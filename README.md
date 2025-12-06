@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/ota-logo.png" alt="OT-Agent Logo" width="480">
+  <img src="assets/ot-agent-logo.png" alt="OT-Agent Logo" width="480">
 </p>
 
 # OpenThoughts-Agent: Data Recipes for Agentic Models
