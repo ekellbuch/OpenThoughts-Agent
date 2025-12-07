@@ -933,19 +933,18 @@ class BaseDataGenerator(ABC):
             return f"{cleaned}/metrics"
 
         agent_kwargs = dict(agent_kwargs)
+        if requires_endpoint:
+            # Endpoint JSON is authoritative for local vLLM jobs; discard stale overrides.
+            for key in ("api_base", "metrics_endpoint"):
+                agent_kwargs.pop(key, None)
+
         derived_metrics_endpoint: Optional[str] = None
         if api_base:
             agent_kwargs["api_base"] = api_base
             derived_metrics_endpoint = _derive_metrics_endpoint_from_api_base(api_base)
 
-        metrics_endpoint = agent_kwargs.get("metrics_endpoint")
         if derived_metrics_endpoint:
-            if (
-                not metrics_endpoint
-                or "replace-with" in str(metrics_endpoint)
-                or str(metrics_endpoint).rstrip("/") != derived_metrics_endpoint.rstrip("/")
-            ):
-                agent_kwargs["metrics_endpoint"] = derived_metrics_endpoint
+            agent_kwargs["metrics_endpoint"] = derived_metrics_endpoint
 
         print(
             "[traces] dispatch",

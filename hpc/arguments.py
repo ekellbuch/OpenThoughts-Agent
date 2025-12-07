@@ -392,19 +392,19 @@ class LaunchArgs:
     pinggy_persistent_url: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Override the Pinggy persistent URL exported to PINGGY_PERSISTENT_URL",
+            "help": "Persistent Pinggy hostname (e.g., xxxxx.a.pinggy.link) to reuse for tunnels",
         },
     )
     pinggy_ssh_command: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Override the Pinggy SSH tunnel command exported to PINGGY_SSH_COMMAND",
+            "help": "Custom Pinggy SSH tunnel command template (use {PORT} for HAProxy port)",
         },
     )
     pinggy_debugger_url: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Override the Pinggy debugger URL exported to PINGGY_DEBUGGER_URL",
+            "help": "Debugger URL exposed via Pinggy (used for health checks)",
         },
     )
     use_mca: bool = field(

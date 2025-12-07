@@ -1006,32 +1006,25 @@ def _build_vllm_env_vars(exp_args: dict, *, include_pinggy: bool = True) -> tupl
     if include_pinggy:
         explicit_cli_keys = set(exp_args.get("_explicit_cli_keys", []) or [])
         pinggy_fields = (
-            ("PINGGY_PERSISTENT_URL", "pinggy_persistent_url"),
-            ("PINGGY_SSH_COMMAND", "pinggy_ssh_command"),
-            ("PINGGY_DEBUGGER_URL", "pinggy_debugger_url"),
+            ("VLLM_PINGGY_PERSISTENT_URL", "pinggy_persistent_url", "PINGGY_PERSISTENT_URL"),
+            ("VLLM_PINGGY_SSH_COMMAND", "pinggy_ssh_command", "PINGGY_SSH_COMMAND"),
+            ("VLLM_PINGGY_DEBUGGER_URL", "pinggy_debugger_url", "PINGGY_DEBUGGER_URL"),
         )
-        for env_key, arg_key in pinggy_fields:
+        for env_key, arg_key, fallback_env in pinggy_fields:
             candidate = exp_args.get(arg_key)
             explicit = arg_key in explicit_cli_keys
             if isinstance(candidate, str):
                 candidate = candidate.strip()
             fallback_allowed = not explicit
-            if candidate in (None, "", "None"):
-                if fallback_allowed:
-                    fallback = os.environ.get(env_key)
-                    if isinstance(fallback, str):
-                        fallback = fallback.strip()
-                    candidate = fallback
-                else:
-                    os.environ.pop(env_key, None)
-                    if arg_key in exp_args:
-                        exp_args = update_exp_args(exp_args, {arg_key: None}, explicit_keys={arg_key})
-                    continue
+            if candidate in (None, "", "None") and fallback_allowed:
+                fallback = os.environ.get(fallback_env)
+                if isinstance(fallback, str):
+                    fallback = fallback.strip()
+                candidate = fallback
             if candidate in (None, "", "None"):
                 continue
             candidate_str = str(candidate)
             env[env_key] = candidate_str
-            os.environ[env_key] = candidate_str
             if exp_args.get(arg_key) != candidate:
                 exp_args = update_exp_args(exp_args, {arg_key: candidate})
 
