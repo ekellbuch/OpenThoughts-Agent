@@ -697,28 +697,25 @@ def _sanitize_surrogates(dataset):
     except Exception:
         return dataset
 
-    def _replace_surrogates(text: str) -> str:
-        if _SURROGATE_PATTERN.search(text):
-            return _SURROGATE_PATTERN.sub(" ", text)
-        return text
-
-    def _clean_value(value):
-        if isinstance(value, str):
-            return _replace_surrogates(value)
-        if isinstance(value, list):
-            return [_clean_value(item) for item in value]
-        if isinstance(value, dict):
-            return {key: _clean_value(val) for key, val in value.items()}
-        return value
-
-    def _map_record(record):
-        return {key: _clean_value(val) for key, val in record.items()}
-
     if isinstance(dataset, DatasetDict):
-        return DatasetDict({k: v.map(_map_record, load_from_cache_file=False) for k, v in dataset.items()})
+        return DatasetDict({k: v.map(_strip_surrogates_from_record, load_from_cache_file=False) for k, v in dataset.items()})
     if isinstance(dataset, Dataset):
-        return dataset.map(_map_record, load_from_cache_file=False)
+        return dataset.map(_strip_surrogates_from_record, load_from_cache_file=False)
     return dataset
+
+
+def _strip_surrogates_from_record(record: dict[str, Any]) -> dict[str, Any]:
+    return {key: _strip_surrogates(value) for key, value in record.items()}
+
+
+def _strip_surrogates(value: Any) -> Any:
+    if isinstance(value, str):
+        return _SURROGATE_PATTERN.sub(" ", value)
+    if isinstance(value, list):
+        return [_strip_surrogates(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _strip_surrogates(val) for key, val in value.items()}
+    return value
 
 def _ensure_sharegpt_conversations(dataset):
     """Guarantee conversation columns conform to ShareGPT expectations."""

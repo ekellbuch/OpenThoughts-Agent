@@ -26,7 +26,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from scripts.harbor.run_and_export_traces import _finalize_trace_dataset
+from scripts.harbor.run_and_export_traces import _finalize_trace_dataset, _strip_surrogates
 
 
 def _install_safe_episode_guard() -> None:
@@ -58,6 +58,32 @@ def _install_safe_episode_guard() -> None:
 
     safe_find_episode_dirs.__dcagent_safe__ = True  # type: ignore[attr-defined]
     traces_utils.find_episode_dirs = safe_find_episode_dirs
+
+
+def _install_dataset_sanitizer() -> None:
+    """Patch Harbor's rows_to_dataset to sanitize surrogate characters before HF conversion."""
+    try:
+        from harbor.utils import traces_utils  # type: ignore
+    except Exception:
+        return
+
+    original_rows_to_dataset = getattr(traces_utils, "rows_to_dataset", None)
+    if original_rows_to_dataset is None:
+        return
+    if getattr(original_rows_to_dataset, "__dcagent_surrogate_sanitized__", False):
+        return
+
+    def safe_rows_to_dataset(rows, *args, **kwargs):
+        cleaned_rows = []
+        for row in rows:
+            if isinstance(row, dict):
+                cleaned_rows.append({k: _strip_surrogates(v) for k, v in row.items()})
+            else:
+                cleaned_rows.append(row)
+        return original_rows_to_dataset(cleaned_rows, *args, **kwargs)
+
+    safe_rows_to_dataset.__dcagent_surrogate_sanitized__ = True  # type: ignore[attr-defined]
+    traces_utils.rows_to_dataset = safe_rows_to_dataset
 
 
 def _import_export_traces():
@@ -126,6 +152,7 @@ def main() -> None:
 
     export_traces = _import_export_traces()
     _install_safe_episode_guard()
+    _install_dataset_sanitizer()
 
     # Map filter flag to traces_utils argument
     success_filter = None if args.filter == "none" else args.filter
