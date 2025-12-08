@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =============================================================================
-# kimi-k2-tracegen-run-v2.sh
+# glm46-tracegen-run-v2.sh
 #
 # Fixed version that uses srun for Ray/vLLM process management like vista_datagen
 # =============================================================================
