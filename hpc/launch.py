@@ -388,6 +388,33 @@ def _escape_template_braces(text: str) -> str:
         i += 1
     return "".join(result)
 
+def _escape_bash_variables(text: str) -> str:
+    """
+    Escape `${...}` sequences (including nested braces) so `str.format`
+    leaves them untouched.
+    """
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text[i] == "$" and i + 1 < length and text[i + 1] == "{":
+            start = i
+            depth = 1
+            j = i + 2
+            while j < length and depth > 0:
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                j += 1
+            segment = text[start:j]
+            escaped = segment.replace("{", "{{").replace("}", "}}")
+            result.append(escaped)
+            i = j
+        else:
+            result.append(text[i])
+            i += 1
+    return "".join(result)
 
 def _normalize_strategy_value(value):
     if value is None:
@@ -520,11 +547,7 @@ def construct_sbatch_script(exp_args):
         )
 
     # safeguard against injection of bash ${} variables
-    bash_variables = re.findall(r"\${.*?}", base_script)
-    for var in bash_variables:
-        base_script = base_script.replace(
-            var, var.replace("{", "{{").replace("}", "}}")
-        )
+    base_script = _escape_bash_variables(base_script)
 
     time_limit = kwargs.get("time_limit")
     if time_limit is None:
