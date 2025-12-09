@@ -89,7 +89,10 @@ matmul = getattr(getattr(torch.backends, "cuda", None), "matmul", None)
 if matmul is None:
     print("torch.backends.cuda.matmul: <unavailable>")
 else:
-    print("Matmul allow_tf32:", matmul.allow_tf32)
+    if hasattr(matmul, "fp32_precision"):
+        print("Matmul fp32_precision:", matmul.fp32_precision)
+    else:
+        print("Matmul fp32_precision attribute unavailable; legacy allow_tf32:", getattr(matmul, "allow_tf32", "<unavailable>"))
     if hasattr(matmul, "allow_bf16_reduced_precision_reduction"):
         print(
             "Matmul allow_bf16_reduced_precision_reduction:",

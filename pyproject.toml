@@ -13,6 +13,7 @@ dependencies = [
     "pyyaml",
     "omegaconf",
     "wandb",
+    "bs4",
     "huggingface_hub>=0.20.0",
     "datasets>=2.0.0",
     "supabase==2.22.3",
@@ -31,6 +32,7 @@ datagen = [
     "ray[default]>=2.50.0",
     "vllm==0.11.2",
     "nvidia-cuda-nvcc-cu12==12.8.93",
+    "torch-c-dlpack-ext==0.1.4",
 ]
 datagen-swesmith = [
     "swesmith",
