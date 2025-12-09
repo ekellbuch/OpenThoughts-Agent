@@ -51,8 +51,79 @@ _sync_repo() {
     git -C "$repo_path" submodule update --init --recursive
 }
 
+_prepend_path() {
+    local var_name="$1"
+    local new_value="$2"
+    local current="${!var_name-}"
+    if [[ -z "$new_value" ]]; then
+        return
+    fi
+    if [[ -n "$current" ]]; then
+        export "${var_name}=${new_value}:${current}"
+    else
+        export "${var_name}=${new_value}"
+    fi
+}
+
+_configure_pip_cuda() {
+    if [[ "${USE_PIP_CUDA:-1}" == "0" ]]; then
+        echo "USE_PIP_CUDA=0 -> leaving system CUDA paths untouched."
+        return
+    fi
+
+    local cuda_root=""
+    if ! cuda_root="$(python - <<'PY'
+import importlib.util
+import pathlib
+spec = importlib.util.find_spec("nvidia.cuda_runtime")
+if not spec or not spec.origin:
+    raise SystemExit(1)
+root = pathlib.Path(spec.origin).parent
+print(root)
+PY
+)"; then
+        echo "WARNING: Could not locate pip-installed CUDA runtime; continuing with system CUDA." >&2
+        return
+    fi
+
+    echo "Configuring pip-installed CUDA runtime at: ${cuda_root}"
+    export CUDA_HOME="${cuda_root}"
+    export CUDA_PATH="${cuda_root}"
+    export CUDATOOLKIT_ROOT_DIR="${cuda_root}"
+
+    local lib32="${cuda_root}/lib"
+    local lib64="${cuda_root}/lib64"
+    local include_dir="${cuda_root}/include"
+
+    if [[ -d "$lib32" ]]; then
+        _prepend_path LD_LIBRARY_PATH "$lib32"
+        _prepend_path LIBRARY_PATH "$lib32"
+    fi
+    if [[ -d "$lib64" ]]; then
+        _prepend_path LD_LIBRARY_PATH "$lib64"
+        _prepend_path LIBRARY_PATH "$lib64"
+    fi
+    if [[ -d "$include_dir" ]]; then
+        _prepend_path CPATH "$include_dir"
+    fi
+    if [[ -d "${cuda_root}/bin" ]]; then
+        _prepend_path PATH "${cuda_root}/bin"
+    fi
+
+    python - <<'PY'
+import importlib.metadata
+pkg = "nvidia-cuda-runtime-cu12"
+try:
+    version = importlib.metadata.version(pkg)
+except importlib.metadata.PackageNotFoundError:
+    version = "<unknown>"
+print(f"Detected {pkg} version: {version}")
+PY
+}
+
 echo "=== Activating conda environment (${CONDA_ENV}) ==="
 _activate_conda
+_configure_pip_cuda
 
 echo
 echo "=== Runtime environment ==="
