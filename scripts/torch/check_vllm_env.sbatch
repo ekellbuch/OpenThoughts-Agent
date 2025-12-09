@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-CONDA_ENV="${CONDA_ENV:-dcagent}"
+CONDA_ENV="${CONDA_ENV:-dcagent312}"
 
 _activate_conda() {
     local conda_root=""

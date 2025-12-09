@@ -39,7 +39,7 @@ echo "SLURM_JOB_ID: ${SLURM_JOB_ID:-<not set>}"
 echo "SLURM_JOB_NUM_NODES: ${SLURM_JOB_NUM_NODES:-1}"
 
 # Activate conda
-CONDA_ENV_NAME="dcagent"
+CONDA_ENV_NAME="dcagent312"
 CONDA_ENV_PATH="$SCRATCH/miniconda3/envs/$CONDA_ENV_NAME"
 
 if [[ -d "$CONDA_ENV_PATH" ]]; then
