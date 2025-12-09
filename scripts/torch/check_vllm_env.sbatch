@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=check-vllm-env
 #SBATCH --account=torch_pr_40_tandon_advanced
-#SBATCH --partition=h200
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
