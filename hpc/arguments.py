@@ -555,6 +555,10 @@ class DataGenArgs:
         default=True,
         metadata={"help": "Include agent reasoning content inside <think> tags when exporting traces"}
     )
+    trace_export_subagents: bool = field(
+        default=True,
+        metadata={"help": "Export subagent traces (e.g., context summarization) alongside main agent traces"}
+    )
     trace_use_gpu: bool = field(
         default=False,
         metadata={"help": "Request GPUs for trace generation", "store_true": True}

@@ -32,6 +32,10 @@ Utility entrypoints that support data generation, trace analysis, Harbor uploads
   ```bash
   python scripts/analysis/trace_runtime_report.py --root ~/evaltraces --output-json ~/evaltraces/summary.json
   ```
+- `analysis/episode_distribution.py` – download one or more Hugging Face trace datasets, normalize their `episode` labels to integers, and plot smoothed per-episode counts to compare run lengths.  
+  ```bash
+  python scripts/analysis/episode_distribution.py my-org/datasetA my-org/datasetB --sigma 3.0 --output plots/episodes.png
+  ```
 
 ### Data generation helpers
 - `datagen/gsm8k_terminal_bench_traces.py` – BaseDataGenerator entrypoint for GSM8K Terminal Bench traces; reruns the standard datagen CLI with dataset-specific flags.  

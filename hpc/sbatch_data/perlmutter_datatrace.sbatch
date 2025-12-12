@@ -86,6 +86,7 @@ TRACE_TASKS_READY_TIMEOUT="${TRACE_TASKS_READY_TIMEOUT:-1800}"
 VLLM_JOB_ID="${VLLM_JOB_ID:-}"
 TRACE_TASK_TYPE="${TRACE_TASK_TYPE:-}"
 TRACE_INCLUDE_REASONING="${TRACE_INCLUDE_REASONING:-1}"
+TRACE_EXPORT_SUBAGENTS="${TRACE_EXPORT_SUBAGENTS:-1}"
 
 source "$DCFT/hpc/sbatch_data/trace_helpers.sh"
 load_trace_chunk_env
@@ -191,6 +192,11 @@ if [ "$TRACE_INCLUDE_REASONING" = "1" ]; then
   CMD+=(--trace-include-reasoning)
 else
   CMD+=(--trace-skip-reasoning)
+fi
+if [ "$TRACE_EXPORT_SUBAGENTS" = "1" ]; then
+  CMD+=(--trace-export-subagents)
+else
+  CMD+=(--trace-skip-subagents)
 fi
 
 if [ -n "$TRACE_ENGINE" ]; then

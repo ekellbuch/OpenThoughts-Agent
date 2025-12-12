@@ -1835,6 +1835,14 @@ def launch_trace_job(
     else:
         trace_include_reasoning = bool(trace_include_reasoning_value)
 
+    trace_export_subagents_value = exp_args.get("trace_export_subagents")
+    if trace_export_subagents_value in (None, "", "None"):
+        trace_export_subagents = True
+    elif isinstance(trace_export_subagents_value, str):
+        trace_export_subagents = trace_export_subagents_value.strip().lower() not in {"0", "false", "no"}
+    else:
+        trace_export_subagents = bool(trace_export_subagents_value)
+
     trace_engine_value = exp_args.get("trace_engine") or exp_args.get("datagen_engine") or ""
     trace_engine = str(trace_engine_value).lower()
 
@@ -1905,6 +1913,7 @@ def launch_trace_job(
         "TRACE_EXPORT_FILTER": trace_export_filter,
         "TRACE_DATASET_TYPE": trace_dataset_type,
         "TRACE_INCLUDE_REASONING": "1" if trace_include_reasoning else "0",
+        "TRACE_EXPORT_SUBAGENTS": "1" if trace_export_subagents else "0",
         "TRACE_JOBS_DIR": trace_jobs_dir,
         "TRACE_ENDPOINT_JSON": trace_endpoint_json or "",
         "TRACE_REQUIRE_ENDPOINT": "1" if requires_endpoint else "0",

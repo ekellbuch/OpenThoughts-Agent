@@ -124,6 +124,7 @@ JOB_NAME_IGNORE_KEYS: list[str] = [
     "trace_eval_only",
     "trace_include_reasoning",
     "trace_include_reasoning_flag",
+    "trace_export_subagents",
     # Timeout toggles
     "trace_agent_timeout_sec",
     "trace_verifier_timeout_sec",

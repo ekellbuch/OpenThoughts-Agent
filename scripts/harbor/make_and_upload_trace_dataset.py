@@ -168,6 +168,8 @@ def main() -> None:
         verbose=True,
         success_filter=success_filter,
         include_reasoning=bool(args.include_reasoning),
+        export_subagents=True,
+        merge_subagents=True,
     )
     ds = _finalize_trace_dataset(ds)
 

@@ -254,6 +254,19 @@ def add_generation_args(
     )
     parser.set_defaults(trace_include_reasoning=True)
     trace_group.add_argument(
+        "--trace-export-subagents",
+        dest="trace_export_subagents",
+        action="store_true",
+        help="Export subagent traces (e.g., context summarization) alongside main agent traces (default: enabled).",
+    )
+    trace_group.add_argument(
+        "--trace-skip-subagents",
+        dest="trace_export_subagents",
+        action="store_false",
+        help="Disable subagent trace export when exporting traces.",
+    )
+    parser.set_defaults(trace_export_subagents=True)
+    trace_group.add_argument(
         "--trace-eval-only",
         action="store_true",
         help="Run Harbor jobs for evaluation only and skip trace export/upload",
