@@ -48,6 +48,25 @@ if [[ -d "$CONDA_ENV_PATH" ]]; then
     conda activate "$CONDA_ENV_NAME"
     set -u
     echo "Activated conda env: $CONDA_ENV_NAME"
+    if [[ -n "${CONDA_PREFIX:-}" ]]; then
+        export CUDA_HOME="$CONDA_PREFIX"
+        conda_lib_paths=()
+        for cuda_dir in "$CONDA_PREFIX/lib" "$CONDA_PREFIX/lib64"; do
+            [[ -d "$cuda_dir" ]] && conda_lib_paths+=("$cuda_dir")
+        done
+        if [[ ${#conda_lib_paths[@]} -gt 0 ]]; then
+            conda_lib_joined=$(IFS=:; echo "${conda_lib_paths[*]}")
+            if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+                export LD_LIBRARY_PATH="${conda_lib_joined}:${LD_LIBRARY_PATH}"
+            else
+                export LD_LIBRARY_PATH="${conda_lib_joined}"
+            fi
+        fi
+        echo "CUDA_HOME: $CUDA_HOME"
+        echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-<not set>}"
+    else
+        echo "WARNING: CONDA_PREFIX not set after activating $CONDA_ENV_NAME" >&2
+    fi
 else
     echo "ERROR: Conda env not found at $CONDA_ENV_PATH" >&2
     exit 1
@@ -61,6 +80,7 @@ for candidate in \
     "/usr/local/cuda/compat/libcuda.so.1"; do
     if [[ -f "$candidate" ]]; then
         export TRITON_LIBCUDA_PATH="$candidate"
+        echo "Found libcuda at: $candidate"
         break
     fi
 done
@@ -124,6 +144,8 @@ mkdir -p "$EXPERIMENTS_DIR" "$EXPERIMENTS_DIR/logs" "$EXPERIMENTS_DIR/outputs/tr
 SRUN_EXPORT_ENV="ALL"
 SRUN_EXPORT_ENV="$SRUN_EXPORT_ENV,TRITON_CC=${TRITON_CC:-}"
 SRUN_EXPORT_ENV="$SRUN_EXPORT_ENV,TRITON_LIBCUDA_PATH=${TRITON_LIBCUDA_PATH:-}"
+SRUN_EXPORT_ENV="$SRUN_EXPORT_ENV,CUDA_HOME=${CUDA_HOME:-}"
+SRUN_EXPORT_ENV="$SRUN_EXPORT_ENV,LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
 SRUN_EXPORT_ENV="$SRUN_EXPORT_ENV,HF_HOME=${HF_HOME:-}"
 SRUN_EXPORT_ENV="$SRUN_EXPORT_ENV,PYTHONPATH=${PYTHONPATH:-}"
 # Ray control-plane stability knobs (prevent backlog storms / exporter hangs)
