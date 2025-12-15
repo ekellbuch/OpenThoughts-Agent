@@ -17,9 +17,12 @@ export CONDA_BACKUP_CXX="${CONDA_BACKUP_CXX:-}"
 export CONDA_BACKUP_CC="${CONDA_BACKUP_CC:-}"
 export CONDA_BACKUP_FC="${CONDA_BACKUP_FC:-}"
 
-if [ -n "${DCFT:-}" ] && [ -f "$DCFT/hpc/dotenv/zih.env" ]; then
+if [ -n "${DCFT:-}" ] && [ -f "$DCFT/hpc/dotenv/zih_capella.env" ]; then
   # shellcheck disable=SC1090
-  source "$DCFT/hpc/dotenv/zih.env"
+  source "$DCFT/hpc/dotenv/zih_capella.env"
+elif [ -n "${DC_AGENT:-}" ] && [ -f "$DC_AGENT/hpc/dotenv/zih_capella.env" ]; then
+  # shellcheck disable=SC1090
+  source "$DC_AGENT/hpc/dotenv/zih_capella.env"
 fi
 
 module load release/24.04 GCCcore/12.3.0
@@ -69,7 +72,11 @@ export NCCL_NET_GDR_READ=1
 export OMP_NUM_THREADS=1
 
 if [ -z "${DCFT:-}" ]; then
-  export DCFT="$PWD"
+  if [ -n "${DC_AGENT:-}" ]; then
+    export DCFT="$DC_AGENT"
+  else
+    export DCFT="$PWD"
+  fi
 fi
 
 mkdir -p "$DCFT/{experiments_dir}"
