@@ -8,7 +8,7 @@ debug: false
 
 orchestrator:
   type: local
-  n_concurrent_trials: 24
+  n_concurrent_trials: 32
   quiet: false
   adaptive_concurrency:
     enabled: false
@@ -58,6 +58,7 @@ agents:
     override_timeout_sec: 1800
     max_timeout_sec: null
     kwargs:
+      record_terminal_session: false
       collect_rollout_details: false
       collect_engine_metrics: false
       metrics_endpoint: https://replace-with-vllm-host/metrics
