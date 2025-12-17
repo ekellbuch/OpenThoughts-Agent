@@ -370,11 +370,6 @@ def _parse_args() -> argparse.Namespace:
         help="Export in ShareGPT-style format where applicable",
     )
     p.add_argument(
-        "--include-reasoning",
-        action="store_true",
-        help="Prepend reasoning_content (if available) to assistant replies inside <think> tags",
-    )
-    p.add_argument(
         "--dataset_type",
         default="SFT",
         help="Dataset type for registration (SFT or RL). Default: SFT",
@@ -412,6 +407,8 @@ def main() -> None:
         verbose=True,
         success_filter=success_filter,
         export_subagents=False,
+        include_instruction=True,
+        include_verifier_output=True,
     )
     try:
         from scripts.harbor.run_and_export_traces import _finalize_trace_dataset  # type: ignore

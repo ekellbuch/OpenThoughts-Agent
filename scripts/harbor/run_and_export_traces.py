@@ -268,7 +268,6 @@ def force_resume(
     push: bool = False,
     export_filter: Optional[str] = None,  # success|failure|None
     verbose: bool = False,
-    include_reasoning: bool = False,
 ) -> Dataset:
     existing_job_dir = Path(existing_job_dir)
     config = JobConfig.model_validate_json((existing_job_dir / "config.json").read_text())
@@ -288,7 +287,8 @@ def force_resume(
         push=push,
         verbose=verbose,
         success_filter=export_filter,
-        include_reasoning=include_reasoning,
+        include_instruction=True,
+        include_verifier_output=True,
     )
     return ds
 
@@ -329,7 +329,6 @@ def run_dataset_to_traces(
     agent_timeout_sec: float | None = None,
     verifier_timeout_sec: float | None = None,
     disable_verification: bool = False,
-    include_reasoning: bool = False,
 ):
     """Run a dataset of tasks and return a HF Dataset of episode traces.
 
@@ -615,7 +614,8 @@ def run_dataset_to_traces(
         push=push,
         verbose=verbose,
         success_filter=export_filter,
-        include_reasoning=include_reasoning,
+        include_instruction=True,
+        include_verifier_output=True,
     )
     return _finalize_trace_dataset(ds)
 
@@ -629,7 +629,6 @@ def only_export_traces(
     push: bool = False,
     verbose: bool = False,
     success_filter: Optional[str] = None,
-    include_reasoning: bool = False,
 ):
     """Export traces from a job directory."""
     ds = _export_traces(
@@ -641,7 +640,8 @@ def only_export_traces(
         push=push,
         verbose=verbose,
         success_filter=success_filter,
-        include_reasoning=include_reasoning,
+        include_instruction=True,
+        include_verifier_output=True,
     )
     return _finalize_trace_dataset(ds)
 
@@ -850,7 +850,6 @@ def run_dataset_to_traces_hdf5(
     repo_id: Optional[str] = None,
     export_filter: Optional[str] = None,  # success|failure|None
     verbose: bool = False,
-    include_reasoning: bool = False,
 ):
     """Run a dataset from HDF5 format and return a HF Dataset of episode traces.
 
@@ -1023,7 +1022,8 @@ def run_dataset_to_traces_hdf5(
         push=push,
         verbose=verbose,
         success_filter=export_filter,
-        include_reasoning=include_reasoning,
+        include_instruction=True,
+        include_verifier_output=True,
     )
     return _finalize_trace_dataset(ds)
 
