@@ -440,11 +440,11 @@ class DataGenArgs:
 
     # Job type
     job_type: Optional[str] = field(
-        default=None,
+        default=JobType.default_value(),
         metadata={
             "help": "Job type: 'sft', 'sft_mca', 'pretokenize', 'datagen', 'consolidate', or 'rl'",
             "choices": JobType.choices(),
-            "required": True,
+            "required": False,
         },
     )
 
