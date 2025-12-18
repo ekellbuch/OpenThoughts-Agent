@@ -24,7 +24,7 @@ class JobType(str, Enum):
         return cls.SFT.value
 
 
-from hpc.launch_utils import coerce_str_bool_none, coerce_numeric_cli_values
+from hpc.cli_utils import coerce_str_bool_none, coerce_numeric_cli_values
 
 @dataclass
 class LlamaFactoryArgs:
