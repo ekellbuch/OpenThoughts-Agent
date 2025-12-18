@@ -43,6 +43,7 @@ from hpc.datagen_launch_utils import (
 from hpc.consolidate_launch_utils import (
     launch_consolidate_job,
 )
+from hpc.data_argument_keys import DATA_ARGUMENT_KEYS
 from data.generation import BaseDataGenerator
 from scripts.harbor.tasks_parquet_converter import from_parquet
 from database.unified_db.utils import load_supabase_keys
@@ -917,16 +918,7 @@ def construct_config_yaml(exp_args):
         )
         exp_args["tokenized_path"] = base_config["tokenized_path"]
 
-    data_tags = [
-        "role_tag",
-        "content_tag",
-        "assistant_tag",
-        "user_tag",
-        "messages",
-        "system",
-    ]
-
-    for tag in data_tags:
+    for tag in DATA_ARGUMENT_KEYS:
         if tag in exp_args:
             tag_value = exp_args[tag]
             if tag_value is not None:
