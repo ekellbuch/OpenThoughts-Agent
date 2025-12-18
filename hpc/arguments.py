@@ -6,6 +6,7 @@ import sys
 from enum import Enum
 
 
+
 def _str_to_bool(value):
     """Best-effort boolean parser for CLI arguments."""
     if isinstance(value, bool):
