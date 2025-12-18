@@ -704,6 +704,15 @@ def launch_datagen_job(exp_args: dict, hpc) -> None:
 
     print("\n=== DATA GENERATION MODE ===")
 
+    hpc_name = str(getattr(hpc, "name", "")).lower()
+    if hpc_name == "nyutorch":
+        warning = (
+            "Datagen jobs are not supported on the NYU Torch cluster. "
+            "Use the dedicated sbatch helper OpenThoughts-Agent/hpc/scripts/glm46-tracegen-torch.sbatch instead."
+        )
+        print(f"WARNING: {warning}")
+        raise RuntimeError(warning)
+
     task_enabled = bool(exp_args.get("enable_task_gen", True))
     trace_enabled = bool(exp_args.get("enable_trace_gen", False))
 
@@ -784,6 +793,10 @@ def launch_datagen_job(exp_args: dict, hpc) -> None:
     if trace_enabled:
         trace_script = exp_args.get("trace_script") or exp_args.get("datagen_script")
         if not trace_script:
+            trace_script = "data/nemo_prism_math/generate_abstract.py"
+            exp_args = update_exp_args(exp_args, {"trace_script": trace_script})
+            print(f"No trace script provided; defaulting to {trace_script}")
+        if not trace_script:
             raise ValueError("Trace generation requires --trace-script (or reuse --datagen-script)")
 
         trace_input_path = exp_args.get("trace_input_path")
@@ -802,6 +815,15 @@ def launch_datagen_job(exp_args: dict, hpc) -> None:
 
         trace_backend = str(exp_args.get("trace_backend") or exp_args.get("datagen_backend") or "vllm").lower()
         trace_engine = str(exp_args.get("trace_engine") or exp_args.get("datagen_engine") or "").lower()
+
+        if trace_backend == "vllm":
+            warning = (
+                "trace_backend=vllm is currently unsupported on all clusters. "
+                "Please switch to a Ray-backed trace backend or disable trace generation."
+            )
+            print(f"WARNING: {warning}")
+            raise RuntimeError(warning)
+
         trace_requires_vllm_server = trace_engine == "vllm_local" and trace_backend == "vllm"
 
         vllm_cfg = exp_args.get("_datagen_vllm_server_config")
@@ -854,8 +876,10 @@ def launch_vllm_server(exp_args: dict, hpc) -> str:
     vllm_sbatch_template = os.path.join(sbatch_dir, f"{hpc.name}_vllm_server.sbatch")
 
     if not os.path.exists(vllm_sbatch_template):
-        # Fallback to vista template
-        vllm_sbatch_template = os.path.join(sbatch_dir, "vista_vllm_server.sbatch")
+        raise FileNotFoundError(
+            f"No vLLM server sbatch template found for cluster '{hpc.name}'. "
+            f"Expected at {vllm_sbatch_template}. Please add {hpc.name}_vllm_server.sbatch under hpc/sbatch_data."
+        )
 
     # Create output sbatch script
     vllm_job_name = f"{exp_args['job_name']}_vllm_server"
