@@ -33,6 +33,8 @@ datagen = [
     "vllm==0.11.2",
     "nvidia-cuda-nvcc-cu12==12.8.93",
     "torch-c-dlpack-ext==0.1.4",
+    "google-cloud-aiplatform>=1.67.0",
+    "google-genai>=0.1.0",
 ]
 datagen-swesmith = [
     "swesmith",

@@ -1052,6 +1052,20 @@ def launch_task_job(exp_args: dict, hpc, vllm_job_id: str = None) -> str:
     datagen_env_vars["DATAGEN_DATA_PARALLEL_SIZE"] = str(data_parallel_size)
     datagen_env_vars["DATAGEN_NUM_NODES"] = str(exp_args.get("num_nodes") or getattr(hpc, "num_nodes", 1) or 1)
     gcs_credentials_path = os.environ.get("GCS_CREDENTIALS_PATH")
+
+    is_gemini_engine = str(engine).lower() in {"gemini_openai", "google_gemini", "gemini"}
+    if is_gemini_engine:
+        default_gcs_path = os.path.join(PROJECT_ROOT, "..", ".gcs_datacomp.json")
+        candidate_path = Path(default_gcs_path).expanduser().resolve()
+        if not candidate_path.exists():
+            print(
+                "Gemini datagen requires GCS credentials at ../.gcs_datacomp.json "
+                "but the file was not found. Aborting."
+            )
+            raise SystemExit(1)
+        gcs_credentials_path = str(candidate_path)
+        os.environ["GCS_CREDENTIALS_PATH"] = gcs_credentials_path
+
     if gcs_credentials_path:
         datagen_env_vars["GCS_CREDENTIALS_PATH"] = gcs_credentials_path
     if exp_args.get("datagen_engine") != engine:

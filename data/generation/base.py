@@ -713,11 +713,14 @@ class BaseDataGenerator(ABC):
         trace_model: Optional[str] = None
         served_model: Optional[str] = None
         api_base: Optional[str] = None
+        is_openai_like_engine = isinstance(
+            engine, (GenericOpenAIEngine, GeminiOpenAIEngine)
+        )
         requires_endpoint = isinstance(engine, GenericOpenAIEngine) and not isinstance(
             engine, GeminiOpenAIEngine
         )
 
-        if isinstance(engine, GenericOpenAIEngine):
+        if is_openai_like_engine:
             print(
                 "[traces] engine",
                 {
@@ -792,7 +795,7 @@ class BaseDataGenerator(ABC):
             )
             if trace_model and str(trace_model).strip().lower() == TRACE_MODEL_PLACEHOLDER:
                 trace_model = ""
-            if not trace_model and isinstance(engine, GenericOpenAIEngine):
+            if not trace_model and isinstance(engine, (GenericOpenAIEngine, GeminiOpenAIEngine)):
                 trace_model = getattr(engine, "model_name", None)
 
             if isinstance(engine, GenericOpenAIEngine):
@@ -804,6 +807,9 @@ class BaseDataGenerator(ABC):
                     if not cleaned.endswith("/v1"):
                         cleaned = f"{cleaned}/v1"
                     api_base = cleaned
+            elif isinstance(engine, GeminiOpenAIEngine):
+                if served_model is None:
+                    served_model = getattr(engine, "model_name", None)
 
         if (
             not trace_model
@@ -853,7 +859,7 @@ class BaseDataGenerator(ABC):
                     "trace_model_dispatch": trace_model_for_dispatch,
                 },
             )
-        elif isinstance(engine, GenericOpenAIEngine):
+        elif is_openai_like_engine:
             provider_prefix = "openai"
             if isinstance(engine, GeminiOpenAIEngine):
                 provider_prefix = "gemini"
