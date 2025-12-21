@@ -27,6 +27,7 @@ export CONSOLIDATE_OUTPUT_REPO="{consolidate_output_repo}"
 export CONSOLIDATE_BASE_REPO="{consolidate_base_repo}"
 export CONSOLIDATE_WORKDIR="{consolidate_workdir}"
 export CONSOLIDATE_COMMIT_MESSAGE="{consolidate_commit_message}"
+export CONSOLIDATE_PUSH_TO_HUB="{consolidate_push_to_hub}"
 
 python3 {python_script} \
   --input "${{CONSOLIDATE_INPUT}}" \
@@ -35,4 +36,5 @@ python3 {python_script} \
   --base-repo "${{CONSOLIDATE_BASE_REPO}}" \
   --workdir "${{CONSOLIDATE_WORKDIR}}" \
   --commit-message "${{CONSOLIDATE_COMMIT_MESSAGE}}" \
+  --push-to-hub "${{CONSOLIDATE_PUSH_TO_HUB}}" \
   --project-root "{project_root}"

@@ -63,6 +63,11 @@ def launch_consolidate_job(
     base_repo = exp_args.get("consolidate_base_repo")
     output_repo = exp_args.get("consolidate_output_repo")
     commit_message = exp_args.get("consolidate_commit_message") or "Merge ZeRO shards into safetensors"
+    push_to_hub_flag = exp_args.get("push_to_hub")
+    if push_to_hub_flag is None:
+        push_to_hub_flag = True
+    else:
+        push_to_hub_flag = bool(push_to_hub_flag)
 
     expanded_input = Path(str(input_value)).expanduser()
     input_is_local = False
@@ -158,6 +163,7 @@ def launch_consolidate_job(
         "consolidate_workdir": workdir,
         "consolidate_commit_message": commit_message,
         "consolidate_output_repo": effective_output_repo,
+        "consolidate_push_to_hub": "true" if push_to_hub_flag else "false",
         "project_root": PROJECT_ROOT,
         "python_script": python_script_path,
     }
