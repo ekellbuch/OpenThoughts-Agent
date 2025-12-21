@@ -116,6 +116,10 @@ def launch_consolidate_job(
         cpus_per_task = min(cpus_per_task, 14)
     mem_per_node = getattr(hpc, "mem_per_node", "") or ""
     mem_directive = f"#SBATCH --mem={mem_per_node}" if mem_per_node else "#SBATCH --mem=0"
+    if hpc_name == "capella":
+        # Capella throttles non-exclusive jobs to 188130 MB per GPU.
+        # Enforce a soft cap below the scheduler limit to avoid rejections.
+        mem_directive = "#SBATCH --mem=188000"
 
     output_path = os.path.join(logs_dir, f"{job_name}_%j.out")
     gpu_directive = "#SBATCH --gpus-per-node=1"
