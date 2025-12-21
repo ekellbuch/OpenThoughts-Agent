@@ -143,6 +143,7 @@ def launch_consolidate_job(
         "mem_directive": mem_directive,
         "job_name": job_name,
         "output_path": output_path,
+        "experiments_dir": experiments_dir,
         "environment_preamble": environment_preamble,
         "consolidate_input": input_value,
         "consolidate_input_kind": input_kind,
