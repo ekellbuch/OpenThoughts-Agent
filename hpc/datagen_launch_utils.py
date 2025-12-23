@@ -1199,6 +1199,8 @@ def launch_task_job(exp_args: dict, hpc, vllm_job_id: str = None) -> str:
         cpus_per_node_effective = getattr(hpc, "cpus_per_node", 1)
     cpus_per_node_effective = int(cpus_per_node_effective)
 
+    qos_value = str(exp_args.get("qos") or getattr(hpc, "qos", "") or "").strip()
+
     substitutions = {
         "{partition}": hpc.partition,
         "{time_limit}": exp_args["time_limit"],
@@ -1209,6 +1211,7 @@ def launch_task_job(exp_args: dict, hpc, vllm_job_id: str = None) -> str:
         "{job_name}": datagen_job_name,
         "{num_gpus}": str(requested_gpus),
         "{gpus_per_node}": "" if gpus_per_node_directive is None else str(gpus_per_node_directive),
+        "{qos}": qos_value,
     }
 
     for key, value in substitutions.items():
@@ -1223,6 +1226,8 @@ def launch_task_job(exp_args: dict, hpc, vllm_job_id: str = None) -> str:
         sbatch_content = sbatch_content.replace("#SBATCH --gpus-per-node {gpus_per_node}\n", "")
         sbatch_content = sbatch_content.replace("#SBATCH --gpus-per-node 0\n", "")
         sbatch_content = sbatch_content.replace("#SBATCH --gpus-per-node=0\n", "")
+    if not qos_value:
+        sbatch_content = re.sub(r"#SBATCH\s+-q[^\n]*\n", "", sbatch_content)
 
     sbatch_content = _inject_env_block(sbatch_content, datagen_env_vars)
 
@@ -1729,6 +1734,7 @@ def launch_trace_job(
 
     partition = getattr(hpc, "partition", "") or ""
     account = getattr(hpc, "account", "") or ""
+    qos_value = str(exp_args.get("qos") or getattr(hpc, "qos", "") or "").strip()
     cpus_per_task_raw = exp_args.get("cpus_per_node") or getattr(hpc, "cpus_per_node", 1)
     cpus_per_task = int(cpus_per_task_raw)
     if cpu_only_trace and cpus_per_task > 32:
@@ -1753,6 +1759,7 @@ def launch_trace_job(
         "{gpus_per_node}": "" if gpus_per_node_trace_directive is None else str(gpus_per_node_trace_directive),
         "{account}": account,
         "{experiments_dir}": exp_args["experiments_dir"],
+        "{qos}": qos_value,
     }
 
     def _render_trace_sbatch_content(
@@ -1793,6 +1800,8 @@ def launch_trace_job(
             content = content.replace("#SBATCH -p \n", "")
         if not account:
             content = content.replace("#SBATCH --account \n", "")
+        if not qos_value:
+            content = re.sub(r"#SBATCH\s+-q[^\n]*\n", "", content)
         if memory_limit_gb is not None:
             memory_override = f"{memory_limit_gb}GB"
             existing_mem = re.search(

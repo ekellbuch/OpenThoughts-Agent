@@ -53,7 +53,7 @@ else
 fi
 
 module load PrgEnv-amd
-module load rocm/6.0.0
+module load rocm/6.4.0
 module load craype-accel-amd-gfx90a
 module load cray-mpich
 
