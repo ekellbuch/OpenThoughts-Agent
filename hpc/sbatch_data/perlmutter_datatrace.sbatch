@@ -90,13 +90,20 @@ export RAY_NOSET_CUDA_VISIBLE_DEVICES="${RAY_NOSET_CUDA_VISIBLE_DEVICES:-1}"
 SRUN_EXPORT_ENV="ALL,PATH=$PATH,LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-},PYTHONPATH=$PYTHONPATH,HF_HOME=$HF_HOME,RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=$RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES,RAY_NOSET_CUDA_VISIBLE_DEVICES=$RAY_NOSET_CUDA_VISIBLE_DEVICES"
 RAY_ENV_VARS="PATH=$PATH LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-} PYTHONPATH=$PYTHONPATH HF_HOME=$HF_HOME RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=$RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES RAY_NOSET_CUDA_VISIBLE_DEVICES=$RAY_NOSET_CUDA_VISIBLE_DEVICES"
 
-# Persist Ray logs/sessions under SCRATCH so they survive node reboots
-RAY_TMPDIR_BASE="${SCRATCH:-/tmp}/ray_sessions"
+# Keep Ray sockets short by using /tmp on compute nodes but archive sessions to SCRATCH.
+RAY_TMPDIR_BASE="${PERLMUTTER_RAY_TMPDIR_BASE:-/tmp/ray}"
 RAY_TMPDIR="${RAY_TMPDIR_BASE}/ray_${SLURM_JOB_ID:-$$}"
 mkdir -p "$RAY_TMPDIR"
-SRUN_EXPORT_ENV="$SRUN_EXPORT_ENV,RAY_TMPDIR=$RAY_TMPDIR"
-RAY_ENV_VARS="$RAY_ENV_VARS RAY_TMPDIR=$RAY_TMPDIR"
-echo "Ray session directory: $RAY_TMPDIR"
+RAY_SESSION_ARCHIVE_BASE="${PERLMUTTER_RAY_SESSION_ARCHIVE_BASE:-${SCRATCH:-$HOME}/ray_sessions_archive}"
+RAY_SESSION_ARCHIVE="${RAY_SESSION_ARCHIVE_BASE}/${SLURM_JOB_ID:-$$}"
+mkdir -p "$RAY_SESSION_ARCHIVE"
+export RAY_SESSION_ARCHIVE
+export TMPDIR="$RAY_TMPDIR"
+export TEMP="$RAY_TMPDIR"
+export TMP="$RAY_TMPDIR"
+SRUN_EXPORT_ENV="$SRUN_EXPORT_ENV,RAY_TMPDIR=$RAY_TMPDIR,RAY_SESSION_TMPDIR=$RAY_TMPDIR,TMPDIR=$RAY_TMPDIR,TEMP=$RAY_TMPDIR,TMP=$RAY_TMPDIR"
+RAY_ENV_VARS="$RAY_ENV_VARS RAY_TMPDIR=$RAY_TMPDIR RAY_SESSION_TMPDIR=$RAY_TMPDIR TMPDIR=$RAY_TMPDIR TEMP=$RAY_TMPDIR TMP=$RAY_TMPDIR"
+echo "Ray session directory: $RAY_TMPDIR (archive: $RAY_SESSION_ARCHIVE)"
 
 TRACE_BACKEND="${TRACE_BACKEND:-vllm}"
 
@@ -353,7 +360,22 @@ PY
         done
     }
 
-    trap 'cleanup_ray; cleanup_vllm' EXIT
+    persist_ray_sessions() {
+        echo "Archiving Ray sessions to $RAY_SESSION_ARCHIVE"
+        mkdir -p "$RAY_SESSION_ARCHIVE"
+        for node in "${nodes_array[@]}"; do
+            local node_dest="$RAY_SESSION_ARCHIVE/$node"
+            srun --export="$SRUN_EXPORT_ENV" --nodes=1 --ntasks=1 --overlap -w "$node" bash -c '
+                if [ -d "${RAY_TMPDIR:-}" ]; then
+                    dest="'"$node_dest"'"
+                    mkdir -p "$dest"
+                    rsync -a "${RAY_TMPDIR}/" "$dest/" >/dev/null 2>&1 || true
+                fi
+            ' || true
+        done
+    }
+
+    trap 'persist_ray_sessions; cleanup_ray; cleanup_vllm' EXIT
 
     echo "Waiting for Ray cluster resources..."
     python3 scripts/ray/wait_for_cluster.py \
