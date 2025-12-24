@@ -233,20 +233,11 @@ fi
 if [ -n "$TRACE_TASK_TYPE" ]; then
     CMD+=(--trace-task-type "$TRACE_TASK_TYPE")
 fi
-if [ "$TRACE_USE_GPU" = "1" ]; then
-    CMD+=(--trace-use-gpu)
-fi
 if [ "$TRACE_BACKEND" = "vllm" ]; then
     CMD+=(--trace-backend vllm)
 fi
 if [ -n "$TRACE_ENDPOINT_JSON" ]; then
     CMD+=(--endpoint-json "$TRACE_ENDPOINT_JSON")
-fi
-if [ "$TRACE_REQUIRE_ENDPOINT" = "1" ]; then
-    CMD+=(--trace-require-endpoint)
-fi
-if [ "$TRACE_WAIT_FOR_ENDPOINT" = "1" ]; then
-    CMD+=(--trace-wait-for-endpoint)
 fi
 
 echo "Command: ${CMD[*]}"
