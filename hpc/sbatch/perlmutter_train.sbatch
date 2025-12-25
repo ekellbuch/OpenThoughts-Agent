@@ -68,6 +68,11 @@ if [ -n "${CUDA_HOME:-}" ]; then
   _cuda_version="$(basename "$CUDA_HOME")"
   _cuda_math_lib_path="$_cuda_sdk_root/math_libs/$_cuda_version/lib64"
   if [ -d "$_cuda_math_lib_path" ]; then
+    if [ -n "${LIBRARY_PATH:-}" ]; then
+      export LIBRARY_PATH="$_cuda_math_lib_path:$LIBRARY_PATH"
+    else
+      export LIBRARY_PATH="$_cuda_math_lib_path"
+    fi
     if [ -n "${LD_LIBRARY_PATH:-}" ]; then
       export LD_LIBRARY_PATH="$_cuda_math_lib_path:$LD_LIBRARY_PATH"
     else
@@ -101,6 +106,11 @@ if [ -n "${CONDA_PREFIX:-}" ]; then
   export FC="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gfortran"
   export CUDAHOSTCXX="$CXX"
   export PATH="$CONDA_PREFIX/bin:$PATH"
+  if [ -n "${LIBRARY_PATH:-}" ]; then
+    export LIBRARY_PATH="$CONDA_PREFIX/lib:$LIBRARY_PATH"
+  else
+    export LIBRARY_PATH="$CONDA_PREFIX/lib"
+  fi
   if [ -n "${LD_LIBRARY_PATH:-}" ]; then
     export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
   else
