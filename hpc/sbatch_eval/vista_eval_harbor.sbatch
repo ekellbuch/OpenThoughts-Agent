@@ -64,12 +64,12 @@ export AGENT_KWARGS_PATH TRACE_ENDPOINT_JSON TRACE_WAIT_FOR_ENDPOINT TRACE_HEALT
 echo "Working directory: $WORKDIR"
 echo "Experiments directory: $EXPERIMENTS_DIR"
 
-cleanup_vllm() {
+cleanup_vllm() {{
   if [ -n "$VLLM_JOB_ID" ]; then
     echo "Tearing down VLLM job $VLLM_JOB_ID"
     scancel "$VLLM_JOB_ID" >/dev/null 2>&1 || echo "Warning: failed to cancel VLLM job $VLLM_JOB_ID"
   fi
-}
+}}
 trap cleanup_vllm EXIT
 
 AGENT_KWARG_FLAGS=()
@@ -83,7 +83,7 @@ import os
 path = os.environ["AGENT_KWARGS_PATH"]
 data = json.loads(open(path).read())
 for key, value in data.items():
-    print(f"{key}={value}")
+    print("{{}}={{}}".format(key, value))
 PY
 )
 fi
@@ -105,25 +105,25 @@ if [ "$TRACE_WAIT_FOR_ENDPOINT" = "1" ]; then
     sleep 5
     TRACE_ENDPOINT_WAIT=$((TRACE_ENDPOINT_WAIT + 5))
     if [ $((TRACE_ENDPOINT_WAIT % 30)) -eq 0 ]; then
-      echo "Still waiting for $TRACE_ENDPOINT_JSON... (${TRACE_ENDPOINT_WAIT}s elapsed)"
+      echo "Still waiting for $TRACE_ENDPOINT_JSON... (${{TRACE_ENDPOINT_WAIT}}s elapsed)"
     fi
   done
   if [ ! -f "$TRACE_ENDPOINT_JSON" ]; then
-    echo "ERROR: Trace endpoint JSON not found after ${TRACE_ENDPOINT_WAIT_MAX}s: $TRACE_ENDPOINT_JSON"
+    echo "ERROR: Trace endpoint JSON not found after ${{TRACE_ENDPOINT_WAIT_MAX}}s: $TRACE_ENDPOINT_JSON"
     exit 1
   fi
   echo "✓ Trace endpoint JSON present"
   python scripts/vllm/wait_for_endpoint.py \
     --endpoint-json "$TRACE_ENDPOINT_JSON" \
-    --max-attempts "${TRACE_HEALTH_MAX_ATTEMPTS:-20}" \
-    --retry-delay "${TRACE_HEALTH_RETRY_DELAY:-30}" \
+    --max-attempts "${{TRACE_HEALTH_MAX_ATTEMPTS:-20}}" \
+    --retry-delay "${{TRACE_HEALTH_RETRY_DELAY:-30}}" \
     --health-path "v1/models"
 fi
 
 if [ -n "$TRACE_ENDPOINT_JSON" ] && [ -f "$TRACE_ENDPOINT_JSON" ]; then
   has_api_base=0
   has_metrics_endpoint=0
-  for kv in "${AGENT_KWARG_FLAGS[@]}"; do
+  for kv in "${{AGENT_KWARG_FLAGS[@]}}"; do
     case "$kv" in
       api_base=*) has_api_base=1 ;;
       metrics_endpoint=*) has_metrics_endpoint=1 ;;
@@ -151,18 +151,18 @@ except FileNotFoundError:
 base_url = (data.get("endpoint_url") or "").rstrip("/")
 api_path = (data.get("api_path") or "").strip()
 if base_url and api_path:
-    base_url = f"{base_url.rstrip('/')}/{api_path.lstrip('/')}"
-api_base = f"{base_url.rstrip('/')}/v1" if base_url else ""
+    base_url = f"{{base_url.rstrip('/')}}/{{api_path.lstrip('/')}}"
+api_base = f"{{base_url.rstrip('/')}}/v1" if base_url else ""
 def derive_metrics(base: str) -> str:
     cleaned = base.rstrip("/")
     if cleaned.endswith("/v1"):
         cleaned = cleaned[:-3].rstrip("/")
-    return f"{cleaned}/metrics" if cleaned else ""
+    return f"{{cleaned}}/metrics" if cleaned else ""
 metrics = derive_metrics(api_base) if api_base else ""
 if api_base:
-    print(f"api_base={api_base}")
+    print("api_base={{}}".format(api_base))
 if metrics:
-    print(f"metrics_endpoint={metrics}")
+    print("metrics_endpoint={{}}".format(metrics))
 PY
 )
     if [ $has_api_base -eq 0 ] && [ -n "$endpoint_api_base" ]; then
@@ -189,7 +189,7 @@ fi
 TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
 SAFE_MODEL=$(echo "$EVAL_MODEL" | tr '/:' '_')
 SAFE_DATASET=$(echo {dataset_label} | tr '/:' '_')
-RUN_TAG="${SAFE_DATASET}_${SAFE_MODEL}_${TIMESTAMP}"
+RUN_TAG="${{SAFE_DATASET}}_${{SAFE_MODEL}}_${{TIMESTAMP}}"
 RUN_DIR="$EXPERIMENTS_DIR/jobs/$RUN_TAG"
 mkdir -p "$RUN_DIR"
 export RUN_TAG RUN_DIR
@@ -205,7 +205,7 @@ except Exception:
     print("unknown")
 PY
 )
-export HARBOR_VERSION=${HARBOR_VERSION:-unknown}
+export HARBOR_VERSION=${{HARBOR_VERSION:-unknown}}
 
 echo "Creating Supabase job row..."
 DB_JOB_ID=$(python - <<'PY'
@@ -224,7 +224,7 @@ harbor_version = os.environ.get("HARBOR_VERSION", "unknown")
 n_trials = int(os.environ.get("EVAL_EXPECTED_TRIALS", "0") or "0")
 n_attempts = int(os.environ.get("EVAL_N_ATTEMPTS", "1") or "1")
 
-config = {"agent": agent, "env": os.environ.get("EVAL_ENV", "daytona")}
+config = {{"agent": agent, "env": os.environ.get("EVAL_ENV", "daytona")}}
 result = create_job_entry_started(
     model_hf_name=model,
     benchmark_hf_name=benchmark,
@@ -242,10 +242,10 @@ if not result.get("success"):
     sys.exit(1)
 print(result["job"]["id"])
 PY
-) || {
+) || {{
   echo "Failed to create Supabase job entry"
   exit 1
-}
+}}
 export DB_JOB_ID
 
 cat <<EOF > "$RUN_DIR/meta.env"
@@ -256,19 +256,19 @@ SLURM_JOB_ID=$SLURM_JOB_ID
 DB_JOB_ID=$DB_JOB_ID
 EOF
 
-HARBOR_CMD=(harbor jobs start "${DATASET_ARGS[@]}" --config "$EVAL_HARBOR_CONFIG" --job-name "$RUN_TAG" --agent "$EVAL_AGENT" --model "$EVAL_MODEL" --env "$EVAL_ENV" --n-concurrent "$EVAL_N_CONCURRENT" --k-attempts "$EVAL_N_ATTEMPTS")
-if [ "${#AGENT_KWARG_FLAGS[@]}" -gt 0 ]; then
-  HARBOR_CMD+=("${AGENT_KWARG_FLAGS[@]}")
+HARBOR_CMD=(harbor jobs start "${{DATASET_ARGS[@]}}" --config "$EVAL_HARBOR_CONFIG" --job-name "$RUN_TAG" --agent "$EVAL_AGENT" --model "$EVAL_MODEL" --env "$EVAL_ENV" --n-concurrent "$EVAL_N_CONCURRENT" --k-attempts "$EVAL_N_ATTEMPTS")
+if [ "${{#AGENT_KWARG_FLAGS[@]}}" -gt 0 ]; then
+  HARBOR_CMD+=("${{AGENT_KWARG_FLAGS[@]}}")
 fi
 
 set +e
-"${HARBOR_CMD[@]}"
+"${{HARBOR_CMD[@]}}"
 SB_EXIT=$?
 set -e
 
-if [ ${SB_EXIT:-0} -ne 0 ]; then
-  echo "Harbor exited with status ${SB_EXIT}"
-  exit ${SB_EXIT}
+if [ ${{SB_EXIT:-0}} -ne 0 ]; then
+  echo "Harbor exited with status ${{SB_EXIT}}"
+  exit ${{SB_EXIT}}
 fi
 
 RESULT_FILE="$RUN_DIR/result.json"
@@ -291,16 +291,16 @@ if "stats" in data and "evals" in data["stats"]:
 print(total)
 PY
   )
-  echo "Daytona errors: ${DAYTONA_COUNT}"
-  if [ "${DAYTONA_COUNT:-0}" -gt "$DAYTONA_THRESHOLD" ]; then
-    echo "Too many Daytona errors (${DAYTONA_COUNT}); skipping upload."
+  echo "Daytona errors: ${{DAYTONA_COUNT}}"
+  if [ "${{DAYTONA_COUNT:-0}}" -gt "$DAYTONA_THRESHOLD" ]; then
+    echo "Too many Daytona errors (${{DAYTONA_COUNT}}); skipping upload."
     exit 0
   fi
 else
   echo "Warning: result.json not found at $RESULT_FILE"
 fi
 
-UPLOAD_LOG="$EXPERIMENTS_DIR/logs/upload_${SLURM_JOB_ID}.log"
+UPLOAD_LOG="$EXPERIMENTS_DIR/logs/upload_${{SLURM_JOB_ID}}.log"
 mkdir -p "$(dirname "$UPLOAD_LOG")"
 
 export RUN_DIR
@@ -329,10 +329,10 @@ if not hf_token:
 safe_tag = re.sub(r"[^A-Za-z0-9._-]+", "-", run_tag).strip("-")
 if len(safe_tag) > 96:
     digest = hashlib.sha1(run_tag.encode()).hexdigest()[:8]
-    safe_tag = f"{safe_tag[:88]}{digest}"
+    safe_tag = "{{}}{{}}".format(safe_tag[:88], digest)
 
-hf_repo_id = f"{prefix}/{safe_tag}"
-print(f"[eval-upload] Uploading {run_dir} -> {hf_repo_id}")
+hf_repo_id = "{{}}/{{}}".format(prefix, safe_tag)
+print("[eval-upload] Uploading {{}} -> {{}}".format(run_dir, hf_repo_id))
 upload_eval_results(
     job_dir=run_dir,
     username=username,
@@ -343,7 +343,7 @@ upload_eval_results(
 )
 print("[eval-upload] Upload complete.")
 PY
-UPLOAD_EXIT=${PIPESTATUS[0]}
+UPLOAD_EXIT=${{PIPESTATUS[0]}}
 set -e
 if [ $UPLOAD_EXIT -ne 0 ]; then
   echo "Upload failed with exit code: $UPLOAD_EXIT"
