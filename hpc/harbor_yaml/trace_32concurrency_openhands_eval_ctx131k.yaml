@@ -52,7 +52,6 @@ agents:
 - name: openhands
   import_path:
   model_name: placeholder/override-at-runtime
-  override_timeout_sec: 1800
   max_timeout_sec:
   kwargs:
     disable_tool_calls: true

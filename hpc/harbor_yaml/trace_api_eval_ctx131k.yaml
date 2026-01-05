@@ -52,7 +52,6 @@ agents:
 - name: terminus-2
   import_path:
   model_name: placeholder/override-at-runtime
-  override_timeout_sec: 1800
   max_timeout_sec:
   kwargs:
     max_episodes: 32

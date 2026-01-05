@@ -16,16 +16,16 @@ dependencies = [
     "bs4",
     "huggingface_hub>=0.20.0",
     "datasets>=2.0.0",
-    "supabase==2.22.3",
+    "supabase>=2.22.3",
     "python-dotenv>=1.0.0",
-    "harbor",
+    "harbor @ git+https://github.com/laude-institute/harbor.git@4aaebe4abfd005382870ce88b5b2670cd9afb54e",
     "dynamic-semaphore @ git+https://github.com/penfever/dynamic-semaphore",
     "google-cloud-storage",
     "h5py",
     "certifi",
     "rapidfuzz",
     "huggingface_hub",
-    "torch==2.9.0+cu128",
+    "uv>=0.4.17",
 ]
 
 [project.optional-dependencies]
@@ -38,11 +38,16 @@ datagen = [
     "torch-c-dlpack-ext==0.1.4",
     "google-cloud-aiplatform>=1.67.0",
     "google-genai>=0.1.0",
-    "nvidia-cuda-nvcc-cu12==12.8.93",
-    "vllm==0.11.2",
+    "nvidia-cuda-nvcc-cu12==12.8.93; platform_system != 'Darwin'",
+    "vllm==0.11.2; platform_system != 'Darwin'",
+    "torch==2.9.0+cu128; platform_system != 'Darwin' or platform_machine != 'arm64'",
+    "torch==2.9.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
 ]
 datagen-swesmith = [
     "swesmith",
+]
+cloud = [
+    "skypilot>=0.6.1",
 ]
 rl = [
     "skyrl @ git+https://github.com/mlfoundations/skyrl.git",
@@ -77,3 +82,5 @@ exclude = [
 
 [tool.uv.pip]
 extra-index-url = ["https://download.pytorch.org/whl/cu128"]
+[tool.uv]
+index-strategy = "unsafe-best-match"
