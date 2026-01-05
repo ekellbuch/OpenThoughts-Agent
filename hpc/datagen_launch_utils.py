@@ -19,7 +19,7 @@ from omegaconf import OmegaConf
 from data.generation import BaseDataGenerator
 from data.generation.utils import load_datagen_config, resolve_engine_runtime
 from harbor.models.environment_type import EnvironmentType
-from hpc.core_launch_utils import cleanup_endpoint_file
+from hpc.core_launch_utils import cleanup_endpoint_file, validate_trace_backend
 from hpc.launch_utils import (
     _inject_env_block,
     _merge_dependencies,
@@ -884,16 +884,15 @@ def launch_datagen_job(exp_args: dict, hpc) -> None:
         if exp_args.get("trace_use_gpu") and getattr(hpc, "gpus_per_node", 0) == 0:
             raise ValueError("trace_use_gpu requested but HPC configuration has no GPUs available")
 
-        trace_backend = str(exp_args.get("trace_backend") or exp_args.get("datagen_backend") or "vllm").lower()
-        trace_engine = str(exp_args.get("trace_engine") or exp_args.get("datagen_engine") or "").lower()
+        trace_backend_raw = exp_args.get("trace_backend") or exp_args.get("datagen_backend")
+        trace_backend = validate_trace_backend(
+            trace_backend_raw,
+            allow_vllm=False,
+            job_type="datagen",
+        )
+        exp_args = update_exp_args(exp_args, {"trace_backend": trace_backend})
 
-        if trace_backend == "vllm":
-            warning = (
-                "trace_backend=vllm is currently unsupported on all clusters. "
-                "Please switch to a Ray-backed trace backend or disable trace generation."
-            )
-            print(f"WARNING: {warning}")
-            raise RuntimeError(warning)
+        trace_engine = str(exp_args.get("trace_engine") or exp_args.get("datagen_engine") or "").lower()
 
         trace_requires_vllm_server = trace_engine == "vllm_local" and trace_backend == "vllm"
 
@@ -1547,7 +1546,11 @@ def launch_trace_job(
     trace_engine = str(trace_engine_value).lower()
 
     trace_backend_value = exp_args.get("trace_backend") or exp_args.get("datagen_backend") or "vllm"
-    trace_backend = str(trace_backend_value).lower()
+    trace_backend = validate_trace_backend(
+        trace_backend_value,
+        allow_vllm=False,
+        job_type="datagen",
+    )
     cpu_only_trace = trace_backend == "vllm_local"
 
     if trace_backend != trace_backend_value:

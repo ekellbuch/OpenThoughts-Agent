@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 
 from data.generation import BaseDataGenerator
 
-from hpc.core_launch_utils import cleanup_endpoint_file
+from hpc.core_launch_utils import cleanup_endpoint_file, validate_trace_backend
 from hpc.launch_utils import launch_sbatch, _parse_optional_int
 from hpc.datagen_launch_utils import default_vllm_endpoint_path, launch_vllm_server
 from scripts.harbor.job_config_utils import load_job_config
@@ -185,6 +185,14 @@ def prepare_eval_configuration(exp_args: dict) -> dict:
             eval_env = "daytona"
     exp_args["_eval_env"] = str(eval_env)
 
+    trace_backend_value = exp_args.get("trace_backend") or exp_args.get("datagen_backend")
+    trace_backend = validate_trace_backend(
+        trace_backend_value,
+        allow_vllm=True,
+        job_type="eval",
+    )
+    exp_args["trace_backend"] = trace_backend
+
     default_n_concurrent = harbor_job.orchestrator.n_concurrent_trials
     if default_n_concurrent is None or default_n_concurrent < 1:
         default_n_concurrent = 64
@@ -283,7 +291,8 @@ def launch_eval_job(exp_args: dict, hpc) -> None:
         dataset_label = "dataset"
 
     datagen_engine = (exp_args.get("datagen_engine") or "").lower()
-    datagen_backend = (exp_args.get("datagen_backend") or "").lower()
+    trace_backend = (exp_args.get("trace_backend") or "").lower()
+    datagen_backend = trace_backend or (exp_args.get("datagen_backend") or "").lower()
     vllm_cfg = exp_args.get("_datagen_vllm_server_config")
     requires_vllm_endpoint = bool(
         vllm_cfg and datagen_engine == "vllm_local" and datagen_backend in {"vllm", "ray"}
