@@ -479,7 +479,7 @@ SLURM_JOB_ID=$SLURM_JOB_ID
 DB_JOB_ID=$DB_JOB_ID
 EOF
 
-HARBOR_CMD=(harbor jobs start "${DATASET_ARGS[@]}" --config "$EVAL_HARBOR_CONFIG" --job-name "$RUN_TAG" --agent "$EVAL_AGENT" --model "$EVAL_MODEL" --env "$EVAL_ENV" --n-concurrent "$EVAL_N_CONCURRENT" --k-attempts "$EVAL_N_ATTEMPTS")
+HARBOR_CMD=(harbor jobs start "${DATASET_ARGS[@]}" --config "$EVAL_HARBOR_CONFIG" --job-name "$RUN_TAG" --agent "$EVAL_AGENT" --model "$EVAL_MODEL" --env "$EVAL_ENV" --n-concurrent "$EVAL_N_CONCURRENT" --n-attempts "$EVAL_N_ATTEMPTS")
 if [ "${#AGENT_KWARG_FLAGS[@]}" -gt 0 ]; then
   HARBOR_CMD+=("${AGENT_KWARG_FLAGS[@]}")
 fi
