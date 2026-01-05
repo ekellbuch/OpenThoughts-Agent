@@ -5,14 +5,15 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from data.generation import BaseDataGenerator
 
 from hpc.core_launch_utils import cleanup_endpoint_file, validate_trace_backend
-from hpc.launch_utils import launch_sbatch, _parse_optional_int
-from hpc.datagen_launch_utils import default_vllm_endpoint_path, launch_vllm_server
+from hpc.launch_utils import launch_sbatch, _parse_optional_int, _inject_env_block
+from hpc.datagen_launch_utils import default_vllm_endpoint_path, _build_vllm_env_vars
 from scripts.harbor.job_config_utils import load_job_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -290,12 +291,13 @@ def launch_eval_job(exp_args: dict, hpc) -> None:
     if not dataset_label:
         dataset_label = "dataset"
 
-    datagen_engine = (exp_args.get("datagen_engine") or "").lower()
-    trace_backend = (exp_args.get("trace_backend") or "").lower()
-    datagen_backend = trace_backend or (exp_args.get("datagen_backend") or "").lower()
+    trace_engine_value = exp_args.get("trace_engine") or exp_args.get("datagen_engine") or ""
+    trace_engine = str(trace_engine_value or "").lower()
+    trace_backend_value = exp_args.get("trace_backend") or exp_args.get("datagen_backend") or "vllm"
+    trace_backend = str(trace_backend_value or "vllm").lower()
     vllm_cfg = exp_args.get("_datagen_vllm_server_config")
     requires_vllm_endpoint = bool(
-        vllm_cfg and datagen_engine == "vllm_local" and datagen_backend in {"vllm", "ray"}
+        vllm_cfg and trace_engine == "vllm_local" and trace_backend in {"vllm", "ray"}
     )
     experiments_dir_value = exp_args.get("experiments_dir") or experiments_subdir
     trace_endpoint_json = exp_args.get("trace_endpoint_json") or exp_args.get("vllm_endpoint_json_path") or ""
@@ -306,12 +308,6 @@ def launch_eval_job(exp_args: dict, hpc) -> None:
         exp_args["vllm_endpoint_json_path"] = trace_endpoint_json
     if requires_vllm_endpoint:
         cleanup_endpoint_file(trace_endpoint_json, descriptor="stale eval endpoint file")
-
-    vllm_job_id: Optional[str] = None
-    if requires_vllm_endpoint:
-        vllm_job_id = launch_vllm_server(exp_args, hpc)
-        if vllm_job_id and vllm_job_id != "dry_run_vllm_job_id":
-            exp_args["vllm_job_id"] = vllm_job_id
 
     default_health_attempts = getattr(BaseDataGenerator, "HEALTHCHECK_MAX_ATTEMPTS", 20)
     trace_health_max_attempts = _parse_optional_int(
@@ -326,9 +322,31 @@ def launch_eval_job(exp_args: dict, hpc) -> None:
     ) or default_health_delay
 
     should_wait_for_endpoint = bool(trace_endpoint_json) and requires_vllm_endpoint
-    vllm_job_identifier = (
-        vllm_job_id if vllm_job_id and vllm_job_id != "dry_run_vllm_job_id" else ""
-    )
+    trace_require_endpoint = "1" if requires_vllm_endpoint else "0"
+
+    gpus_per_node_raw = exp_args.get("gpus_per_node")
+    if isinstance(gpus_per_node_raw, str) and gpus_per_node_raw.strip() == "":
+        gpus_per_node_raw = None
+    default_gpu_count = getattr(hpc, "gpus_per_node", None)
+    if isinstance(default_gpu_count, str) and not default_gpu_count.strip():
+        default_gpu_count = None
+    gpus_per_node = int(gpus_per_node_raw or default_gpu_count or 1)
+
+    trace_ray_port = str(exp_args.get("datagen_ray_port") or exp_args.get("trace_ray_port") or 6379)
+    trace_api_port = str(exp_args.get("datagen_api_port") or exp_args.get("trace_api_port") or 8000)
+
+    tensor_parallel_size = getattr(vllm_cfg, "tensor_parallel_size", None) or 1
+    pipeline_parallel_size = getattr(vllm_cfg, "pipeline_parallel_size", None) or 1
+    data_parallel_size = getattr(vllm_cfg, "data_parallel_size", None) or 1
+
+    vllm_env_vars: Dict[str, str] = {}
+    if requires_vllm_endpoint:
+        vllm_env_vars, exp_args = _build_vllm_env_vars(exp_args, include_pinggy=True)
+        vllm_env_vars.setdefault("VLLM_BACKEND", trace_backend)
+        vllm_env_vars.setdefault("VLLM_RAY_PORT", trace_ray_port)
+        vllm_env_vars.setdefault("VLLM_API_PORT", trace_api_port)
+        if gpus_per_node:
+            vllm_env_vars.setdefault("VLLM_GPUS_PER_NODE", str(gpus_per_node))
 
     sbatch_output = sbatch_dir / f"{job_name}_eval.sbatch"
     substitutions = {
@@ -356,13 +374,33 @@ def launch_eval_job(exp_args: dict, hpc) -> None:
         "dataset_label": _shell_quote(dataset_label),
         "trace_endpoint_json": _shell_quote(trace_endpoint_json or ""),
         "trace_wait_for_endpoint": "1" if should_wait_for_endpoint else "0",
+        "trace_require_endpoint": trace_require_endpoint,
         "trace_health_max_attempts": str(trace_health_max_attempts),
         "trace_health_retry_delay": str(trace_health_retry_delay),
-        "vllm_job_id": _shell_quote(vllm_job_identifier),
+        "trace_backend": _shell_quote(trace_backend),
+        "trace_engine": _shell_quote(trace_engine),
+        "needs_vllm_server": "1" if requires_vllm_endpoint else "0",
+        "trace_ray_port": _shell_quote(trace_ray_port),
+        "trace_api_port": _shell_quote(trace_api_port),
+        "trace_tensor_parallel_size": str(tensor_parallel_size),
+        "trace_pipeline_parallel_size": str(pipeline_parallel_size),
+        "trace_data_parallel_size": str(data_parallel_size),
+        "trace_gpus_per_node": str(gpus_per_node),
     }
 
     template_text = template_path.read_text()
-    sbatch_text = template_text.format(**substitutions)
+
+    placeholder_pattern = re.compile(r"{([A-Za-z0-9_]+)}")
+
+    def _substitute(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key in substitutions:
+            return str(substitutions[key])
+        return match.group(0)
+
+    sbatch_text = placeholder_pattern.sub(_substitute, template_text)
+    if vllm_env_vars:
+        sbatch_text = _inject_env_block(sbatch_text, vllm_env_vars)
     sbatch_output.write_text(sbatch_text, encoding="utf-8")
     os.chmod(sbatch_output, 0o750)
 
@@ -373,9 +411,6 @@ def launch_eval_job(exp_args: dict, hpc) -> None:
         print("--------")
         return
 
-    dependency = f"after:{vllm_job_identifier}" if vllm_job_identifier else None
-    job_id = launch_sbatch(str(sbatch_output), dependency=dependency)
+    job_id = launch_sbatch(str(sbatch_output))
     print(f"\nEval job submitted via {sbatch_output}")
     print(f"SLURM Job ID: {job_id}")
-    if vllm_job_identifier:
-        print(f"VLLM Server Job ID: {vllm_job_identifier}")
