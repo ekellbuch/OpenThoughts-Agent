@@ -326,6 +326,8 @@ def _start_vllm_controller(
         }
     )
     env.update(getattr(args, "_vllm_env_overrides", {}))
+    if getattr(args, "_served_model_name", None):
+        env["VLLM_CUSTOM_MODEL_NAME"] = args._served_model_name
     extra_cli = getattr(args, "_vllm_extra_args", None)
     if extra_cli:
         env["VLLM_SERVER_EXTRA_ARGS_JSON"] = json.dumps(extra_cli)
@@ -519,6 +521,7 @@ def main() -> None:
     if args.model is None:
         raise ValueError("Provide --model or supply a datagen config with vllm_server.model_path.")
     args._harbor_model_name = _hosted_vllm_model_name()
+    args._served_model_name = args._harbor_model_name
     if args.ray_port is None:
         args.ray_port = 6379
     if args.api_port is None:
