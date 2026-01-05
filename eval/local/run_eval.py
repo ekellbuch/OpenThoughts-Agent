@@ -456,7 +456,19 @@ def _build_harbor_command(
         cmd.extend(["--agent-kwarg", kw])
     for passthrough_kw in passthrough:
         cmd.extend(["--agent-kwarg", passthrough_kw])
-    for extra in args.harbor_extra_arg or []:
+    extra_args = list(args.harbor_extra_arg or [])
+
+    def _flag_present(flag: str) -> bool:
+        return any(arg == flag for arg in extra_args)
+
+    if not (_flag_present("--export-traces") or _flag_present("--no-export-traces")):
+        extra_args.append("--export-traces")
+    if not (
+        _flag_present("--export-verifier-metadata") or _flag_present("--no-export-verifier-metadata")
+    ):
+        extra_args.append("--export-verifier-metadata")
+
+    for extra in extra_args:
         cmd.append(extra)
 
     return cmd
