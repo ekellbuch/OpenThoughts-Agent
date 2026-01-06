@@ -15,6 +15,7 @@ from hpc.launch_utils import (
     PROJECT_ROOT,
     resolve_repo_path,
     resolve_workspace_path,
+    resolve_config_path,
     coerce_agent_kwargs,
     default_vllm_endpoint_path,
     launch_sbatch,
@@ -22,7 +23,20 @@ from hpc.launch_utils import (
     cleanup_endpoint_file,
     validate_trace_backend,
 )
+
+# Config directory paths (same as datagen_launch_utils)
+_DIRENV = os.path.dirname(__file__)
+HARBOR_CONFIG_DIR = os.path.join(_DIRENV, "harbor_yaml")
+
 from scripts.harbor.job_config_utils import load_job_config
+
+
+def resolve_harbor_config_path(raw_value: str) -> Path:
+    """Resolve ``raw_value`` to an absolute Harbor job config path.
+
+    Checks in order: raw_value as-is, then HARBOR_CONFIG_DIR fallback.
+    """
+    return resolve_config_path(raw_value, HARBOR_CONFIG_DIR, "harbor job")
 
 DEFAULT_REGISTRY_HINTS = [
     Path(os.environ.get("HARBOR_REGISTRY_PATH", "")).expanduser()
@@ -84,7 +98,7 @@ def prepare_eval_configuration(exp_args: dict) -> dict:
     harbor_cfg = exp_args.get("trace_harbor_config")
     if not harbor_cfg:
         raise ValueError("Eval jobs require --trace-harbor-config pointing at an eval YAML.")
-    resolved_cfg = resolve_repo_path(harbor_cfg)
+    resolved_cfg = resolve_harbor_config_path(harbor_cfg)
     if "_eval_" not in resolved_cfg.name:
         raise ValueError(
             f"Eval Harbor YAML '{resolved_cfg.name}' must include '_eval_' in the filename."
