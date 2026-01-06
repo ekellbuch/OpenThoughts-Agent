@@ -239,6 +239,10 @@ class EvalJobConfig:
     experiments_dir: str = "experiments"
     cluster_name: str = ""
 
+    # Resource allocation (from CLI overrides, None = use HPC cluster defaults)
+    gpus_per_node: Optional[int] = None
+    cpus_per_node: Optional[int] = None
+
     # vLLM settings (if launching inline)
     needs_vllm: bool = False
     vllm_model_path: Optional[str] = None
@@ -326,10 +330,14 @@ class EvalJobRunner:
         hpc = self._get_hpc()
         num_nodes = int(os.environ.get("SLURM_JOB_NUM_NODES", 1))
 
+        # Use config values (from CLI overrides) instead of cluster defaults
+        gpus_per_node = self.config.gpus_per_node or hpc.gpus_per_node
+        cpus_per_node = self.config.cpus_per_node or hpc.cpus_per_node
+
         ray_cfg = RayClusterConfig(
             num_nodes=num_nodes,
-            gpus_per_node=hpc.gpus_per_node,
-            cpus_per_node=hpc.cpus_per_node,
+            gpus_per_node=gpus_per_node,
+            cpus_per_node=cpus_per_node,
             ray_port=self.config.ray_port,
             srun_export_env=hpc.get_srun_export_env(),
             ray_env_vars=hpc.get_ray_env_vars(),
@@ -467,6 +475,7 @@ def launch_eval_job_v2(exp_args: dict, hpc) -> None:
     requires_vllm = bool(vllm_cfg and trace_engine == "vllm_local")
 
     gpus_per_node = int(exp_args.get("gpus_per_node") or getattr(hpc, "gpus_per_node", 1) or 1)
+    cpus_per_node = int(exp_args.get("cpus_per_node") or getattr(hpc, "cpus_per_node", 24) or 24)
     tensor_parallel_size = getattr(vllm_cfg, "tensor_parallel_size", None) or 1
     pipeline_parallel_size = getattr(vllm_cfg, "pipeline_parallel_size", None) or 1
     data_parallel_size = getattr(vllm_cfg, "data_parallel_size", None) or 1
@@ -495,6 +504,8 @@ def launch_eval_job_v2(exp_args: dict, hpc) -> None:
         eval_env=exp_args.get("_eval_env") or "daytona",
         experiments_dir=experiments_subdir,
         cluster_name=hpc.name,
+        gpus_per_node=gpus_per_node,
+        cpus_per_node=cpus_per_node,
         needs_vllm=requires_vllm,
         vllm_model_path=getattr(vllm_cfg, "model_path", None) if vllm_cfg else None,
         tensor_parallel_size=tensor_parallel_size,

@@ -479,6 +479,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
     requires_vllm = bool(vllm_cfg and engine == "vllm_local")
 
     gpus_per_node = int(exp_args.get("gpus_per_node") or getattr(hpc, "gpus_per_node", 0) or 0)
+    cpus_per_node = int(exp_args.get("cpus_per_node") or getattr(hpc, "cpus_per_node", 24) or 24)
     tensor_parallel_size = getattr(vllm_cfg, "tensor_parallel_size", None) or 1
     pipeline_parallel_size = getattr(vllm_cfg, "pipeline_parallel_size", None) or 1
     data_parallel_size = getattr(vllm_cfg, "data_parallel_size", None) or 1
@@ -522,6 +523,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             disable_verification=bool(exp_args.get("disable_verification")),
             num_nodes=int(exp_args.get("num_nodes") or 1),
             gpus_per_node=gpus_per_node,
+            cpus_per_node=cpus_per_node,
             vllm_server_config=vllm_server_config,
         )
 
@@ -629,6 +631,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             agent_kwargs=agent_kwargs,
             num_nodes=int(exp_args.get("num_nodes") or 1),
             gpus_per_node=gpus_per_node,
+            cpus_per_node=cpus_per_node,
             vllm_server_config=trace_vllm_server_config,
         )
 
@@ -726,9 +729,10 @@ class TaskgenJobConfig:
     extra_args: str = ""
     disable_verification: bool = False
 
-    # GPU settings
+    # Resource allocation (from CLI overrides, None = use HPC cluster defaults)
     num_nodes: int = 1
-    gpus_per_node: int = 0
+    gpus_per_node: Optional[int] = None
+    cpus_per_node: Optional[int] = None
 
 
 class TaskgenJobRunner:
@@ -790,10 +794,14 @@ class TaskgenJobRunner:
         hpc = self._get_hpc()
         num_nodes = int(os.environ.get("SLURM_JOB_NUM_NODES", self.config.num_nodes))
 
+        # Use config values (from CLI overrides) instead of cluster defaults
+        gpus_per_node = self.config.gpus_per_node or hpc.gpus_per_node
+        cpus_per_node = self.config.cpus_per_node or hpc.cpus_per_node
+
         ray_cfg = RayClusterConfig(
             num_nodes=num_nodes,
-            gpus_per_node=hpc.gpus_per_node,
-            cpus_per_node=hpc.cpus_per_node,
+            gpus_per_node=gpus_per_node,
+            cpus_per_node=cpus_per_node,
             ray_port=self.config.ray_port,
             srun_export_env=hpc.get_srun_export_env(),
             ray_env_vars=hpc.get_ray_env_vars(),
@@ -912,9 +920,10 @@ class TracegenJobConfig:
     # Upload settings
     upload_username: str = ""
 
-    # GPU settings
+    # Resource allocation (from CLI overrides, None = use HPC cluster defaults)
     num_nodes: int = 1
-    gpus_per_node: int = 4
+    gpus_per_node: Optional[int] = None
+    cpus_per_node: Optional[int] = None
 
 
 class TracegenJobRunner:
@@ -979,10 +988,14 @@ class TracegenJobRunner:
         hpc = self._get_hpc()
         num_nodes = int(os.environ.get("SLURM_JOB_NUM_NODES", self.config.num_nodes))
 
+        # Use config values (from CLI overrides) instead of cluster defaults
+        gpus_per_node = self.config.gpus_per_node or hpc.gpus_per_node
+        cpus_per_node = self.config.cpus_per_node or hpc.cpus_per_node
+
         ray_cfg = RayClusterConfig(
             num_nodes=num_nodes,
-            gpus_per_node=hpc.gpus_per_node,
-            cpus_per_node=hpc.cpus_per_node,
+            gpus_per_node=gpus_per_node,
+            cpus_per_node=cpus_per_node,
             ray_port=self.config.ray_port,
             srun_export_env=hpc.get_srun_export_env(),
             ray_env_vars=hpc.get_ray_env_vars(),

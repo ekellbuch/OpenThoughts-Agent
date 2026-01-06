@@ -30,9 +30,12 @@ class HPC(BaseModel):
     train_sbatch_filename: str
     node_exclusion_list: str = ""
     qos: str = ""  # Most clusters don't use QOS; set explicitly where needed
-    # GPU directive format: "--gres=gpu:{n}", "--gpus-per-node={n}", or "" (no directive)
-    # Use {n} as placeholder for GPU count
+    # GPU directive format: "--gres=gpu:{n}", "--gres=gpu:{type}:{n}", "--gpus-per-node={n}", or "" (no directive)
+    # Use {n} as placeholder for GPU count, {type} for GPU type (e.g., h200, l40s)
     gpu_directive_format: str = ""
+    # Default GPU type for clusters with multiple GPU types (e.g., "h200", "l40s")
+    # Only used if gpu_directive_format contains {type}
+    default_gpu_type: str = ""
     pretok_qos: str = ""
     pretok_cpus_per_node: int = 0  # will use all available cpus
     pretok_time_limit: str = "24:00:00"
@@ -90,19 +93,29 @@ class HPC(BaseModel):
             return ""
         return f"#SBATCH --exclude={self.node_exclusion_list}"
 
-    def get_gpu_directive(self, gpus: int) -> str:
-        """Generate SBATCH GPU directive for the given GPU count.
+    def get_gpu_directive(self, gpus: int, gpu_type: str | None = None) -> str:
+        """Generate SBATCH GPU directive for the given GPU count and type.
 
         Args:
             gpus: Number of GPUs to request.
+            gpu_type: GPU type override (e.g., "h200", "l40s"). If None, uses default_gpu_type.
 
         Returns:
-            SBATCH directive string (e.g., "#SBATCH --gres=gpu:4") or empty string
+            SBATCH directive string (e.g., "#SBATCH --gres=gpu:h200:4") or empty string
             if the cluster doesn't use GPU directives (like TACC GH200 clusters).
         """
         if not self.gpu_directive_format or gpus <= 0:
             return ""
         directive = self.gpu_directive_format.replace("{n}", str(gpus))
+        # Handle GPU type if format includes {type} placeholder
+        if "{type}" in directive:
+            resolved_type = gpu_type or self.default_gpu_type
+            if not resolved_type:
+                # If no type specified and format requires it, fall back to removing the type placeholder
+                # This handles cases where a type is optional
+                directive = directive.replace("{type}:", "").replace(":{type}", "").replace("{type}", "")
+            else:
+                directive = directive.replace("{type}", resolved_type)
         return f"#SBATCH {directive}"
 
     def get_mem_directive(self, mem: str | None = None) -> str:
@@ -120,7 +133,9 @@ class HPC(BaseModel):
             return ""
         return f"#SBATCH --mem={mem_value}"
 
-    def get_sbatch_directives(self, qos: str = "", gpus: int = 0, mem: str | None = None) -> str:
+    def get_sbatch_directives(
+        self, qos: str = "", gpus: int = 0, gpu_type: str | None = None, mem: str | None = None
+    ) -> str:
         """Generate cluster-specific SBATCH directives.
 
         Returns directives for partition, account, QoS, GPU, memory, exclusions, etc.
@@ -129,6 +144,7 @@ class HPC(BaseModel):
         Args:
             qos: Optional QoS string.
             gpus: Number of GPUs to request (0 = use cluster default or skip).
+            gpu_type: GPU type override (e.g., "h200", "l40s"). Uses default if None.
             mem: Memory override (uses cluster default if None).
         """
         lines = []
@@ -138,7 +154,7 @@ class HPC(BaseModel):
             lines.append(f"#SBATCH --account {self.account}")
         if qos:
             lines.append(f"#SBATCH -q {qos}")
-        gpu_directive = self.get_gpu_directive(gpus)
+        gpu_directive = self.get_gpu_directive(gpus, gpu_type)
         if gpu_directive:
             lines.append(gpu_directive)
         mem_directive = self.get_mem_directive(mem)
@@ -409,9 +425,10 @@ nyutorch = HPC(
     cpus_per_node=24,
     mem_per_node="192G",
     internet_node=True,
-    gpus_type="H200 141GB",
+    gpus_type="H200 141GB / L40S 48GB",
     total_partition_nodes=48,
-    gpu_directive_format="--gres=gpu:{n}",
+    gpu_directive_format="--gres=gpu:{type}:{n}",
+    default_gpu_type="H200",  # Options: H200, L40S
     # Runtime configuration for Ray/vLLM (from legacy scripts)
     conda_activate="source $SCRATCH/miniconda3/etc/profile.d/conda.sh && conda activate dcagent312",
     env_vars={

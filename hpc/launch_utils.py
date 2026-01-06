@@ -245,6 +245,7 @@ def build_sbatch_directives(
     account: str | None = None,
     qos: str | None = None,
     gpus: int | None = None,
+    gpu_type: str | None = None,
     mem: str | None = None,
 ) -> list[str]:
     """Build list of SBATCH directives for job submission.
@@ -256,6 +257,7 @@ def build_sbatch_directives(
         account: Override account (falls back to exp_args then hpc).
         qos: Override QoS (falls back to exp_args).
         gpus: Override GPU count (falls back to exp_args then hpc).
+        gpu_type: Override GPU type (e.g., "h200", "l40s"). Falls back to exp_args then hpc default.
         mem: Override memory (falls back to hpc.mem_per_node).
 
     Returns:
@@ -266,6 +268,7 @@ def build_sbatch_directives(
     account = account or exp_args.get("account") or hpc.account
     qos = qos or exp_args.get("qos") or ""
     gpus_requested = int(gpus if gpus is not None else (exp_args.get("gpus_per_node") or hpc.gpus_per_node or 0))
+    gpu_type_resolved = gpu_type or exp_args.get("gpu_type") or None  # Let hpc.get_gpu_directive use its default
 
     directives = []
     if partition:
@@ -275,7 +278,7 @@ def build_sbatch_directives(
     if qos:
         directives.append(f"#SBATCH -q {qos}")
     # Add GPU directive if the cluster uses one
-    gpu_directive = hpc.get_gpu_directive(gpus_requested)
+    gpu_directive = hpc.get_gpu_directive(gpus_requested, gpu_type_resolved)
     if gpu_directive:
         directives.append(gpu_directive)
     # Add memory directive if the cluster uses one

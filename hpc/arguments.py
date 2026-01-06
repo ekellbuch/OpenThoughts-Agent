@@ -725,20 +725,14 @@ def parse_args():
         "gpus_type",
         "total_partition_nodes",
         "qos",
+        "gpu_type",
     ]
+    str_hpc_fields = {"name", "account", "partition", "gpus_type", "qos", "gpu_type"}
     for field in hpc_fields:
         hpc_group.add_argument(
             f"--{field}",
-            type=(
-                str
-                if field == "name"
-                or field == "account"
-                or field == "partition"
-                or field == "gpus_type"
-                or field == "qos"
-                else int
-            ),
-            help=f"HPC {field}",
+            type=str if field in str_hpc_fields else int,
+            help=f"HPC {field}" if field != "gpu_type" else "GPU type override (e.g., h200, l40s) for clusters with multiple GPU types",
         )
 
     # Add LlamaFactoryArgs arguments
