@@ -11,7 +11,10 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import List, Optional, Sequence
 
@@ -66,6 +69,84 @@ DEFAULT_LOCAL_SYNC_DIR = (REPO_ROOT / "cloud_runs").as_posix()
 # GitHub Container Registry images (build with docker/build_and_push.sh)
 GHCR_IMAGE_BASE = "ghcr.io/open-thoughts/openthoughts-agent"
 DEFAULT_DOCKER_IMAGE = f"{GHCR_IMAGE_BASE}:gpu-1x"
+
+# Default interval for periodic log sync (seconds)
+DEFAULT_LOG_SYNC_INTERVAL = 120  # 2 minutes
+
+
+class PeriodicLogSync:
+    """Background thread that periodically syncs log files from a remote cluster."""
+
+    def __init__(
+        self,
+        cluster_name: str,
+        remote_log_dir: str,
+        local_log_dir: str,
+        interval_seconds: int = DEFAULT_LOG_SYNC_INTERVAL,
+    ):
+        self.cluster_name = cluster_name
+        self.remote_log_dir = remote_log_dir
+        self.local_log_dir = local_log_dir
+        self.interval = interval_seconds
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def _sync_logs(self) -> None:
+        """Perform a single log sync."""
+        try:
+            # Ensure local directory exists
+            Path(self.local_log_dir).mkdir(parents=True, exist_ok=True)
+
+            # Use rsync via sky exec for efficient incremental sync
+            sync_cmd = [
+                "sky", "exec", self.cluster_name,
+                f"rsync -avz --ignore-missing-args {self.remote_log_dir}/ /dev/stdout 2>/dev/null | head -5 || true"
+            ]
+            # Actually use sky rsync for proper file transfer
+            rsync_cmd = f"sky rsync {self.cluster_name}:{self.remote_log_dir}/ {self.local_log_dir}/"
+            result = subprocess.run(
+                rsync_cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                # Check what files we got
+                log_files = list(Path(self.local_log_dir).glob("*.log"))
+                if log_files:
+                    print(f"[log-sync] Synced {len(log_files)} log file(s) to {self.local_log_dir}")
+        except subprocess.TimeoutExpired:
+            pass  # Sync took too long, skip this iteration
+        except Exception as e:
+            print(f"[log-sync] Warning: sync failed: {e}", file=sys.stderr)
+
+    def _run(self) -> None:
+        """Background thread loop."""
+        # Initial delay to let the job start
+        time.sleep(30)
+        while not self._stop_event.is_set():
+            self._sync_logs()
+            # Wait for interval or until stopped
+            self._stop_event.wait(self.interval)
+
+    def start(self) -> None:
+        """Start the background sync thread."""
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        print(f"[log-sync] Started periodic log sync (every {self.interval}s) to {self.local_log_dir}")
+
+    def stop(self) -> None:
+        """Stop the background sync thread."""
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+        # Do one final sync
+        self._sync_logs()
+        print("[log-sync] Stopped periodic log sync")
 
 
 def _repo_relative(path_str: str) -> str:
@@ -151,6 +232,13 @@ def _parse_args() -> argparse.Namespace:
         "--down",
         action="store_true",
         help="Tear down cluster after task completes (default: keep cluster for reuse).",
+    )
+    parser.add_argument(
+        "--log-sync-interval",
+        type=int,
+        default=DEFAULT_LOG_SYNC_INTERVAL,
+        metavar="SECONDS",
+        help=f"Interval for periodic log sync from remote cluster (default: {DEFAULT_LOG_SYNC_INTERVAL}s). Set to 0 to disable.",
     )
 
     return parser.parse_args()
@@ -413,8 +501,22 @@ def main() -> None:
 
     cluster_for_sync = getattr(handle, "cluster_name", None) or args.cluster_name
 
+    # Start periodic log sync if enabled
+    log_sync: Optional[PeriodicLogSync] = None
+    if cluster_for_sync and args.log_sync_interval > 0:
+        local_logs_dir = str(Path(args.local_sync_dir) / "logs")
+        remote_logs_dir = f"{remote_output_dir}/logs"
+        log_sync = PeriodicLogSync(
+            cluster_name=cluster_for_sync,
+            remote_log_dir=remote_logs_dir,
+            local_log_dir=local_logs_dir,
+            interval_seconds=args.log_sync_interval,
+        )
+        log_sync.start()
+
     # Wait for the job to complete by tailing logs
     # sky.launch() only waits for submission, not completion
+    job_failed = False
     if cluster_for_sync:
         print(f"[cloud] Waiting for job to complete on cluster '{cluster_for_sync}'...")
         try:
@@ -424,9 +526,54 @@ def main() -> None:
             else:
                 print("[cloud] Job ID unavailable; streaming latest job logs (may include older runs).")
                 sky.tail_logs(cluster_for_sync, job_id=None, follow=True)
+        except KeyboardInterrupt:
+            print("\n[cloud] Log streaming interrupted by user (Ctrl-C).", file=sys.stderr)
+            print(f"[cloud] Job may still be running. Check with: sky queue {cluster_for_sync}", file=sys.stderr)
         except Exception as e:
             print(f"[cloud] Warning: Failed to tail logs: {e}", file=sys.stderr)
             print(f"[cloud] You can manually check status with: sky queue {cluster_for_sync}", file=sys.stderr)
+        finally:
+            # Stop periodic log sync
+            if log_sync:
+                log_sync.stop()
+
+        # Check job status to detect failures
+        try:
+            queue_result = sky.queue(cluster_for_sync, all_users=False)
+            jobs = sky.stream_and_get(queue_result) or []
+            for job in jobs:
+                jid = getattr(job, "job_id", None)
+                status = getattr(job, "status", None)
+                if job_id is not None and jid == job_id:
+                    if status and "FAILED" in str(status).upper():
+                        job_failed = True
+                        print(f"[cloud] Job {job_id} FAILED. Attempting to retrieve diagnostic logs...", file=sys.stderr)
+                    break
+        except Exception as e:
+            print(f"[cloud] Warning: Could not check job status: {e}", file=sys.stderr)
+
+        # If job failed, try to retrieve vLLM logs for diagnostics
+        if job_failed and cluster_for_sync:
+            print("[cloud] Fetching vLLM and Ray logs for diagnostics...")
+            try:
+                # vLLM controller log is in experiments_dir/logs/
+                vllm_log_path = f"{remote_output_dir}/logs/vllm_controller.log"
+                vllm_log_cmd = f"sky exec {cluster_for_sync} 'cat {vllm_log_path} 2>/dev/null || echo \"No vLLM controller log found at {vllm_log_path}\"'"
+                print(f"[cloud-debug] vLLM Controller Log ({vllm_log_path}):")
+                subprocess.run(vllm_log_cmd, shell=True)
+
+                # Ray log is in experiments_dir/logs/
+                ray_log_path = f"{remote_output_dir}/logs/ray.log"
+                ray_log_cmd = f"sky exec {cluster_for_sync} 'tail -100 {ray_log_path} 2>/dev/null || echo \"No Ray log found at {ray_log_path}\"'"
+                print(f"\n[cloud-debug] Ray Log (last 100 lines):")
+                subprocess.run(ray_log_cmd, shell=True)
+
+                # Also check system raylet logs
+                raylet_cmd = f"sky exec {cluster_for_sync} 'tail -50 /tmp/ray/session_latest/logs/raylet.out 2>/dev/null || echo \"No raylet.out found\"'"
+                print(f"\n[cloud-debug] Ray Raylet System Log (last 50 lines):")
+                subprocess.run(raylet_cmd, shell=True)
+            except Exception as e:
+                print(f"[cloud] Warning: Could not fetch diagnostic logs: {e}", file=sys.stderr)
 
     # Sync outputs from remote cluster
     # 1. Sync the experiments directory (logs, endpoint JSON, etc.)

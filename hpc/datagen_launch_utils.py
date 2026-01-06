@@ -1066,6 +1066,10 @@ class TracegenJobRunner:
             else:
                 cmd.extend(["--agent-kwarg", f"{key}={value}"])
 
+        # Set jobs_dir inside experiments folder (not repo root)
+        jobs_dir = str(Path(self.config.experiments_dir) / "trace_jobs")
+        cmd.extend(["--jobs-dir", jobs_dir])
+
         # Standard export flags
         cmd.extend([
             "--export-traces",
