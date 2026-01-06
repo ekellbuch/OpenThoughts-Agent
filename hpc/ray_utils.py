@@ -146,6 +146,36 @@ class RayCluster:
         """Number of nodes in the cluster."""
         return len(self.node_list)
 
+    def _cleanup_existing_ray(self) -> None:
+        """Stop any existing Ray instances on allocated nodes.
+
+        This ensures a clean slate before starting a new cluster,
+        preventing conflicts with lingering processes from previous jobs.
+        """
+        print("Cleaning up existing Ray instances...")
+        for node in self.node_list:
+            try:
+                subprocess.run(
+                    [
+                        "srun",
+                        f"--export={self.config.srun_export_env}",
+                        "--nodes=1",
+                        "--ntasks=1",
+                        "--overlap",
+                        "-w",
+                        node,
+                        "ray",
+                        "stop",
+                        "--force",
+                    ],
+                    capture_output=True,
+                    timeout=30,
+                )
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                pass  # Ignore errors - node may not have Ray running
+        # Brief pause to let processes terminate
+        time.sleep(2)
+
     def start(self) -> None:
         """Start the Ray cluster.
 
@@ -155,6 +185,9 @@ class RayCluster:
         if self._started:
             print(f"Ray cluster already started at {self.address}")
             return
+
+        # Clean up any lingering Ray instances from previous jobs
+        self._cleanup_existing_ray()
 
         print(f"=== Starting Ray Cluster ===")
         print(f"  Nodes: {len(self.node_list)}")
