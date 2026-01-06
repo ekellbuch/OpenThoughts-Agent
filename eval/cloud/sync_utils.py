@@ -1,27 +1,88 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
+from typing import Optional
 
 
-def sync_eval_outputs(cluster_name: str | None, remote_path: str, local_dir: str) -> None:
-    """Placeholder sync hook for pulling eval artifacts back to the caller's machine.
+def sync_eval_outputs(
+    cluster_name: Optional[str],
+    remote_path: str,
+    local_dir: str,
+    verbose: bool = True,
+) -> bool:
+    """Sync eval outputs from remote cluster to local machine using rsync.
 
-    This shim keeps all sync logic in one place so we can swap in a real
-    implementation (e.g., sky storage mounts, GCS buckets, etc.) without touching
-    the launcher. For now we simply ensure the destination exists and emit
-    instructions for the operator.
+    Args:
+        cluster_name: SkyPilot cluster name (used as SSH host)
+        remote_path: Path on the remote cluster
+        local_dir: Local destination directory
+        verbose: Print progress information
+
+    Returns:
+        True if sync succeeded, False otherwise
     """
+    if not cluster_name:
+        print("[cloud-sync] No cluster name provided, skipping sync.", file=sys.stderr)
+        return False
 
     target = Path(local_dir).expanduser().resolve()
     target.mkdir(parents=True, exist_ok=True)
 
-    hint = remote_path
-    if cluster_name:
-        hint = f"{cluster_name}:{remote_path}"
+    # SkyPilot clusters can be accessed via SSH using the cluster name as host
+    # rsync -Pavz cluster:/remote/path/ /local/path/
+    remote_spec = f"{cluster_name}:{remote_path}/"
+    local_spec = str(target) + "/"
 
+    if verbose:
+        print(f"[cloud-sync] Syncing outputs from cluster...")
+        print(f"[cloud-sync]   Remote: {remote_spec}")
+        print(f"[cloud-sync]   Local:  {local_spec}")
+
+    # Build rsync command
+    rsync_cmd = [
+        "rsync",
+        "-avz",  # archive, verbose, compress
+        "--progress",
+        remote_spec,
+        local_spec,
+    ]
+
+    try:
+        result = subprocess.run(
+            rsync_cmd,
+            check=False,
+            capture_output=not verbose,
+            text=True,
+        )
+
+        if result.returncode == 0:
+            if verbose:
+                print(f"[cloud-sync] Successfully synced outputs to {target}")
+            return True
+        else:
+            print(f"[cloud-sync] rsync failed with code {result.returncode}", file=sys.stderr)
+            if not verbose and result.stderr:
+                print(f"[cloud-sync] Error: {result.stderr}", file=sys.stderr)
+            _print_manual_instructions(cluster_name, remote_path, target)
+            return False
+
+    except FileNotFoundError:
+        print("[cloud-sync] rsync not found. Install it or sync manually:", file=sys.stderr)
+        _print_manual_instructions(cluster_name, remote_path, target)
+        return False
+    except Exception as e:
+        print(f"[cloud-sync] Sync failed: {e}", file=sys.stderr)
+        _print_manual_instructions(cluster_name, remote_path, target)
+        return False
+
+
+def _print_manual_instructions(cluster_name: str, remote_path: str, local_path: Path) -> None:
+    """Print manual sync instructions as fallback."""
     print(
-        "[cloud-sync] Eval outputs were left in "
-        f"'{remote_path}'. Syncing is not automated yet.\n"
-        f"Copy them into '{target}' using your preferred method "
-        f"(e.g., `sky storage cp {hint} {target}` or `sky exec`)."
+        f"\n[cloud-sync] Manual sync instructions:\n"
+        f"  rsync -avz --progress {cluster_name}:{remote_path}/ {local_path}/\n"
+        f"  # or\n"
+        f"  scp -r {cluster_name}:{remote_path}/* {local_path}/\n"
     )

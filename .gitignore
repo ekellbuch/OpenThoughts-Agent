@@ -340,9 +340,11 @@ train/hpc/dotenv/secret.env
 # Claude
 CLAUDE.md
 data/self_instruct/seed
+
 # Eval results
 eval/tacc/jobs/
 eval/tacc/runs/
+cloud_runs/
 
 # Google Cloud SDK and credentials
 google-cloud-sdk/

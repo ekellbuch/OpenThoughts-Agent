@@ -112,9 +112,9 @@ python eval/cloud/launch_eval_cloud.py \
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--cloud-provider` | `gcp` | Cloud provider to use |
+| `--cloud-provider` | `gcp` | Cloud provider(s). Comma-separated for fallbacks (e.g., `gcp,aws,lambda`). |
 | `--accelerator` | `A100:1` | GPU type and count. Comma-separated for fallbacks (e.g., `H100:1,H200:1,A100-80GB:1`). |
-| `--region` | auto | Preferred region |
+| `--region` | auto | Preferred region(s). Comma-separated for fallbacks (e.g., `us-central1,us-west1`). |
 | `--zone` | auto | Preferred zone |
 | `--use-spot` | false | Use spot/preemptible instances |
 | `--docker-image` | auto | Docker image (auto-selects gpu-1x/4x/8x) |
@@ -138,7 +138,7 @@ python eval/cloud/launch_eval_cloud.py \
 |----------|---------|-------------|
 | `--task-name` | `ot-eval-cloud` | SkyPilot task name |
 | `--cluster-name` | auto | SkyPilot cluster name |
-| `--remote-output-dir` | `/opt/openthoughts/cloud_runs` | Remote output path |
+| `--remote-output-subdir` | `cloud_runs` | Subdirectory under workdir for outputs |
 | `--local-sync-dir` | `./cloud_runs` | Local path to sync results |
 | `--secrets-env` | none | Path to secrets.env file |
 
@@ -294,6 +294,20 @@ python eval/cloud/launch_eval_cloud.py \
 
 SkyPilot will try each accelerator in order of cost and use the first available.
 
+### Multi-cloud fallback (use cheapest available)
+
+```bash
+python eval/cloud/launch_eval_cloud.py \
+  --cloud-provider "gcp,aws,lambda" \
+  --accelerator "H100:1,A100-80GB:1" \
+  --harbor-config hpc/harbor_yaml/trace_32concurrency_eval_ctx32k.yaml \
+  --dataset terminal-bench@2.0 \
+  --model your-org/your-model \
+  --eval-benchmark-repo YourOrg/eval-repo
+```
+
+SkyPilot will try all 6 combinations (3 providers × 2 accelerators) and use the cheapest available.
+
 ### One-off job with auto-teardown
 
 ```bash
@@ -415,13 +429,34 @@ python -m eval.cloud.providers --setup <provider>
 
 Make sure `--no-sync` is not set. By default, local code is synced on every launch.
 
+## Output Syncing
+
+After the eval task completes, outputs are automatically synced from the remote cluster to your local machine using rsync. The remote output directory is `<workdir>/cloud_runs/` where workdir is `/sky/workdir` (with code sync) or `/opt/openthoughts` (with `--no-sync`).
+
+```
+[cloud-sync] Syncing outputs from cluster...
+[cloud-sync]   Remote: glm46-tb2-smoke:/sky/workdir/cloud_runs/
+[cloud-sync]   Local:  /Users/you/OpenThoughts-Agent/cloud_runs/
+[cloud-sync] Successfully synced outputs to /Users/you/OpenThoughts-Agent/cloud_runs/...
+```
+
+If `--down` is used, the sync happens before the cluster is torn down.
+
+**Manual sync** (if automatic sync fails):
+```bash
+# SkyPilot clusters are accessible via SSH using the cluster name as hostname
+rsync -avz --progress CLUSTER:/sky/workdir/cloud_runs/ ./cloud_runs/
+# or
+scp -r CLUSTER:/sky/workdir/cloud_runs/* ./cloud_runs/
+```
+
 ## Architecture
 
 ```
 eval/cloud/
 ├── launch_eval_cloud.py  # Main launcher script
 ├── providers.py          # Provider configurations and utilities
-├── sync_utils.py         # Output syncing utilities
+├── sync_utils.py         # Output syncing utilities (rsync-based)
 └── README.md             # This file
 ```
 
@@ -431,4 +466,5 @@ The launcher:
 3. Creates a SkyPilot Task with the eval command
 4. Launches on the specified provider
 5. Streams logs and waits for completion
-6. Syncs results back to local machine
+6. Syncs results back to local machine via rsync
+7. Tears down cluster if `--down` was specified

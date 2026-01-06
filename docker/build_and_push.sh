@@ -3,15 +3,17 @@
 # Build and push OpenThoughts Docker images to GitHub Container Registry (ghcr.io)
 #
 # Usage:
-#   ./docker/build_and_push.sh              # Build and push all images
-#   ./docker/build_and_push.sh --build-only # Build without pushing
-#   ./docker/build_and_push.sh --push-only  # Push previously built images
+#   ./docker/build_and_push.sh              # Build and push all images (multi-platform)
+#   ./docker/build_and_push.sh --build-only # Build without pushing (local platform only)
 #   ./docker/build_and_push.sh gpu-1x       # Build/push specific image
 #
 # Prerequisites:
-#   1. Docker installed and running
+#   1. Docker installed and running with buildx support
 #   2. Authenticated to ghcr.io:
 #      echo $GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
+#
+# Platforms:
+#   Builds for both linux/amd64 (x86) and linux/arm64 (ARM, e.g., GH200)
 #
 
 set -euo pipefail
@@ -24,6 +26,9 @@ REGISTRY="ghcr.io"
 ORG="open-thoughts"
 IMAGE_NAME="openthoughts-agent"
 IMAGE_BASE="${REGISTRY}/${ORG}/${IMAGE_NAME}"
+
+# Target platforms (amd64 for x86, arm64 for GH200/ARM)
+PLATFORMS="linux/amd64,linux/arm64"
 
 # Available image variants
 VARIANTS=("gpu-1x" "gpu-4x" "gpu-8x")
@@ -40,22 +45,24 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --push-only)
-            BUILD=false
-            shift
+            echo "ERROR: --push-only not supported with multi-platform builds."
+            echo "Multi-platform images must be built and pushed together."
+            exit 1
             ;;
         --help|-h)
-            echo "Usage: $0 [--build-only|--push-only] [variant...]"
+            echo "Usage: $0 [--build-only] [variant...]"
             echo ""
             echo "Options:"
-            echo "  --build-only    Build images without pushing"
-            echo "  --push-only     Push previously built images"
+            echo "  --build-only    Build images without pushing (local platform only)"
             echo ""
             echo "Variants: ${VARIANTS[*]}"
             echo ""
             echo "Examples:"
-            echo "  $0                    # Build and push all"
+            echo "  $0                    # Build and push all (multi-platform)"
             echo "  $0 gpu-1x             # Build and push gpu-1x only"
-            echo "  $0 --build-only       # Build all without pushing"
+            echo "  $0 --build-only       # Build all without pushing (local only)"
+            echo ""
+            echo "Platforms: ${PLATFORMS}"
             exit 0
             ;;
         gpu-*)
@@ -83,12 +90,22 @@ echo "============================================"
 echo "Registry:  ${REGISTRY}"
 echo "Image:     ${ORG}/${IMAGE_NAME}"
 echo "Variants:  ${SELECTED_VARIANTS[*]}"
+echo "Platforms: ${PLATFORMS}"
 echo "Git SHA:   ${GIT_SHA}"
-echo "Build:     ${BUILD}"
 echo "Push:      ${PUSH}"
 echo "============================================"
 
 cd "$REPO_ROOT"
+
+# Ensure buildx builder exists for multi-platform builds
+BUILDER_NAME="openthoughts-builder"
+if ! docker buildx inspect "$BUILDER_NAME" &>/dev/null; then
+    echo ""
+    echo ">>> Creating buildx builder for multi-platform support..."
+    docker buildx create --name "$BUILDER_NAME" --use --bootstrap
+else
+    docker buildx use "$BUILDER_NAME"
+fi
 
 for variant in "${SELECTED_VARIANTS[@]}"; do
     dockerfile="docker/Dockerfile.${variant}"
@@ -101,24 +118,29 @@ for variant in "${SELECTED_VARIANTS[@]}"; do
     image_tag="${IMAGE_BASE}:${variant}"
     image_tag_sha="${IMAGE_BASE}:${variant}-${GIT_SHA}"
 
-    if [[ "$BUILD" == "true" ]]; then
-        echo ""
-        echo ">>> Building ${variant}..."
-        docker build \
-            --platform linux/amd64 \
+    echo ""
+    echo ">>> Building ${variant}..."
+
+    if [[ "$PUSH" == "true" ]]; then
+        # Multi-platform build and push (buildx requires --push for multi-platform)
+        docker buildx build \
+            --platform "$PLATFORMS" \
             -f "$dockerfile" \
             -t "$image_tag" \
             -t "$image_tag_sha" \
+            --push \
             .
-        echo ">>> Built: ${image_tag}"
-    fi
-
-    if [[ "$PUSH" == "true" ]]; then
-        echo ""
-        echo ">>> Pushing ${variant}..."
-        docker push "$image_tag"
-        docker push "$image_tag_sha"
-        echo ">>> Pushed: ${image_tag}"
+        echo ">>> Built and pushed: ${image_tag} (platforms: ${PLATFORMS})"
+    else
+        # Local build only (single platform - current machine's architecture)
+        echo ">>> Building for local platform only (multi-platform requires --push)"
+        docker buildx build \
+            -f "$dockerfile" \
+            -t "$image_tag" \
+            -t "$image_tag_sha" \
+            --load \
+            .
+        echo ">>> Built locally: ${image_tag}"
     fi
 done
 
@@ -130,4 +152,8 @@ echo "Images available:"
 for variant in "${SELECTED_VARIANTS[@]}"; do
     echo "  ${IMAGE_BASE}:${variant}"
 done
+if [[ "$PUSH" == "true" ]]; then
+    echo ""
+    echo "Platforms: ${PLATFORMS}"
+fi
 echo "============================================"

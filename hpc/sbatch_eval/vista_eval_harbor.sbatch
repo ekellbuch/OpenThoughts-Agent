@@ -10,9 +10,17 @@
 
 set -euo pipefail
 
+# Some system bash-completion scripts reference BASH_COMPLETION_DEBUG without
+# guarding for set -u. Define it if missing so module/apptainer helpers stay quiet.
+if [ -z "${BASH_COMPLETION_DEBUG+x}" ]; then
+  export BASH_COMPLETION_DEBUG=""
+fi
+
+set +u
 module load gcc/15.1.0
 module load cuda/12.8
 module load tacc-apptainer
+set -u
 
 if [ -n "$DCFT_PRIVATE" ]; then
   WORKDIR="$DCFT_PRIVATE"

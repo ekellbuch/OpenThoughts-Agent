@@ -59,7 +59,8 @@ except ImportError as exc:  # pragma: no cover - optional dependency
     raise SystemExit(1) from exc
 
 
-DEFAULT_REMOTE_OUTPUT_DIR = "/opt/openthoughts/cloud_runs"
+# Output directory is relative to workdir - gets resolved at runtime based on sync mode
+DEFAULT_REMOTE_OUTPUT_SUBDIR = "cloud_runs"
 DEFAULT_LOCAL_SYNC_DIR = (REPO_ROOT / "cloud_runs").as_posix()
 
 # GitHub Container Registry images (build with docker/build_and_push.sh)
@@ -99,16 +100,19 @@ def _parse_args() -> argparse.Namespace:
     # Cloud specific options
     parser.add_argument(
         "--cloud-provider",
-        choices=get_all_provider_names(),
         default="gcp",
-        help="Cloud provider to use. Run with --list-providers for details.",
+        help="Cloud provider(s) to use. Comma-separated for fallbacks (e.g., 'gcp,aws,lambda'). "
+        "Run with --list-providers for details.",
     )
     parser.add_argument(
         "--list-providers",
         action="store_true",
         help="List supported cloud providers and exit.",
     )
-    parser.add_argument("--region", help="Preferred region.")
+    parser.add_argument(
+        "--region",
+        help="Preferred region(s). Comma-separated for fallbacks (e.g., 'us-central1,us-west1,europe-west1').",
+    )
     parser.add_argument("--zone", help="Preferred zone.")
     parser.add_argument(
         "--accelerator",
@@ -125,7 +129,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--task-name", default="ot-eval-cloud", help="SkyPilot task name.")
     parser.add_argument("--cluster-name", help="Optional SkyPilot cluster name override.")
-    parser.add_argument("--remote-output-dir", default=DEFAULT_REMOTE_OUTPUT_DIR)
+    parser.add_argument(
+        "--remote-output-subdir",
+        default=DEFAULT_REMOTE_OUTPUT_SUBDIR,
+        help="Subdirectory under workdir for outputs (default: 'cloud_runs').",
+    )
     parser.add_argument("--local-sync-dir", default=DEFAULT_LOCAL_SYNC_DIR)
     parser.add_argument("--secrets-env", help="Path to secrets.env to source inside the container.")
     parser.add_argument(
@@ -156,7 +164,7 @@ def _ensure_mutually_exclusive(dataset: Optional[str], dataset_path: Optional[st
         raise ValueError("Must provide --dataset or --dataset-path for eval workloads.")
 
 
-def _build_run_eval_command(args: argparse.Namespace) -> List[str]:
+def _build_run_eval_command(args: argparse.Namespace, remote_output_dir: str) -> List[str]:
     cmd: List[str] = ["python", "eval/local/run_eval.py", "--harbor-config", args.harbor_config, "--model", args.model]
     if args.datagen_config:
         cmd.extend(["--datagen-config", args.datagen_config])
@@ -177,7 +185,7 @@ def _build_run_eval_command(args: argparse.Namespace) -> List[str]:
             "--eval-benchmark-repo",
             args.eval_benchmark_repo,
             "--experiments-dir",
-            args.remote_output_dir,
+            remote_output_dir,
         ]
     )
     if args.expected_trials:
@@ -239,30 +247,33 @@ def main() -> None:
 
     _ensure_mutually_exclusive(args.dataset, args.dataset_path)
 
-    # Get provider configuration and check credentials
-    provider_config = get_provider_config(args.cloud_provider)
-    creds_ok, creds_msg = check_provider_credentials(args.cloud_provider)
-    if not creds_ok:
-        print(f"[cloud] Warning: {creds_msg}", file=sys.stderr)
-        print(f"[cloud] Setup instructions for {provider_config.display_name}:", file=sys.stderr)
-        print(get_setup_instructions(args.cloud_provider), file=sys.stderr)
+    # Parse comma-separated providers
+    provider_names = [p.strip() for p in args.cloud_provider.split(",")]
+    provider_configs = [get_provider_config(p) for p in provider_names]
 
-    # Warn about provider limitations
-    if args.use_spot and not provider_config.supports_spot:
+    # Check credentials for all providers
+    for pname, pconfig in zip(provider_names, provider_configs):
+        creds_ok, creds_msg = check_provider_credentials(pname)
+        if not creds_ok:
+            print(f"[cloud] Warning ({pconfig.display_name}): {creds_msg}", file=sys.stderr)
+
+    # Warn about provider limitations (use first provider's config for compatibility checks)
+    primary_config = provider_configs[0]
+    if args.use_spot and not all(pc.supports_spot for pc in provider_configs):
+        no_spot = [pc.display_name for pc in provider_configs if not pc.supports_spot]
         print(
-            f"[cloud] Warning: {provider_config.display_name} does not support spot instances. "
-            "Ignoring --use-spot.",
+            f"[cloud] Warning: {', '.join(no_spot)} do not support spot instances. "
+            "Spot will only be used where supported.",
             file=sys.stderr,
         )
-        args.use_spot = False
 
-    if args.region and not provider_config.supports_regions:
+    if args.region and not all(pc.supports_regions for pc in provider_configs):
+        no_region = [pc.display_name for pc in provider_configs if not pc.supports_regions]
         print(
-            f"[cloud] Warning: {provider_config.display_name} does not support region selection. "
-            "Ignoring --region.",
+            f"[cloud] Warning: {', '.join(no_region)} do not support region selection. "
+            "Region will only be used where supported.",
             file=sys.stderr,
         )
-        args.region = None
 
     # Normalize repo-relative paths so the container can access them.
     args.harbor_config = _repo_relative(args.harbor_config)
@@ -273,20 +284,34 @@ def main() -> None:
 
     # Select and normalize docker image (auto-selects variant based on GPU count)
     # Some providers (like RunPod) don't support docker as runtime environment
-    if provider_config.supports_docker_runtime:
+    if all(pc.supports_docker_runtime for pc in provider_configs):
         docker_image = _normalize_docker_image(_select_docker_image(args))
     else:
-        docker_image = None
-        print(
-            f"[cloud] Note: {provider_config.display_name} does not support Docker as runtime. "
-            "Using provider's default environment.",
-            file=sys.stderr,
-        )
+        no_docker = [pc.display_name for pc in provider_configs if not pc.supports_docker_runtime]
+        if len(no_docker) == len(provider_configs):
+            # None support docker
+            docker_image = None
+            print(
+                f"[cloud] Note: Selected providers do not support Docker as runtime. "
+                "Using provider's default environment.",
+                file=sys.stderr,
+            )
+        else:
+            # Some support, some don't - use docker where supported
+            docker_image = _normalize_docker_image(_select_docker_image(args))
+            print(
+                f"[cloud] Note: {', '.join(no_docker)} do not support Docker as runtime. "
+                "Docker will only be used where supported.",
+                file=sys.stderr,
+            )
 
     # Remote working directory - use /sky/workdir when syncing to avoid conflict with Docker image's /opt/openthoughts
     remote_workdir = "/sky/workdir" if not args.no_sync else "/opt/openthoughts"
 
-    run_eval_cmd = _build_run_eval_command(args)
+    # Compute the actual output directory (under workdir)
+    remote_output_dir = f"{remote_workdir}/{args.remote_output_subdir}"
+
+    run_eval_cmd = _build_run_eval_command(args, remote_output_dir)
     run_eval_str = " ".join(shlex.quote(part) for part in run_eval_cmd)
     remote_cmds = [f"cd {remote_workdir}", "set -euo pipefail"]
 
@@ -312,28 +337,36 @@ def main() -> None:
         file_mounts[remote_secret_path] = os.path.abspath(args.secrets_env)
 
     # Build Resources with provider-specific settings
-    # Support comma-separated accelerators for fallback options (e.g., "H100:1,H200:1,A100-80GB:1")
+    # Support comma-separated accelerators, providers, and regions for fallback options
     accelerator_options = [a.strip() for a in args.accelerator.split(",")]
+    region_options = [r.strip() for r in args.region.split(",")] if args.region else [None]
 
-    def build_resource(accel: str) -> sky.Resources:
+    def build_resource(provider_name: str, pconfig, accel: str, region: Optional[str]) -> sky.Resources:
         kwargs = {
-            "cloud": resolve_cloud(args.cloud_provider),
+            "cloud": resolve_cloud(provider_name),
             "accelerators": accel,
-            "use_spot": args.use_spot,
+            "use_spot": args.use_spot if pconfig.supports_spot else False,
         }
-        if args.region and provider_config.supports_regions:
-            kwargs["region"] = args.region
+        if region and pconfig.supports_regions:
+            kwargs["region"] = region
         if args.zone:
             kwargs["zone"] = args.zone
-        if docker_image:
+        if docker_image and pconfig.supports_docker_runtime:
             kwargs["image_id"] = docker_image
         return sky.Resources(**kwargs)
 
-    if len(accelerator_options) == 1:
-        resources = build_resource(accelerator_options[0])
+    # Build all combinations of providers, accelerators, and regions
+    all_resources = []
+    for pname, pconfig in zip(provider_names, provider_configs):
+        for accel in accelerator_options:
+            for region in region_options:
+                all_resources.append(build_resource(pname, pconfig, accel, region))
+
+    if len(all_resources) == 1:
+        resources = all_resources[0]
     else:
         # Multiple options: SkyPilot will try in order of cost
-        resources = {build_resource(accel) for accel in accelerator_options}
+        resources = set(all_resources)
 
     task = sky.Task(name=args.task_name, run=final_cmd)
     task.set_resources(resources)
@@ -342,23 +375,27 @@ def main() -> None:
 
     sync_status = f"enabled -> {remote_workdir}" if not args.no_sync else "disabled (using Docker image)"
     image_status = docker_image if docker_image else "(provider default)"
-    accel_status = " | ".join(accelerator_options) if len(accelerator_options) > 1 else accelerator_options[0]
+    provider_status = " | ".join(pc.display_name for pc in provider_configs)
+    accel_status = " | ".join(accelerator_options)
+    region_status = " | ".join(r for r in region_options if r) if any(region_options) else "auto"
     autostop_status = f"{args.autostop} min" if args.autostop > 0 else "disabled"
     print(f"[cloud] Launching SkyPilot task '{args.task_name}'")
-    print(f"[cloud]   Provider: {provider_config.display_name}")
+    print(f"[cloud]   Provider(s): {provider_status}")
+    print(f"[cloud]   Region(s): {region_status}")
     print(f"[cloud]   Accelerator(s): {accel_status}")
     print(f"[cloud]   Image: {image_status}")
     print(f"[cloud]   Code sync: {sync_status}")
     print(f"[cloud]   Autostop: {autostop_status}")
+    if len(all_resources) > 1:
+        print(f"[cloud]   Candidate resources: {len(all_resources)} combinations")
     if args.down:
         print(f"[cloud]   Teardown: enabled (cluster will be deleted after task)")
 
-    # Launch returns a request ID; use stream_and_get to wait and stream logs
+    # Launch returns a request ID; use stream_and_get to wait for provisioning
+    # Note: Don't pass down=True to launch() - we need to sync outputs first, then tear down
     launch_kwargs = {"cluster_name": args.cluster_name}
     if args.autostop > 0:
         launch_kwargs["idle_minutes_to_autostop"] = args.autostop
-    if args.down:
-        launch_kwargs["down"] = True
 
     request_id = sky.launch(task, **launch_kwargs)
     handle = sky.stream_and_get(request_id)
@@ -366,11 +403,36 @@ def main() -> None:
     if isinstance(handle, Sequence):
         handle = handle[0] if handle else None
     cluster_for_sync = getattr(handle, "cluster_name", None) or args.cluster_name
+
+    # Wait for the job to complete by tailing logs
+    # sky.launch() only waits for submission, not completion
+    if cluster_for_sync:
+        print(f"[cloud] Waiting for job to complete on cluster '{cluster_for_sync}'...")
+        try:
+            # tail_logs blocks until the job finishes and streams output
+            # job_id=None means tail the latest job
+            sky.tail_logs(cluster_for_sync, job_id=None, follow=True)
+        except Exception as e:
+            print(f"[cloud] Warning: Failed to tail logs: {e}", file=sys.stderr)
+            print(f"[cloud] You can manually check status with: sky queue {cluster_for_sync}", file=sys.stderr)
+
+    # Sync outputs from remote cluster
     sync_eval_outputs(
         cluster_name=cluster_for_sync,
-        remote_path=args.remote_output_dir,
+        remote_path=remote_output_dir,
         local_dir=args.local_sync_dir,
     )
+
+    # Tear down cluster if requested (after syncing)
+    if args.down and cluster_for_sync:
+        print(f"[cloud] Tearing down cluster '{cluster_for_sync}'...")
+        try:
+            down_request = sky.down(cluster_for_sync)
+            sky.stream_and_get(down_request)
+            print(f"[cloud] Cluster '{cluster_for_sync}' terminated.")
+        except Exception as e:
+            print(f"[cloud] Warning: Failed to tear down cluster: {e}", file=sys.stderr)
+            print(f"[cloud] Run manually: sky down {cluster_for_sync}", file=sys.stderr)
 
 
 if __name__ == "__main__":
