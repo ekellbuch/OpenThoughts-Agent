@@ -269,10 +269,11 @@ launch_inline_vllm() {
     exit 1
   fi
   local nodes
-  nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
+  nodes=$(scontrol show hostnames "${SLURM_JOB_NODELIST:-}")
   if [ -z "$nodes" ]; then
-    echo "ERROR: Unable to resolve SLURM hostnames for inline eval hosting."
-    exit 1
+    # Fallback to current hostname so we can still attempt a single-node launch.
+    nodes=$(hostname)
+    echo "Warning: SLURM_JOB_NODELIST was empty; defaulting to $(hostname) for inline eval hosting."
   fi
   read -r -a nodes_array <<<"$nodes"
   local head_node="${nodes_array[0]}"
@@ -298,8 +299,12 @@ PY
   export RAY_ADDRESS="$ip_head"
 
   start_ray_node() {
-    local node_name=$1
-    local start_cmd=$2
+    local node_name="${1:-}"
+    local start_cmd="${2:-}"
+    if [ -z "$node_name" ] || [ -z "$start_cmd" ]; then
+      echo "ERROR: start_ray_node called without node name or command."
+      exit 1
+    fi
     srun --export="$SRUN_EXPORT_ENV" --nodes=1 --ntasks=1 --overlap -w "$node_name" bash -c "env $RAY_ENV_VARS $start_cmd" &
     ray_pids+=($!)
   }
