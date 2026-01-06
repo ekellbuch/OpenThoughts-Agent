@@ -409,8 +409,9 @@ def main() -> None:
     # When syncing code, ensure synced code takes precedence over Docker's installed packages
     # The Docker image may have an editable install pointing to /opt/openthoughts which would
     # take precedence over the synced /sky/workdir code for package imports like `hpc.*`
+    # Use ${PYTHONPATH:-} to handle unset PYTHONPATH (required due to set -u)
     if not args.no_sync:
-        remote_cmds.append(f"export PYTHONPATH={remote_workdir}:$PYTHONPATH")
+        remote_cmds.append(f"export PYTHONPATH={remote_workdir}:${{PYTHONPATH:-}}")
 
     remote_secret_path = None
     if args.secrets_env:
