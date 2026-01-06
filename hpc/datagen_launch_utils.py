@@ -15,11 +15,11 @@ from typing import Any, Dict, Optional
 from omegaconf import OmegaConf
 
 from data.generation.utils import load_datagen_config, resolve_engine_runtime
-from hpc.core_launch_utils import cleanup_endpoint_file
 from hpc.launch_utils import (
     default_vllm_endpoint_path,
     derive_datagen_job_name,  # Re-exported for backwards compatibility
     launch_sbatch,
+    cleanup_endpoint_file,
 )
 
 DIRENV = os.path.dirname(__file__)

@@ -9,7 +9,6 @@ from typing import Any, Dict, Optional
 
 from data.generation import BaseDataGenerator
 
-from hpc.core_launch_utils import cleanup_endpoint_file, validate_trace_backend
 from hpc.launch_utils import (
     PROJECT_ROOT,
     resolve_repo_path,
@@ -18,6 +17,8 @@ from hpc.launch_utils import (
     default_vllm_endpoint_path,
     launch_sbatch,
     _parse_optional_int,
+    cleanup_endpoint_file,
+    validate_trace_backend,
 )
 from scripts.harbor.job_config_utils import load_job_config
 

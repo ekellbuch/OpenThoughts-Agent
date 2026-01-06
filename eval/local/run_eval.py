@@ -30,29 +30,28 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EXPERIMENTS_DIR = REPO_ROOT / "eval_runs"
 DEFAULT_ENDPOINT = "vllm_endpoint.json"
 
-VALUE_ENV_FIELDS = {
-    "max_model_len": "VLLM_MAX_MODEL_LEN",
-    "max_num_seqs": "VLLM_MAX_NUM_SEQS",
-    "gpu_memory_utilization": "VLLM_GPU_MEMORY_UTILIZATION",
-    "swap_space": "VLLM_SWAP_SPACE",
-    "max_seq_len_to_capture": "VLLM_MAX_SEQ_LEN_TO_CAPTURE",
-    "custom_model_name": "VLLM_CUSTOM_MODEL_NAME",
-    "tool_call_parser": "VLLM_TOOL_CALL_PARSER",
-    "reasoning_parser": "VLLM_REASONING_PARSER",
-    "hf_overrides": "VLLM_HF_OVERRIDES",
-    "cpu_offload_gb": "VLLM_CPU_OFFLOAD_GB",
-    "kv_offloading_size": "VLLM_KV_OFFLOADING_SIZE",
-    "kv_offloading_backend": "VLLM_KV_OFFLOADING_BACKEND",
-    "max_output_tokens": "VLLM_MAX_OUTPUT_TOKENS",
-    "logging_level": "VLLM_LOGGING_LEVEL",
+# Fields from vllm_server config that we handle specially (not passed through to vLLM)
+_OUR_FIELDS = {"num_replicas", "time_limit", "endpoint_json_path", "model_path"}
+
+# Fields that map to different vLLM CLI arg names
+_FIELD_RENAMES = {
+    "model_path": "model",
 }
 
-BOOL_ENV_FIELDS = {
-    "use_deep_gemm": "VLLM_USE_DEEP_GEMM",
+# Boolean flags (passed as --flag without value when True)
+_BOOLEAN_FLAGS = {
+    "enable_chunked_prefill",
+    "enable_prefix_caching",
+    "enable_auto_tool_choice",
+    "trust_remote_code",
+    "disable_log_requests",
+    "enable_reasoning",
+}
+
+# Fields that are environment variables, not CLI args
+_ENV_VAR_FIELDS = {
     "enable_expert_parallel": "VLLM_ENABLE_EXPERT_PARALLEL",
-    "enable_auto_tool_choice": "VLLM_ENABLE_AUTO_TOOL_CHOICE",
-    "trust_remote_code": "VLLM_TRUST_REMOTE_CODE",
-    "disable_log_requests": "VLLM_DISABLE_LOG_REQUESTS",
+    "use_deep_gemm": "VLLM_USE_DEEP_GEMM",
 }
 
 
@@ -324,23 +323,61 @@ def _maybe_int(value: object) -> Optional[int]:
         return None
 
 
-def _prepare_vllm_env_from_datagen(cfg: dict) -> dict[str, str]:
-    env: dict[str, str] = {}
-    for field, env_key in VALUE_ENV_FIELDS.items():
-        value = cfg.get(field)
-        if value in (None, "", "None"):
+def _build_vllm_cli_args(server_config: dict) -> tuple[List[str], dict[str, str]]:
+    """Convert vllm_server config dict to CLI args and env vars.
+
+    Returns:
+        Tuple of (cli_args list, env_vars dict)
+    """
+    cli_args: List[str] = []
+    env_vars: dict[str, str] = {}
+
+    for key, value in server_config.items():
+        # Skip our internal fields
+        if key in _OUR_FIELDS:
             continue
-        env[env_key] = str(value)
-    for field, env_key in BOOL_ENV_FIELDS.items():
-        flag = cfg.get(field)
-        if isinstance(flag, bool) and flag:
-            env[env_key] = "1"
-    return env
+
+        # Skip None/empty values
+        if value is None or value == "":
+            continue
+
+        # Handle extra_args (already a list of CLI args)
+        if key == "extra_args":
+            if isinstance(value, list):
+                cli_args.extend(str(v) for v in value)
+            continue
+
+        # Handle env var fields
+        if key in _ENV_VAR_FIELDS:
+            if value:  # Only set if truthy
+                env_vars[_ENV_VAR_FIELDS[key]] = "1"
+            continue
+
+        # Rename field if needed
+        arg_name = _FIELD_RENAMES.get(key, key)
+
+        # Convert underscore to dash for CLI
+        arg_name = arg_name.replace("_", "-")
+
+        # Handle boolean flags
+        if key in _BOOLEAN_FLAGS:
+            if value:  # Only add flag if True
+                cli_args.append(f"--{arg_name}")
+            continue
+
+        # Handle regular key-value args
+        if isinstance(value, bool):
+            # Non-flag booleans: pass as true/false string
+            cli_args.extend([f"--{arg_name}", str(value).lower()])
+        else:
+            cli_args.extend([f"--{arg_name}", str(value)])
+
+    return cli_args, env_vars
 
 
 def _apply_datagen_defaults(args: argparse.Namespace) -> None:
-    args._vllm_env_overrides = {}
-    args._vllm_extra_args: List[str] = []
+    args._vllm_cli_args: List[str] = []
+    args._vllm_env_vars: dict[str, str] = {}
     if not args.datagen_config:
         return
 
@@ -380,12 +417,13 @@ def _apply_datagen_defaults(args: argparse.Namespace) -> None:
     if args.api_port is None:
         args.api_port = _maybe_int(backend_cfg.get("api_port")) or args.api_port
 
-    env_overrides = _prepare_vllm_env_from_datagen({**engine_cfg, **vllm_cfg})
-    args._vllm_env_overrides = env_overrides
+    # Build CLI args and env vars from vllm_server config (pass-through to vLLM)
+    merged_cfg = {**engine_cfg, **vllm_cfg}
+    cli_args, env_vars = _build_vllm_cli_args(merged_cfg)
+    args._vllm_cli_args = cli_args
+    args._vllm_env_vars = env_vars
 
-    extra_args = vllm_cfg.get("extra_args")
-    if isinstance(extra_args, list) and extra_args:
-        args._vllm_extra_args = [str(item) for item in extra_args]
+
 def _start_ray(args: argparse.Namespace, log_path: Path | None) -> ManagedProcess:
     cmd = [
         "ray",
@@ -418,21 +456,13 @@ def _start_vllm_controller(
     log_path: Path | None,
 ) -> ManagedProcess:
     env = os.environ.copy()
-    env.update(
-        {
-            "VLLM_MODEL_PATH": args.model,
-            "VLLM_TENSOR_PARALLEL_SIZE": str(args.tensor_parallel_size),
-            "VLLM_PIPELINE_PARALLEL_SIZE": str(args.pipeline_parallel_size),
-            "VLLM_DATA_PARALLEL_SIZE": str(args.data_parallel_size),
-            "VLLM_ENDPOINT_JSON_PATH": str(endpoint_path),
-        }
-    )
-    env.update(getattr(args, "_vllm_env_overrides", {}))
-    if getattr(args, "_served_model_id", None):
-        env["VLLM_CUSTOM_MODEL_NAME"] = args._served_model_id
-    extra_cli = getattr(args, "_vllm_extra_args", None)
-    if extra_cli:
-        env["VLLM_SERVER_EXTRA_ARGS_JSON"] = json.dumps(extra_cli)
+    # Set model path in env (controller reads this)
+    env["VLLM_MODEL_PATH"] = args.model
+
+    # Add any env vars from datagen config (e.g., VLLM_ENABLE_EXPERT_PARALLEL)
+    env.update(getattr(args, "_vllm_env_vars", {}))
+
+    # Build command with core args
     cmd = [
         sys.executable,
         str(REPO_ROOT / "scripts" / "vllm" / "start_vllm_ray_controller.py"),
@@ -442,6 +472,8 @@ def _start_vllm_controller(
         args.host,
         "--port",
         str(args.api_port),
+        "--model",
+        args.model,
         "--tensor-parallel-size",
         str(args.tensor_parallel_size),
         "--pipeline-parallel-size",
@@ -451,6 +483,17 @@ def _start_vllm_controller(
         "--endpoint-json",
         str(endpoint_path),
     ]
+
+    # Add served model name if set
+    served_model_id = getattr(args, "_served_model_id", None)
+    if served_model_id:
+        cmd.extend(["--served-model-name", served_model_id])
+
+    # Add pass-through vLLM CLI args from datagen config
+    vllm_cli_args = getattr(args, "_vllm_cli_args", [])
+    if vllm_cli_args:
+        cmd.extend(vllm_cli_args)
+
     stdout = stderr = None
     if log_path:
         log_file = open(log_path, "w", encoding="utf-8")
