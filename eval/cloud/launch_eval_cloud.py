@@ -283,9 +283,12 @@ def main() -> None:
             file=sys.stderr,
         )
 
+    # Remote working directory - use /sky/workdir when syncing to avoid conflict with Docker image's /opt/openthoughts
+    remote_workdir = "/sky/workdir" if not args.no_sync else "/opt/openthoughts"
+
     run_eval_cmd = _build_run_eval_command(args)
     run_eval_str = " ".join(shlex.quote(part) for part in run_eval_cmd)
-    remote_cmds = ["cd /opt/openthoughts", "set -euo pipefail"]
+    remote_cmds = [f"cd {remote_workdir}", "set -euo pipefail"]
 
     remote_secret_path = None
     if args.secrets_env:
@@ -303,8 +306,8 @@ def main() -> None:
     # Build file mounts
     file_mounts = {}
     if not args.no_sync:
-        # Sync local codebase to remote VM (overwrites stale code baked into Docker image)
-        file_mounts["/opt/openthoughts"] = REPO_ROOT.as_posix()
+        # Sync local codebase to remote VM at /sky/workdir (avoids conflict with Docker's /opt/openthoughts)
+        file_mounts[remote_workdir] = REPO_ROOT.as_posix()
     if remote_secret_path:
         file_mounts[remote_secret_path] = os.path.abspath(args.secrets_env)
 
@@ -337,7 +340,7 @@ def main() -> None:
     if file_mounts:
         task.set_file_mounts(file_mounts)
 
-    sync_status = "disabled (--no-sync)" if args.no_sync else "enabled"
+    sync_status = f"enabled -> {remote_workdir}" if not args.no_sync else "disabled (using Docker image)"
     image_status = docker_image if docker_image else "(provider default)"
     accel_status = " | ".join(accelerator_options) if len(accelerator_options) > 1 else accelerator_options[0]
     autostop_status = f"{args.autostop} min" if args.autostop > 0 else "disabled"
