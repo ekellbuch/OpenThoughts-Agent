@@ -587,7 +587,7 @@ class DataGenArgs:
     # Upload settings (traces -> HuggingFace, result abstracts -> Supabase)
     upload_to_database: bool = field(
         default=False,
-        metadata={"help": "Upload result abstracts to Supabase and traces to HuggingFace after eval"}
+        metadata={"help": "Upload result abstracts to Supabase and traces to HuggingFace after eval", "store_true": True}
     )
     upload_username: Optional[str] = field(
         default=None,
@@ -603,7 +603,7 @@ class DataGenArgs:
     )
     upload_hf_private: bool = field(
         default=False,
-        metadata={"help": "Create the HuggingFace traces repo as private"}
+        metadata={"help": "Create the HuggingFace traces repo as private", "store_true": True}
     )
     upload_hf_episodes: str = field(
         default="last",
@@ -611,7 +611,7 @@ class DataGenArgs:
     )
     upload_forced_update: bool = field(
         default=False,
-        metadata={"help": "Allow overwriting existing Supabase result records for the same job"}
+        metadata={"help": "Allow overwriting existing Supabase result records for the same job", "store_true": True}
     )
 
 @dataclass
