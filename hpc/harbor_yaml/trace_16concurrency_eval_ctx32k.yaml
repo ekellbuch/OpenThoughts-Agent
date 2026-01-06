@@ -27,9 +27,9 @@ orchestrator:
     exclude_exceptions:
     - AgentTimeoutError
     - VerifierTimeoutError
-    wait_multiplier: 1.0
+    wait_multiplier: 2.0
     min_wait_sec: 1.0
-    max_wait_sec: 60.0
+    max_wait_sec: 90.0
   kwargs: {}
 
 environment:
