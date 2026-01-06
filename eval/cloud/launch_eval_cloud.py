@@ -100,8 +100,9 @@ class PeriodicLogSync:
 
             # Use direct rsync via SSH (SkyPilot configures SSH with cluster name as host)
             # Note: "sky rsync" command doesn't exist; use native rsync
+            # Note: Don't use --ignore-missing-args (not supported on macOS rsync)
             rsync_cmd = [
-                "rsync", "-avz", "--ignore-missing-args",
+                "rsync", "-avz",
                 f"{self.cluster_name}:{self.remote_log_dir}/",
                 f"{self.local_log_dir}/",
             ]
@@ -405,6 +406,12 @@ def main() -> None:
     run_eval_str = " ".join(shlex.quote(part) for part in run_eval_cmd)
     remote_cmds = [f"cd {remote_workdir}", "set -euo pipefail"]
 
+    # When syncing code, ensure synced code takes precedence over Docker's installed packages
+    # The Docker image may have an editable install pointing to /opt/openthoughts which would
+    # take precedence over the synced /sky/workdir code for package imports like `hpc.*`
+    if not args.no_sync:
+        remote_cmds.append(f"export PYTHONPATH={remote_workdir}:$PYTHONPATH")
+
     remote_secret_path = None
     if args.secrets_env:
         secret_src = Path(args.secrets_env).expanduser().resolve()
@@ -568,7 +575,7 @@ def main() -> None:
                 remote_logs_dir = f"{remote_output_dir}/logs"
 
                 rsync_cmd = [
-                    "rsync", "-avz", "--ignore-missing-args",
+                    "rsync", "-avz",
                     f"{cluster_for_sync}:{remote_logs_dir}/",
                     f"{local_logs_dir}/",
                 ]
@@ -598,7 +605,7 @@ def main() -> None:
                 ray_system_dir = local_logs_dir / "ray_system"
                 ray_system_dir.mkdir(parents=True, exist_ok=True)
                 ray_sys_cmd = [
-                    "rsync", "-avz", "--ignore-missing-args",
+                    "rsync", "-avz",
                     f"{cluster_for_sync}:/tmp/ray/session_latest/logs/",
                     f"{ray_system_dir}/",
                 ]

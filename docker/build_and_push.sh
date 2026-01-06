@@ -15,6 +15,17 @@
 # Platforms:
 #   Builds for both linux/amd64 (x86) and linux/arm64 (ARM, e.g., GH200)
 #
+# Architecture Note:
+#   These images contain ONLY dependencies, not the actual source code.
+#   Source code is synced at runtime via SkyPilot to /sky/workdir.
+#   The cloud eval launcher sets PYTHONPATH=/sky/workdir to ensure synced
+#   code takes precedence over any stubs in the image.
+#
+#   This design ensures:
+#   - Code changes don't require rebuilding Docker images
+#   - No stale code in the image causes import conflicts
+#   - Smaller image sizes
+#
 
 set -euo pipefail
 
