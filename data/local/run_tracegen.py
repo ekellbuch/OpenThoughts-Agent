@@ -17,16 +17,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import errno
 import json
 import os
-import pty
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Iterable, List, Optional
+from typing import Any, List, Optional
 
 import yaml
 
