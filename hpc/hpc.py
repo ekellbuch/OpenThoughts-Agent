@@ -2,11 +2,17 @@ import math
 import os
 import re
 import socket
+from typing import Dict, List
 from pydantic import BaseModel, computed_field
 
 
 class HPC(BaseModel):
-    """Base pydantic model for HPC clusters"""
+    """Base pydantic model for HPC clusters.
+
+    This class contains both job submission parameters (account, partition, etc.)
+    and runtime configuration (modules, conda activation, env vars) needed for
+    SBATCH job execution with Ray and vLLM.
+    """
 
     name: str = ""
     hostname: str = ""
@@ -25,11 +31,17 @@ class HPC(BaseModel):
     node_exclusion_list: str = ""
     qos: str = "normal"
     pretok_qos: str = "normal"
-    pretok_cpus_per_node: int = 0 # will use all available cpus
+    pretok_cpus_per_node: int = 0  # will use all available cpus
     pretok_time_limit: str = "24:00:00"
     pretok_partition: str = ""
-    pretok_gpus_per_node: int = 0 # will ask for 0 gpus
+    pretok_gpus_per_node: int = 0  # will ask for 0 gpus
     local_mode: bool = False
+
+    # Runtime configuration for SBATCH jobs (Ray/vLLM)
+    modules: List[str] = []
+    conda_activate: str = ""
+    env_vars: Dict[str, str] = {}
+    library_paths: Dict[str, str] = {}
 
     def model_post_init(self, __context) -> None:
         # Derive a default CPU-per-GPU ratio when not explicitly provided.
@@ -49,19 +61,90 @@ class HPC(BaseModel):
         hpc_dir = os.path.dirname(os.path.realpath(__file__))
         return os.path.join(hpc_dir, "dotenv", self.dotenv_filename)
 
+    # =========================================================================
+    # Runtime configuration methods for SBATCH/Ray/vLLM
+    # =========================================================================
+
+    def get_module_commands(self) -> str:
+        """Generate module load commands for SBATCH scripts."""
+        if not self.modules:
+            return ""
+        lines = ["set +u"]
+        lines.extend(f"module load {m}" for m in self.modules)
+        lines.append("set -u")
+        return "\n".join(lines)
+
+    def get_env_exports(self) -> str:
+        """Generate environment variable exports for SBATCH scripts."""
+        lines = []
+        for key, value in {**self.env_vars, **self.library_paths}.items():
+            lines.append(f'export {key}="{value}"')
+        return "\n".join(lines)
+
+    def get_exclude_directive(self) -> str:
+        """Generate SBATCH exclude directive if nodes should be excluded."""
+        if not self.node_exclusion_list:
+            return ""
+        return f"#SBATCH --exclude={self.node_exclusion_list}"
+
+    def get_sbatch_directives(self, qos: str = "") -> str:
+        """Generate cluster-specific SBATCH directives.
+
+        Returns directives for partition, account, QoS, exclusions, etc.
+        Only includes directives that are actually needed for this cluster.
+        """
+        lines = []
+        if self.partition:
+            lines.append(f"#SBATCH -p {self.partition}")
+        if self.account:
+            lines.append(f"#SBATCH --account {self.account}")
+        if qos:
+            lines.append(f"#SBATCH -q {qos}")
+        if self.node_exclusion_list:
+            lines.append(f"#SBATCH --exclude={self.node_exclusion_list}")
+        return "\n".join(lines)
+
+    def get_srun_export_env(self) -> str:
+        """Generate SRUN --export string with all necessary env vars."""
+        env_parts = ["ALL"]
+        for key, value in {**self.env_vars, **self.library_paths}.items():
+            env_parts.append(f"{key}={value}")
+        # Add common paths
+        env_parts.append("PATH=$PATH")
+        env_parts.append("LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}")
+        env_parts.append("PYTHONPATH=${PYTHONPATH:-}")
+        env_parts.append("HF_HOME=${HF_HOME:-}")
+        return ",".join(env_parts)
+
+    def get_ray_env_vars(self) -> str:
+        """Generate space-separated env vars for Ray worker processes."""
+        env_parts = []
+        for key, value in {**self.env_vars, **self.library_paths}.items():
+            env_parts.append(f"{key}={value}")
+        env_parts.append("PATH=$PATH")
+        env_parts.append("LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}")
+        env_parts.append("PYTHONPATH=${PYTHONPATH:-}")
+        env_parts.append("HF_HOME=${HF_HOME:-}")
+        return " ".join(env_parts)
+
 
 jureca = HPC(
     name="jureca",
     hostname_pattern=r"jr.*?.jureca",
     train_sbatch_filename="jsc_train.sbatch",
     dotenv_filename="jureca.env",
-    account="westai0007", # synthlaion (24 nodes per job)
-    partition="dc-hwai", # dc-gpu
+    account="westai0007",  # synthlaion (24 nodes per job)
+    partition="dc-hwai",  # dc-gpu
     gpus_per_node=4,
     cpus_per_node=48,
     internet_node=False,
     gpus_type="H100 94GB",
     total_partition_nodes=16,
+    # Runtime configuration for Ray/vLLM
+    modules=["CUDA/12.3"],
+    env_vars={
+        "PYTHONFAULTHANDLER": "1",
+    },
 )
 
 jupiter = HPC(
@@ -130,6 +213,17 @@ capella = HPC(
     internet_node=True,
     gpus_type="H100 94GB",
     total_partition_nodes=146,
+    # Runtime configuration for Ray/vLLM
+    modules=["CUDA/12.8.0"],
+    env_vars={
+        "PYTHONFAULTHANDLER": "1",
+        "NCCL_DEBUG": "INFO",
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
+        "CUDA_LAUNCH_BLOCKING": "0",
+        "PYTORCH_CUDA_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+        "RAY_NOSET_CUDA_VISIBLE_DEVICES": "1",
+    },
 )
 
 alpha = HPC(
@@ -190,6 +284,21 @@ vista = HPC(
     total_partition_nodes=552,
     pretok_time_limit="4:00:00",
     pretok_partition="gh",
+    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082",
+    # Runtime configuration for Ray/vLLM
+    modules=["gcc/15.1.0", "cuda/12.8", "tacc-apptainer"],
+    conda_activate="source $SCRATCH/miniconda3/etc/profile.d/conda.sh && conda activate $SCRATCH/miniconda3/envs/vllm_sandboxes",
+    env_vars={
+        "HF_HOME": "/tmp/hf_home",
+        "PYTHONFAULTHANDLER": "1",
+        "NCCL_TIMEOUT": "1800",
+        "NCCL_IB_TIMEOUT": "23",
+        "PYTORCH_CUDA_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
+    },
+    library_paths={
+        "TRITON_CC": "/home1/apps/gcc/15.1.0/bin/gcc",
+        "LD_PRELOAD": "/home1/apps/gcc/15.1.0/lib64/libstdc++.so.6",
+    },
 )
 
 lonestar = HPC(

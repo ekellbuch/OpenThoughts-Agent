@@ -4,39 +4,30 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
-import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from data.generation import BaseDataGenerator
 
 from hpc.core_launch_utils import cleanup_endpoint_file, validate_trace_backend
-from hpc.launch_utils import launch_sbatch, _parse_optional_int, _inject_env_block
-from hpc.datagen_launch_utils import default_vllm_endpoint_path, _build_vllm_env_vars
+from hpc.launch_utils import (
+    PROJECT_ROOT,
+    resolve_repo_path,
+    resolve_workspace_path,
+    coerce_agent_kwargs,
+    default_vllm_endpoint_path,
+    launch_sbatch,
+    _parse_optional_int,
+)
+from hpc.datagen_launch_utils import _build_vllm_env_vars
 from scripts.harbor.job_config_utils import load_job_config
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGISTRY_HINTS = [
     Path(os.environ.get("HARBOR_REGISTRY_PATH", "")).expanduser()
     if os.environ.get("HARBOR_REGISTRY_PATH")
     else None,
     PROJECT_ROOT.parent / "harbor" / "registry.json",
 ]
-
-
-def _resolve_repo_path(path_like: str) -> Path:
-    path = Path(path_like).expanduser()
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    return path.resolve()
-
-
-def _resolve_workspace_path(path_like: str) -> Path:
-    path = Path(path_like).expanduser()
-    if path.is_absolute():
-        return path
-    return (PROJECT_ROOT / path).resolve()
 
 
 def _load_harbor_registry() -> dict | None:
@@ -78,19 +69,8 @@ def _validate_harbor_dataset_slug(slug: str) -> None:
 
 
 def _coerce_agent_kwargs(value: Any) -> Dict[str, Any]:
-    if value in (None, "", {}):
-        return {}
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Failed to parse eval agent kwargs JSON: {exc}") from exc
-        if not isinstance(parsed, dict):
-            raise ValueError("Eval agent kwargs must decode to an object/dict.")
-        return parsed
-    raise ValueError("Eval agent kwargs must be provided as JSON string or dict.")
+    """Wrapper for backwards compatibility - use coerce_agent_kwargs from launch_utils."""
+    return coerce_agent_kwargs(value)
 
 
 def prepare_eval_configuration(exp_args: dict) -> dict:
@@ -102,7 +82,7 @@ def prepare_eval_configuration(exp_args: dict) -> dict:
     harbor_cfg = exp_args.get("trace_harbor_config")
     if not harbor_cfg:
         raise ValueError("Eval jobs require --trace-harbor-config pointing at an eval YAML.")
-    resolved_cfg = _resolve_repo_path(harbor_cfg)
+    resolved_cfg = resolve_repo_path(harbor_cfg)
     if "_eval_" not in resolved_cfg.name:
         raise ValueError(
             f"Eval Harbor YAML '{resolved_cfg.name}' must include '_eval_' in the filename."
@@ -121,7 +101,7 @@ def prepare_eval_configuration(exp_args: dict) -> dict:
             "Eval jobs accept either --trace-input-path or --harbor-dataset, but not both."
         )
     if dataset_path:
-        resolved_dataset = _resolve_repo_path(dataset_path)
+        resolved_dataset = resolve_repo_path(dataset_path)
         exp_args["_eval_dataset_path_resolved"] = str(resolved_dataset)
         exp_args["trace_input_path"] = str(resolved_dataset)
     if harbor_dataset:
@@ -222,46 +202,236 @@ def prepare_eval_configuration(exp_args: dict) -> dict:
     return exp_args
 
 
-def _shell_quote(value: Optional[str]) -> str:
-    if value in (None, "", "None"):
-        return "''"
-    return shlex.quote(str(value))
+# =============================================================================
+# EvalJobRunner - New universal job runner for Phase 2 refactoring
+# =============================================================================
+
+from dataclasses import dataclass, field, asdict
+from typing import List
+import subprocess
+import sys
 
 
-def _write_agent_kwargs_file(
-    agent_kwargs: Dict[str, Any],
-    configs_dir: Path,
-    job_name: str,
-) -> Optional[Path]:
-    if not agent_kwargs:
-        return None
-    target = configs_dir / f"{job_name}_eval_agent_kwargs.json"
-    target.write_text(json.dumps(agent_kwargs, indent=2), encoding="utf-8")
-    return target
+@dataclass
+class EvalJobConfig:
+    """Configuration for an eval job (serialized to JSON for sbatch)."""
+
+    job_name: str
+    harbor_config: str
+    model: str
+    agent: str
+    dataset: Optional[str] = None
+    dataset_path: Optional[str] = None
+    n_concurrent: int = 64
+    n_attempts: int = 3
+    expected_trials: int = 64
+    eval_benchmark_repo: str = ""
+    eval_env: str = "daytona"
+    experiments_dir: str = "experiments"
+    cluster_name: str = ""
+
+    # vLLM settings (if launching inline)
+    needs_vllm: bool = False
+    vllm_model_path: Optional[str] = None
+    tensor_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    data_parallel_size: int = 1
+    endpoint_json_path: Optional[str] = None
+    ray_port: int = 6379
+    api_port: int = 8000
+
+    # Health check settings
+    health_max_attempts: int = 120
+    health_retry_delay: int = 15
+
+    # Agent kwargs (serialized as JSON)
+    agent_kwargs: Dict[str, Any] = field(default_factory=dict)
+
+    # Upload settings
+    upload_username: str = ""
+    upload_mode: str = "skip_on_error"
+    hf_repo_prefix: str = "DCAgent2"
 
 
-def launch_eval_job(exp_args: dict, hpc) -> None:
-    """Construct and submit the sbatch script for eval workloads."""
+class EvalJobRunner:
+    """Runs Harbor eval jobs with optional vLLM management.
 
-    print("\n=== EVAL MODE ===")
-    template_path = Path(__file__).parent / "sbatch_eval" / f"{hpc.name}_eval_harbor.sbatch"
-    if not template_path.exists():
-        raise FileNotFoundError(
-            f"No eval sbatch template found for cluster '{hpc.name}'. "
-            f"Expected {template_path}."
+    This class encapsulates the eval job logic that was previously
+    spread across 600+ lines of sbatch scripts.
+
+    Usage (from sbatch):
+        python -m hpc.eval_launch_utils --config /path/to/config.json
+    """
+
+    def __init__(self, config: EvalJobConfig):
+        self.config = config
+        self._hpc = None
+
+    def _get_hpc(self):
+        """Lazy-load HPC configuration."""
+        if self._hpc is None:
+            from hpc.hpc import detect_hpc, clusters
+            if self.config.cluster_name:
+                # Find by name
+                for c in clusters:
+                    if c.name.lower() == self.config.cluster_name.lower():
+                        self._hpc = c
+                        break
+                if self._hpc is None:
+                    raise ValueError(f"Unknown cluster: {self.config.cluster_name}")
+            else:
+                self._hpc = detect_hpc()
+        return self._hpc
+
+    def run(self) -> int:
+        """Execute the eval job.
+
+        Returns:
+            Exit code (0 for success)
+        """
+        print(f"=== EvalJobRunner: {self.config.job_name} ===")
+
+        try:
+            if self.config.needs_vllm:
+                exit_code = self._run_with_vllm()
+            else:
+                exit_code = self._run_harbor(endpoint=None)
+
+            if exit_code == 0:
+                print(f"Eval job '{self.config.job_name}' completed successfully")
+            else:
+                print(f"Eval job '{self.config.job_name}' failed with code {exit_code}")
+
+            return exit_code
+
+        except Exception as e:
+            print(f"Eval job failed with exception: {e}", file=sys.stderr)
+            raise
+
+    def _run_with_vllm(self) -> int:
+        """Run eval with managed Ray cluster and vLLM server."""
+        from hpc.ray_utils import RayCluster, RayClusterConfig
+        from hpc.vllm_utils import VLLMServer, VLLMConfig
+
+        hpc = self._get_hpc()
+        num_nodes = int(os.environ.get("SLURM_JOB_NUM_NODES", 1))
+
+        ray_cfg = RayClusterConfig(
+            num_nodes=num_nodes,
+            gpus_per_node=hpc.gpus_per_node,
+            cpus_per_node=hpc.cpus_per_node,
+            ray_port=self.config.ray_port,
+            srun_export_env=hpc.get_srun_export_env(),
+            ray_env_vars=hpc.get_ray_env_vars(),
         )
 
+        vllm_cfg = VLLMConfig(
+            model_path=self.config.vllm_model_path or self.config.model,
+            tensor_parallel_size=self.config.tensor_parallel_size,
+            pipeline_parallel_size=self.config.pipeline_parallel_size,
+            data_parallel_size=self.config.data_parallel_size,
+            api_port=self.config.api_port,
+            endpoint_json_path=self.config.endpoint_json_path,
+            health_max_attempts=self.config.health_max_attempts,
+            health_retry_delay=self.config.health_retry_delay,
+        )
+
+        log_dir = Path(self.config.experiments_dir) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        vllm_log = log_dir / f"{self.config.job_name}_vllm.log"
+
+        with RayCluster.from_slurm(ray_cfg) as ray_cluster:
+            vllm_server = VLLMServer(
+                config=vllm_cfg,
+                ray_cluster=ray_cluster,
+                log_path=vllm_log,
+            )
+            with vllm_server:
+                return self._run_harbor(endpoint=vllm_server.endpoint)
+
+    def _run_harbor(self, endpoint: Optional[str]) -> int:
+        """Execute the Harbor CLI."""
+        cmd = [
+            "harbor",
+            "jobs",
+            "start",
+            "--config",
+            self.config.harbor_config,
+            "--job-name",
+            self.config.job_name,
+            "--agent",
+            self.config.agent,
+            "--model",
+            self.config.model,
+            "--env",
+            self.config.eval_env,
+            "--n-concurrent",
+            str(self.config.n_concurrent),
+            "--n-attempts",
+            str(self.config.n_attempts),
+        ]
+
+        if self.config.dataset:
+            cmd.extend(["--dataset", self.config.dataset])
+        elif self.config.dataset_path:
+            cmd.extend(["-p", self.config.dataset_path])
+
+        if self.config.expected_trials:
+            cmd.extend(["--expected-trials", str(self.config.expected_trials)])
+
+        # Build agent kwargs
+        agent_kwargs = dict(self.config.agent_kwargs)
+        if endpoint:
+            agent_kwargs["api_base"] = endpoint
+            metrics_endpoint = endpoint.replace("/v1", "/metrics")
+            agent_kwargs["metrics_endpoint"] = metrics_endpoint
+
+        for key, value in agent_kwargs.items():
+            if isinstance(value, (dict, list)):
+                cmd.extend(["--agent-kwarg", f"{key}={json.dumps(value)}"])
+            else:
+                cmd.extend(["--agent-kwarg", f"{key}={value}"])
+
+        # Standard export flags
+        cmd.extend([
+            "--export-traces",
+            "--export-verifier-metadata",
+            "--export-episodes", "last",
+        ])
+
+        print(f"Running Harbor command: {' '.join(cmd)}")
+        result = subprocess.run(cmd)
+        return result.returncode
+
+
+def launch_eval_job_v2(exp_args: dict, hpc) -> None:
+    """Launch eval job using the new universal template system.
+
+    This replaces the old launch_eval_job() function by:
+    1. Creating an EvalJobConfig from exp_args
+    2. Writing the config to JSON
+    3. Using the universal_eval.sbatch template
+    4. Submitting the job
+    """
+    from hpc.launch_utils import launch_sbatch
+
+    print("\n=== EVAL MODE (Universal Launcher) ===")
+
+    # Resolve paths
     experiments_subdir = exp_args.get("experiments_dir") or "experiments"
-    experiments_abs = _resolve_workspace_path(experiments_subdir)
+    experiments_abs = resolve_workspace_path(experiments_subdir)
     sbatch_dir = experiments_abs / "sbatch"
     sbatch_dir.mkdir(parents=True, exist_ok=True)
     configs_dir = experiments_abs / "configs"
     configs_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = experiments_abs / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     job_name = exp_args.get("job_name")
     if not job_name:
         raise ValueError("Eval jobs require a --job_name.")
 
+    # Extract config values
     harbor_cfg = exp_args.get("_eval_harbor_config_resolved")
     dataset_path = exp_args.get("_eval_dataset_path_resolved")
     dataset_slug = exp_args.get("harbor_dataset")
@@ -275,138 +445,106 @@ def launch_eval_job(exp_args: dict, hpc) -> None:
         raise ValueError("Eval jobs require an agent name (set one in the Harbor YAML or pass --trace-agent-name).")
 
     agent_kwargs = exp_args.get("_eval_agent_kwargs") or {}
-    agent_kwargs_path = _write_agent_kwargs_file(agent_kwargs, configs_dir, job_name)
 
-    eval_env = exp_args.get("_eval_env") or "daytona"
-    n_concurrent = int(exp_args.get("_eval_n_concurrent", 64))
-    n_attempts = int(exp_args.get("_eval_n_attempts", 3))
-    expected_trials = int(exp_args.get("_eval_expected_trials", n_concurrent))
-
-    upload_username = exp_args.get("job_creator") or os.environ.get("USER", "unknown")
-    hf_repo_prefix = "DCAgent2"
-    upload_mode = "skip_on_error"
-    benchmark_repo = exp_args.get("eval_benchmark_repo")
-
-    dataset_label = dataset_slug or (dataset_path or "").strip()
-    if not dataset_label:
-        dataset_label = "dataset"
-
-    trace_engine_value = exp_args.get("trace_engine") or exp_args.get("datagen_engine") or ""
-    trace_engine = str(trace_engine_value or "").lower()
-    trace_backend_value = exp_args.get("trace_backend") or exp_args.get("datagen_backend") or "vllm"
-    trace_backend = str(trace_backend_value or "vllm").lower()
+    # vLLM settings
     vllm_cfg = exp_args.get("_datagen_vllm_server_config")
-    requires_vllm_endpoint = bool(
-        vllm_cfg and trace_engine == "vllm_local" and trace_backend in {"vllm", "ray"}
-    )
-    experiments_dir_value = exp_args.get("experiments_dir") or experiments_subdir
-    trace_endpoint_json = exp_args.get("trace_endpoint_json") or exp_args.get("vllm_endpoint_json_path") or ""
-    if requires_vllm_endpoint and not trace_endpoint_json:
-        if not experiments_dir_value:
-            raise ValueError("experiments_dir is required to derive the vLLM endpoint JSON path.")
-        trace_endpoint_json = default_vllm_endpoint_path(experiments_dir_value)
-        exp_args["vllm_endpoint_json_path"] = trace_endpoint_json
-    if requires_vllm_endpoint:
-        cleanup_endpoint_file(trace_endpoint_json, descriptor="stale eval endpoint file")
+    trace_engine = str(exp_args.get("trace_engine") or exp_args.get("datagen_engine") or "").lower()
+    requires_vllm = bool(vllm_cfg and trace_engine == "vllm_local")
 
-    default_health_attempts = getattr(BaseDataGenerator, "HEALTHCHECK_MAX_ATTEMPTS", 20)
-    trace_health_max_attempts = _parse_optional_int(
-        exp_args.get("trace_health_max_attempts"),
-        "--trace_health_max_attempts",
-    ) or default_health_attempts
-
-    default_health_delay = getattr(BaseDataGenerator, "HEALTHCHECK_RETRY_DELAY", 30)
-    trace_health_retry_delay = _parse_optional_int(
-        exp_args.get("trace_health_retry_delay"),
-        "--trace_health_retry_delay",
-    ) or default_health_delay
-
-    should_wait_for_endpoint = bool(trace_endpoint_json) and requires_vllm_endpoint
-    trace_require_endpoint = "1" if requires_vllm_endpoint else "0"
-
-    gpus_per_node_raw = exp_args.get("gpus_per_node")
-    if isinstance(gpus_per_node_raw, str) and gpus_per_node_raw.strip() == "":
-        gpus_per_node_raw = None
-    default_gpu_count = getattr(hpc, "gpus_per_node", None)
-    if isinstance(default_gpu_count, str) and not default_gpu_count.strip():
-        default_gpu_count = None
-    gpus_per_node = int(gpus_per_node_raw or default_gpu_count or 1)
-
-    trace_ray_port = str(exp_args.get("datagen_ray_port") or exp_args.get("trace_ray_port") or 6379)
-    trace_api_port = str(exp_args.get("datagen_api_port") or exp_args.get("trace_api_port") or 8000)
-
+    gpus_per_node = int(exp_args.get("gpus_per_node") or getattr(hpc, "gpus_per_node", 1) or 1)
     tensor_parallel_size = getattr(vllm_cfg, "tensor_parallel_size", None) or 1
     pipeline_parallel_size = getattr(vllm_cfg, "pipeline_parallel_size", None) or 1
     data_parallel_size = getattr(vllm_cfg, "data_parallel_size", None) or 1
 
-    vllm_env_vars: Dict[str, str] = {}
-    if requires_vllm_endpoint:
-        vllm_env_vars, exp_args = _build_vllm_env_vars(exp_args, include_pinggy=True)
-        vllm_env_vars.setdefault("VLLM_BACKEND", trace_backend)
-        vllm_env_vars.setdefault("VLLM_RAY_PORT", trace_ray_port)
-        vllm_env_vars.setdefault("VLLM_API_PORT", trace_api_port)
-        if gpus_per_node:
-            vllm_env_vars.setdefault("VLLM_GPUS_PER_NODE", str(gpus_per_node))
+    endpoint_json_path = None
+    if requires_vllm:
+        endpoint_json_path = exp_args.get("vllm_endpoint_json_path") or str(
+            default_vllm_endpoint_path(experiments_subdir)
+        )
+        cleanup_endpoint_file(endpoint_json_path, descriptor="stale eval endpoint file")
 
-    sbatch_output = sbatch_dir / f"{job_name}_eval.sbatch"
-    substitutions = {
-        "partition": hpc.partition,
-        "time_limit": exp_args.get("time_limit") or os.environ.get("DEFAULT_TIME_LIMIT", "24:00:00"),
-        "num_nodes": exp_args.get("num_nodes") or 1,
-        "cpus_per_node": exp_args.get("cpus_per_node") or hpc.cpus_per_node,
-        "gpus_per_node": str(gpus_per_node),
-        "account": exp_args.get("account") or hpc.account,
-        "experiments_dir": experiments_subdir,
-        "job_name": job_name,
-        "eval_dataset_path": _shell_quote(dataset_path),
-        "harbor_dataset": _shell_quote(dataset_slug),
-        "eval_harbor_config": _shell_quote(harbor_cfg),
-        "eval_agent_name": _shell_quote(agent_name),
-        "eval_model": _shell_quote(model_name),
-        "eval_env": _shell_quote(eval_env),
-        "eval_n_concurrent": str(n_concurrent),
-        "eval_n_attempts": str(n_attempts),
-        "eval_expected_trials": str(expected_trials),
-        "eval_benchmark_repo": _shell_quote(benchmark_repo),
-        "eval_upload_username": _shell_quote(upload_username),
-        "eval_upload_mode": _shell_quote(upload_mode),
-        "eval_hf_repo_prefix": _shell_quote(hf_repo_prefix),
-        "agent_kwargs_path": _shell_quote(str(agent_kwargs_path) if agent_kwargs_path else ""),
-        "dataset_label": _shell_quote(dataset_label),
-        "trace_endpoint_json": _shell_quote(trace_endpoint_json or ""),
-        "trace_wait_for_endpoint": "1" if should_wait_for_endpoint else "0",
-        "trace_require_endpoint": trace_require_endpoint,
-        "trace_health_max_attempts": str(trace_health_max_attempts),
-        "trace_health_retry_delay": str(trace_health_retry_delay),
-        "trace_backend": _shell_quote(trace_backend),
-        "trace_engine": _shell_quote(trace_engine),
-        "needs_vllm_server": "1" if requires_vllm_endpoint else "0",
-        "trace_ray_port": _shell_quote(trace_ray_port),
-        "trace_api_port": _shell_quote(trace_api_port),
-        "trace_tensor_parallel_size": str(tensor_parallel_size),
-        "trace_pipeline_parallel_size": str(pipeline_parallel_size),
-        "trace_data_parallel_size": str(data_parallel_size),
-        "trace_gpus_per_node": str(gpus_per_node),
-    }
+    # Build the job config
+    job_config = EvalJobConfig(
+        job_name=job_name,
+        harbor_config=harbor_cfg or "",
+        model=model_name,
+        agent=agent_name,
+        dataset=dataset_slug,
+        dataset_path=dataset_path,
+        n_concurrent=int(exp_args.get("_eval_n_concurrent", 64)),
+        n_attempts=int(exp_args.get("_eval_n_attempts", 3)),
+        expected_trials=int(exp_args.get("_eval_expected_trials", 64)),
+        eval_benchmark_repo=exp_args.get("eval_benchmark_repo") or "",
+        eval_env=exp_args.get("_eval_env") or "daytona",
+        experiments_dir=experiments_subdir,
+        cluster_name=hpc.name,
+        needs_vllm=requires_vllm,
+        vllm_model_path=getattr(vllm_cfg, "model_path", None) if vllm_cfg else None,
+        tensor_parallel_size=tensor_parallel_size,
+        pipeline_parallel_size=pipeline_parallel_size,
+        data_parallel_size=data_parallel_size,
+        endpoint_json_path=endpoint_json_path,
+        ray_port=int(exp_args.get("datagen_ray_port") or 6379),
+        api_port=int(exp_args.get("datagen_api_port") or 8000),
+        health_max_attempts=int(exp_args.get("trace_health_max_attempts") or 120),
+        health_retry_delay=int(exp_args.get("trace_health_retry_delay") or 15),
+        agent_kwargs=agent_kwargs,
+        upload_username=exp_args.get("job_creator") or os.environ.get("USER", "unknown"),
+    )
+
+    # Write config JSON
+    config_path = configs_dir / f"{job_name}_eval_config.json"
+    config_path.write_text(json.dumps(asdict(job_config), indent=2))
+
+    # Load and populate universal template
+    template_path = Path(__file__).parent / "sbatch_eval" / "universal_eval.sbatch"
+    if not template_path.exists():
+        raise FileNotFoundError(f"Universal eval template not found: {template_path}")
 
     template_text = template_path.read_text()
 
-    placeholder_pattern = re.compile(r"{([A-Za-z0-9_]+)}")
+    # Determine cluster env file
+    cluster_env_file = hpc.dotenv_filename if hasattr(hpc, "dotenv_filename") else f"{hpc.name.lower()}.env"
 
-    def _substitute(match: re.Match[str]) -> str:
-        key = match.group(1)
-        if key in substitutions:
-            return str(substitutions[key])
-        return match.group(0)
+    # Build SBATCH directives respecting user overrides
+    partition = exp_args.get("partition") or hpc.partition
+    account = exp_args.get("account") or hpc.account
+    qos = exp_args.get("qos") or ""
+    sbatch_directives = []
+    if partition:
+        sbatch_directives.append(f"#SBATCH -p {partition}")
+    if account:
+        sbatch_directives.append(f"#SBATCH --account {account}")
+    if qos:
+        sbatch_directives.append(f"#SBATCH -q {qos}")
+    if hpc.node_exclusion_list:
+        sbatch_directives.append(f"#SBATCH --exclude={hpc.node_exclusion_list}")
 
-    sbatch_text = placeholder_pattern.sub(_substitute, template_text)
-    if vllm_env_vars:
-        sbatch_text = _inject_env_block(sbatch_text, vllm_env_vars)
-    sbatch_output.write_text(sbatch_text, encoding="utf-8")
+    substitutions = {
+        "time_limit": exp_args.get("time_limit") or "24:00:00",
+        "num_nodes": str(exp_args.get("num_nodes") or 1),
+        "cpus_per_node": str(exp_args.get("cpus_per_node") or hpc.cpus_per_node),
+        "experiments_dir": experiments_subdir,
+        "job_name": job_name,
+        "sbatch_extra_directives": "\n".join(sbatch_directives),
+        "module_commands": hpc.get_module_commands(),
+        "conda_activate": hpc.conda_activate or "# No conda activation configured",
+        "cluster_env_file": cluster_env_file,
+        "config_path": str(config_path),
+    }
+
+    sbatch_text = template_text
+    for key, value in substitutions.items():
+        sbatch_text = sbatch_text.replace("{" + key + "}", value)
+
+    # Write sbatch script
+    sbatch_output = sbatch_dir / f"{job_name}_eval.sbatch"
+    sbatch_output.write_text(sbatch_text)
     os.chmod(sbatch_output, 0o750)
 
     if exp_args.get("dry_run"):
         print(f"DRY RUN: Eval sbatch script written to {sbatch_output}")
+        print(f"Config JSON: {config_path}")
         print("--------")
         print(sbatch_text)
         print("--------")
@@ -414,4 +552,32 @@ def launch_eval_job(exp_args: dict, hpc) -> None:
 
     job_id = launch_sbatch(str(sbatch_output))
     print(f"\nEval job submitted via {sbatch_output}")
+    print(f"Config: {config_path}")
     print(f"SLURM Job ID: {job_id}")
+
+
+def run_eval_job_main():
+    """Entry point for running eval jobs from sbatch scripts.
+
+    Usage:
+        python -m hpc.eval_launch_utils --config /path/to/config.json
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run eval job from config JSON")
+    parser.add_argument("--config", required=True, help="Path to job config JSON")
+    args = parser.parse_args()
+
+    config_path = Path(args.config)
+    if not config_path.exists():
+        print(f"Config file not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    config_data = json.loads(config_path.read_text())
+    config = EvalJobConfig(**config_data)
+    runner = EvalJobRunner(config)
+    sys.exit(runner.run())
+
+
+if __name__ == "__main__":
+    run_eval_job_main()

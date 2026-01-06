@@ -4,6 +4,7 @@ Utility helpers shared across HPC launch entry points.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -11,13 +12,174 @@ import socket
 import shutil
 import subprocess
 from collections import defaultdict
-from typing import Any, Mapping, Optional
+from pathlib import Path
+from typing import Any, Dict, Mapping, Optional
 
 from hpc.hpc import detect_hpc
 
 from .job_name_ignore_list import JOB_NAME_IGNORE_KEYS
 from .arguments import JobType
 from .sft_launch_utils import build_accelerate_config_block
+
+# =============================================================================
+# Global Constants
+# =============================================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+"""Root directory of the OpenThoughts-Agent project."""
+
+
+# =============================================================================
+# Path Resolution Utilities
+# =============================================================================
+
+def resolve_repo_path(path_like: str) -> Path:
+    """Resolve a path relative to PROJECT_ROOT if not absolute.
+
+    Args:
+        path_like: A path string that may be relative or absolute.
+
+    Returns:
+        Resolved absolute Path object.
+    """
+    path = Path(path_like).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
+
+
+def resolve_workspace_path(path_like: str) -> Path:
+    """Resolve a workspace path, keeping absolute paths as-is.
+
+    Args:
+        path_like: A path string that may be relative or absolute.
+
+    Returns:
+        Resolved Path object (absolute paths kept as-is, relative resolved to PROJECT_ROOT).
+    """
+    path = Path(path_like).expanduser()
+    if path.is_absolute():
+        return path
+    return (PROJECT_ROOT / path).resolve()
+
+
+# =============================================================================
+# JSON/Config Parsing Utilities
+# =============================================================================
+
+def coerce_agent_kwargs(value: Any) -> Dict[str, Any]:
+    """Parse agent kwargs from various input formats.
+
+    Args:
+        value: None, empty string, dict, or JSON string.
+
+    Returns:
+        Dictionary of agent kwargs.
+
+    Raises:
+        ValueError: If the value cannot be parsed as a dict.
+    """
+    if value in (None, "", {}):
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Failed to parse agent kwargs JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("Agent kwargs must decode to an object/dict.")
+        return parsed
+    raise ValueError("Agent kwargs must be provided as JSON string or dict.")
+
+
+# =============================================================================
+# vLLM Endpoint Utilities
+# =============================================================================
+
+def default_vllm_endpoint_path(
+    experiments_dir: str | os.PathLike[str],
+    *,
+    trace: bool = False,
+    chunk_index: int | None = None,
+) -> str:
+    """Compute a canonical vLLM endpoint JSON path under experiments_dir.
+
+    Args:
+        experiments_dir: Base experiments directory.
+        trace: Whether the path is for trace collection (adds trace-specific suffix).
+        chunk_index: Optional chunk index for sharded trace jobs.
+
+    Returns:
+        String path to the endpoint JSON file.
+    """
+    base = Path(experiments_dir).expanduser()
+
+    if trace:
+        if chunk_index is not None:
+            filename = f"vllm_endpoint_trace_{chunk_index:03d}.json"
+        else:
+            filename = "vllm_endpoint_trace.json"
+    else:
+        filename = "vllm_endpoint.json"
+
+    return str(base / filename)
+
+
+# =============================================================================
+# Local Execution Utilities
+# =============================================================================
+
+def is_local_mode(hpc) -> bool:
+    """Check if HPC config indicates local (non-SLURM) execution."""
+    return bool(getattr(hpc, "local_mode", False))
+
+
+def run_local_script(script_path: str) -> str:
+    """Execute a script locally via bash.
+
+    Args:
+        script_path: Path to the bash script to execute.
+
+    Returns:
+        A fake job ID string for consistency.
+
+    Raises:
+        RuntimeError: If the script exits with non-zero status.
+    """
+    print(f"Running locally: bash {script_path}")
+    result = subprocess.run(["bash", script_path], check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"Local execution failed (exit {result.returncode}) for {script_path}")
+    return f"local_{Path(script_path).stem}"
+
+
+def submit_script(
+    script_path: str,
+    *,
+    dependency: str | None = None,
+    array: str | None = None,
+    hpc=None,
+) -> str:
+    """Submit a script via sbatch or run locally based on HPC config.
+
+    Args:
+        script_path: Path to the sbatch script.
+        dependency: Optional SLURM dependency string.
+        array: Optional SLURM array specification.
+        hpc: HPC configuration object.
+
+    Returns:
+        Job ID string.
+    """
+    if is_local_mode(hpc):
+        if dependency:
+            print(f"Warning: ignoring job dependency '{dependency}' for local execution.")
+        if array:
+            raise RuntimeError("Job arrays are not supported for local execution.")
+        return run_local_script(script_path)
+    return launch_sbatch(script_path, dependency=dependency, array=array)
 
 
 def sanitize_repo_for_job(repo_id: str) -> str:
@@ -424,18 +586,34 @@ def construct_sbatch_script(exp_args: dict) -> str:
 
 
 __all__ = [
+    # Constants
+    "PROJECT_ROOT",
+    # Path resolution
+    "resolve_repo_path",
+    "resolve_workspace_path",
+    # JSON/Config parsing
+    "coerce_agent_kwargs",
+    # vLLM utilities
+    "default_vllm_endpoint_path",
+    # Local execution
+    "is_local_mode",
+    "run_local_script",
+    "submit_script",
+    # Job naming
     "derive_datagen_job_name",
+    "get_job_name",
+    "sanitize_repo_for_job",
+    "sanitize_repo_component",
+    # SBATCH utilities
     "_parse_optional_int",
     "_inject_env_block",
     "_ensure_dependency_directive",
     "_merge_dependencies",
     "launch_sbatch",
     "update_exp_args",
+    # File utilities
     "check_exists",
     "construct_sbatch_script",
     "extract_template_keys",
     "fill_template",
-    "get_job_name",
-    "sanitize_repo_for_job",
-    "sanitize_repo_component",
 ]

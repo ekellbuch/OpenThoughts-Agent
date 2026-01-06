@@ -8,7 +8,6 @@ import os
 import re
 import shlex
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,22 +17,18 @@ from omegaconf import OmegaConf
 
 from data.generation import BaseDataGenerator
 from data.generation.utils import load_datagen_config, resolve_engine_runtime
-from harbor.models.environment_type import EnvironmentType
-from hpc.core_launch_utils import cleanup_endpoint_file, validate_trace_backend
+from hpc.core_launch_utils import cleanup_endpoint_file
 from hpc.launch_utils import (
-    _inject_env_block,
-    _merge_dependencies,
+    PROJECT_ROOT,
+    default_vllm_endpoint_path,
+    derive_datagen_job_name,  # Re-exported for backwards compatibility
+    is_local_mode,
+    run_local_script,
+    submit_script,
     launch_sbatch,
     update_exp_args,
 )
-from scripts.harbor.job_config_utils import (
-    dump_job_config,
-    load_job_config,
-    overwrite_agent_fields,
-    set_job_metadata,
-    set_local_dataset,
-    update_agent_kwargs,
-)
+from scripts.harbor.job_config_utils import load_job_config
 
 DIRENV = os.path.dirname(__file__)
 DATAGEN_CONFIG_DIR = os.path.join(DIRENV, "datagen_yaml")
@@ -41,53 +36,22 @@ HARBOR_CONFIG_DIR = os.path.join(DIRENV, "harbor_yaml")
 DEFAULT_RAY_CGRAPH_TIMEOUT = os.environ.get("RAY_CGRAPH_TIMEOUT_DEFAULT", "86500")
 DEFAULT_RAY_CGRAPH_MAX_INFLIGHT = os.environ.get("RAY_CGRAPH_MAX_INFLIGHT_DEFAULT", "")
 HARBOR_MODEL_PLACEHOLDER = "placeholder/override-at-runtime"
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+# Backwards compatibility wrappers for renamed functions
 def _is_local_mode(hpc) -> bool:
-    return bool(getattr(hpc, "local_mode", False))
+    """Wrapper for backwards compatibility - use is_local_mode from launch_utils."""
+    return is_local_mode(hpc)
 
 
 def _run_local_script(script_path: str) -> str:
-    print(f"Running locally: bash {script_path}")
-    result = subprocess.run(["bash", script_path], check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"Local execution failed (exit {result.returncode}) for {script_path}")
-    return f"local_{Path(script_path).stem}"
+    """Wrapper for backwards compatibility - use run_local_script from launch_utils."""
+    return run_local_script(script_path)
 
 
 def _submit_script(script_path: str, *, dependency: str | None = None, array: str | None = None, hpc=None) -> str:
-    if _is_local_mode(hpc):
-        if dependency:
-            print(f"Warning: ignoring job dependency '{dependency}' for local execution.")
-        if array:
-            raise RuntimeError("Job arrays are not supported for local execution.")
-        return _run_local_script(script_path)
-    return launch_sbatch(script_path, dependency=dependency, array=array)
-
-
-def derive_datagen_job_name(cli_args: Mapping[str, Any]) -> str:
-    """Construct a fallback job name for datagen/trace launches."""
-
-    def _sanitize_component(value: str) -> str:
-        value = value.strip().rstrip("/")
-        if "/" in value:
-            value = value.split("/")[-1]
-        return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-_") or "repo"
-
-    parts: list[str] = ["datagen"]
-    engine = cli_args.get("datagen_engine") or cli_args.get("trace_engine") or "engine"
-    parts.append(str(engine or "engine"))
-
-    repo_candidate = cli_args.get("datagen_target_repo") or cli_args.get("trace_target_repo")
-    model_candidate = cli_args.get("datagen_model") or cli_args.get("trace_model")
-    if model_candidate:
-        parts.append(_sanitize_component(str(model_candidate)))
-    elif repo_candidate:
-        parts.append(_sanitize_component(str(repo_candidate)))
-
-    job_name = "_".join(filter(None, parts))
-    return job_name or "datagen_job"
+    """Wrapper for backwards compatibility - use submit_script from launch_utils."""
+    return submit_script(script_path, dependency=dependency, array=array, hpc=hpc)
 
 
 def _detect_gpu_required(datagen_script: str) -> bool:
@@ -127,53 +91,29 @@ def _detect_gpu_required(datagen_script: str) -> bool:
 
 
 def _validate_sbatch_templates(hpc_obj) -> None:
+    """Validate that universal sbatch templates exist.
+
+    Since Phase 3 refactoring, we use universal templates for all clusters.
+    """
     if getattr(hpc_obj, "local_mode", False):
         print(f"Local execution detected for {hpc_obj.name}; skipping sbatch template validation.")
         return
-    req_path = Path(__file__).parent / "sbatch_data_requirements.json"
-    if not req_path.exists():
-        return
 
-    data = json.loads(req_path.read_text())
-    entries = data.get(hpc_obj.name.lower())
-    if not entries:
-        raise ValueError(
-            f"No sbatch templates registered for cluster '{hpc_obj.name}'. "
-            "Please add entries to hpc/sbatch_data_requirements.json."
-        )
+    # Validate universal templates exist
+    universal_templates = [
+        Path(__file__).parent / "sbatch_data" / "universal_taskgen.sbatch",
+        Path(__file__).parent / "sbatch_data" / "universal_tracegen.sbatch",
+        Path(__file__).parent / "sbatch_eval" / "universal_eval.sbatch",
+    ]
 
-    missing = [entry["path"] for entry in entries if not Path(entry["path"]).exists()]
+    missing = [str(t) for t in universal_templates if not t.exists()]
     if missing:
         raise FileNotFoundError(
-            "Missing sbatch templates for datagen: " + ", ".join(missing)
+            "Missing universal sbatch templates: " + ", ".join(missing)
         )
 
 
-def default_vllm_endpoint_path(
-    experiments_dir: str | os.PathLike[str],
-    *,
-    trace: bool = False,
-    chunk_index: int | None = None,
-) -> str:
-    """Compute a canonical vLLM endpoint JSON path under ``experiments_dir``.
-
-    Args:
-        experiments_dir: Base experiments directory.
-        trace: Whether the path is for trace collection (adds trace-specific suffix).
-        chunk_index: Optional chunk index for sharded trace jobs.
-    """
-
-    base = Path(experiments_dir).expanduser()
-
-    if trace:
-        if chunk_index is not None:
-            filename = f"vllm_endpoint_trace_{chunk_index:03d}.json"
-        else:
-            filename = "vllm_endpoint_trace.json"
-    else:
-        filename = "vllm_endpoint.json"
-
-    return str(base / filename)
+# default_vllm_endpoint_path is now imported from launch_utils
 
 
 def _cleanup_stale_vllm_endpoint(exp_args: Mapping[str, Any]) -> None:
@@ -757,54 +697,29 @@ def _prepare_trace_chunk_plans(
     return chunk_plans, map_path
 
 
-def launch_datagen_job(exp_args: dict, hpc) -> None:
-    """Handle datagen/trace launch orchestration."""
 
-    print("\n=== DATA GENERATION MODE ===")
-    _cleanup_stale_vllm_endpoint(exp_args)
+
+def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
+    """Launch datagen job using the new universal template system.
+
+    This replaces the old launch_datagen_job() function by:
+    1. Creating TaskgenJobConfig and/or TracegenJobConfig from exp_args
+    2. Writing configs to JSON
+    3. Using universal_taskgen.sbatch and universal_tracegen.sbatch templates
+    4. Submitting the jobs
+    """
+    from dataclasses import asdict
+    from hpc.launch_utils import launch_sbatch, update_exp_args
+
+    print("\n=== DATA GENERATION MODE (Universal Launcher) ===")
 
     hpc_name = str(getattr(hpc, "name", "")).lower()
     if hpc_name == "nyutorch":
-        warning = (
-            "Datagen jobs are not supported on the NYU Torch cluster. "
-            "Use the dedicated sbatch helper OpenThoughts-Agent/hpc/scripts/glm46-tracegen-torch.sbatch instead."
-        )
-        print(f"WARNING: {warning}")
-        raise RuntimeError(warning)
+        raise RuntimeError("Datagen jobs are not supported on the NYU Torch cluster.")
 
+    # Determine what to run
     task_enabled = str(exp_args.get("enable_task_gen", True)).lower() not in {"false", "0", "no", "none"}
     trace_enabled = str(exp_args.get("enable_trace_gen", False)).lower() not in {"false", "0", "no", "none"}
-
-    trace_eval_only_raw = exp_args.pop("trace_eval_only", None)
-    trace_eval_only_requested = False
-    if isinstance(trace_eval_only_raw, str):
-        trace_eval_only_requested = trace_eval_only_raw.strip().lower() in {"1", "true", "yes", "on"}
-    else:
-        trace_eval_only_requested = bool(trace_eval_only_raw)
-    if trace_eval_only_requested:
-        print(
-            "WARNING: --trace-eval-only is no longer supported. "
-            "Launch eval workloads via `python -m hpc.launch --job_type eval`."
-        )
-
-    # Keep datagen/trace engine/backend selections in sync when only one is provided
-    datagen_engine_value = exp_args.get("datagen_engine")
-    trace_engine_value = exp_args.get("trace_engine")
-    if datagen_engine_value is None and trace_engine_value is not None:
-        exp_args = update_exp_args(exp_args, {"datagen_engine": trace_engine_value})
-        datagen_engine_value = trace_engine_value
-    elif trace_engine_value is None and datagen_engine_value is not None:
-        exp_args = update_exp_args(exp_args, {"trace_engine": datagen_engine_value})
-        trace_engine_value = datagen_engine_value
-
-    datagen_backend_value = exp_args.get("datagen_backend")
-    trace_backend_value = exp_args.get("trace_backend")
-    if datagen_backend_value is None and trace_backend_value is not None:
-        exp_args = update_exp_args(exp_args, {"datagen_backend": trace_backend_value})
-        datagen_backend_value = trace_backend_value
-    elif trace_backend_value is None and datagen_backend_value is not None:
-        exp_args = update_exp_args(exp_args, {"trace_backend": datagen_backend_value})
-        trace_backend_value = datagen_backend_value
 
     if not task_enabled and not trace_enabled:
         raise ValueError("Enable at least one of task or trace generation")
@@ -812,1276 +727,681 @@ def launch_datagen_job(exp_args: dict, hpc) -> None:
     if task_enabled and not exp_args.get("datagen_script"):
         raise ValueError("--datagen-script is required for task generation")
 
-    datagen_extra_args_value = exp_args.get("datagen_extra_args")
-    no_upload_requested = False
-    if isinstance(datagen_extra_args_value, str):
-        lowered = datagen_extra_args_value.replace("_", "-").lower()
-        no_upload_requested = "--no-upload" in lowered
-    elif isinstance(datagen_extra_args_value, (list, tuple)):
-        normalized = [
-            str(item).replace("_", "-").lower() for item in datagen_extra_args_value
-        ]
-        no_upload_requested = any("--no-upload" in token for token in normalized)
+    # Resolve paths
+    experiments_subdir = exp_args.get("experiments_dir") or "experiments"
+    experiments_abs = Path(experiments_subdir).expanduser().resolve()
+    sbatch_dir = experiments_abs / "sbatch"
+    sbatch_dir.mkdir(parents=True, exist_ok=True)
+    configs_dir = experiments_abs / "configs"
+    configs_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = experiments_abs / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
-    if task_enabled and not exp_args.get("datagen_target_repo") and not no_upload_requested:
-        raise ValueError("--datagen-target-repo is required for task generation (omit only when --no-upload is set)")
+    job_name = exp_args.get("job_name")
+    if not job_name:
+        job_name = derive_datagen_job_name(exp_args)
+
+    # vLLM settings
+    vllm_cfg = exp_args.get("_datagen_vllm_server_config")
+    engine = str(exp_args.get("datagen_engine") or "openai").lower()
+    requires_vllm = bool(vllm_cfg and engine == "vllm_local")
+
+    gpus_per_node = int(exp_args.get("gpus_per_node") or getattr(hpc, "gpus_per_node", 0) or 0)
+    tensor_parallel_size = getattr(vllm_cfg, "tensor_parallel_size", None) or 1
+    pipeline_parallel_size = getattr(vllm_cfg, "pipeline_parallel_size", None) or 1
+    data_parallel_size = getattr(vllm_cfg, "data_parallel_size", None) or 1
+
+    endpoint_json_path = None
+    if requires_vllm:
+        endpoint_json_path = exp_args.get("vllm_endpoint_json_path") or str(
+            default_vllm_endpoint_path(experiments_subdir)
+        )
+        cleanup_endpoint_file(endpoint_json_path, descriptor="stale datagen endpoint file")
+
+    # Determine cluster env file
+    cluster_env_file = hpc.dotenv_filename if hasattr(hpc, "dotenv_filename") else f"{hpc.name.lower()}.env"
 
     task_job_id = None
-    vllm_job_id = None
 
-    tasks_output_dir = exp_args.get("datagen_output_dir")
-
+    # === Task Generation ===
     if task_enabled:
-        engine = str(exp_args.get("datagen_engine") or "openai").lower()
-        backend = str(exp_args.get("datagen_backend") or "vllm").lower()
-        vllm_cfg = exp_args.get("_datagen_vllm_server_config")
-        if vllm_cfg and engine == "vllm_local":
-            if backend == "vllm":
-                print("Mode: Local VLLM inference for task generation (standalone server)")
-                vllm_job_id = launch_vllm_server(exp_args, hpc)
-                if vllm_job_id and vllm_job_id != "dry_run_vllm_job_id":
-                    exp_args = update_exp_args(exp_args, {"vllm_job_id": vllm_job_id})
-            elif backend == "ray":
-                print("Mode: Ray-backed local VLLM inference for task generation")
-                _, exp_args = _build_vllm_env_vars(exp_args, include_pinggy=False)
-            else:
-                raise ValueError(f"Unsupported datagen backend: {backend}")
+        task_config = TaskgenJobConfig(
+            job_name=f"{job_name}_tasks",
+            datagen_script=exp_args.get("datagen_script") or "",
+            experiments_dir=experiments_subdir,
+            cluster_name=hpc.name,
+            output_dir=exp_args.get("datagen_output_dir"),
+            input_dir=exp_args.get("datagen_input_dir"),
+            target_repo=exp_args.get("datagen_target_repo"),
+            engine=engine,
+            datagen_config_path=exp_args.get("datagen_config_path"),
+            needs_vllm=requires_vllm,
+            vllm_model_path=getattr(vllm_cfg, "model_path", None) if vllm_cfg else None,
+            tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+            data_parallel_size=data_parallel_size,
+            endpoint_json_path=endpoint_json_path,
+            ray_port=int(exp_args.get("datagen_ray_port") or 6379),
+            api_port=int(exp_args.get("datagen_api_port") or 8000),
+            extra_args=exp_args.get("datagen_extra_args") or "",
+            disable_verification=bool(exp_args.get("disable_verification")),
+            num_nodes=int(exp_args.get("num_nodes") or 1),
+            gpus_per_node=gpus_per_node,
+        )
+
+        # Write task config JSON
+        task_config_path = configs_dir / f"{job_name}_taskgen_config.json"
+        task_config_path.write_text(json.dumps(asdict(task_config), indent=2))
+
+        # Load and populate taskgen template
+        template_path = Path(__file__).parent / "sbatch_data" / "universal_taskgen.sbatch"
+        if not template_path.exists():
+            raise FileNotFoundError(f"Universal taskgen template not found: {template_path}")
+
+        template_text = template_path.read_text()
+
+        # Build SBATCH directives respecting user overrides
+        partition = exp_args.get("partition") or hpc.partition
+        account = exp_args.get("account") or hpc.account
+        qos = exp_args.get("qos") or ""
+        sbatch_directives = []
+        if partition:
+            sbatch_directives.append(f"#SBATCH -p {partition}")
+        if account:
+            sbatch_directives.append(f"#SBATCH --account {account}")
+        if qos:
+            sbatch_directives.append(f"#SBATCH -q {qos}")
+        if hpc.node_exclusion_list:
+            sbatch_directives.append(f"#SBATCH --exclude={hpc.node_exclusion_list}")
+
+        substitutions = {
+            "time_limit": exp_args.get("time_limit") or "24:00:00",
+            "num_nodes": str(exp_args.get("num_nodes") or 1),
+            "cpus_per_node": str(exp_args.get("cpus_per_node") or hpc.cpus_per_node),
+            "experiments_dir": experiments_subdir,
+            "job_name": f"{job_name}_tasks",
+            "sbatch_extra_directives": "\n".join(sbatch_directives),
+            "module_commands": hpc.get_module_commands(),
+            "conda_activate": hpc.conda_activate or "# No conda activation configured",
+            "cluster_env_file": cluster_env_file,
+            "config_path": str(task_config_path),
+        }
+
+        sbatch_text = template_text
+        for key, value in substitutions.items():
+            sbatch_text = sbatch_text.replace("{" + key + "}", value)
+
+        task_sbatch_output = sbatch_dir / f"{job_name}_taskgen.sbatch"
+        task_sbatch_output.write_text(sbatch_text)
+        os.chmod(task_sbatch_output, 0o750)
+
+        if exp_args.get("dry_run"):
+            print(f"DRY RUN: Taskgen sbatch script written to {task_sbatch_output}")
+            task_job_id = "dry_run_task_job_id"
         else:
-            print(f"Mode: {engine} task generation")
+            task_job_id = launch_sbatch(str(task_sbatch_output))
+            print(f"✓ Task generation job submitted: {task_job_id}")
 
-        task_job_id = launch_task_job(exp_args, hpc, vllm_job_id)
-        print("\n=== Task Generation Submitted ===")
-        print(f"Task Job ID: {task_job_id}")
-        if vllm_job_id:
-            print(f"VLLM Server Job ID: {vllm_job_id}")
-        tasks_output_dir = exp_args.get("datagen_output_dir")
-        if tasks_output_dir:
-            print(f"Task output directory: {tasks_output_dir}")
-
-    trace_job_id = None
-    trace_requires_vllm_server = False
-
+    # === Trace Generation ===
     if trace_enabled:
         trace_script = exp_args.get("trace_script") or exp_args.get("datagen_script")
-        if not trace_script:
-            trace_script = "data/nemo_prism_math/generate_abstract.py"
-            exp_args = update_exp_args(exp_args, {"trace_script": trace_script})
-            print(f"No trace script provided; defaulting to {trace_script}")
-        if not trace_script:
-            raise ValueError("Trace generation requires --trace-script (or reuse --datagen-script)")
-
-        trace_input_path = exp_args.get("trace_input_path")
-        if not trace_input_path:
-            trace_input_path = tasks_output_dir
-        if trace_input_path:
-            exp_args = update_exp_args(exp_args, {"trace_input_path": trace_input_path})
-        if not trace_input_path:
-            raise ValueError("Trace generation requires --trace-input-path when task generation is disabled")
-
-        if not task_enabled and not os.path.exists(trace_input_path):
-            raise FileNotFoundError(f"Trace input path not found: {trace_input_path}")
-
-        if exp_args.get("trace_use_gpu") and getattr(hpc, "gpus_per_node", 0) == 0:
-            raise ValueError("trace_use_gpu requested but HPC configuration has no GPUs available")
-
-        trace_backend_raw = exp_args.get("trace_backend") or exp_args.get("datagen_backend")
-        trace_backend = validate_trace_backend(
-            trace_backend_raw,
-            allow_vllm=False,
-            job_type="datagen",
-        )
-        exp_args = update_exp_args(exp_args, {"trace_backend": trace_backend})
-
-        trace_engine = str(exp_args.get("trace_engine") or exp_args.get("datagen_engine") or "").lower()
-
-        trace_requires_vllm_server = trace_engine == "vllm_local" and trace_backend == "vllm"
-
-        vllm_cfg = exp_args.get("_datagen_vllm_server_config")
-        if trace_requires_vllm_server and not vllm_job_id and vllm_cfg:
-            print("Trace stage requires a standalone VLLM server – launching now")
-            vllm_job_id = launch_vllm_server(exp_args, hpc)
-            if vllm_job_id and vllm_job_id != "dry_run_vllm_job_id":
-                exp_args = update_exp_args(exp_args, {"vllm_job_id": vllm_job_id})
-
-        dependency = None
-        if task_enabled and task_job_id and task_job_id != "dry_run_task_job_id":
-            dependency = f"afterany:{task_job_id}"
-
-        trace_job_id = launch_trace_job(exp_args, hpc, trace_input_path, dependency=dependency)
-        print("\n=== Trace Generation Submitted ===")
-        if isinstance(trace_job_id, list):
-            print(f"Trace Job IDs: {', '.join(trace_job_id)}")
-        else:
-            print(f"Trace Job ID: {trace_job_id}")
-        print(f"Trace input path: {trace_input_path}")
-
-    return
-
-
-def launch_vllm_server(exp_args: dict, hpc) -> str:
-    """
-    Launch VLLM server job with Pinggy tunnel.
-
-    Returns:
-        Job ID of the VLLM server job
-    """
-    print("\n=== Launching VLLM Server ===")
-
-    # Prepare environment variables for VLLM server
-    vllm_cfg = exp_args.get("_datagen_vllm_server_config")
-    if not vllm_cfg:
-        raise ValueError("vLLM server launch requested but no vllm_server configuration provided.")
-
-    vllm_env_vars, exp_args = _build_vllm_env_vars(exp_args, include_pinggy=True)
-
-    model_path = vllm_cfg.model_path
-
-    num_replicas = vllm_cfg.num_replicas or 1
-    tensor_parallel = vllm_cfg.tensor_parallel_size or 1
-    pipeline_parallel = vllm_cfg.pipeline_parallel_size or 1
-    server_time_limit = vllm_cfg.time_limit or "48:00:00"
-
-    # Prepare sbatch script path
-    sbatch_dir = os.path.join(os.path.dirname(__file__), "sbatch_data")
-    vllm_sbatch_template = os.path.join(sbatch_dir, f"{hpc.name}_vllm_server.sbatch")
-
-    if not os.path.exists(vllm_sbatch_template):
-        raise FileNotFoundError(
-            f"No vLLM server sbatch template found for cluster '{hpc.name}'. "
-            f"Expected at {vllm_sbatch_template}. Please add {hpc.name}_vllm_server.sbatch under hpc/sbatch_data."
-        )
-
-    # Create output sbatch script
-    vllm_job_name = f"{exp_args['job_name']}_vllm_server"
-    vllm_sbatch_output = os.path.join(
-        exp_args["experiments_dir"],
-        "sbatch",
-        f"{vllm_job_name}.sbatch"
-    )
-    os.makedirs(os.path.dirname(vllm_sbatch_output), exist_ok=True)
-    os.makedirs(os.path.join(exp_args["experiments_dir"], "logs"), exist_ok=True)
-    os.makedirs(os.path.join(exp_args["experiments_dir"], "logs"), exist_ok=True)
-
-    # Read template and substitute
-    with open(vllm_sbatch_template) as f:
-        sbatch_content = f.read()
-
-    # Calculate GPUs needed (must account for TP * PP per replica)
-    num_gpus = int(num_replicas or 1) * int(tensor_parallel or 1) * int(pipeline_parallel or 1)
-
-    num_nodes = exp_args.get("num_nodes") or getattr(hpc, "num_nodes", 1) or 1
-    gpus_per_node = exp_args.get("gpus_per_node") or getattr(hpc, "gpus_per_node", num_gpus)
-
-    cpus_per_node_effective = exp_args.get("cpus_per_node")
-    if cpus_per_node_effective in (None, "", "None"):
-        cpus_per_node_effective = getattr(hpc, "cpus_per_node", 1)
-    cpus_per_node_effective = int(cpus_per_node_effective)
-
-    substitutions = {
-        "{partition}": hpc.partition,
-        "{time_limit}": server_time_limit,
-        "{num_nodes}": str(num_nodes),
-        "{cpus_per_node}": str(cpus_per_node_effective),
-        "{num_gpus}": str(num_gpus),
-        "{gpus_per_node}": str(gpus_per_node),
-        "{account}": hpc.account,
-        "{experiments_dir}": exp_args["experiments_dir"],
-        "{job_name}": vllm_job_name,
-    }
-
-    for key, value in substitutions.items():
-        sbatch_content = sbatch_content.replace(key, value)
-
-    if not gpus_per_node:
-        sbatch_content = sbatch_content.replace("#SBATCH --gpus-per-node {gpus_per_node}\n", "")
-        sbatch_content = sbatch_content.replace("#SBATCH --gpus-per-node 0\n", "")
-        sbatch_content = sbatch_content.replace("#SBATCH --gpus-per-node=0\n", "")
-
-    sbatch_content = _inject_env_block(sbatch_content, vllm_env_vars)
-
-    # Write output sbatch
-    with open(vllm_sbatch_output, 'w') as f:
-        f.write(sbatch_content)
-
-    print(f"VLLM server sbatch: {vllm_sbatch_output}")
-    print(f"Endpoint JSON will be saved to: {exp_args['vllm_endpoint_json_path']}")
-
-    # Submit job
-    if not exp_args.get("dry_run"):
-        job_id = _submit_script(vllm_sbatch_output, hpc=hpc)
-        print(f"✓ VLLM server job submitted: {job_id}")
-        return job_id
-    else:
-        print("DRY RUN: Would submit VLLM server job")
-        return "dry_run_vllm_job_id"
-
-
-def launch_task_job(exp_args: dict, hpc, vllm_job_id: str = None) -> str:
-    """
-    Launch data generation job.
-
-    Args:
-        exp_args: Experiment arguments
-        hpc: HPC configuration
-        vllm_job_id: Optional VLLM server job ID for dependency
-
-    Returns:
-        Job ID of the datagen job
-    """
-    print("\n=== Launching Task Generation Job ===")
-
-    runtime = exp_args.get("_datagen_engine_runtime")
-    if runtime is None:
-        runtime = _prepare_datagen_configuration(exp_args)
-
-    # Prepare environment variables for datagen
-    datagen_engine_value = exp_args.get("datagen_engine", runtime.type if runtime else "openai")
-    engine = str(datagen_engine_value or "openai").lower()
-    datagen_env_vars = {
-        "DATAGEN_SCRIPT": exp_args["datagen_script"],
-        "DATAGEN_HEALTHCHECK_INTERVAL": str(exp_args.get("datagen_healthcheck_interval", 300)),
-        "DATAGEN_ENGINE": engine,
-        "DATAGEN_STAGE": "tasks",
-        "DATAGEN_BACKEND": str(exp_args.get("datagen_backend", "vllm")),
-        "PYTHON_EXECUTABLE": sys.executable,
-    }
-    task_type_value = exp_args.get("task_type")
-    if task_type_value:
-        datagen_env_vars["DATAGEN_TASK_TYPE"] = str(task_type_value)
-        print(f"Task generation task type: {task_type_value}")
-    if exp_args.get("datagen_target_repo"):
-        datagen_env_vars["DATAGEN_TARGET_REPO"] = exp_args["datagen_target_repo"]
-
-    backend = str(datagen_env_vars["DATAGEN_BACKEND"]).lower()
-    if backend != datagen_env_vars["DATAGEN_BACKEND"]:
-        datagen_env_vars["DATAGEN_BACKEND"] = backend
-    is_ray_backend = backend == "ray"
-
-    is_cpu_only = engine == "none" and backend in ("vllm", "none")
-    if is_cpu_only:
-        backend = "none"
-        datagen_env_vars["DATAGEN_BACKEND"] = backend
-        exp_args = update_exp_args(exp_args, {"datagen_backend": backend})
-    vllm_env_vars, exp_args = _build_vllm_env_vars(exp_args, include_pinggy=False)
-    datagen_env_vars.update(vllm_env_vars)
-
-    if is_ray_backend:
-        if exp_args.get("ray_cgraph_submit_timeout"):
-            datagen_env_vars["RAY_CGRAPH_submit_timeout"] = str(exp_args["ray_cgraph_submit_timeout"])
-        if exp_args.get("ray_cgraph_get_timeout"):
-            datagen_env_vars["RAY_CGRAPH_get_timeout"] = str(exp_args["ray_cgraph_get_timeout"])
-        if exp_args.get("ray_cgraph_max_inflight_executions"):
-            datagen_env_vars["RAY_CGRAPH_max_inflight_executions"] = str(
-                exp_args["ray_cgraph_max_inflight_executions"]
-            )
-        _maybe_set_ray_cgraph_env(datagen_env_vars)
-
-    script_gpu_required = False
-    script_path = exp_args.get("datagen_script")
-    if script_path:
-        script_gpu_required = _detect_gpu_required(script_path)
-
-    requested_gpus = 0
-    try:
-        requested_gpus = int(exp_args.get("gpus_per_node") or 0)
-    except (TypeError, ValueError):
-        requested_gpus = 0
-
-    if script_gpu_required and requested_gpus == 0:
-        requested_gpus = int(getattr(hpc, "gpus_per_node", 0) or 0)
-
-    datagen_gpu_required = script_gpu_required or requested_gpus > 0
-
-    datagen_env_vars["DATAGEN_GPU_REQUIRED"] = "1" if requested_gpus > 0 else "0"
-    gpus_per_node = exp_args.get("gpus_per_node") or getattr(hpc, "gpus_per_node", requested_gpus)
-    datagen_env_vars["DATAGEN_GPUS_PER_NODE"] = str(gpus_per_node)
-    datagen_env_vars["DATAGEN_RAY_PORT"] = str(exp_args.get("datagen_ray_port", 6379))
-    datagen_env_vars["DATAGEN_API_PORT"] = str(exp_args.get("datagen_api_port", 8000))
-    tensor_parallel_size = None
-    pipeline_parallel_size = None
-    backend_cfg = exp_args.get("_datagen_backend_config")
-    vllm_cfg = exp_args.get("_datagen_vllm_server_config")
-    data_parallel_size = None
-    if vllm_cfg:
-        tensor_parallel_size = getattr(vllm_cfg, "tensor_parallel_size", None)
-        pipeline_parallel_size = getattr(vllm_cfg, "pipeline_parallel_size", None)
-        data_parallel_size = getattr(vllm_cfg, "data_parallel_size", None)
-    if tensor_parallel_size is None and backend_cfg:
-        tensor_parallel_size = getattr(backend_cfg, "tensor_parallel_size", None)
-    if pipeline_parallel_size is None and backend_cfg:
-        pipeline_parallel_size = getattr(backend_cfg, "pipeline_parallel_size", None)
-    if data_parallel_size is None and backend_cfg:
-        data_parallel_size = getattr(backend_cfg, "data_parallel_size", None)
-    if tensor_parallel_size is None:
-        tensor_parallel_size = 1
-    if pipeline_parallel_size is None:
-        pipeline_parallel_size = 1
-    if data_parallel_size is None:
-        data_parallel_size = 1
-    datagen_env_vars["DATAGEN_TENSOR_PARALLEL_SIZE"] = str(tensor_parallel_size)
-    datagen_env_vars["DATAGEN_PIPELINE_PARALLEL_SIZE"] = str(pipeline_parallel_size)
-    datagen_env_vars["DATAGEN_DATA_PARALLEL_SIZE"] = str(data_parallel_size)
-    datagen_env_vars["DATAGEN_NUM_NODES"] = str(exp_args.get("num_nodes") or getattr(hpc, "num_nodes", 1) or 1)
-    datagen_env_vars["PROJECT_ROOT"] = str(PROJECT_ROOT)
-    gcs_credentials_path = os.environ.get("GCS_CREDENTIALS_PATH")
-
-    is_gemini_engine = str(engine).lower() in {"gemini_openai", "google_gemini", "gemini"}
-    if is_gemini_engine:
-        default_gcs_path = os.path.join(PROJECT_ROOT, "..", ".gcs_datacomp.json")
-        candidate_path = Path(default_gcs_path).expanduser().resolve()
-        if not candidate_path.exists():
-            print(
-                "Gemini datagen requires GCS credentials at ../.gcs_datacomp.json "
-                "but the file was not found. Aborting."
-            )
-            raise SystemExit(1)
-        gcs_credentials_path = str(candidate_path)
-        os.environ["GCS_CREDENTIALS_PATH"] = gcs_credentials_path
-
-    if gcs_credentials_path:
-        datagen_env_vars["GCS_CREDENTIALS_PATH"] = gcs_credentials_path
-    if exp_args.get("datagen_engine") != engine:
-        exp_args = update_exp_args(exp_args, {"datagen_engine": engine})
-
-    if exp_args.get("datagen_input_dir"):
-        datagen_env_vars["DATAGEN_INPUT_DIR"] = exp_args["datagen_input_dir"]
-
-    output_dir = exp_args.get("datagen_output_dir")
-    if not output_dir:
-        output_dir = os.path.join(exp_args["experiments_dir"], "outputs", "tasks")
-        exp_args = update_exp_args(exp_args, {"datagen_output_dir": output_dir})
-    datagen_env_vars["DATAGEN_OUTPUT_DIR"] = output_dir
-
-    datagen_extra_args = exp_args.get("datagen_extra_args") or ""
-    extra_tokens: list[str]
-    if datagen_extra_args:
-        try:
-            extra_tokens = shlex.split(datagen_extra_args)
-        except ValueError:
-            extra_tokens = datagen_extra_args.split()
-    else:
-        extra_tokens = []
-
-    if exp_args.get("disable_verification"):
-        disable_flags = {"--disable-verification", "--disable_verification"}
-        if not any(token in disable_flags for token in extra_tokens):
-            extra_tokens.append("--disable-verification")
-
-    if extra_tokens:
-        datagen_extra_args = " ".join(extra_tokens)
-        datagen_env_vars["DATAGEN_EXTRA_ARGS"] = datagen_extra_args
-        exp_args = update_exp_args(exp_args, {"datagen_extra_args": datagen_extra_args})
-
-    datagen_env_vars["VLLM_JOB_ID"] = (str(vllm_job_id) if vllm_job_id and vllm_job_id != "dry_run_vllm_job_id" else "")
-
-    sandbox_overrides = {
-        "SANDBOX_CPU": exp_args.get("sandbox_cpu"),
-        "SANDBOX_MEMORY_GB": exp_args.get("sandbox_memory_gb"),
-        "SANDBOX_DISK_GB": exp_args.get("sandbox_disk_gb"),
-        "SANDBOX_GPU": exp_args.get("sandbox_gpu"),
-    }
-    for env_key, value in sandbox_overrides.items():
-        if value is not None:
-            datagen_env_vars[env_key] = str(value)
-
-    # Set endpoint JSON path
-    endpoint_path = exp_args.get("vllm_endpoint_json_path")
-    requires_endpoint = engine == "vllm_local" and (script_gpu_required or is_ray_backend)
-    if requires_endpoint and not endpoint_path:
-        endpoint_path = os.path.join(exp_args["experiments_dir"], "vllm_endpoint.json")
-        exp_args["vllm_endpoint_json_path"] = endpoint_path
-
-    datagen_env_vars["DATAGEN_ENDPOINT_JSON"] = endpoint_path or ""
-    datagen_env_vars["DATAGEN_REQUIRE_ENDPOINT"] = "1" if requires_endpoint else "0"
-    datagen_wait_flag = exp_args.get("datagen_wait_for_endpoint")
-    if datagen_wait_flag is None:
-        datagen_wait_flag = "1" if requires_endpoint and backend != "ray" else "0"
-    else:
-        datagen_wait_flag = "1" if str(datagen_wait_flag).lower() in ("1", "true", "yes") else "0"
-    datagen_env_vars["DATAGEN_WAIT_FOR_ENDPOINT"] = datagen_wait_flag
-
-    config_path = _snapshot_datagen_config(exp_args)
-    datagen_env_vars["DATAGEN_CONFIG_PATH"] = config_path
-
-    # Prepare sbatch script
-    sbatch_dir = os.path.join(os.path.dirname(__file__), "sbatch_data")
-    hpc_name = getattr(hpc, "name", "") or ""
-    uses_vllm_cluster = is_ray_backend or requires_endpoint
-    datagen_sbatch_template = os.path.join(sbatch_dir, f"{hpc_name}_datagen.sbatch")
-
-    if hpc_name.lower() == "vista":
-        datagen_sbatch_template = os.path.join(
-            sbatch_dir,
-            "vista_datagen.sbatch" if uses_vllm_cluster else "vista_datagen_cpu.sbatch",
-        )
-
-    if not os.path.exists(datagen_sbatch_template):
-        # Fallback to vista template
-        datagen_sbatch_template = os.path.join(sbatch_dir, "vista_datagen.sbatch")
-
-    # Create output sbatch script
-    datagen_job_name = f"{exp_args['job_name']}_datagen"
-    datagen_sbatch_output = os.path.join(
-        exp_args["experiments_dir"],
-        "sbatch",
-        f"{datagen_job_name}.sbatch"
-    )
-
-    # Read template and substitute
-    with open(datagen_sbatch_template) as f:
-        sbatch_content = f.read()
-
-    num_nodes = exp_args.get("num_nodes") or getattr(hpc, "num_nodes", 1) or 1
-    if is_cpu_only:
-        num_nodes = 1
-    if hpc_name.lower() == "vista" and not uses_vllm_cluster and not exp_args.get("num_nodes"):
-        num_nodes = 1
-    gpus_per_node_directive = gpus_per_node
-    if getattr(hpc, "name", "").lower() == "vista":
-        gpus_per_node_directive = None
-
-    cpus_per_node_effective = exp_args.get("cpus_per_node")
-    if cpus_per_node_effective in (None, "", "None"):
-        cpus_per_node_effective = getattr(hpc, "cpus_per_node", 1)
-    cpus_per_node_effective = int(cpus_per_node_effective)
-
-    qos_value = str(exp_args.get("qos") or getattr(hpc, "qos", "") or "").strip()
-
-    substitutions = {
-        "{partition}": hpc.partition,
-        "{time_limit}": exp_args["time_limit"],
-        "{num_nodes}": str(num_nodes),
-        "{cpus_per_node}": str(cpus_per_node_effective),
-        "{account}": hpc.account,
-        "{experiments_dir}": exp_args["experiments_dir"],
-        "{job_name}": datagen_job_name,
-        "{num_gpus}": str(requested_gpus),
-        "{gpus_per_node}": "" if gpus_per_node_directive is None else str(gpus_per_node_directive),
-        "{qos}": qos_value,
-    }
-
-    for key, value in substitutions.items():
-        sbatch_content = sbatch_content.replace(key, value)
-
-    if datagen_env_vars.get("DATAGEN_NUM_NODES") != str(num_nodes):
-        datagen_env_vars["DATAGEN_NUM_NODES"] = str(num_nodes)
-
-    if requested_gpus == 0:
-        sbatch_content = sbatch_content.replace("#SBATCH --gres=gpu:0\n", "")
-    if not gpus_per_node_directive:
-        sbatch_content = sbatch_content.replace("#SBATCH --gpus-per-node {gpus_per_node}\n", "")
-        sbatch_content = sbatch_content.replace("#SBATCH --gpus-per-node 0\n", "")
-        sbatch_content = sbatch_content.replace("#SBATCH --gpus-per-node=0\n", "")
-    if not qos_value:
-        sbatch_content = re.sub(r"#SBATCH\s+-q[^\n]*\n", "", sbatch_content)
-
-    sbatch_content = _inject_env_block(sbatch_content, datagen_env_vars)
-
-    # Ensure output directory exists and write output sbatch
-    os.makedirs(os.path.dirname(datagen_sbatch_output), exist_ok=True)
-    os.makedirs(os.path.join(exp_args["experiments_dir"], "logs"), exist_ok=True)
-    with open(datagen_sbatch_output, 'w') as f:
-        f.write(sbatch_content)
-
-    print(f"Task generation sbatch: {datagen_sbatch_output}")
-    print(f"Generation script: {exp_args['datagen_script']}")
-    target_repo_display = exp_args.get("datagen_target_repo") or "<none>"
-    print(f"Target repo: {target_repo_display}")
-    print(f"Datagen model: {exp_args.get('datagen_model')}")
-
-    # Submit job with dependency if VLLM job exists
-    if not exp_args.get("dry_run"):
-        dependency = None
-        if vllm_job_id and vllm_job_id != "dry_run_vllm_job_id":
-            # Wait until the VLLM job begins running so the endpoint is ready
-            dependency = f"after:{vllm_job_id}"
-            print(f"Setting dependency on VLLM job start: {vllm_job_id}")
-
-        job_id = _submit_script(datagen_sbatch_output, dependency=dependency, hpc=hpc)
-        print(f"✓ Task generation job submitted: {job_id}")
-        return job_id
-
-    print("DRY RUN: Would submit task generation job")
-    if vllm_job_id:
-        print(f"  with dependency on VLLM job: {vllm_job_id}")
-    return "dry_run_task_job_id"
-
-
-def launch_trace_job(
-    exp_args: dict,
-    hpc,
-    tasks_input_path: str,
-    dependency: Optional[str] = None,
-) -> Union[str, list[str]]:
-    """Launch trace generation job."""
-
-    print("\n=== Launching Trace Generation Job ===")
-
-    trace_script = exp_args.get("trace_script") or exp_args.get("datagen_script")
-    if not trace_script:
-        raise ValueError("Trace generation requires --trace-script or --datagen-script")
-
-    trace_target_repo = exp_args.get("trace_target_repo")
-    if not trace_target_repo:
-        raise ValueError("--trace-target-repo is required when enabling trace generation")
-
-    trace_output_dir = exp_args.get("trace_output_dir")
-    if not trace_output_dir:
-        trace_output_dir = os.path.join(exp_args["experiments_dir"], "outputs", "traces")
-        exp_args = update_exp_args(exp_args, {"trace_output_dir": trace_output_dir})
-
-    dry_run_flag = bool(exp_args.get("dry_run"))
-
-    chunk_size_raw = exp_args.get("chunk_size")
-    chunk_size_value: Optional[int]
-    if chunk_size_raw in (None, "", "None"):
-        chunk_size_value = None
-    elif isinstance(chunk_size_raw, int):
-        chunk_size_value = chunk_size_raw
-    else:
-        try:
-            chunk_size_value = int(chunk_size_raw)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("--chunk_size must be an integer value") from exc
-        exp_args = update_exp_args(exp_args, {"chunk_size": chunk_size_value})
-
-    tasks_root = Path(tasks_input_path)
-    if chunk_size_value and not tasks_root.exists():
-        raise ValueError(
-            "Chunked trace generation is not yet supported when task generation runs in the same job. "
-            f"Tasks directory not found at {tasks_root}. Generate/download tasks first (without --chunk_size) "
-            "and re-run traces with chunking enabled."
-        )
-
-    task_entries = _discover_task_entries(
-        tasks_root,
-        create_if_missing=bool(dependency) and not dry_run_flag,
-    )
-    total_tasks = len(task_entries)
-    if total_tasks == 0:
-        # Do not fail early; the downstream trace runner waits for tasks to appear.
-        # This allows submitting a trace job even when tasks are not yet materialized.
-        if dependency:
-            print(
-                "Trace tasks directory is empty; dependency on task job will ensure "
-                "tasks populate before traces start."
-            )
-        else:
-            print(
-                f"No tasks currently found under {tasks_root}; submitting trace job that will wait for tasks."
-            )
-    else:
-        print(f"Discovered {total_tasks} tasks for trace generation at {tasks_root}")
-
-    trace_config_spec = exp_args.get("trace_harbor_config")
-    if not trace_config_spec:
-        raise ValueError("Trace generation requires --trace-harbor-config.")
-    trace_config_path = resolve_harbor_config_path(trace_config_spec)
-    base_trace_config = load_job_config(trace_config_path)
-
-    trace_configs_dir = Path(exp_args["experiments_dir"]) / "configs" / "trace"
-    trace_configs_dir.mkdir(parents=True, exist_ok=True)
-
-    if "trace_jobs_dir" in exp_args and exp_args["trace_jobs_dir"]:
-        trace_jobs_dir_path = Path(str(exp_args["trace_jobs_dir"])).expanduser().resolve()
-    else:
-        experiments_dir = Path(str(exp_args["experiments_dir"])).expanduser().resolve()
-        trace_jobs_dir_path = experiments_dir / "trace_jobs"
-        exp_args = update_exp_args(exp_args, {"trace_jobs_dir": str(trace_jobs_dir_path)})
-    trace_jobs_dir_path.mkdir(parents=True, exist_ok=True)
-    trace_jobs_dir = str(trace_jobs_dir_path)
-
-    chunk_plans: list[TraceChunkPlan] = []
-    chunk_map_path: Optional[Path] = None
-    if chunk_size_value:
-        chunk_plans, chunk_map_path = _prepare_trace_chunk_plans(
-            tasks_root=tasks_root,
-            task_entries=task_entries,
-            chunk_size=chunk_size_value,
-            trace_jobs_dir=trace_jobs_dir,
-            trace_output_dir=trace_output_dir,
-            trace_target_repo=trace_target_repo,
-            dry_run=dry_run_flag,
-        )
-        if chunk_plans:
-            print(f"Prepared chunk plan for {len(chunk_plans)} trace jobs.")
-        else:
-            print(
-                f"Chunk size {chunk_size_value} does not require splitting "
-                f"(total tasks: {total_tasks})."
+        trace_target_repo = exp_args.get("trace_target_repo")
+        if not trace_target_repo:
+            raise ValueError("--trace-target-repo is required when enabling trace generation")
+
+        harbor_config = exp_args.get("trace_harbor_config")
+        if not harbor_config:
+            raise ValueError("--trace-harbor-config is required for trace generation")
+        harbor_config_resolved = str(resolve_harbor_config_path(harbor_config))
+
+        tasks_input_path = exp_args.get("trace_input_path")
+        if not tasks_input_path and task_enabled:
+            tasks_input_path = exp_args.get("datagen_output_dir") or str(
+                experiments_abs / "outputs" / "tasks"
             )
 
-    cfg_agent = base_trace_config.agents[0] if base_trace_config.agents else None
+        trace_model = exp_args.get("trace_model") or exp_args.get("datagen_model") or ""
+        if vllm_cfg and not trace_model:
+            trace_model = getattr(vllm_cfg, "model_path", "") or ""
 
-    trace_agent_timeout_override = exp_args.get("trace_agent_timeout_sec")
-    base_agent_kwargs = exp_args.get("_datagen_extra_agent_kwargs") or {}
-    if not isinstance(base_agent_kwargs, dict):
-        base_agent_kwargs = dict(base_agent_kwargs)
-    trace_agent_kwargs: dict[str, Any] = dict(base_agent_kwargs)
-    trace_agent_kwargs_raw = exp_args.get("trace_agent_kwargs")
-    cli_agent_kwargs: dict[str, Any] | None = None
-    if isinstance(trace_agent_kwargs_raw, dict):
-        cli_agent_kwargs = dict(trace_agent_kwargs_raw)
-    elif trace_agent_kwargs_raw not in (None, "", "None"):
-        try:
-            parsed_kwargs = json.loads(str(trace_agent_kwargs_raw))
-        except json.JSONDecodeError as exc:
-            raise ValueError("--trace_agent_kwargs must be valid JSON") from exc
-        if not isinstance(parsed_kwargs, dict):
-            raise ValueError("--trace_agent_kwargs must be a JSON object")
-        cli_agent_kwargs = parsed_kwargs
-    if cli_agent_kwargs is not None:
-        trace_agent_kwargs.update(cli_agent_kwargs)
-
-    trace_n_concurrent_override = exp_args.get("trace_n_concurrent")
-    trace_env_override = exp_args.get("trace_env")
-    trace_model_override = exp_args.get("trace_model")
-    trace_agent_name_override = exp_args.get("trace_agent_name")
-
-    trace_model = trace_model_override or (
-        cfg_agent.model_name if cfg_agent and cfg_agent.model_name else None
-    )
-    if trace_model and str(trace_model).strip() == HARBOR_MODEL_PLACEHOLDER:
-        trace_model = ""
-    raw_trace_model = trace_model
-
-    datagen_runtime = exp_args.get("_datagen_engine_runtime")
-    runtime_engine_type = ""
-    runtime_model_name: str | None = None
-    if datagen_runtime is not None:
-        runtime_engine_type = str(getattr(datagen_runtime, "type", "") or "").lower()
-        runtime_model_name = (
-            datagen_runtime.engine_kwargs.get("model")
-            or datagen_runtime.engine_kwargs.get("model_name")
-        )
-
-    if (
-        trace_model_override is None
-        and runtime_model_name
-        and runtime_engine_type not in ("vllm_local", "none")
-    ):
-        trace_model = runtime_model_name
-
-    if not trace_model:
-        vllm_cfg = exp_args.get("_datagen_vllm_server_config")
-        if vllm_cfg:
-            trace_model = vllm_cfg.model_path
-    trace_model = trace_model or ""
-
-    provider_prefix: str | None = None
-    if runtime_engine_type == "openai":
-        provider_prefix = "openai"
-    elif runtime_engine_type == "anthropic":
-        provider_prefix = "anthropic"
-    elif runtime_engine_type in {"gemini_openai", "google_gemini"}:
-        provider_prefix = "gemini"
-
-    def _normalize_model_for_provider(model_value: str, provider: str | None) -> str:
-        if not model_value:
-            return ""
-        candidate = str(model_value).strip()
-        if provider and candidate.lower().startswith(f"{provider.lower()}/"):
-            return candidate
-        for prefix in (
-            "openai/",
-            "anthropic/",
-            "gemini/",
-            "google_gemini/",
-        ):
-            if candidate.lower().startswith(prefix):
-                candidate = candidate[len(prefix):]
-                break
-        if candidate.lower().startswith("models/"):
-            candidate = candidate[len("models/"):]
-        candidate = candidate.lstrip("/")
-        if provider:
-            if not candidate:
-                return ""
-            return f"{provider}/{candidate}"
-        return candidate
-
-    trace_model_dispatch = _normalize_model_for_provider(trace_model, provider_prefix)
-
-    if not trace_model_dispatch and runtime_model_name:
-        trace_model_dispatch = _normalize_model_for_provider(runtime_model_name, provider_prefix)
-
-    if not trace_model_dispatch:
-        raise ValueError(
-            "Unable to determine trace model. Provide --trace_model or specify engine.model in the datagen config."
-        )
-
-    if trace_model_dispatch == HARBOR_MODEL_PLACEHOLDER:
-        raise ValueError(
-            "Trace Harbor config still references placeholder/override-at-runtime. "
-            "Ensure the datagen config supplies a concrete model."
-        )
-
-    raw_model_display = raw_trace_model or runtime_model_name or trace_model_dispatch
-    if trace_model_dispatch != (raw_trace_model or runtime_model_name or ""):
-        print(f"Trace model selected: {trace_model_dispatch} (raw: {raw_model_display})")
-    else:
-        print(f"Trace model selected: {trace_model_dispatch}")
-
-    exp_args = update_exp_args(exp_args, {"trace_model": trace_model_dispatch})
-
-    trace_agent_name = (
-        trace_agent_name_override
-        or (cfg_agent.name if cfg_agent and cfg_agent.name else None)
-        or "terminus-2"
-    )
-
-    trace_episodes = exp_args.get("trace_episodes") or "last"
-    trace_export_filter = exp_args.get("trace_export_filter") or "none"
-    trace_dataset_type = exp_args.get("trace_dataset_type") or "SFT"
-    disable_verification_flag = bool(exp_args.get("disable_verification"))
-    trace_export_subagents_value = exp_args.get("trace_export_subagents")
-    if trace_export_subagents_value in (None, "", "None"):
-        trace_export_subagents = True
-    elif isinstance(trace_export_subagents_value, str):
-        trace_export_subagents = trace_export_subagents_value.strip().lower() not in {"0", "false", "no"}
-    else:
-        trace_export_subagents = bool(trace_export_subagents_value)
-
-    trace_engine_value = exp_args.get("trace_engine") or exp_args.get("datagen_engine") or ""
-    trace_engine = str(trace_engine_value).lower()
-
-    trace_backend_value = exp_args.get("trace_backend") or exp_args.get("datagen_backend") or "vllm"
-    trace_backend = validate_trace_backend(
-        trace_backend_value,
-        allow_vllm=False,
-        job_type="datagen",
-    )
-    cpu_only_trace = trace_backend == "vllm_local"
-
-    if trace_backend != trace_backend_value:
-        exp_args = update_exp_args(exp_args, {"trace_backend": trace_backend})
-
-    if trace_engine == "none" and trace_backend in ("vllm", "none"):
-        trace_backend = "none"
-        exp_args = update_exp_args(exp_args, {"trace_backend": trace_backend})
-
-    requires_endpoint = trace_engine == "vllm_local" and trace_backend in ("vllm", "ray")
-
-    trace_endpoint_json: str = ""
-    if requires_endpoint:
-        base_endpoint_path = exp_args.get("trace_endpoint_json") or exp_args.get("vllm_endpoint_json_path")
-        if base_endpoint_path:
-            trace_endpoint_json = base_endpoint_path
-        else:
-            experiments_dir = exp_args.get("experiments_dir")
-            if not experiments_dir:
-                raise ValueError("experiments_dir is required to compute trace endpoint path")
-            trace_endpoint_json = default_vllm_endpoint_path(
-                experiments_dir,
-                trace=bool(chunk_plans),
-            )
-    else:
-        trace_endpoint_json = exp_args.get("trace_endpoint_json") or exp_args.get("vllm_endpoint_json_path") or ""
-
-    trace_use_gpu_flag = bool(exp_args.get("trace_use_gpu"))
-    if cpu_only_trace and trace_use_gpu_flag:
-        print("TRACE backend 'vllm_local' is CPU-only; ignoring --trace_use_gpu request.")
-        trace_use_gpu_flag = False
-        exp_args = update_exp_args(exp_args, {"trace_use_gpu": False})
-    if requires_endpoint and not trace_use_gpu_flag:
-        trace_use_gpu_flag = True
-        exp_args = update_exp_args(exp_args, {"trace_use_gpu": True})
-
-    num_gpus = hpc.gpus_per_node if trace_use_gpu_flag else 0
-    trace_memory_limit_gb = 32 if cpu_only_trace else None
-
-    trace_n_concurrent_effective = (
-        trace_n_concurrent_override
-        if trace_n_concurrent_override is not None
-        else base_trace_config.orchestrator.n_concurrent_trials
-    )
-    if trace_n_concurrent_effective is None:
-        trace_n_concurrent_effective = 8
-    print(f"Trace concurrency selected: {trace_n_concurrent_effective}")
-    if trace_env_override:
-        print(f"Trace environment override: {trace_env_override}")
-
-    task_type_value = exp_args.get("task_type")
-
-    trace_env_vars = {
-        "TRACE_SCRIPT": trace_script,
-        "TRACE_STAGE": "traces",
-        "TRACE_TASKS_PATH": tasks_input_path,
-        "TRACE_TARGET_REPO": trace_target_repo,
-        "TRACE_MODEL": trace_model_dispatch,
-        "TRACE_ENGINE": trace_engine,
-        "TRACE_OUTPUT_DIR": trace_output_dir,
-        "TRACE_USE_GPU": "1" if trace_use_gpu_flag else "0",
-        "TRACE_EPISODES": trace_episodes,
-        "TRACE_EXPORT_FILTER": trace_export_filter,
-        "TRACE_DATASET_TYPE": trace_dataset_type,
-        "TRACE_EXPORT_SUBAGENTS": "1" if trace_export_subagents else "0",
-        "TRACE_JOBS_DIR": trace_jobs_dir,
-        "TRACE_ENDPOINT_JSON": trace_endpoint_json or "",
-        "TRACE_REQUIRE_ENDPOINT": "1" if requires_endpoint else "0",
-        "TRACE_WAIT_FOR_ENDPOINT": "1" if requires_endpoint else "0",
-        "TRACE_HEALTH_MAX_ATTEMPTS": str(
-            exp_args.get("trace_health_max_attempts", getattr(BaseDataGenerator, "HEALTHCHECK_MAX_ATTEMPTS", 20))
-        ),
-        "TRACE_HEALTH_RETRY_DELAY": str(
-            exp_args.get("trace_health_retry_delay", getattr(BaseDataGenerator, "HEALTHCHECK_RETRY_DELAY", 30))
-        ),
-        "TRACE_DISABLE_VERIFICATION": "1" if disable_verification_flag else "0",
-        "VLLM_JOB_ID": str(exp_args.get("vllm_job_id", "")),
-        "TRACE_NUM_GPUS": str(num_gpus),
-        "TRACE_BACKEND": trace_backend,
-        "TRACE_AGENT_TIMEOUT_SEC": str(trace_agent_timeout_override or ""),
-        "TRACE_VERIFIER_TIMEOUT_SEC": str(exp_args.get("trace_verifier_timeout_sec") or ""),
-        "TRACE_TOTAL_TASKS": str(total_tasks),
-        "TRACE_CHUNK_SIZE": str(chunk_size_value or ""),
-        "TRACE_CHUNK_COUNT": str(len(chunk_plans) if chunk_plans else 1),
-        "TRACE_CHUNK_MAP_PATH": str(chunk_map_path) if chunk_map_path else "",
-        "TRACE_JOB_INDEX": "0",
-        "TRACE_TARGET_REPO_BASE": trace_target_repo,
-        "TRACE_HARBOR_CONFIG": "",
-        "PROJECT_ROOT": str(PROJECT_ROOT),
-        "PYTHON_EXECUTABLE": sys.executable,
-    }
-    if task_type_value:
-        trace_env_vars["TRACE_TASK_TYPE"] = str(task_type_value)
-    def _materialize_trace_config(
-        dataset_path: Path,
-        job_suffix: str,
-        jobs_dir: Path | str,
-        *,
-        agent_name_override: str | None,
-        agent_model_override: str | None,
-        agent_timeout_override: float | None,
-        agent_kwargs_override: dict[str, Any] | None,
-        n_concurrent_override: int | None,
-        env_override: str | None,
-        disable_verification: bool,
-    ) -> Path:
-        config = set_local_dataset(base_trace_config, Path(dataset_path))
-        config = set_job_metadata(
-            config,
-            job_name=f"{exp_args['job_name']}{job_suffix}",
-            jobs_dir=jobs_dir,
-        )
-        config = overwrite_agent_fields(
-            config,
-            name=agent_name_override,
-            model_name=agent_model_override or None,
-            override_timeout_sec=agent_timeout_override,
-        )
-        if (
-            config.agents
-            and getattr(config.agents[0], "model_name", None) == HARBOR_MODEL_PLACEHOLDER
-        ):
-            raise ValueError(
-                "Trace Harbor config still references placeholder/override-at-runtime after resolution."
-            )
-        config = update_agent_kwargs(config, agent_kwargs_override)
-        if n_concurrent_override is not None:
-            config.orchestrator.n_concurrent_trials = int(n_concurrent_override)
-        if env_override:
-            env_str = str(env_override).strip()
-            try:
-                env_enum = EnvironmentType(env_str.lower())
-            except ValueError:
+        agent_kwargs = exp_args.get("_datagen_extra_agent_kwargs") or {}
+        if exp_args.get("trace_agent_kwargs"):
+            if isinstance(exp_args["trace_agent_kwargs"], dict):
+                agent_kwargs.update(exp_args["trace_agent_kwargs"])
+            else:
                 try:
-                    env_enum = EnvironmentType[env_str.upper()]
-                except KeyError as exc:
-                    raise ValueError(f"Invalid trace environment override: {env_override}") from exc
-            config.environment.type = env_enum
-        if disable_verification:
-            config.verifier.disable = True
-        output_path = trace_configs_dir / f"{config.job_name}.yaml"
-        if not dry_run_flag:
-            dump_job_config(config, output_path)
-        return output_path
+                    agent_kwargs.update(json.loads(str(exp_args["trace_agent_kwargs"])))
+                except json.JSONDecodeError:
+                    pass
 
-    # Overwrite trace health max_attempts and delay if environment variable is specified
-    if "TRACE_HEALTH_MAX_ATTEMPTS" in os.environ:
-        trace_env_vars["TRACE_HEALTH_MAX_ATTEMPTS"] = os.environ["TRACE_HEALTH_MAX_ATTEMPTS"]
-
-    if "TRACE_HEALTH_RETRY_DELAY" in os.environ:
-        trace_env_vars["TRACE_HEALTH_RETRY_DELAY"] = os.environ["TRACE_HEALTH_RETRY_DELAY"]
-
-    backend = str(trace_env_vars["TRACE_BACKEND"]).lower()
-    is_trace_ray_backend = backend == "ray"
-    vllm_trace_env, exp_args = _build_vllm_env_vars(exp_args, include_pinggy=False)
-    vllm_cfg = exp_args.get("_datagen_vllm_server_config")
-    backend_cfg = exp_args.get("_datagen_backend_config")
-    trace_env_vars.update(vllm_trace_env)
-
-    if dry_run_flag:
-        trace_engine_config_path = exp_args.get("datagen_config_path") or exp_args.get(
-            "_datagen_config_original_path"
-        )
-    else:
-        trace_engine_config_path = _snapshot_datagen_config(exp_args)
-    if trace_engine_config_path:
-        trace_env_vars["TRACE_ENGINE_CONFIG_PATH"] = str(trace_engine_config_path)
-    if is_trace_ray_backend:
-        if exp_args.get("ray_cgraph_submit_timeout"):
-            trace_env_vars["RAY_CGRAPH_submit_timeout"] = str(exp_args["ray_cgraph_submit_timeout"])
-        if exp_args.get("ray_cgraph_get_timeout"):
-            trace_env_vars["RAY_CGRAPH_get_timeout"] = str(exp_args["ray_cgraph_get_timeout"])
-        if exp_args.get("ray_cgraph_max_inflight_executions"):
-            trace_env_vars["RAY_CGRAPH_max_inflight_executions"] = str(
-                exp_args["ray_cgraph_max_inflight_executions"]
-            )
-        _maybe_set_ray_cgraph_env(trace_env_vars)
-    trace_env_vars["TRACE_RAY_PORT"] = str(exp_args.get("datagen_ray_port", 6379))
-    trace_env_vars["TRACE_API_PORT"] = str(exp_args.get("datagen_api_port", 8000))
-    tensor_parallel_size = None
-    pipeline_parallel_size = None
-    data_parallel_size = None
-    if vllm_cfg:
-        tensor_parallel_size = getattr(vllm_cfg, "tensor_parallel_size", None)
-        pipeline_parallel_size = getattr(vllm_cfg, "pipeline_parallel_size", None)
-        data_parallel_size = getattr(vllm_cfg, "data_parallel_size", None)
-    if tensor_parallel_size is None and backend_cfg:
-        tensor_parallel_size = getattr(backend_cfg, "tensor_parallel_size", None)
-    if pipeline_parallel_size is None and backend_cfg:
-        pipeline_parallel_size = getattr(backend_cfg, "pipeline_parallel_size", None)
-    if data_parallel_size is None and backend_cfg:
-        data_parallel_size = getattr(backend_cfg, "data_parallel_size", None)
-    if tensor_parallel_size is None:
-        tensor_parallel_size = 1
-    if pipeline_parallel_size is None:
-        pipeline_parallel_size = 1
-    if data_parallel_size is None:
-        data_parallel_size = 1
-    trace_env_vars["TRACE_TENSOR_PARALLEL_SIZE"] = str(tensor_parallel_size)
-    trace_env_vars["TRACE_PIPELINE_PARALLEL_SIZE"] = str(pipeline_parallel_size)
-    trace_env_vars["TRACE_DATA_PARALLEL_SIZE"] = str(data_parallel_size)
-    trace_env_vars["TRACE_NUM_NODES"] = str(exp_args.get("num_nodes") or getattr(hpc, "num_nodes", 1) or 1)
-    trace_env_vars["TRACE_GPUS_PER_NODE"] = str(exp_args.get("gpus_per_node") or getattr(hpc, "gpus_per_node", num_gpus))
-
-    sandbox_overrides = {
-        "SANDBOX_CPU": exp_args.get("sandbox_cpu"),
-        "SANDBOX_MEMORY_GB": exp_args.get("sandbox_memory_gb"),
-        "SANDBOX_DISK_GB": exp_args.get("sandbox_disk_gb"),
-        "SANDBOX_GPU": exp_args.get("sandbox_gpu"),
-    }
-    for env_key, value in sandbox_overrides.items():
-        if value is not None:
-            trace_env_vars[env_key] = str(value)
-
-    daytona_api_key = os.environ.get("DAYTONA_API_KEY")
-    if daytona_api_key:
-        trace_env_vars["DAYTONA_API_KEY"] = daytona_api_key
-    else:
-        print(
-            "Warning: DAYTONA_API_KEY not found in environment; trace jobs may fail to start Daytona sandboxes."
+        trace_config = TracegenJobConfig(
+            job_name=f"{job_name}_traces",
+            harbor_config=harbor_config_resolved,
+            trace_script=trace_script or "",
+            experiments_dir=experiments_subdir,
+            cluster_name=hpc.name,
+            tasks_input_path=tasks_input_path or "",
+            output_dir=exp_args.get("trace_output_dir"),
+            target_repo=trace_target_repo,
+            engine=engine,
+            datagen_config_path=exp_args.get("datagen_config_path"),
+            needs_vllm=requires_vllm,
+            vllm_model_path=getattr(vllm_cfg, "model_path", None) if vllm_cfg else None,
+            tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+            data_parallel_size=data_parallel_size,
+            endpoint_json_path=endpoint_json_path,
+            ray_port=int(exp_args.get("datagen_ray_port") or 6379),
+            api_port=int(exp_args.get("datagen_api_port") or 8000),
+            model=trace_model,
+            agent=exp_args.get("trace_agent_name") or "",
+            trace_env=exp_args.get("trace_env") or "daytona",
+            n_concurrent=int(exp_args.get("trace_n_concurrent") or 64),
+            n_attempts=int(exp_args.get("trace_n_attempts") or 3),
+            agent_kwargs=agent_kwargs,
+            num_nodes=int(exp_args.get("num_nodes") or 1),
+            gpus_per_node=gpus_per_node,
         )
 
-    sbatch_dir = os.path.join(os.path.dirname(__file__), "sbatch_data")
-    trace_sbatch_template = os.path.join(sbatch_dir, f"{hpc.name}_datatrace.sbatch")
-    if not os.path.exists(trace_sbatch_template):
-        trace_sbatch_template = os.path.join(sbatch_dir, "vista_datatrace.sbatch")
+        # Write trace config JSON
+        trace_config_path = configs_dir / f"{job_name}_tracegen_config.json"
+        trace_config_path.write_text(json.dumps(asdict(trace_config), indent=2))
 
-    with open(trace_sbatch_template) as f:
-        trace_sbatch_template_text = f.read()
+        # Load and populate tracegen template
+        template_path = Path(__file__).parent / "sbatch_data" / "universal_tracegen.sbatch"
+        if not template_path.exists():
+            raise FileNotFoundError(f"Universal tracegen template not found: {template_path}")
 
-    partition = getattr(hpc, "partition", "") or ""
-    account = getattr(hpc, "account", "") or ""
-    qos_value = str(exp_args.get("qos") or getattr(hpc, "qos", "") or "").strip()
-    cpus_per_task_raw = exp_args.get("cpus_per_node") or getattr(hpc, "cpus_per_node", 1)
-    cpus_per_task = int(cpus_per_task_raw)
-    if cpu_only_trace and cpus_per_task > 32:
-        print("TRACE backend 'vllm_local' is CPU-only; limiting CPUs per node to 32.")
-        cpus_per_task = 32
-        exp_args = update_exp_args(exp_args, {"cpus_per_node": cpus_per_task})
-    trace_env_vars["TRACE_CPUS_PER_NODE"] = str(cpus_per_task)
-    num_nodes = exp_args.get("num_nodes") or getattr(hpc, "num_nodes", 1) or 1
-    gpus_per_node_trace = exp_args.get("gpus_per_node") or getattr(hpc, "gpus_per_node", num_gpus)
-    if cpu_only_trace:
-        gpus_per_node_trace = 0
-    gpus_per_node_trace_directive = gpus_per_node_trace
-    if getattr(hpc, "name", "").lower() == "vista":
-        gpus_per_node_trace_directive = None
+        template_text = template_path.read_text()
 
-    base_substitutions = {
-        "{partition}": partition,
-        "{time_limit}": exp_args["time_limit"],
-        "{num_nodes}": str(num_nodes),
-        "{cpus_per_node}": str(cpus_per_task),
-        "{num_gpus}": str(num_gpus),
-        "{gpus_per_node}": "" if gpus_per_node_trace_directive is None else str(gpus_per_node_trace_directive),
-        "{account}": account,
-        "{experiments_dir}": exp_args["experiments_dir"],
-        "{qos}": qos_value,
-    }
+        # Build SBATCH directives respecting user overrides (same as taskgen)
+        partition = exp_args.get("partition") or hpc.partition
+        account = exp_args.get("account") or hpc.account
+        qos = exp_args.get("qos") or ""
+        sbatch_directives = []
+        if partition:
+            sbatch_directives.append(f"#SBATCH -p {partition}")
+        if account:
+            sbatch_directives.append(f"#SBATCH --account {account}")
+        if qos:
+            sbatch_directives.append(f"#SBATCH -q {qos}")
+        if hpc.node_exclusion_list:
+            sbatch_directives.append(f"#SBATCH --exclude={hpc.node_exclusion_list}")
 
-    def _render_trace_sbatch_content(
-        job_name: str,
-        env_vars: dict[str, str],
-        *,
-        memory_limit_gb: int | None = None,
-        array_spec: str | None = None,
-    ) -> str:
-        content = trace_sbatch_template_text
-        for key, value in base_substitutions.items():
-            content = content.replace(key, value)
-        content = content.replace("{job_name}", job_name)
-        if array_spec:
-            job_line = f"#SBATCH --job-name {job_name}\n"
-            array_line = f"#SBATCH --array={array_spec}\n"
-            if job_line in content:
-                content = content.replace(job_line, job_line + array_line, 1)
-            else:
-                if content.startswith("#!"):
-                    newline_idx = content.find("\n")
-                    if newline_idx == -1:
-                        newline_idx = len(content)
-                    content = (
-                        content[: newline_idx + 1]
-                        + array_line
-                        + content[newline_idx + 1 :]
-                    )
-                else:
-                    content = array_line + content
-        if num_gpus == 0:
-            content = content.replace("#SBATCH --gres=gpu:0\n", "")
-        if not gpus_per_node_trace_directive:
-            content = content.replace("#SBATCH --gpus-per-node {gpus_per_node}\n", "")
-            content = content.replace("#SBATCH --gpus-per-node 0\n", "")
-            content = content.replace("#SBATCH --gpus-per-node=0\n", "")
-        if not partition:
-            content = content.replace("#SBATCH -p \n", "")
-        if not account:
-            content = content.replace("#SBATCH --account \n", "")
-        if not qos_value:
-            content = re.sub(r"#SBATCH\s+-q[^\n]*\n", "", content)
-        if memory_limit_gb is not None:
-            memory_override = f"{memory_limit_gb}GB"
-            existing_mem = re.search(
-                r"^#SBATCH --mem=([0-9]+)([A-Za-z]+)",
-                content,
-                flags=re.MULTILINE,
-            )
-            if existing_mem:
-                unit = existing_mem.group(2)
-                try:
-                    current_mem_value = int(existing_mem.group(1))
-                except ValueError:
-                    current_mem_value = None
-                if current_mem_value is not None:
-                    target_mem_value = min(current_mem_value, memory_limit_gb)
-                    memory_override = f"{target_mem_value}{unit}"
-            if re.search(r"^#SBATCH --mem=\S+", content, flags=re.MULTILINE):
-                content = re.sub(
-                    r"^#SBATCH --mem=\S+",
-                    f"#SBATCH --mem={memory_override}",
-                    content,
-                    count=1,
-                    flags=re.MULTILINE,
-                )
-            else:
-                cpu_line_pattern = rf"(#SBATCH --cpus-per-task={cpus_per_task}\s*\n)"
-                if re.search(cpu_line_pattern, content):
-                    content = re.sub(
-                        cpu_line_pattern,
-                        r"\1#SBATCH --mem=" + memory_override + "\n",
-                        content,
-                        count=1,
-                    )
-                else:
-                    content = content.replace(
-                        "#SBATCH --ntasks-per-node 1\n",
-                        "#SBATCH --ntasks-per-node 1\n" + f"#SBATCH --mem={memory_override}\n",
-                        1,
-                    )
-            if not re.search(r"^#SBATCH --mem=\S+", content, flags=re.MULTILINE):
-                content = f"#SBATCH --mem={memory_override}\n" + content
-        return _inject_env_block(content, env_vars)
+        substitutions = {
+            "time_limit": exp_args.get("time_limit") or "24:00:00",
+            "num_nodes": str(exp_args.get("num_nodes") or 1),
+            "cpus_per_node": str(exp_args.get("cpus_per_node") or hpc.cpus_per_node),
+            "experiments_dir": experiments_subdir,
+            "job_name": f"{job_name}_traces",
+            "sbatch_extra_directives": "\n".join(sbatch_directives),
+            "module_commands": hpc.get_module_commands(),
+            "conda_activate": hpc.conda_activate or "# No conda activation configured",
+            "cluster_env_file": cluster_env_file,
+            "config_path": str(trace_config_path),
+        }
 
-    def _write_chunk_env_file(path: Path, env_map: dict[str, Any]) -> None:
-        lines: list[str] = []
-        for key, value in env_map.items():
-            if value is None:
-                continue
-            lines.append(f"export {key}={shlex.quote(str(value))}")
-        lines.append("")
-        path.write_text("\n".join(lines))
+        sbatch_text = template_text
+        for key, value in substitutions.items():
+            sbatch_text = sbatch_text.replace("{" + key + "}", value)
 
-    sbatch_output_dir = os.path.join(exp_args["experiments_dir"], "sbatch")
-    logs_dir = os.path.join(exp_args["experiments_dir"], "logs")
-    os.makedirs(sbatch_output_dir, exist_ok=True)
-    os.makedirs(logs_dir, exist_ok=True)
+        trace_sbatch_output = sbatch_dir / f"{job_name}_tracegen.sbatch"
+        trace_sbatch_output.write_text(sbatch_text)
+        os.chmod(trace_sbatch_output, 0o750)
 
-    if chunk_plans and _is_local_mode(hpc):
-        raise RuntimeError("Trace chunking (--chunk_size) is not supported for local execution.")
+        # Set dependency on task job if both are enabled
+        dependency = f"afterok:{task_job_id}" if task_enabled and task_job_id and task_job_id != "dry_run_task_job_id" else None
 
-    if chunk_plans:
-        if chunk_map_path:
-            print(f"Trace chunk map saved to: {chunk_map_path}")
-        chunk_array_max = exp_args.get("_chunk_array_max")
-        try:
-            chunk_array_max = int(chunk_array_max) if chunk_array_max is not None else None
-        except (TypeError, ValueError):
-            chunk_array_max = None
-        if not chunk_array_max or chunk_array_max <= 0:
-            chunk_array_max = 3
-
-        chunk_env_dir = trace_configs_dir / "chunk_envs"
-        if dry_run_flag:
-            print(f"DRY RUN: Would create chunk env directory at {chunk_env_dir}")
+        if exp_args.get("dry_run"):
+            print(f"DRY RUN: Tracegen sbatch script written to {trace_sbatch_output}")
         else:
-            if chunk_env_dir.exists():
-                shutil.rmtree(chunk_env_dir)
-            chunk_env_dir.mkdir(parents=True, exist_ok=True)
-
-        original_endpoint_json_path = exp_args.get("vllm_endpoint_json_path")
-        base_trace_engine_config_path = trace_env_vars.get("TRACE_ENGINE_CONFIG_PATH")
-
-        for plan in chunk_plans:
-            chunk_overrides: dict[str, Any] = {
-                "TRACE_TASKS_PATH": str(plan.tasks_path),
-                "TRACE_TARGET_REPO": plan.target_repo,
-                "TRACE_OUTPUT_DIR": str(plan.output_dir),
-                "TRACE_JOBS_DIR": str(plan.jobs_dir),
-                "TRACE_JOB_INDEX": str(plan.index),
-                "TRACE_CHUNK_COUNT": str(len(chunk_plans)),
-                "JOB_SUBMIT_ORDER": str(plan.index + 1),
-            }
-            chunk_config_path = _materialize_trace_config(
-                dataset_path=plan.tasks_path,
-                job_suffix=f"_trace_{plan.index:03d}",
-                jobs_dir=plan.jobs_dir,
-                agent_name_override=trace_agent_name,
-                agent_model_override=trace_model_dispatch or None,
-                agent_timeout_override=trace_agent_timeout_override,
-                agent_kwargs_override=trace_agent_kwargs,
-                n_concurrent_override=trace_n_concurrent_effective,
-                env_override=trace_env_override,
-                disable_verification=disable_verification_flag,
-            )
-            chunk_overrides["TRACE_HARBOR_CONFIG"] = str(chunk_config_path)
-            chunk_endpoint_json = (
-                default_vllm_endpoint_path(
-                    exp_args["experiments_dir"],
-                    trace=True,
-                    chunk_index=plan.index,
-                )
-                if requires_endpoint
-                else ""
-            )
-            chunk_engine_config_path = base_trace_engine_config_path
-            if chunk_endpoint_json:
-                update_exp_args(
-                    exp_args,
-                    {"vllm_endpoint_json_path": chunk_endpoint_json},
-                )
-                chunk_engine_config_path = _snapshot_datagen_config(
-                    exp_args,
-                    output_filename=f"datagen_config_trace_{plan.index:03d}.resolved.yaml",
-                    update_exp_args=False,
-                )
-                chunk_overrides["TRACE_ENDPOINT_JSON"] = chunk_endpoint_json
-                chunk_overrides["VLLM_ENDPOINT_JSON_PATH"] = chunk_endpoint_json
-            if chunk_engine_config_path:
-                chunk_overrides["TRACE_ENGINE_CONFIG_PATH"] = str(chunk_engine_config_path)
-
-            env_file = chunk_env_dir / f"chunk_{plan.index:03d}.env"
-            if dry_run_flag:
-                print(
-                    f"DRY RUN: Would write chunk env {env_file} "
-                    f"(tasks: {len(plan.task_names)}, repo: {plan.target_repo})"
-                )
+            if dependency:
+                job_id = launch_sbatch(str(trace_sbatch_output), dependency=dependency)
             else:
-                _write_chunk_env_file(env_file, chunk_overrides)
-            print(
-                f"Prepared trace chunk {plan.index}: tasks={len(plan.task_names)} "
-                f"repo={plan.target_repo} env_file={env_file}"
+                job_id = launch_sbatch(str(trace_sbatch_output))
+            print(f"✓ Trace generation job submitted: {job_id}")
+
+
+# ==============================================================================
+# Job Runner Classes for Universal SBATCH Scripts
+# ==============================================================================
+#
+# These classes encapsulate the job logic that was previously spread across
+# 400-600 line SBATCH scripts. They are called from universal_taskgen.sbatch
+# and universal_tracegen.sbatch templates.
+
+
+@dataclass
+class TaskgenJobConfig:
+    """Configuration for a task generation job (serialized to JSON for sbatch)."""
+
+    job_name: str
+    datagen_script: str
+    experiments_dir: str
+    cluster_name: str = ""
+
+    # Output settings
+    output_dir: Optional[str] = None
+    input_dir: Optional[str] = None
+    target_repo: Optional[str] = None
+
+    # Engine settings
+    engine: str = "openai"
+    datagen_config_path: Optional[str] = None
+
+    # vLLM settings (if engine requires it)
+    needs_vllm: bool = False
+    vllm_model_path: Optional[str] = None
+    tensor_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    data_parallel_size: int = 1
+    endpoint_json_path: Optional[str] = None
+    ray_port: int = 6379
+    api_port: int = 8000
+
+    # Health check settings
+    health_max_attempts: int = 120
+    health_retry_delay: int = 15
+    healthcheck_interval: int = 300
+
+    # Extra args
+    extra_args: str = ""
+    disable_verification: bool = False
+
+    # GPU settings
+    num_nodes: int = 1
+    gpus_per_node: int = 0
+
+
+class TaskgenJobRunner:
+    """Runs task generation jobs with optional vLLM management.
+
+    This class encapsulates the task generation logic that was previously
+    spread across 400+ lines of sbatch scripts.
+
+    Usage (from sbatch):
+        python -m hpc.datagen_launch_utils --mode taskgen --config /path/to/config.json
+    """
+
+    def __init__(self, config: TaskgenJobConfig):
+        self.config = config
+        self._hpc = None
+
+    def _get_hpc(self):
+        """Lazy-load HPC configuration."""
+        if self._hpc is None:
+            from hpc.hpc import detect_hpc, clusters
+            if self.config.cluster_name:
+                for c in clusters:
+                    if c.name.lower() == self.config.cluster_name.lower():
+                        self._hpc = c
+                        break
+                if self._hpc is None:
+                    raise ValueError(f"Unknown cluster: {self.config.cluster_name}")
+            else:
+                self._hpc = detect_hpc()
+        return self._hpc
+
+    def run(self) -> int:
+        """Execute the task generation job.
+
+        Returns:
+            Exit code (0 for success)
+        """
+        print(f"=== TaskgenJobRunner: {self.config.job_name} ===")
+
+        try:
+            if self.config.needs_vllm:
+                exit_code = self._run_with_vllm()
+            else:
+                exit_code = self._run_datagen(endpoint=None)
+
+            if exit_code == 0:
+                print(f"Task generation job '{self.config.job_name}' completed successfully")
+            else:
+                print(f"Task generation job '{self.config.job_name}' failed with code {exit_code}")
+
+            return exit_code
+
+        except Exception as e:
+            print(f"Task generation job failed with exception: {e}", file=sys.stderr)
+            raise
+
+    def _run_with_vllm(self) -> int:
+        """Run task generation with managed Ray cluster and vLLM server."""
+        from hpc.ray_utils import RayCluster, RayClusterConfig
+        from hpc.vllm_utils import VLLMServer, VLLMConfig
+
+        hpc = self._get_hpc()
+        num_nodes = int(os.environ.get("SLURM_JOB_NUM_NODES", self.config.num_nodes))
+
+        ray_cfg = RayClusterConfig(
+            num_nodes=num_nodes,
+            gpus_per_node=hpc.gpus_per_node,
+            cpus_per_node=hpc.cpus_per_node,
+            ray_port=self.config.ray_port,
+            srun_export_env=hpc.get_srun_export_env(),
+            ray_env_vars=hpc.get_ray_env_vars(),
+        )
+
+        vllm_cfg = VLLMConfig(
+            model_path=self.config.vllm_model_path or "",
+            tensor_parallel_size=self.config.tensor_parallel_size,
+            pipeline_parallel_size=self.config.pipeline_parallel_size,
+            data_parallel_size=self.config.data_parallel_size,
+            api_port=self.config.api_port,
+            endpoint_json_path=self.config.endpoint_json_path,
+            health_max_attempts=self.config.health_max_attempts,
+            health_retry_delay=self.config.health_retry_delay,
+        )
+
+        log_dir = Path(self.config.experiments_dir) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        vllm_log = log_dir / f"{self.config.job_name}_vllm.log"
+
+        with RayCluster.from_slurm(ray_cfg) as ray_cluster:
+            vllm_server = VLLMServer(
+                config=vllm_cfg,
+                ray_cluster=ray_cluster,
+                log_path=vllm_log,
             )
+            with vllm_server:
+                return self._run_datagen(endpoint=vllm_server.endpoint)
 
-        if original_endpoint_json_path is not None:
-            update_exp_args(
-                exp_args,
-                {"vllm_endpoint_json_path": original_endpoint_json_path},
+    def _run_datagen(self, endpoint: Optional[str]) -> int:
+        """Execute the data generation script."""
+        script_path = Path(self.config.datagen_script)
+        if not script_path.exists():
+            print(f"Error: Datagen script not found: {script_path}", file=sys.stderr)
+            return 1
+
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--stage", "tasks",
+        ]
+
+        if self.config.output_dir:
+            cmd.extend(["--output-dir", self.config.output_dir])
+
+        if self.config.input_dir:
+            cmd.extend(["--input-dir", self.config.input_dir])
+
+        if self.config.target_repo:
+            cmd.extend(["--target-repo", self.config.target_repo])
+
+        if self.config.datagen_config_path:
+            cmd.extend(["--config", self.config.datagen_config_path])
+
+        if endpoint:
+            cmd.extend(["--endpoint", endpoint])
+
+        if self.config.disable_verification:
+            cmd.append("--disable-verification")
+
+        # Add extra args
+        if self.config.extra_args:
+            extra_tokens = shlex.split(self.config.extra_args)
+            cmd.extend(extra_tokens)
+
+        print(f"Running datagen command: {' '.join(cmd)}")
+        result = subprocess.run(cmd)
+        return result.returncode
+
+
+@dataclass
+class TracegenJobConfig:
+    """Configuration for a trace generation job (serialized to JSON for sbatch)."""
+
+    job_name: str
+    harbor_config: str
+    trace_script: str
+    experiments_dir: str
+    cluster_name: str = ""
+
+    # Input/output settings
+    tasks_input_path: str = ""
+    output_dir: Optional[str] = None
+    target_repo: str = ""
+
+    # Engine settings
+    engine: str = "vllm_local"
+    datagen_config_path: Optional[str] = None
+
+    # vLLM settings
+    needs_vllm: bool = True
+    vllm_model_path: Optional[str] = None
+    tensor_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    data_parallel_size: int = 1
+    endpoint_json_path: Optional[str] = None
+    ray_port: int = 6379
+    api_port: int = 8000
+
+    # Health check settings
+    health_max_attempts: int = 120
+    health_retry_delay: int = 15
+
+    # Harbor settings
+    model: str = ""
+    agent: str = ""
+    trace_env: str = "daytona"
+    n_concurrent: int = 64
+    n_attempts: int = 3
+
+    # Agent kwargs (serialized as JSON)
+    agent_kwargs: Dict[str, Any] = field(default_factory=dict)
+
+    # Upload settings
+    upload_username: str = ""
+
+    # GPU settings
+    num_nodes: int = 1
+    gpus_per_node: int = 4
+
+
+class TracegenJobRunner:
+    """Runs trace generation jobs with optional vLLM management.
+
+    This class encapsulates the trace generation logic that was previously
+    spread across 600+ lines of sbatch scripts.
+
+    Usage (from sbatch):
+        python -m hpc.datagen_launch_utils --mode tracegen --config /path/to/config.json
+    """
+
+    def __init__(self, config: TracegenJobConfig):
+        self.config = config
+        self._hpc = None
+
+    def _get_hpc(self):
+        """Lazy-load HPC configuration."""
+        if self._hpc is None:
+            from hpc.hpc import detect_hpc, clusters
+            if self.config.cluster_name:
+                for c in clusters:
+                    if c.name.lower() == self.config.cluster_name.lower():
+                        self._hpc = c
+                        break
+                if self._hpc is None:
+                    raise ValueError(f"Unknown cluster: {self.config.cluster_name}")
+            else:
+                self._hpc = detect_hpc()
+        return self._hpc
+
+    def run(self) -> int:
+        """Execute the trace generation job.
+
+        Returns:
+            Exit code (0 for success)
+        """
+        print(f"=== TracegenJobRunner: {self.config.job_name} ===")
+
+        try:
+            if self.config.needs_vllm:
+                exit_code = self._run_with_vllm()
+            else:
+                exit_code = self._run_harbor(endpoint=None)
+
+            if exit_code == 0:
+                print(f"Trace generation job '{self.config.job_name}' completed successfully")
+            else:
+                print(f"Trace generation job '{self.config.job_name}' failed with code {exit_code}")
+
+            return exit_code
+
+        except Exception as e:
+            print(f"Trace generation job failed with exception: {e}", file=sys.stderr)
+            raise
+
+    def _run_with_vllm(self) -> int:
+        """Run trace generation with managed Ray cluster and vLLM server."""
+        from hpc.ray_utils import RayCluster, RayClusterConfig
+        from hpc.vllm_utils import VLLMServer, VLLMConfig
+
+        hpc = self._get_hpc()
+        num_nodes = int(os.environ.get("SLURM_JOB_NUM_NODES", self.config.num_nodes))
+
+        ray_cfg = RayClusterConfig(
+            num_nodes=num_nodes,
+            gpus_per_node=hpc.gpus_per_node,
+            cpus_per_node=hpc.cpus_per_node,
+            ray_port=self.config.ray_port,
+            srun_export_env=hpc.get_srun_export_env(),
+            ray_env_vars=hpc.get_ray_env_vars(),
+        )
+
+        vllm_cfg = VLLMConfig(
+            model_path=self.config.vllm_model_path or self.config.model,
+            tensor_parallel_size=self.config.tensor_parallel_size,
+            pipeline_parallel_size=self.config.pipeline_parallel_size,
+            data_parallel_size=self.config.data_parallel_size,
+            api_port=self.config.api_port,
+            endpoint_json_path=self.config.endpoint_json_path,
+            health_max_attempts=self.config.health_max_attempts,
+            health_retry_delay=self.config.health_retry_delay,
+        )
+
+        log_dir = Path(self.config.experiments_dir) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        vllm_log = log_dir / f"{self.config.job_name}_vllm.log"
+
+        with RayCluster.from_slurm(ray_cfg) as ray_cluster:
+            vllm_server = VLLMServer(
+                config=vllm_cfg,
+                ray_cluster=ray_cluster,
+                log_path=vllm_log,
             )
-        elif "vllm_endpoint_json_path" in exp_args:
-            del exp_args["vllm_endpoint_json_path"]
+            with vllm_server:
+                return self._run_harbor(endpoint=vllm_server.endpoint)
 
-        if dry_run_flag:
-            return [f"dry_run_trace_job_id_{plan.index:03d}" for plan in chunk_plans]
+    def _run_harbor(self, endpoint: Optional[str]) -> int:
+        """Execute the Harbor CLI for trace generation."""
+        cmd = [
+            "harbor",
+            "jobs",
+            "start",
+            "--config",
+            self.config.harbor_config,
+            "--job-name",
+            self.config.job_name,
+            "--env",
+            self.config.trace_env,
+            "--n-concurrent",
+            str(self.config.n_concurrent),
+            "--n-attempts",
+            str(self.config.n_attempts),
+        ]
 
-        chunk_base_env = dict(trace_env_vars)
-        chunk_base_env.update(
-            {
-                "TRACE_CHUNK_MODE": "1",
-                "TRACE_CHUNK_ENV_DIR": str(chunk_env_dir),
-                "TRACE_CHUNK_COUNT": str(len(chunk_plans)),
-            }
-        )
+        if self.config.agent:
+            cmd.extend(["--agent", self.config.agent])
 
-        array_limit = min(chunk_array_max, len(chunk_plans))
-        array_spec = f"0-{len(chunk_plans) - 1}%{array_limit}"
-        chunk_job_name = f"{exp_args['job_name']}_trace_chunks"
-        chunk_sbatch_output = os.path.join(sbatch_output_dir, f"{chunk_job_name}.sbatch")
-        sbatch_content = _render_trace_sbatch_content(
-            chunk_job_name,
-            chunk_base_env,
-            memory_limit_gb=trace_memory_limit_gb,
-            array_spec=array_spec,
-        )
-        with open(chunk_sbatch_output, "w") as f:
-            f.write(sbatch_content)
+        if self.config.model:
+            cmd.extend(["--model", self.config.model])
 
-        print(
-            f"Trace chunk job array sbatch: {chunk_sbatch_output} "
-            f"(chunks: {len(chunk_plans)}, array: {array_spec})"
-        )
+        if self.config.tasks_input_path:
+            cmd.extend(["-p", self.config.tasks_input_path])
 
-        job_id = _submit_script(chunk_sbatch_output, dependency=dependency, array=array_spec, hpc=hpc)
-        print(f"✓ Trace chunk array job submitted: {job_id}")
-        return [job_id]
+        # Build agent kwargs
+        agent_kwargs = dict(self.config.agent_kwargs)
+        if endpoint:
+            agent_kwargs["api_base"] = endpoint
+            metrics_endpoint = endpoint.replace("/v1", "/metrics")
+            agent_kwargs["metrics_endpoint"] = metrics_endpoint
 
-    trace_config_output = _materialize_trace_config(
-        dataset_path=tasks_root,
-        job_suffix="_trace",
-        jobs_dir=trace_jobs_dir_path,
-        agent_name_override=trace_agent_name,
-        agent_model_override=trace_model_dispatch or None,
-        agent_timeout_override=trace_agent_timeout_override,
-        agent_kwargs_override=trace_agent_kwargs,
-        n_concurrent_override=trace_n_concurrent_effective,
-        env_override=trace_env_override,
-        disable_verification=disable_verification_flag,
+        for key, value in agent_kwargs.items():
+            if isinstance(value, (dict, list)):
+                cmd.extend(["--agent-kwarg", f"{key}={json.dumps(value)}"])
+            else:
+                cmd.extend(["--agent-kwarg", f"{key}={value}"])
+
+        # Standard export flags
+        cmd.extend([
+            "--export-traces",
+            "--export-verifier-metadata",
+            "--export-episodes", "last",
+        ])
+
+        print(f"Running Harbor command: {' '.join(cmd)}")
+        result = subprocess.run(cmd)
+        return result.returncode
+
+
+def run_datagen_job_main():
+    """Entry point for running datagen jobs from sbatch scripts.
+
+    Usage:
+        python -m hpc.datagen_launch_utils --mode taskgen --config /path/to/config.json
+        python -m hpc.datagen_launch_utils --mode tracegen --config /path/to/config.json
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run datagen job from config JSON")
+    parser.add_argument(
+        "--mode",
+        required=True,
+        choices=["taskgen", "tracegen"],
+        help="Job mode: taskgen or tracegen",
     )
-    trace_env_vars["TRACE_HARBOR_CONFIG"] = str(trace_config_output)
-
-    trace_job_name = f"{exp_args['job_name']}_trace"
-    trace_sbatch_output = os.path.join(sbatch_output_dir, f"{trace_job_name}.sbatch")
-    sbatch_content = _render_trace_sbatch_content(
-        trace_job_name,
-        trace_env_vars,
-        memory_limit_gb=trace_memory_limit_gb,
+    parser.add_argument(
+        "--config",
+        required=True,
+        help="Path to job config JSON file",
     )
-    with open(trace_sbatch_output, "w") as f:
-        f.write(sbatch_content)
+    args = parser.parse_args()
 
-    print(f"Trace generation sbatch: {trace_sbatch_output}")
-    print(f"Trace script: {trace_script}")
-    print(f"Trace target repo: {trace_target_repo}")
+    config_path = Path(args.config)
+    if not config_path.exists():
+        print(f"Error: Config file not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
 
-    if dry_run_flag:
-        print("DRY RUN: Would submit trace generation job")
-        return "dry_run_trace_job_id"
+    config_data = json.loads(config_path.read_text())
 
-    job_id = _submit_script(trace_sbatch_output, dependency=dependency, hpc=hpc)
-    print(f"✓ Trace generation job submitted: {job_id}")
-    return job_id
+    if args.mode == "taskgen":
+        config = TaskgenJobConfig(**config_data)
+        runner = TaskgenJobRunner(config)
+    else:  # tracegen
+        config = TracegenJobConfig(**config_data)
+        runner = TracegenJobRunner(config)
+
+    exit_code = runner.run()
+    sys.exit(exit_code)
 
 
+if __name__ == "__main__":
+    run_datagen_job_main()
 
 
 __all__ = [
+    # Constants
     "DATAGEN_CONFIG_DIR",
     "HARBOR_CONFIG_DIR",
     "DEFAULT_RAY_CGRAPH_TIMEOUT",
     "DEFAULT_RAY_CGRAPH_MAX_INFLIGHT",
+    # Re-exports from launch_utils (for backwards compatibility)
     "derive_datagen_job_name",
     "default_vllm_endpoint_path",
+    # Config utilities
     "_maybe_set_ray_cgraph_env",
     "_normalize_cli_args",
     "_prepare_datagen_configuration",
@@ -2089,12 +1409,17 @@ __all__ = [
     "_build_vllm_env_vars",
     "resolve_datagen_config_path",
     "resolve_harbor_config_path",
+    # Chunk planning
     "TraceChunkPlan",
     "_format_chunk_target_repo",
     "_discover_task_entries",
     "_prepare_trace_chunk_plans",
-    "launch_datagen_job",
-    "launch_vllm_server",
-    "launch_task_job",
-    "launch_trace_job",
+    # Universal launcher
+    "launch_datagen_job_v2",
+    # Job runner classes for universal sbatch scripts
+    "TaskgenJobConfig",
+    "TaskgenJobRunner",
+    "TracegenJobConfig",
+    "TracegenJobRunner",
+    "run_datagen_job_main",
 ]

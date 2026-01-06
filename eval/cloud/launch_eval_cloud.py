@@ -398,10 +398,22 @@ def main() -> None:
         launch_kwargs["idle_minutes_to_autostop"] = args.autostop
 
     request_id = sky.launch(task, **launch_kwargs)
-    handle = sky.stream_and_get(request_id)
+    launch_result = sky.stream_and_get(request_id)
 
-    if isinstance(handle, Sequence):
-        handle = handle[0] if handle else None
+    job_id: Optional[int] = None
+    handle = None
+    if isinstance(launch_result, tuple) and len(launch_result) == 2:
+        potential_job_id, potential_handle = launch_result
+        if isinstance(potential_job_id, int) or potential_job_id is None:
+            job_id = potential_job_id
+            handle = potential_handle
+        else:
+            handle = launch_result[0]
+    elif isinstance(launch_result, Sequence):
+        handle = launch_result[0] if launch_result else None
+    else:
+        handle = launch_result
+
     cluster_for_sync = getattr(handle, "cluster_name", None) or args.cluster_name
 
     # Wait for the job to complete by tailing logs
@@ -410,8 +422,11 @@ def main() -> None:
         print(f"[cloud] Waiting for job to complete on cluster '{cluster_for_sync}'...")
         try:
             # tail_logs blocks until the job finishes and streams output
-            # job_id=None means tail the latest job
-            sky.tail_logs(cluster_for_sync, job_id=None, follow=True)
+            if job_id is not None:
+                sky.tail_logs(cluster_for_sync, job_id=job_id, follow=True)
+            else:
+                print("[cloud] Job ID unavailable; streaming latest job logs (may include older runs).")
+                sky.tail_logs(cluster_for_sync, job_id=None, follow=True)
         except Exception as e:
             print(f"[cloud] Warning: Failed to tail logs: {e}", file=sys.stderr)
             print(f"[cloud] You can manually check status with: sky queue {cluster_for_sync}", file=sys.stderr)

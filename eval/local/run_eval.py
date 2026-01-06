@@ -624,8 +624,6 @@ def _build_harbor_command(
         extra_args.append("--export-verifier-metadata")
     if not (_flag_present("--export-episodes")):
         extra_args.extend(["--export-episodes", "last"])
-    if not (_flag_present("--auto-resume") or _flag_present("--no-auto-resume")):
-        extra_args.append("--auto-resume")
 
     for extra in extra_args:
         cmd.append(extra)
