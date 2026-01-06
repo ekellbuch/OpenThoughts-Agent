@@ -22,6 +22,7 @@ from hpc.launch_utils import (
     _parse_optional_int,
     cleanup_endpoint_file,
     validate_trace_backend,
+    build_sbatch_directives,
 )
 
 # Config directory paths (same as datagen_launch_utils)
@@ -527,19 +528,8 @@ def launch_eval_job_v2(exp_args: dict, hpc) -> None:
     # Determine cluster env file
     cluster_env_file = hpc.dotenv_filename if hasattr(hpc, "dotenv_filename") else f"{hpc.name.lower()}.env"
 
-    # Build SBATCH directives respecting user overrides
-    partition = exp_args.get("partition") or hpc.partition
-    account = exp_args.get("account") or hpc.account
-    qos = exp_args.get("qos") or ""
-    sbatch_directives = []
-    if partition:
-        sbatch_directives.append(f"#SBATCH -p {partition}")
-    if account:
-        sbatch_directives.append(f"#SBATCH --account {account}")
-    if qos:
-        sbatch_directives.append(f"#SBATCH -q {qos}")
-    if hpc.node_exclusion_list:
-        sbatch_directives.append(f"#SBATCH --exclude={hpc.node_exclusion_list}")
+    # Build SBATCH directives using shared utility
+    sbatch_directives = build_sbatch_directives(hpc, exp_args)
 
     substitutions = {
         "time_limit": exp_args.get("time_limit") or "24:00:00",

@@ -30,6 +30,9 @@ class HPC(BaseModel):
     train_sbatch_filename: str
     node_exclusion_list: str = ""
     qos: str = ""  # Most clusters don't use QOS; set explicitly where needed
+    # GPU directive format: "--gres=gpu:{n}", "--gpus-per-node={n}", or "" (no directive)
+    # Use {n} as placeholder for GPU count
+    gpu_directive_format: str = ""
     pretok_qos: str = ""
     pretok_cpus_per_node: int = 0  # will use all available cpus
     pretok_time_limit: str = "24:00:00"
@@ -87,11 +90,46 @@ class HPC(BaseModel):
             return ""
         return f"#SBATCH --exclude={self.node_exclusion_list}"
 
-    def get_sbatch_directives(self, qos: str = "") -> str:
+    def get_gpu_directive(self, gpus: int) -> str:
+        """Generate SBATCH GPU directive for the given GPU count.
+
+        Args:
+            gpus: Number of GPUs to request.
+
+        Returns:
+            SBATCH directive string (e.g., "#SBATCH --gres=gpu:4") or empty string
+            if the cluster doesn't use GPU directives (like TACC GH200 clusters).
+        """
+        if not self.gpu_directive_format or gpus <= 0:
+            return ""
+        directive = self.gpu_directive_format.replace("{n}", str(gpus))
+        return f"#SBATCH {directive}"
+
+    def get_mem_directive(self, mem: str | None = None) -> str:
+        """Generate SBATCH memory directive.
+
+        Args:
+            mem: Memory string override. If None, uses cluster's mem_per_node.
+
+        Returns:
+            SBATCH directive string (e.g., "#SBATCH --mem=192G") or empty string
+            if memory is not configured for this cluster.
+        """
+        mem_value = mem or self.mem_per_node
+        if not mem_value:
+            return ""
+        return f"#SBATCH --mem={mem_value}"
+
+    def get_sbatch_directives(self, qos: str = "", gpus: int = 0, mem: str | None = None) -> str:
         """Generate cluster-specific SBATCH directives.
 
-        Returns directives for partition, account, QoS, exclusions, etc.
+        Returns directives for partition, account, QoS, GPU, memory, exclusions, etc.
         Only includes directives that are actually needed for this cluster.
+
+        Args:
+            qos: Optional QoS string.
+            gpus: Number of GPUs to request (0 = use cluster default or skip).
+            mem: Memory override (uses cluster default if None).
         """
         lines = []
         if self.partition:
@@ -100,6 +138,12 @@ class HPC(BaseModel):
             lines.append(f"#SBATCH --account {self.account}")
         if qos:
             lines.append(f"#SBATCH -q {qos}")
+        gpu_directive = self.get_gpu_directive(gpus)
+        if gpu_directive:
+            lines.append(gpu_directive)
+        mem_directive = self.get_mem_directive(mem)
+        if mem_directive:
+            lines.append(mem_directive)
         if self.node_exclusion_list:
             lines.append(f"#SBATCH --exclude={self.node_exclusion_list}")
         return "\n".join(lines)
@@ -140,6 +184,7 @@ jureca = HPC(
     internet_node=False,
     gpus_type="H100 94GB",
     total_partition_nodes=16,
+    gpu_directive_format="--gres=gpu:{n}",
     # Runtime configuration for Ray/vLLM
     modules=["CUDA/12.3"],
     env_vars={
@@ -159,6 +204,7 @@ jupiter = HPC(
     internet_node=False,
     gpus_type="GH200 96GB",
     total_partition_nodes=48,
+    gpu_directive_format="--gres=gpu:{n}",
 )
 
 juwels = HPC(
@@ -174,6 +220,7 @@ juwels = HPC(
     gpus_type="A100 40GB",
     total_partition_nodes=936,
     node_exclusion_list="jwb[0059,0067,0069,0193,0198,0215,0266,0284,0287,0294,0359,0418,0637,0647,0829,0832,0838,0898,0907,0921,0971,1004,1023,1029,1213]",
+    gpu_directive_format="--gres=gpu:{n}",
 )
 
 leonardo = HPC(
@@ -189,10 +236,11 @@ leonardo = HPC(
     gpus_type="A100 64GB",
     total_partition_nodes=3456,
     node_exclusion_list="lrdn[1606,2776,2425,2808,3064,3064,1953,2414,1506,1718,1779,2828,2354,3279,1370,2595,2751,2921,2368,2976,2733,2277,3136,2013,2952,1427,2682,2349,1655,1390,3151,3130,2002,2654,2101,2358,1597,2585,2900,2687,3165,3031,2798,2530,2344,1384,1420,1474,1509,1520,1556,1607,1647,1810,1927,2000,2028,2056,2120,2136,2371,2384,2444,2465,2479,2563,2598,2652,2716,2731,2746,2755,2772,2775,2792,2794,2917,2926,2927,3110,3221,3395,0666,0291,0043,1743,3299,3434,2379,2660,2711,2855,3444,3354,3111,2736,2345,0021,0037,2350,2201,2674,2642,2734,2690,3004,3091,1670,2689,3002,2362,1714,2071,1399,2940,2581,1357,3439,1569,1591,3439,1507,1531,2297,3379,3277,2912,1930,2878,2363,2984,3012,2663,2139,1457,2197]",
+    gpu_directive_format="--gres=gpu:{n}",
     pretok_qos="boost_qos_dbg",
     pretok_time_limit="00:30:00",
     pretok_partition="boost_usr_prod",
-    # this version doesn't work due to RuntimeError: 0 active drivers ([]). There should only be one. 
+    # this version doesn't work due to RuntimeError: 0 active drivers ([]). There should only be one.
     # errors that come up during imports.... could go deeper but wasn't working immediately
     # pretok_qos="normal",
     # pretok_cpus_per_node=4,
@@ -213,6 +261,7 @@ capella = HPC(
     internet_node=True,
     gpus_type="H100 94GB",
     total_partition_nodes=146,
+    gpu_directive_format="--gpus-per-node={n}",
     # Runtime configuration for Ray/vLLM
     modules=["CUDA/12.8.0"],
     env_vars={
@@ -239,6 +288,7 @@ alpha = HPC(
     internet_node=True,
     gpus_type="A100 40GB",
     total_partition_nodes=37,
+    gpu_directive_format="--gpus-per-node={n}",
 )
 
 dip = HPC(
@@ -268,6 +318,7 @@ lrz = HPC(
     internet_node=True,
     gpus_type="H100 94GB",
     total_partition_nodes=30,
+    gpu_directive_format="--gres=gpu:{n}",
 )
 
 vista = HPC(
@@ -327,6 +378,7 @@ claix = HPC(
     internet_node=True,
     gpus_type="H100 96GB",
     total_partition_nodes=50,
+    gpu_directive_format="--gres=gpu:{n}",
 )
 
 nyugreene = HPC(
@@ -342,6 +394,7 @@ nyugreene = HPC(
     internet_node=True,
     gpus_type="A100/H100 80GB",
     total_partition_nodes=48,
+    gpu_directive_format="--gres=gpu:{n}",
 )
 
 nyutorch = HPC(
@@ -358,6 +411,7 @@ nyutorch = HPC(
     internet_node=True,
     gpus_type="H200 141GB",
     total_partition_nodes=48,
+    gpu_directive_format="--gres=gpu:{n}",
     # Runtime configuration for Ray/vLLM (from legacy scripts)
     conda_activate="source $SCRATCH/miniconda3/etc/profile.d/conda.sh && conda activate dcagent312",
     env_vars={
@@ -381,6 +435,7 @@ oumi = HPC(
     internet_node=True,
     gpus_type="H100 80GB",
     total_partition_nodes=4,
+    gpu_directive_format="--gpus-per-node={n}",
 )
 
 perlmutter = HPC(
@@ -397,6 +452,7 @@ perlmutter = HPC(
     gpus_type="A100 80GB",
     total_partition_nodes=256,
     qos="regular",
+    gpu_directive_format="--gpus-per-node={n}",
 )
 
 frontier = HPC(
@@ -413,6 +469,7 @@ frontier = HPC(
     gpus_type="AMD Instinct MI250X",
     total_partition_nodes=9216,
     qos="normal",
+    gpu_directive_format="--gpus-per-node={n}",
 )
 
 clusters = [jureca, jupiter, juwels, leonardo, capella, alpha, dip, lrz, vista, lonestar, claix, nyugreene, nyutorch, oumi, perlmutter, frontier]

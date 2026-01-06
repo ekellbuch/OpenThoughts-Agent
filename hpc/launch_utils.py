@@ -237,6 +237,57 @@ def coerce_positive_int(value: Any, default: int) -> int:
         return default
 
 
+def build_sbatch_directives(
+    hpc,
+    exp_args: dict,
+    *,
+    partition: str | None = None,
+    account: str | None = None,
+    qos: str | None = None,
+    gpus: int | None = None,
+    mem: str | None = None,
+) -> list[str]:
+    """Build list of SBATCH directives for job submission.
+
+    Args:
+        hpc: HPC configuration object.
+        exp_args: Experiment arguments dict (used for fallback values).
+        partition: Override partition (falls back to exp_args then hpc).
+        account: Override account (falls back to exp_args then hpc).
+        qos: Override QoS (falls back to exp_args).
+        gpus: Override GPU count (falls back to exp_args then hpc).
+        mem: Override memory (falls back to hpc.mem_per_node).
+
+    Returns:
+        List of SBATCH directive strings (e.g., ["#SBATCH -p gpu", ...]).
+    """
+    # Resolve values with fallbacks
+    partition = partition or exp_args.get("partition") or hpc.partition
+    account = account or exp_args.get("account") or hpc.account
+    qos = qos or exp_args.get("qos") or ""
+    gpus_requested = int(gpus if gpus is not None else (exp_args.get("gpus_per_node") or hpc.gpus_per_node or 0))
+
+    directives = []
+    if partition:
+        directives.append(f"#SBATCH -p {partition}")
+    if account:
+        directives.append(f"#SBATCH --account {account}")
+    if qos:
+        directives.append(f"#SBATCH -q {qos}")
+    # Add GPU directive if the cluster uses one
+    gpu_directive = hpc.get_gpu_directive(gpus_requested)
+    if gpu_directive:
+        directives.append(gpu_directive)
+    # Add memory directive if the cluster uses one
+    mem_directive = hpc.get_mem_directive(mem)
+    if mem_directive:
+        directives.append(mem_directive)
+    if hpc.node_exclusion_list:
+        directives.append(f"#SBATCH --exclude={hpc.node_exclusion_list}")
+
+    return directives
+
+
 # =============================================================================
 # JSON/Config Parsing Utilities
 # =============================================================================
