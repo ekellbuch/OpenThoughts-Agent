@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import argparse
 import errno
+import getpass
+import hashlib
 import json
 import os
 import pty
+import re
 import signal
 import subprocess
 import sys
@@ -51,6 +54,62 @@ BOOL_ENV_FIELDS = {
     "trust_remote_code": "VLLM_TRUST_REMOTE_CODE",
     "disable_log_requests": "VLLM_DISABLE_LOG_REQUESTS",
 }
+
+
+def _resolve_jobs_dir_path(jobs_dir_value: Optional[str]) -> Path:
+    raw_value = jobs_dir_value or "jobs"
+    path = Path(raw_value)
+    if not path.is_absolute():
+        path = (REPO_ROOT / path).resolve()
+    return path
+
+
+def _ensure_database_module_path() -> None:
+    db_path = REPO_ROOT / "database"
+    if db_path.exists():
+        db_path_str = str(db_path)
+        if db_path_str not in sys.path:
+            sys.path.insert(0, db_path_str)
+
+
+def _sanitize_hf_repo_id(repo_id: str, max_length: int = 96) -> str:
+    """
+    Sanitize a Hugging Face repo_id to comply with naming rules.
+    Based on the sbatch uploader helper used in HPC eval jobs.
+    """
+
+    def collapse(value: str) -> str:
+        prev = None
+        while value != prev:
+            prev = value
+            value = value.replace("--", "-").replace("..", ".")
+        return value
+
+    org, name = repo_id.split("/", 1) if "/" in repo_id else (None, repo_id)
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", name)
+    name = collapse(name).strip("-.")
+    if not name:
+        name = "repo"
+    limit = max_length - (len(org) + 1 if org else 0)
+    if len(name) > limit > 8:
+        digest = hashlib.sha1(name.encode()).hexdigest()[:8]
+        keep = max(1, limit - len(digest))
+        base = name[:keep].rstrip("-.") or "r"
+        name = collapse(f"{base}{digest}").strip("-.")
+    if name[0] in "-.":
+        name = f"r{name[1:]}"
+    if name[-1] in "-.":
+        name = f"{name[:-1]}0"
+    return f"{org}/{name}" if org else name
+
+
+def _derive_default_hf_repo_id(args: argparse.Namespace, job_name: str) -> str:
+    benchmark_repo = args.eval_benchmark_repo or ""
+    if "/" in benchmark_repo:
+        org = benchmark_repo.split("/", 1)[0]
+    else:
+        org = benchmark_repo or "openthoughts-agent"
+    return f"{org}/{job_name}"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -128,6 +187,45 @@ def _parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Print commands without executing Harbor.",
+    )
+    parser.add_argument(
+        "--upload-to-database",
+        action="store_true",
+        help="After Harbor finishes, upload traces + metrics to Supabase (same flow as HPC eval jobs).",
+    )
+    parser.add_argument(
+        "--upload-username",
+        help="Username to attribute in Supabase (defaults to $UPLOAD_USERNAME or current user).",
+    )
+    parser.add_argument(
+        "--upload-error-mode",
+        choices=["skip_on_error", "rollback_on_error"],
+        default="skip_on_error",
+        help="Supabase upload error handling (default: skip_on_error).",
+    )
+    parser.add_argument(
+        "--upload-hf-repo",
+        help="Hugging Face repo id used when uploading traces (defaults to <org>/<job_name>).",
+    )
+    parser.add_argument(
+        "--upload-hf-token",
+        help="Hugging Face token for trace upload (defaults to $HF_TOKEN).",
+    )
+    parser.add_argument(
+        "--upload-hf-private",
+        action="store_true",
+        help="Create/overwrite the Hugging Face repo as private.",
+    )
+    parser.add_argument(
+        "--upload-hf-episodes",
+        choices=["last", "all"],
+        default="last",
+        help="Which episodes to upload to Hugging Face when pushing traces.",
+    )
+    parser.add_argument(
+        "--upload-forced-update",
+        action="store_true",
+        help="Allow overwriting existing Supabase records for the same job.",
     )
     return parser.parse_args()
 
@@ -410,6 +508,62 @@ def _load_endpoint_metadata(endpoint_json: Path) -> dict:
     return data
 
 
+def _maybe_upload_results(args: argparse.Namespace) -> None:
+    if not getattr(args, "upload_to_database", False):
+        return
+    if args.dry_run:
+        print("[upload] Skipping Supabase upload because --dry-run was set.")
+        return
+    job_name = getattr(args, "_harbor_job_name", None)
+    jobs_dir_path = getattr(args, "_jobs_dir_path", None)
+    if not job_name or jobs_dir_path is None:
+        print("[upload] Unable to determine job directory; upload skipped.")
+        return
+    run_dir = Path(jobs_dir_path) / job_name
+    if not run_dir.exists():
+        print(f"[upload] Expected Harbor job directory {run_dir} does not exist; upload skipped.")
+        return
+
+    _ensure_database_module_path()
+    try:
+        from unified_db.utils import upload_eval_results
+    except ImportError as exc:
+        raise RuntimeError(
+            "Supabase upload helpers are unavailable. Install the database extras "
+            "(e.g., `pip install .[cloud]`) or ensure dcagents-leaderboard is on PYTHONPATH."
+        ) from exc
+
+    username = args.upload_username or os.environ.get("UPLOAD_USERNAME") or getpass.getuser()
+    hf_repo_id = args.upload_hf_repo or _derive_default_hf_repo_id(args, job_name)
+    hf_token = args.upload_hf_token or os.environ.get("HF_TOKEN")
+    if hf_repo_id:
+        hf_repo_id = _sanitize_hf_repo_id(hf_repo_id)
+    if hf_repo_id and not hf_token:
+        print("[upload] HF repo requested but no token provided; skipping HF upload step.")
+        hf_repo_id = None
+    print(f"[upload] Uploading Harbor job '{job_name}' from {run_dir}")
+    result = upload_eval_results(
+        run_dir,
+        username=username,
+        error_mode=args.upload_error_mode,
+        agent_name=args.agent,
+        model_name=args.model,
+        benchmark_name=args.dataset or args.dataset_path,
+        register_benchmark=True,
+        hf_repo_id=hf_repo_id,
+        hf_private=args.upload_hf_private,
+        hf_token=hf_token,
+        hf_episodes=args.upload_hf_episodes,
+        forced_update=args.upload_forced_update,
+    )
+    uploaded = result.get("n_trials_uploaded")
+    job_id = result.get("job_id")
+    hf_dataset = result.get("hf_dataset_url")
+    print(
+        f"[upload] Upload complete (job_id={job_id}, trials={uploaded}, hf_dataset={hf_dataset or 'n/a'})."
+    )
+
+
 def _build_harbor_command(
     args: argparse.Namespace,
     dataset_label: str,
@@ -418,6 +572,7 @@ def _build_harbor_command(
     harbor_model = getattr(args, "_harbor_model_name", args.model)
     job_model_label = args.model or harbor_model or "model"
     job_name = args.job_name or _default_job_name(dataset_label, job_model_label)
+    args._harbor_job_name = job_name
     base_agent_kwargs = _deep_copy(getattr(args, "_base_agent_kwargs", {}) or {})
     if endpoint_meta.get("metrics_endpoint"):
         base_agent_kwargs["metrics_endpoint"] = endpoint_meta["metrics_endpoint"]
@@ -562,6 +717,11 @@ def main() -> None:
             harbor_config_data = yaml.safe_load(harbor_handle) or {}
     except FileNotFoundError:
         harbor_config_data = {}
+    if isinstance(harbor_config_data, dict):
+        jobs_dir_value = harbor_config_data.get("jobs_dir")
+    else:
+        jobs_dir_value = None
+    args._jobs_dir_path = _resolve_jobs_dir_path(jobs_dir_value)
     agents_def = harbor_config_data.get("agents") if isinstance(harbor_config_data, dict) else None
     first_agent = agents_def[0] if agents_def else {}
     base_agent_kwargs = first_agent.get("kwargs") if isinstance(first_agent, dict) else {}
@@ -611,6 +771,9 @@ def main() -> None:
         print("Harbor command:", " ".join(harbor_cmd))
         if not args.dry_run:
             _run_harbor_cli(harbor_cmd, harbor_log)
+            _maybe_upload_results(args)
+        elif args.upload_to_database:
+            print("[upload] --upload-to-database ignored because --dry-run was requested.")
     finally:
         _terminate(processes[::-1])
         subprocess.run(["ray", "stop", "--force"], check=False)

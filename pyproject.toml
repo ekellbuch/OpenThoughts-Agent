@@ -48,6 +48,29 @@ datagen-swesmith = [
 ]
 cloud = [
     "skypilot>=0.6.1",
+    "google-api-python-client",  # GCP support for SkyPilot
+]
+cloud-aws = [
+    "skypilot>=0.6.1",
+    "boto3",
+]
+cloud-lambda = [
+    "skypilot>=0.6.1",
+    # Lambda Cloud only needs skypilot + API key configuration
+]
+cloud-vast = [
+    "skypilot>=0.6.1",
+    "vastai-sdk>=0.1.12",
+]
+cloud-kubernetes = [
+    "skypilot>=0.6.1",
+    # Kubernetes needs kubectl + kubeconfig, no extra Python deps
+]
+cloud-all = [
+    "skypilot>=0.6.1",
+    "google-api-python-client",
+    "boto3",
+    "vastai-sdk>=0.1.12",
 ]
 rl = [
     "skyrl @ git+https://github.com/mlfoundations/skyrl.git",
