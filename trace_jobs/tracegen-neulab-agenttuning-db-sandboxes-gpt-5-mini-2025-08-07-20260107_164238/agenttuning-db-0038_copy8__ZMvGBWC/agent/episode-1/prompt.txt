@@ -1,0 +1,42 @@
+New Terminal Output:
+
+root@f73ad5e43986:/app# which mysql
+root@f73ad5e43986:/app# mysql --version
+bash: mysql: command not found
+root@f73ad5e43986:/app# mysql -u root -e "SHOW DATABASES;"
+bash: mysql: command not found
+root@f73ad5e43986:/app#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

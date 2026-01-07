@@ -1,0 +1,42 @@
+New Terminal Output:
+
+root@3ac0e9a84838:/app# mysql -uroot -e "SHOW DATABASES;"
+bash: mysql: command not found
+root@3ac0e9a84838:/app#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

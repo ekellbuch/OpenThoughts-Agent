@@ -1,0 +1,3 @@
+New Terminal Output:
+
+root@8e41ef17c439:/app#
