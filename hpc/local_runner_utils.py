@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from hpc.vllm_utils import _build_vllm_cli_args
+from hpc.launch_utils import generate_served_model_id, hosted_vllm_alias
 
 
 @dataclass
@@ -669,17 +670,8 @@ def load_harbor_config(harbor_config_path: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # LocalHarborRunner base class
 # ---------------------------------------------------------------------------
-
-
-def generate_served_model_id() -> str:
-    """Generate a unique served model ID based on timestamp."""
-    import time
-    return str(int(time.time() * 1_000_000))
-
-
-def hosted_vllm_alias(served_id: str) -> str:
-    """Generate the hosted_vllm model alias."""
-    return f"hosted_vllm/{served_id}"
+# Note: generate_served_model_id and hosted_vllm_alias are imported from
+# hpc.launch_utils to avoid duplication.
 
 
 class LocalHarborRunner:
@@ -1080,7 +1072,7 @@ __all__ = [
     "parse_agent_kwarg_strings",
     "serialize_agent_kwargs",
     "build_harbor_command",
-    # Model ID utilities
+    # Model ID utilities (re-exported from launch_utils)
     "generate_served_model_id",
     "hosted_vllm_alias",
     # Base runner class

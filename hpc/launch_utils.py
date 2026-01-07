@@ -4,6 +4,7 @@ Utility helpers shared across HPC launch entry points.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -61,6 +62,45 @@ def strip_hosted_vllm_alias(model_name: Optional[str]) -> str:
     if is_hosted_vllm_alias(model_name):
         return str(model_name)[len(_HOSTED_VLLM_PREFIX) :]
     return str(model_name)
+
+
+def sanitize_hf_repo_id(repo_id: str, max_length: int = 96) -> str:
+    """Sanitize a HuggingFace repo_id to comply with naming rules.
+
+    Keeps org prefix (e.g. 'mlfoundations-dev/') and cleans up the rest.
+    Used when deriving HF dataset repo names from job names or model paths.
+
+    Args:
+        repo_id: The repository ID to sanitize (e.g., 'org/some-name').
+        max_length: Maximum allowed length for the full repo_id.
+
+    Returns:
+        Sanitized repo_id that complies with HuggingFace naming rules.
+    """
+
+    def collapse(value: str) -> str:
+        prev = None
+        while value != prev:
+            prev = value
+            value = value.replace("--", "-").replace("..", ".")
+        return value
+
+    org, name = repo_id.split("/", 1) if "/" in repo_id else (None, repo_id)
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", name)
+    name = collapse(name).strip("-.")
+    if not name:
+        name = "repo"
+    limit = max_length - (len(org) + 1 if org else 0)
+    if len(name) > limit > 8:
+        digest = hashlib.sha1(name.encode()).hexdigest()[:8]
+        keep = max(1, limit - len(digest))
+        base = name[:keep].rstrip("-.") or "r"
+        name = collapse(f"{base}{digest}").strip("-.")
+    if name[0] in "-.":
+        name = f"r{name[1:]}"
+    if name[-1] in "-.":
+        name = f"{name[:-1]}0"
+    return f"{org}/{name}" if org else name
 
 
 # =============================================================================
@@ -1132,6 +1172,7 @@ __all__ = [
     "get_job_name",
     "sanitize_repo_for_job",
     "sanitize_repo_component",
+    "sanitize_hf_repo_id",
     # SBATCH utilities
     "_parse_optional_int",
     "_inject_env_block",

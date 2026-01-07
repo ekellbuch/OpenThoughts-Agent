@@ -10,46 +10,13 @@ where we have exclusive access to the box.
 from __future__ import annotations
 
 import argparse
-import hashlib
-import re
-import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 from hpc.local_runner_utils import LocalHarborRunner
-
-
-def _sanitize_hf_repo_id(repo_id: str, max_length: int = 96) -> str:
-    """
-    Sanitize a Hugging Face repo_id to comply with naming rules.
-    Based on the sbatch uploader helper used in HPC eval jobs.
-    """
-
-    def collapse(value: str) -> str:
-        prev = None
-        while value != prev:
-            prev = value
-            value = value.replace("--", "-").replace("..", ".")
-        return value
-
-    org, name = repo_id.split("/", 1) if "/" in repo_id else (None, repo_id)
-    name = re.sub(r"[^A-Za-z0-9._-]", "-", name)
-    name = collapse(name).strip("-.")
-    if not name:
-        name = "repo"
-    limit = max_length - (len(org) + 1 if org else 0)
-    if len(name) > limit > 8:
-        digest = hashlib.sha1(name.encode()).hexdigest()[:8]
-        keep = max(1, limit - len(digest))
-        base = name[:keep].rstrip("-.") or "r"
-        name = collapse(f"{base}{digest}").strip("-.")
-    if name[0] in "-.":
-        name = f"r{name[1:]}"
-    if name[-1] in "-.":
-        name = f"{name[:-1]}0"
-    return f"{org}/{name}" if org else name
+from hpc.launch_utils import sanitize_hf_repo_id
 
 
 class EvalRunner(LocalHarborRunner):
@@ -219,7 +186,7 @@ class EvalRunner(LocalHarborRunner):
         )
         hf_repo_id = args.upload_hf_repo or self._derive_default_hf_repo_id(job_name)
         if hf_repo_id:
-            hf_repo_id = _sanitize_hf_repo_id(hf_repo_id)
+            hf_repo_id = sanitize_hf_repo_id(hf_repo_id)
 
         result = sync_eval_to_database(
             job_dir=run_dir,
