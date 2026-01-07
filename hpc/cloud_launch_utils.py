@@ -538,9 +538,9 @@ def prepare_hf_dataset_for_sync(
             print(f"[hf-prep] Extracting {parquet_file} to {output_path}")
 
         # Extract tasks
-        tpc.parquet_to_tasks(
+        tpc.from_parquet(
             parquet_path=str(parquet_file),
-            output_dir=str(output_path),
+            base=str(output_path),
             on_exist=on_exist,
         )
 
