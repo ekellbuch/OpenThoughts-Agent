@@ -1,3 +1,11 @@
+"""
+Sync utilities for SkyPilot-based cloud launches.
+
+This module provides rsync-based file synchronization between
+remote cloud clusters and local machines. It uses SkyPilot's
+SSH configuration (cluster name as SSH host) for authentication.
+"""
+
 from __future__ import annotations
 
 import subprocess
@@ -6,13 +14,13 @@ from pathlib import Path
 from typing import Optional
 
 
-def sync_eval_outputs(
+def sync_outputs(
     cluster_name: Optional[str],
     remote_path: str,
     local_dir: str,
     verbose: bool = True,
 ) -> bool:
-    """Sync eval outputs from remote cluster to local machine using rsync.
+    """Sync outputs from remote cluster to local machine using rsync.
 
     Args:
         cluster_name: SkyPilot cluster name (used as SSH host)
@@ -86,3 +94,7 @@ def _print_manual_instructions(cluster_name: str, remote_path: str, local_path: 
         f"  # or\n"
         f"  scp -r {cluster_name}:{remote_path}/* {local_path}/\n"
     )
+
+
+# Backwards compatibility alias
+sync_eval_outputs = sync_outputs

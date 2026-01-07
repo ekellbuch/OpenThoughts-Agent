@@ -1,5 +1,5 @@
 """
-Cloud provider utilities for SkyPilot-based eval launches.
+Cloud provider utilities for SkyPilot-based cloud launches.
 
 This module provides:
 - Provider configuration and metadata
@@ -13,7 +13,7 @@ Supported providers:
 - Infrastructure: kubernetes
 
 For setup instructions, run:
-    python -m eval.cloud.providers --check
+    python -m hpc.cloud_providers --check
 """
 
 from __future__ import annotations
