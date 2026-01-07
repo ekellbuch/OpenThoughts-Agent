@@ -666,6 +666,397 @@ def load_harbor_config(harbor_config_path: str) -> Dict[str, Any]:
         return {}
 
 
+# ---------------------------------------------------------------------------
+# LocalHarborRunner base class
+# ---------------------------------------------------------------------------
+
+
+def generate_served_model_id() -> str:
+    """Generate a unique served model ID based on timestamp."""
+    import time
+    return str(int(time.time() * 1_000_000))
+
+
+def hosted_vllm_alias(served_id: str) -> str:
+    """Generate the hosted_vllm model alias."""
+    return f"hosted_vllm/{served_id}"
+
+
+class LocalHarborRunner:
+    """Base class for local Harbor runners (tracegen, eval).
+
+    This class encapsulates the common workflow for running Harbor jobs locally:
+    1. Parse and validate arguments
+    2. Set up defaults for parallelism, ports, etc.
+    3. Start Ray cluster and vLLM controller
+    4. Wait for endpoint to be ready
+    5. Build and run Harbor command
+    6. Clean up processes
+
+    Subclasses should override:
+    - JOB_PREFIX: Job name prefix (e.g., "tracegen", "eval")
+    - DEFAULT_EXPERIMENTS_SUBDIR: Subdirectory for experiments (e.g., "trace_runs")
+    - DEFAULT_N_CONCURRENT: Default concurrent trials
+    - DATAGEN_CONFIG_REQUIRED: Whether datagen_config is required
+    - get_env_type(): Return the environment type from args
+    - get_dataset_label(): Return dataset label for job naming
+    - get_dataset_for_harbor(): Return (dataset_slug, dataset_path) tuple
+    - validate_args(): Additional argument validation
+    - post_harbor_hook(): Called after Harbor completes (for uploads)
+    - print_banner(): Print startup banner
+    """
+
+    # Subclass configuration - override these in subclasses
+    JOB_PREFIX: str = "job"
+    DEFAULT_EXPERIMENTS_SUBDIR: str = "runs"
+    DEFAULT_N_CONCURRENT: int = 16
+    DATAGEN_CONFIG_REQUIRED: bool = False
+    DEFAULT_ENDPOINT_FILENAME: str = "vllm_endpoint.json"
+
+    def __init__(self, args: argparse.Namespace, repo_root: Path):
+        """Initialize the runner.
+
+        Args:
+            args: Parsed command-line arguments
+            repo_root: Path to repository root
+        """
+        self.args = args
+        self.repo_root = repo_root
+        self.processes: List[ManagedProcess] = []
+        self._endpoint_json: Optional[Path] = None
+        self._endpoint_meta: Optional[Dict[str, Any]] = None
+        self._harbor_job_name: Optional[str] = None
+
+    @classmethod
+    def add_common_arguments(cls, parser: argparse.ArgumentParser) -> None:
+        """Add common arguments shared by all local runners.
+
+        Args:
+            parser: ArgumentParser to add arguments to
+        """
+        parser.add_argument(
+            "--harbor-config",
+            required=True,
+            help="Path to Harbor job config YAML.",
+        )
+        parser.add_argument(
+            "--model",
+            help="Model identifier (overrides datagen config).",
+        )
+        parser.add_argument(
+            "--agent",
+            default="terminus-2",
+            help="Harbor agent name to run (default: terminus-2).",
+        )
+        parser.add_argument(
+            "--n-concurrent",
+            type=int,
+            default=cls.DEFAULT_N_CONCURRENT,
+            help=f"Concurrent trials (default: {cls.DEFAULT_N_CONCURRENT}).",
+        )
+        parser.add_argument(
+            "--n-attempts",
+            type=int,
+            default=3,
+            help="Retries per task (default: 3).",
+        )
+        parser.add_argument(
+            "--job-name",
+            help="Optional Harbor job name override.",
+        )
+        parser.add_argument(
+            "--host",
+            default="127.0.0.1",
+            help="Host/IP for Ray + vLLM (default: 127.0.0.1).",
+        )
+        parser.add_argument("--ray-port", type=int, default=6379, help="Ray head port.")
+        parser.add_argument("--api-port", type=int, default=8000, help="vLLM OpenAI server port.")
+        parser.add_argument("--gpus", type=int, help="GPUs to expose to Ray.")
+        parser.add_argument("--cpus", type=int, help="CPUs to expose to Ray.")
+        parser.add_argument("--tensor-parallel-size", type=int)
+        parser.add_argument("--pipeline-parallel-size", type=int)
+        parser.add_argument("--data-parallel-size", type=int)
+        parser.add_argument("--health-max-attempts", type=int, default=100)
+        parser.add_argument("--health-retry-delay", type=int, default=30)
+        parser.add_argument("--harbor-binary", default="harbor", help="Harbor CLI executable.")
+        parser.add_argument(
+            "--agent-kwarg",
+            action="append",
+            default=[],
+            help="Additional --agent-kwarg entries (key=value).",
+        )
+        parser.add_argument(
+            "--controller-log",
+            help="Optional path for vLLM controller stdout/stderr.",
+        )
+        parser.add_argument(
+            "--ray-log",
+            help="Optional path for Ray stdout/stderr.",
+        )
+        parser.add_argument(
+            "--endpoint-json",
+            help="Optional endpoint JSON path.",
+        )
+        parser.add_argument(
+            "--harbor-log",
+            help="Optional path for Harbor CLI stdout/stderr.",
+        )
+        parser.add_argument(
+            "--harbor-extra-arg",
+            action="append",
+            default=[],
+            help="Additional passthrough args for `harbor jobs start`.",
+        )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Print commands without executing Harbor.",
+        )
+
+    def get_env_type(self) -> str:
+        """Get the environment type (--trace-env or --eval-env).
+
+        Subclasses must override this method.
+        """
+        raise NotImplementedError("Subclasses must implement get_env_type()")
+
+    def get_dataset_label(self) -> str:
+        """Get the dataset label for job naming.
+
+        Subclasses must override this method.
+        """
+        raise NotImplementedError("Subclasses must implement get_dataset_label()")
+
+    def get_dataset_for_harbor(self) -> Tuple[Optional[str], Optional[str]]:
+        """Return (dataset_slug, dataset_path) for harbor command.
+
+        Subclasses must override this method.
+
+        Returns:
+            Tuple of (dataset_slug, dataset_path) - one should be None
+        """
+        raise NotImplementedError("Subclasses must implement get_dataset_for_harbor()")
+
+    def get_experiments_dir(self) -> Path:
+        """Get the experiments directory path.
+
+        Can be overridden by subclasses for custom logic.
+        """
+        if hasattr(self.args, "experiments_dir") and self.args.experiments_dir:
+            return Path(self.args.experiments_dir).expanduser().resolve()
+        return self.repo_root / self.DEFAULT_EXPERIMENTS_SUBDIR
+
+    def validate_args(self) -> None:
+        """Validate arguments - subclasses can override for additional checks."""
+        pass
+
+    def post_harbor_hook(self) -> None:
+        """Called after Harbor completes - for uploads, etc.
+
+        Subclasses should override this method to implement upload logic.
+        """
+        pass
+
+    def print_banner(self) -> None:
+        """Print startup banner - subclasses should override."""
+        print(f"=== Local {self.JOB_PREFIX.title()} Runner ===")
+        print(f"  Model: {self.args.model}")
+        print(f"  TP/PP/DP: {self.args.tensor_parallel_size}/{self.args.pipeline_parallel_size}/{self.args.data_parallel_size}")
+        print(f"  GPUs: {self.args.gpus}")
+        print("=" * 35)
+
+    def setup(self) -> None:
+        """Set up the runner - apply defaults, configure environment."""
+        args = self.args
+
+        # Apply datagen config defaults
+        apply_datagen_defaults(args)
+
+        # Set up Docker runtime if using docker backend
+        setup_docker_runtime_if_needed(self.get_env_type())
+
+        # Set parallelism defaults
+        if args.tensor_parallel_size is None:
+            args.tensor_parallel_size = 1
+        if args.pipeline_parallel_size is None:
+            args.pipeline_parallel_size = 1
+        if args.data_parallel_size is None:
+            args.data_parallel_size = 1
+
+        # Validate model
+        if args.model is None:
+            raise ValueError("Provide --model or supply a datagen config with vllm_server.model_path.")
+
+        # Generate served model ID
+        served_model_id = generate_served_model_id()
+        args._served_model_id = served_model_id
+        args._harbor_model_name = hosted_vllm_alias(served_model_id)
+
+        # Set GPU/CPU defaults
+        if args.gpus is None:
+            args.gpus = max(
+                1,
+                args.tensor_parallel_size * args.pipeline_parallel_size * args.data_parallel_size,
+            )
+        if args.cpus is None:
+            args.cpus = os.cpu_count() or 16
+
+        # Set port defaults
+        if args.ray_port is None:
+            args.ray_port = 6379
+        if args.api_port is None:
+            args.api_port = 8000
+
+        # Resolve paths
+        args.harbor_config = str(Path(args.harbor_config).expanduser().resolve())
+
+        # Load Harbor config
+        harbor_config_data = load_harbor_config(args.harbor_config)
+        jobs_dir_value = harbor_config_data.get("jobs_dir") if isinstance(harbor_config_data, dict) else None
+        args._jobs_dir_path = resolve_jobs_dir_path(jobs_dir_value, self.repo_root)
+        args._harbor_config_data = harbor_config_data
+
+        # Subclass-specific validation
+        self.validate_args()
+
+    def _setup_directories(self) -> Tuple[Path, Path]:
+        """Set up experiments and logs directories.
+
+        Returns:
+            Tuple of (experiments_dir, logs_dir)
+        """
+        experiments_dir = self.get_experiments_dir()
+        experiments_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir = experiments_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        return experiments_dir, logs_dir
+
+    def _setup_signal_handlers(self) -> None:
+        """Set up signal handlers for graceful shutdown."""
+        import signal as sig
+
+        def _handle_signal(signum, _frame):
+            print(f"\nSignal {signum} received; shutting down...", file=sys.stderr)
+            self.cleanup()
+            sys.exit(1)
+
+        sig.signal(sig.SIGINT, _handle_signal)
+        sig.signal(sig.SIGTERM, _handle_signal)
+
+    def cleanup(self) -> None:
+        """Clean up processes."""
+        terminate_processes(self.processes[::-1])
+        subprocess.run(["ray", "stop", "--force"], check=False)
+
+    def run(self) -> None:
+        """Main entry point - start services and run Harbor."""
+        args = self.args
+
+        # Set up directories
+        experiments_dir, logs_dir = self._setup_directories()
+
+        # Set up endpoint JSON path
+        self._endpoint_json = Path(args.endpoint_json or (experiments_dir / self.DEFAULT_ENDPOINT_FILENAME))
+        if self._endpoint_json.exists():
+            self._endpoint_json.unlink()
+
+        # Change to repo root
+        os.chdir(self.repo_root)
+
+        # Set up log paths
+        ray_log = Path(args.ray_log) if args.ray_log else logs_dir / "ray.log"
+        controller_log = Path(args.controller_log) if args.controller_log else logs_dir / "vllm_controller.log"
+        harbor_log = Path(args.harbor_log).expanduser().resolve() if args.harbor_log else None
+
+        # Set up signal handlers
+        self._setup_signal_handlers()
+
+        # Print banner
+        self.print_banner()
+
+        # Start Ray
+        controller_script = self.repo_root / "scripts" / "vllm" / "start_vllm_ray_controller.py"
+
+        ray_proc = start_ray(
+            host=args.host,
+            ray_port=args.ray_port,
+            num_gpus=args.gpus,
+            num_cpus=args.cpus,
+            log_path=ray_log,
+        )
+        self.processes.append(ray_proc)
+
+        # Start vLLM controller
+        vllm_proc = start_vllm_controller(
+            model=args.model,
+            host=args.host,
+            ray_port=args.ray_port,
+            api_port=args.api_port,
+            tensor_parallel_size=args.tensor_parallel_size,
+            pipeline_parallel_size=args.pipeline_parallel_size,
+            data_parallel_size=args.data_parallel_size,
+            endpoint_path=self._endpoint_json,
+            controller_script=controller_script,
+            log_path=controller_log,
+            served_model_name=getattr(args, "_served_model_id", None),
+            extra_cli_args=getattr(args, "_vllm_cli_args", []),
+            extra_env_vars=getattr(args, "_vllm_env_vars", {}),
+        )
+        self.processes.append(vllm_proc)
+
+        try:
+            # Wait for endpoint and run health check
+            wait_for_endpoint(self._endpoint_json, vllm_proc)
+            run_endpoint_health_check(
+                self._endpoint_json,
+                args.health_max_attempts,
+                args.health_retry_delay,
+                self.repo_root,
+            )
+            self._endpoint_meta = load_endpoint_metadata(self._endpoint_json)
+
+            # Compute job name
+            harbor_model = getattr(args, "_harbor_model_name", args.model)
+            job_model_label = args.model or harbor_model or "model"
+            dataset_label = self.get_dataset_label()
+            job_name = args.job_name or default_job_name(self.JOB_PREFIX, dataset_label, job_model_label)
+            self._harbor_job_name = job_name
+            args._harbor_job_name = job_name
+
+            # Get dataset info
+            dataset_slug, dataset_path = self.get_dataset_for_harbor()
+
+            # Build Harbor command
+            harbor_cmd = build_harbor_command(
+                harbor_binary=args.harbor_binary,
+                harbor_config_path=args.harbor_config,
+                harbor_config_data=getattr(args, "_harbor_config_data", {}),
+                job_name=job_name,
+                agent_name=args.agent,
+                model_name=harbor_model,
+                env_type=self.get_env_type(),
+                n_concurrent=args.n_concurrent,
+                n_attempts=args.n_attempts,
+                endpoint_meta=self._endpoint_meta,
+                agent_kwarg_overrides=list(args.agent_kwarg or []),
+                harbor_extra_args=list(args.harbor_extra_arg or []),
+                dataset_slug=dataset_slug,
+                dataset_path=dataset_path,
+            )
+            print("Harbor command:", " ".join(harbor_cmd))
+
+            if not args.dry_run:
+                # Import here to avoid circular imports
+                from hpc.cli_utils import run_harbor_cli
+                run_harbor_cli(harbor_cmd, harbor_log)
+                self.post_harbor_hook()
+            else:
+                print(f"[dry-run] Would run Harbor {self.JOB_PREFIX} job.")
+
+        finally:
+            self.cleanup()
+
+
 __all__ = [
     # Process management
     "ManagedProcess",
@@ -689,6 +1080,11 @@ __all__ = [
     "parse_agent_kwarg_strings",
     "serialize_agent_kwargs",
     "build_harbor_command",
+    # Model ID utilities
+    "generate_served_model_id",
+    "hosted_vllm_alias",
+    # Base runner class
+    "LocalHarborRunner",
     # Re-exports
     "_build_vllm_cli_args",
 ]
