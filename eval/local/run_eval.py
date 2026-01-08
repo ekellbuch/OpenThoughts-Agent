@@ -13,10 +13,8 @@ import argparse
 from pathlib import Path
 from typing import Optional, Tuple
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
+from hpc.launch_utils import PROJECT_ROOT, sanitize_hf_repo_id
 from hpc.local_runner_utils import LocalHarborRunner
-from hpc.launch_utils import sanitize_hf_repo_id
 from hpc.arg_groups import add_harbor_env_arg, add_hf_upload_args, add_database_upload_args
 
 
@@ -60,7 +58,7 @@ class EvalRunner(LocalHarborRunner):
 
         parser.add_argument(
             "--experiments_dir",
-            default=str(REPO_ROOT / cls.DEFAULT_EXPERIMENTS_SUBDIR),
+            default=str(PROJECT_ROOT / cls.DEFAULT_EXPERIMENTS_SUBDIR),
             help="Directory for logs + endpoint JSON.",
         )
         parser.add_argument("--experiments-dir", dest="experiments_dir", help=argparse.SUPPRESS)
@@ -189,7 +187,7 @@ def main() -> None:
     parser = EvalRunner.create_parser()
     args = parser.parse_args()
 
-    runner = EvalRunner(args, REPO_ROOT)
+    runner = EvalRunner(args, PROJECT_ROOT)
     runner.setup()
     runner.run()
 
