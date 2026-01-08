@@ -12,9 +12,10 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.append(str(REPO_ROOT))
+# Add repo root to sys.path for imports
+_repo_root = Path(__file__).resolve().parents[2]
+if str(_repo_root) not in sys.path:
+    sys.path.append(str(_repo_root))
 
 # Handle --list-providers before importing anything heavy
 if "--list-providers" in sys.argv:
@@ -24,6 +25,7 @@ if "--list-providers" in sys.argv:
 
 import argparse
 
+from hpc.launch_utils import PROJECT_ROOT
 from hpc.cloud_launch_utils import CloudLauncher, repo_relative, parse_gpu_count
 from hpc.cloud_sync_utils import sync_outputs
 from hpc.arg_groups import (
@@ -114,12 +116,15 @@ class EvalCloudLauncher(CloudLauncher):
 
         cmd.extend([
             "--agent", args.agent,
-            "--harbor_env", args.harbor_env,
             "--n_concurrent", str(args.n_concurrent),
             "--n_attempts", str(args.n_attempts),
             "--gpus", str(args.gpus),
             "--experiments_dir", remote_output_dir,
         ])
+
+        # Only pass --harbor_env if explicitly specified (otherwise infer from config)
+        if args.harbor_env:
+            cmd.extend(["--harbor_env", args.harbor_env])
 
         if args.job_name:
             cmd.extend(["--job_name", args.job_name])
@@ -174,7 +179,7 @@ class EvalCloudLauncher(CloudLauncher):
 
 
 def main() -> None:
-    launcher = EvalCloudLauncher(REPO_ROOT)
+    launcher = EvalCloudLauncher(PROJECT_ROOT)
     parser = launcher.create_argument_parser(
         description="Launch eval/local/run_eval.py on a cloud GPU node via SkyPilot."
     )

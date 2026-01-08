@@ -20,8 +20,7 @@ import argparse
 from pathlib import Path
 from typing import Optional, Tuple
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
+from hpc.launch_utils import PROJECT_ROOT
 from hpc.local_runner_utils import LocalHarborRunner
 from hpc.arg_groups import add_harbor_env_arg, add_hf_upload_args, add_tasks_input_arg
 
@@ -61,7 +60,7 @@ class TracegenRunner(LocalHarborRunner):
 
         parser.add_argument(
             "--experiments_dir",
-            default=str(REPO_ROOT / cls.DEFAULT_EXPERIMENTS_SUBDIR),
+            default=str(PROJECT_ROOT / cls.DEFAULT_EXPERIMENTS_SUBDIR),
             help="Directory for logs + endpoint JSON.",
         )
         parser.add_argument("--experiments-dir", dest="experiments_dir", help=argparse.SUPPRESS)
@@ -72,8 +71,12 @@ class TracegenRunner(LocalHarborRunner):
         return parser
 
     def get_env_type(self) -> str:
-        """Get the environment type from --harbor-env (or legacy --trace-env)."""
-        return self.args.harbor_env
+        """Get the environment type from --harbor-env or infer from Harbor config."""
+        if self.args.harbor_env:
+            return self.args.harbor_env
+        # Infer from harbor config if not explicitly specified
+        from hpc.harbor_utils import get_harbor_env_from_config
+        return get_harbor_env_from_config(self.args.harbor_config)
 
     def get_dataset_label(self) -> str:
         """Get the dataset label for job naming."""
@@ -140,7 +143,7 @@ def main() -> None:
     parser = TracegenRunner.create_parser()
     args = parser.parse_args()
 
-    runner = TracegenRunner(args, REPO_ROOT)
+    runner = TracegenRunner(args, PROJECT_ROOT)
     runner.setup()
     runner.run()
 

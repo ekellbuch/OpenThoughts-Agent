@@ -5,16 +5,12 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from omegaconf import OmegaConf
-
-from data.generation.utils import load_datagen_config, resolve_engine_runtime
 from hpc.launch_utils import (
     default_vllm_endpoint_path,
     derive_datagen_job_name,  # Re-exported for backwards compatibility
@@ -22,60 +18,37 @@ from hpc.launch_utils import (
     cleanup_endpoint_file,
     normalize_cli_args,
     resolve_config_path,
-    coerce_positive_int,
     build_sbatch_directives,
     generate_served_model_id,
     hosted_vllm_alias,
     strip_hosted_vllm_alias,
+    set_or_pop,
+    setup_experiments_dir,
+    substitute_template,
+)
+from hpc.harbor_utils import (
+    get_harbor_env_from_config,
+    HARBOR_CONFIG_DIR,
+    resolve_harbor_config_path,
 )
 
 # Backward compatibility aliases
 _normalize_cli_args = normalize_cli_args
-_coerce_positive_int = coerce_positive_int
 
 DIRENV = os.path.dirname(__file__)
 DATAGEN_CONFIG_DIR = os.path.join(DIRENV, "datagen_yaml")
-HARBOR_CONFIG_DIR = os.path.join(DIRENV, "harbor_yaml")
 DEFAULT_RAY_CGRAPH_TIMEOUT = os.environ.get("RAY_CGRAPH_TIMEOUT_DEFAULT", "86500")
 DEFAULT_RAY_CGRAPH_MAX_INFLIGHT = os.environ.get("RAY_CGRAPH_MAX_INFLIGHT_DEFAULT", "")
 HARBOR_MODEL_PLACEHOLDER = "placeholder/override-at-runtime"
 
 
-def _validate_sbatch_templates(hpc_obj) -> None:
-    """Validate that universal sbatch templates exist.
-
-    Since Phase 3 refactoring, we use universal templates for all clusters.
-    """
-    if getattr(hpc_obj, "local_mode", False):
-        print(f"Local execution detected for {hpc_obj.name}; skipping sbatch template validation.")
-        return
-
-    # Validate universal templates exist
-    universal_templates = [
-        Path(__file__).parent / "sbatch_data" / "universal_taskgen.sbatch",
-        Path(__file__).parent / "sbatch_data" / "universal_tracegen.sbatch",
-        Path(__file__).parent / "sbatch_eval" / "universal_eval.sbatch",
-    ]
-
-    missing = [str(t) for t in universal_templates if not t.exists()]
-    if missing:
-        raise FileNotFoundError(
-            "Missing universal sbatch templates: " + ", ".join(missing)
-        )
-
-
-def resolve_datagen_config_path(raw_value: str) -> Path:
-    """Resolve ``raw_value`` to an absolute datagen config path."""
-    return resolve_config_path(raw_value, DATAGEN_CONFIG_DIR, "datagen")
-
-
-def resolve_harbor_config_path(raw_value: str) -> Path:
-    """Resolve ``raw_value`` to an absolute Harbor job config path."""
-    return resolve_config_path(raw_value, HARBOR_CONFIG_DIR, "harbor job")
-
-
 def _prepare_datagen_configuration(exp_args: dict):
-    """Load the YAML datagen configuration and derive launch metadata."""
+    """Load the YAML datagen configuration and derive launch metadata.
+
+    Uses the consolidated parse_datagen_config() for common parsing logic.
+    """
+    from hpc.datagen_config_utils import parse_datagen_config
+    from data.generation.utils import resolve_engine_runtime
 
     raw_config = exp_args.get("datagen_config") or os.environ.get("DATAGEN_CONFIG_PATH")
     if not raw_config:
@@ -83,109 +56,49 @@ def _prepare_datagen_configuration(exp_args: dict):
             "Data generation requires --datagen-config or DATAGEN_CONFIG_PATH to specify the engine YAML."
         )
 
-    resolved_path = resolve_datagen_config_path(raw_config)
-    loaded = load_datagen_config(resolved_path)
+    # Resolve path and parse config
+    resolved_path = resolve_config_path(raw_config, DATAGEN_CONFIG_DIR, "datagen")
+    parsed = parse_datagen_config(
+        config_path=str(resolved_path),
+        model_override=exp_args.get("trace_model"),
+    )
 
-    trace_model_override = exp_args.get("trace_model")
-    if trace_model_override:
-        engine_cfg = loaded.config.engine
-        engine_cfg.model = trace_model_override
-        try:
-            loaded.raw.engine.model = trace_model_override
-        except AttributeError:
-            pass
+    # Engine runtime (for backwards compatibility)
+    runtime = resolve_engine_runtime(parsed.loaded.config)
+    backend = parsed.loaded.config.backend
 
-        engine_type = (engine_cfg.type or "").lower()
-        if engine_type == "vllm_local" and getattr(engine_cfg, "vllm_local", None):
-            engine_cfg.vllm_local.model_name = trace_model_override  # type: ignore[assignment]
-            try:
-                loaded.raw.engine.vllm_local.model_name = trace_model_override  # type: ignore[attr-defined]
-            except AttributeError:
-                pass
+    # Direct assignments (always set)
+    exp_args.update({
+        # Internal objects
+        "_parsed_datagen_config": parsed,
+        "_datagen_config_original_path": str(parsed.config_path),
+        "_datagen_config_raw": parsed.loaded.raw,
+        "_datagen_config_obj": parsed.loaded.config,
+        "_datagen_engine_runtime": runtime,
+        "_datagen_extra_agent_kwargs": parsed.extra_agent_kwargs,
+        "_datagen_backend_config": backend,
+        "_datagen_vllm_server_config": parsed.vllm_server_config,
+        "_chunk_array_max": parsed.chunk_array_max,
+        # Public settings
+        "datagen_config_path": str(parsed.config_path),
+        "datagen_engine": parsed.engine_type,
+        "datagen_healthcheck_interval": parsed.healthcheck_interval,
+        "datagen_backend": backend.type,
+        "datagen_wait_for_endpoint": parsed.wait_for_endpoint,
+        "datagen_ray_port": parsed.ray_port,
+        "datagen_api_port": parsed.api_port,
+    })
 
-        vllm_cfg = loaded.config.vllm_server
-        if vllm_cfg:
-            vllm_cfg.model_path = trace_model_override
-            try:
-                loaded.raw.vllm_server.model_path = trace_model_override  # type: ignore[attr-defined]
-            except AttributeError:
-                pass
-
-    runtime = resolve_engine_runtime(loaded.config)
-
-    exp_args["_datagen_config_original_path"] = str(resolved_path)
-    exp_args["_datagen_config_raw"] = loaded.raw
-    exp_args["_datagen_config_obj"] = loaded.config
-    extra_agent_kwargs = dict(getattr(loaded.config, "extra_agent_kwargs", {}) or {})
-    exp_args["_datagen_extra_agent_kwargs"] = extra_agent_kwargs
-    chunk_array_max = getattr(loaded.config, "chunk_array_max", None)
-    try:
-        chunk_array_max = int(chunk_array_max) if chunk_array_max is not None else None
-    except (TypeError, ValueError):
-        chunk_array_max = None
-    exp_args["_chunk_array_max"] = chunk_array_max
-    exp_args["_datagen_engine_runtime"] = runtime
-    exp_args["datagen_config_path"] = str(resolved_path)
-
-    exp_args["datagen_engine"] = runtime.type
-    exp_args["datagen_healthcheck_interval"] = runtime.healthcheck_interval or 300
-    runtime_model = runtime.engine_kwargs.get("model") or runtime.engine_kwargs.get("model_name")
-    if runtime_model:
-        exp_args["datagen_model"] = runtime_model
-    elif trace_model_override:
-        exp_args["datagen_model"] = trace_model_override
-    else:
-        exp_args.pop("datagen_model", None)
-    if runtime.max_output_tokens is not None:
-        exp_args["datagen_max_tokens"] = runtime.max_output_tokens
-    else:
-        exp_args.pop("datagen_max_tokens", None)
-
-    backend = loaded.config.backend
-    exp_args["_datagen_backend_config"] = backend
-    exp_args["datagen_backend"] = backend.type
-    exp_args["datagen_wait_for_endpoint"] = backend.wait_for_endpoint
-    exp_args["datagen_ray_port"] = backend.ray_port
-    exp_args["datagen_api_port"] = backend.api_port
-    if backend.endpoint_json_path:
-        exp_args["vllm_endpoint_json_path"] = backend.endpoint_json_path
-    if backend.ray_cgraph_submit_timeout is not None:
-        exp_args["ray_cgraph_submit_timeout"] = str(backend.ray_cgraph_submit_timeout)
-    else:
-        exp_args.pop("ray_cgraph_submit_timeout", None)
-    if backend.ray_cgraph_get_timeout is not None:
-        exp_args["ray_cgraph_get_timeout"] = str(backend.ray_cgraph_get_timeout)
-    else:
-        exp_args.pop("ray_cgraph_get_timeout", None)
-    if backend.ray_cgraph_max_inflight_executions is not None:
-        exp_args["ray_cgraph_max_inflight_executions"] = str(
-            backend.ray_cgraph_max_inflight_executions
-        )
-    else:
-        exp_args.pop("ray_cgraph_max_inflight_executions", None)
-    if backend.healthcheck_max_attempts is not None:
-        exp_args["trace_health_max_attempts"] = int(backend.healthcheck_max_attempts)
-    elif "trace_health_max_attempts" in exp_args:
-        exp_args.pop("trace_health_max_attempts")
-    if backend.healthcheck_retry_delay is not None:
-        exp_args["trace_health_retry_delay"] = int(backend.healthcheck_retry_delay)
-    elif "trace_health_retry_delay" in exp_args:
-        exp_args.pop("trace_health_retry_delay")
-
-    vllm_cfg = loaded.config.vllm_server
-    exp_args["_datagen_vllm_server_config"] = vllm_cfg
-    if vllm_cfg and vllm_cfg.endpoint_json_path:
-        exp_args["vllm_endpoint_json_path"] = vllm_cfg.endpoint_json_path
-    elif exp_args.get("vllm_endpoint_json_path") and not vllm_cfg:
-        exp_args.pop("vllm_endpoint_json_path", None)
-    if vllm_cfg:
-        extra_cli_args = _normalize_cli_args(vllm_cfg.extra_args)
-        if extra_cli_args:
-            exp_args["_vllm_server_extra_args"] = extra_cli_args
-        elif "_vllm_server_extra_args" in exp_args:
-            exp_args.pop("_vllm_server_extra_args")
-    elif "_vllm_server_extra_args" in exp_args:
-        exp_args.pop("_vllm_server_extra_args")
+    # Conditional assignments (set if present, remove if None)
+    set_or_pop(exp_args, "datagen_model", parsed.model)
+    set_or_pop(exp_args, "datagen_max_tokens", parsed.max_output_tokens)
+    set_or_pop(exp_args, "vllm_endpoint_json_path", parsed.endpoint_json_path)
+    set_or_pop(exp_args, "ray_cgraph_submit_timeout", parsed.ray_cgraph_submit_timeout)
+    set_or_pop(exp_args, "ray_cgraph_get_timeout", parsed.ray_cgraph_get_timeout)
+    set_or_pop(exp_args, "ray_cgraph_max_inflight_executions", parsed.ray_cgraph_max_inflight_executions)
+    set_or_pop(exp_args, "trace_health_max_attempts", parsed.health_max_attempts)
+    set_or_pop(exp_args, "trace_health_retry_delay", parsed.health_retry_delay)
+    set_or_pop(exp_args, "_vllm_server_extra_args", parsed.vllm_extra_args or None)
 
     return runtime
 
@@ -202,10 +115,6 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
 
     print("\n=== DATA GENERATION MODE (Universal Launcher) ===")
 
-    hpc_name = str(getattr(hpc, "name", "")).lower()
-    if hpc_name == "nyutorch":
-        raise RuntimeError("Datagen jobs are not supported on the NYU Torch cluster.")
-
     # Determine what to run
     task_enabled = str(exp_args.get("enable_task_gen", True)).lower() not in {"false", "0", "no", "none"}
     trace_enabled = str(exp_args.get("enable_trace_gen", False)).lower() not in {"false", "0", "no", "none"}
@@ -217,14 +126,8 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
         raise ValueError("--datagen-script is required for task generation")
 
     # Resolve paths
-    experiments_subdir = exp_args.get("experiments_dir") or "experiments"
-    experiments_abs = Path(experiments_subdir).expanduser().resolve()
-    sbatch_dir = experiments_abs / "sbatch"
-    sbatch_dir.mkdir(parents=True, exist_ok=True)
-    configs_dir = experiments_abs / "configs"
-    configs_dir.mkdir(parents=True, exist_ok=True)
-    logs_dir = experiments_abs / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
+    exp_paths = setup_experiments_dir(exp_args)
+    experiments_subdir = str(exp_paths.root)  # String form for config dicts
 
     job_name = exp_args.get("job_name")
     if not job_name:
@@ -285,7 +188,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
         )
 
         # Write task config JSON
-        task_config_path = configs_dir / f"{job_name}_taskgen_config.json"
+        task_config_path = exp_paths.configs / f"{job_name}_taskgen_config.json"
         task_config_path.write_text(json.dumps(asdict(task_config), indent=2))
 
         # Load and populate taskgen template
@@ -311,11 +214,9 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             "config_path": str(task_config_path),
         }
 
-        sbatch_text = template_text
-        for key, value in substitutions.items():
-            sbatch_text = sbatch_text.replace("{" + key + "}", value)
+        sbatch_text = substitute_template(template_text, substitutions)
 
-        task_sbatch_output = sbatch_dir / f"{job_name}_taskgen.sbatch"
+        task_sbatch_output = exp_paths.sbatch / f"{job_name}_taskgen.sbatch"
         task_sbatch_output.write_text(sbatch_text)
         os.chmod(task_sbatch_output, 0o750)
 
@@ -341,7 +242,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
         tasks_input_path = exp_args.get("trace_input_path")
         if not tasks_input_path and task_enabled:
             tasks_input_path = exp_args.get("datagen_output_dir") or str(
-                experiments_abs / "outputs" / "tasks"
+                exp_paths.root / "outputs" / "tasks"
             )
 
         trace_model = exp_args.get("trace_model") or exp_args.get("datagen_model") or ""
@@ -357,15 +258,12 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             if not vllm_model_path:
                 vllm_model_path = trace_model or ""
 
-        agent_kwargs = exp_args.get("_datagen_extra_agent_kwargs") or {}
-        if exp_args.get("trace_agent_kwargs"):
-            if isinstance(exp_args["trace_agent_kwargs"], dict):
-                agent_kwargs.update(exp_args["trace_agent_kwargs"])
-            else:
-                try:
-                    agent_kwargs.update(json.loads(str(exp_args["trace_agent_kwargs"])))
-                except json.JSONDecodeError:
-                    pass
+        # Collect extra agent kwargs using consolidated helper
+        from hpc.harbor_utils import collect_extra_agent_kwargs
+        agent_kwargs = collect_extra_agent_kwargs(
+            datagen_extras=exp_args.get("_datagen_extra_agent_kwargs"),
+            cli_kwargs=exp_args.get("trace_agent_kwargs"),
+        )
 
         # Convert vllm_cfg dataclass to dict for pass-through (if not already done)
         trace_vllm_server_config = asdict(vllm_cfg) if vllm_cfg else {}
@@ -392,7 +290,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             model=harbor_model_name,
             served_model_id=served_model_id,
             agent=exp_args.get("trace_agent_name") or "",
-            trace_env=exp_args.get("trace_env") or "daytona",
+            trace_env=exp_args.get("trace_env") or get_harbor_env_from_config(harbor_config_resolved),
             n_concurrent=int(exp_args.get("trace_n_concurrent") or 64),
             n_attempts=int(exp_args.get("trace_n_attempts") or 3),
             agent_kwargs=agent_kwargs,
@@ -407,7 +305,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
         )
 
         # Write trace config JSON
-        trace_config_path = configs_dir / f"{job_name}_tracegen_config.json"
+        trace_config_path = exp_paths.configs / f"{job_name}_tracegen_config.json"
         trace_config_path.write_text(json.dumps(asdict(trace_config), indent=2))
 
         # Load and populate tracegen template
@@ -433,11 +331,9 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             "config_path": str(trace_config_path),
         }
 
-        sbatch_text = template_text
-        for key, value in substitutions.items():
-            sbatch_text = sbatch_text.replace("{" + key + "}", value)
+        sbatch_text = substitute_template(template_text, substitutions)
 
-        trace_sbatch_output = sbatch_dir / f"{job_name}_tracegen.sbatch"
+        trace_sbatch_output = exp_paths.sbatch / f"{job_name}_tracegen.sbatch"
         trace_sbatch_output.write_text(sbatch_text)
         os.chmod(trace_sbatch_output, 0o750)
 
@@ -561,6 +457,7 @@ class TaskgenJobRunner:
         """Run task generation with managed Ray cluster and vLLM server."""
         from hpc.ray_utils import RayCluster, RayClusterConfig
         from hpc.vllm_utils import VLLMServer, VLLMConfig
+        from hpc.model_utils import is_gpt_oss_model, setup_gpt_oss_tiktoken
 
         hpc = self._get_hpc()
         num_nodes = int(os.environ.get("SLURM_JOB_NUM_NODES", self.config.num_nodes))
@@ -578,8 +475,16 @@ class TaskgenJobRunner:
             ray_env_vars=hpc.get_ray_env_vars(),
         )
 
+        model_path = self.config.vllm_model_path or ""
+
+        # Setup tiktoken encodings for GPT-OSS models
+        extra_env_vars = {}
+        if is_gpt_oss_model(model_path):
+            _, tiktoken_env = setup_gpt_oss_tiktoken()
+            extra_env_vars.update(tiktoken_env)
+
         vllm_cfg = VLLMConfig(
-            model_path=self.config.vllm_model_path or "",
+            model_path=model_path,
             tensor_parallel_size=self.config.tensor_parallel_size,
             pipeline_parallel_size=self.config.pipeline_parallel_size,
             data_parallel_size=self.config.data_parallel_size,
@@ -599,6 +504,7 @@ class TaskgenJobRunner:
                 config=vllm_cfg,
                 ray_cluster=ray_cluster,
                 log_path=vllm_log,
+                extra_env_vars=extra_env_vars if extra_env_vars else None,
             )
             with vllm_server:
                 return self._run_datagen(endpoint=vllm_server.endpoint)
@@ -788,6 +694,7 @@ class TracegenJobRunner:
         """Run trace generation with managed Ray cluster and vLLM server."""
         from hpc.ray_utils import RayCluster, RayClusterConfig
         from hpc.vllm_utils import VLLMServer, VLLMConfig
+        from hpc.model_utils import is_gpt_oss_model, setup_gpt_oss_tiktoken
 
         hpc = self._get_hpc()
         num_nodes = int(os.environ.get("SLURM_JOB_NUM_NODES", self.config.num_nodes))
@@ -807,6 +714,12 @@ class TracegenJobRunner:
 
         raw_model_path = self.config.vllm_model_path or self.config.model
         model_path = strip_hosted_vllm_alias(raw_model_path) or raw_model_path
+
+        # Setup tiktoken encodings for GPT-OSS models
+        extra_env_vars = {}
+        if is_gpt_oss_model(model_path):
+            _, tiktoken_env = setup_gpt_oss_tiktoken()
+            extra_env_vars.update(tiktoken_env)
 
         vllm_cfg = VLLMConfig(
             model_path=model_path,
@@ -830,60 +743,43 @@ class TracegenJobRunner:
                 config=vllm_cfg,
                 ray_cluster=ray_cluster,
                 log_path=vllm_log,
+                extra_env_vars=extra_env_vars if extra_env_vars else None,
             )
             with vllm_server:
                 return self._run_harbor(endpoint=vllm_server.endpoint)
 
     def _run_harbor(self, endpoint: Optional[str]) -> int:
         """Execute the Harbor CLI for trace generation."""
-        cmd = [
-            "harbor",
-            "jobs",
-            "start",
-            "--config",
-            self.config.harbor_config,
-            "--job-name",
-            self.config.job_name,
-            "--env",
-            self.config.trace_env,
-            "--n-concurrent",
-            str(self.config.n_concurrent),
-            "--n-attempts",
-            str(self.config.n_attempts),
-        ]
+        from hpc.harbor_utils import build_harbor_command, load_harbor_config, build_endpoint_meta
 
-        if self.config.agent:
-            cmd.extend(["--agent", self.config.agent])
+        # Build endpoint metadata for vLLM
+        endpoint_meta = build_endpoint_meta(endpoint) if endpoint else None
 
-        if self.config.model:
-            cmd.extend(["--model", self.config.model])
-
-        if self.config.tasks_input_path:
-            cmd.extend(["-p", self.config.tasks_input_path])
-
-        # Build agent kwargs
-        agent_kwargs = dict(self.config.agent_kwargs)
-        if endpoint:
-            agent_kwargs["api_base"] = endpoint
-            metrics_endpoint = endpoint.replace("/v1", "/metrics")
-            agent_kwargs["metrics_endpoint"] = metrics_endpoint
-
-        for key, value in agent_kwargs.items():
-            if isinstance(value, (dict, list)):
-                cmd.extend(["--agent-kwarg", f"{key}={json.dumps(value)}"])
-            else:
-                cmd.extend(["--agent-kwarg", f"{key}={value}"])
+        # Load harbor config data for agent kwargs extraction
+        harbor_config_data = load_harbor_config(self.config.harbor_config)
 
         # Set jobs_dir inside experiments folder (not repo root)
         jobs_dir = str(Path(self.config.experiments_dir) / "trace_jobs")
-        cmd.extend(["--jobs-dir", jobs_dir])
 
-        # Standard export flags
-        cmd.extend([
-            "--export-traces",
-            "--export-verifier-metadata",
-            "--export-episodes", "last",
-        ])
+        # Build command using shared utility
+        # Pass config.agent_kwargs as extra_agent_kwargs (from datagen config + CLI overrides)
+        cmd = build_harbor_command(
+            harbor_binary="harbor",
+            harbor_config_path=self.config.harbor_config,
+            harbor_config_data=harbor_config_data,
+            job_name=self.config.job_name,
+            agent_name=self.config.agent,
+            model_name=self.config.model,
+            env_type=self.config.trace_env,
+            n_concurrent=self.config.n_concurrent,
+            n_attempts=self.config.n_attempts,
+            endpoint_meta=endpoint_meta,
+            agent_kwarg_overrides=[],  # CLI overrides already merged into config.agent_kwargs
+            harbor_extra_args=[],
+            dataset_path=self.config.tasks_input_path,
+            jobs_dir=jobs_dir,
+            extra_agent_kwargs=self.config.agent_kwargs or None,
+        )
 
         print(f"Running Harbor command: {' '.join(cmd)}")
         sys.stdout.flush()
@@ -954,7 +850,6 @@ __all__ = [
     # Config utilities
     "_normalize_cli_args",
     "_prepare_datagen_configuration",
-    "resolve_datagen_config_path",
     "resolve_harbor_config_path",
     # Universal launcher
     "launch_datagen_job_v2",

@@ -12,9 +12,10 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.append(str(REPO_ROOT))
+# Add repo root to sys.path for imports
+_repo_root = Path(__file__).resolve().parents[2]
+if str(_repo_root) not in sys.path:
+    sys.path.append(str(_repo_root))
 
 # Handle --list-providers before importing anything heavy
 if "--list-providers" in sys.argv:
@@ -24,6 +25,7 @@ if "--list-providers" in sys.argv:
 
 import argparse
 
+from hpc.launch_utils import PROJECT_ROOT
 from hpc.cloud_launch_utils import CloudLauncher, repo_relative, parse_gpu_count
 from hpc.cloud_sync_utils import sync_outputs
 from hpc.arg_groups import (
@@ -99,12 +101,15 @@ class TracegenCloudLauncher(CloudLauncher):
 
         cmd.extend([
             "--agent", args.agent,
-            "--harbor_env", args.harbor_env,
             "--n_concurrent", str(args.n_concurrent),
             "--n_attempts", str(args.n_attempts),
             "--gpus", str(args.gpus),
             "--experiments_dir", remote_output_dir,
         ])
+
+        # Only pass --harbor_env if explicitly specified (otherwise infer from config)
+        if args.harbor_env:
+            cmd.extend(["--harbor_env", args.harbor_env])
 
         if args.job_name:
             cmd.extend(["--job_name", args.job_name])
@@ -129,17 +134,17 @@ class TracegenCloudLauncher(CloudLauncher):
     def get_periodic_sync_paths(self, args, remote_output_dir: str, remote_workdir: str) -> List[tuple]:
         """Return paths to sync periodically during job execution.
 
-        Syncs logs and Harbor jobs directory to track trace generation progress.
+        Syncs logs and Harbor trace_jobs directory to track trace generation progress.
         """
         return [
             (f"{remote_output_dir}/logs", str(Path(args.local_sync_dir) / "logs")),
-            (f"{remote_workdir}/jobs", str(Path(args.local_sync_dir) / "jobs")),
+            (f"{remote_workdir}/trace_jobs", str(Path(args.local_sync_dir) / "trace_jobs")),
         ]
 
     def sync_additional_outputs(self, cluster_name: str, args, remote_workdir: str) -> None:
-        """Sync Harbor jobs directory (final sync after job completes)."""
-        jobs_remote = f"{remote_workdir}/jobs"
-        jobs_local = str(Path(args.local_sync_dir) / "jobs")
+        """Sync Harbor trace_jobs directory (final sync after job completes)."""
+        jobs_remote = f"{remote_workdir}/trace_jobs"
+        jobs_local = str(Path(args.local_sync_dir) / "trace_jobs")
         print(f"[cloud-sync] Also syncing Harbor jobs from {jobs_remote}...")
         sync_outputs(
             cluster_name=cluster_name,
@@ -149,7 +154,7 @@ class TracegenCloudLauncher(CloudLauncher):
 
 
 def main() -> None:
-    launcher = TracegenCloudLauncher(REPO_ROOT)
+    launcher = TracegenCloudLauncher(PROJECT_ROOT)
     parser = launcher.create_argument_parser(
         description="Launch data/local/run_tracegen.py on a cloud GPU node via SkyPilot."
     )
