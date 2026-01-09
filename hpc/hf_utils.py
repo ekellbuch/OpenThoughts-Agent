@@ -122,6 +122,43 @@ def derive_default_hf_repo_id(
     return f"{org}/{job_name}"
 
 
+def resolve_dataset_path(
+    path_or_repo: str,
+    *,
+    verbose: bool = True,
+) -> str:
+    """Resolve a dataset path, downloading from HuggingFace if needed.
+
+    Handles both local filesystem paths and HuggingFace dataset identifiers.
+    Used by both eval and datagen launchers to resolve --trace_input_path.
+
+    Args:
+        path_or_repo: Either a local path or HF dataset identifier (e.g., "org/repo")
+        verbose: Whether to print status messages
+
+    Returns:
+        Resolved local filesystem path (absolute)
+    """
+    from pathlib import Path
+
+    if is_hf_dataset_path(path_or_repo):
+        # It's an HF dataset identifier - download it
+        from huggingface_hub import snapshot_download
+
+        if verbose:
+            print(f"[hf_utils] Downloading HF dataset: {path_or_repo}")
+        local_path = snapshot_download(repo_id=path_or_repo, repo_type="dataset")
+        if verbose:
+            print(f"[hf_utils] Downloaded to: {local_path}")
+        return local_path
+    else:
+        # It's a local path - resolve relative to PROJECT_ROOT
+        from hpc.launch_utils import resolve_repo_path
+
+        resolved = resolve_repo_path(path_or_repo)
+        return str(resolved)
+
+
 def resolve_hf_repo_id(
     explicit_repo: Optional[str],
     upload_to_database: bool,
@@ -169,5 +206,6 @@ __all__ = [
     "is_hf_dataset_path",
     "sanitize_hf_repo_id",
     "derive_default_hf_repo_id",
+    "resolve_dataset_path",
     "resolve_hf_repo_id",
 ]
