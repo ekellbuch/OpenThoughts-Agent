@@ -476,6 +476,11 @@ def main():
         )
         return
 
+    if job_type == JobType.RL.value:
+        from hpc.rl_launch_utils import launch_rl_job
+        launch_rl_job(exp_args, hpc)
+        return
+
     # If we reach here, the job type is not implemented or invalid
     raise NotImplementedError(
         f"Job type '{job_type}' is not yet implemented or is invalid. "

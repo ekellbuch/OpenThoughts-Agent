@@ -1,0 +1,199 @@
+# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs
+# Optimized for 32k context agentic RL with synchronous training
+#
+# Hardware: 16 GPUs with 80GB VRAM each (e.g., 2x8 H100/A100-80GB or 4x4)
+# Model: Qwen3 8B Base (~16GB bf16 weights)
+#
+# CONTEXT BUDGET (32k total model context):
+#   - max_prompt_length: 24k tokens (conversation history)
+#   - max_generate_length: 8k tokens (agent responses)
+#   - Total: 24k + 8k = 32k (model's max_model_len)
+#
+# vLLM enforces prompt + generation <= max_model_len, so we must budget.
+# For multi-turn agentic tasks, prompts grow with history - enable_summarize
+# helps compress old turns to stay within budget.
+#
+# Key Design Decisions:
+# - TP=2 for inference engines: 8 engines with 160GB effective memory each
+#   This provides headroom for 32k KV cache with multiple concurrent sequences
+# - Small train_batch_size (16): Reduces sync RL waiting time variance
+# - Aggressive memory settings: 0.90 utilization with prefix caching enabled
+# - GRPO with 4 samples: Good gradient signal for policy improvement
+#
+# Usage:
+#   python -m hpc.launch \
+#       --job_type rl \
+#       --rl_config qwen3_8b_16x80GB.yaml \
+#       --job_name qwen3_8b_agentic \
+#       --train_data '["mlfoundations-dev/your-dataset"]' \
+#       --model_path Qwen/Qwen3-8B \
+#       --num_nodes 2
+
+# SkyRL entrypoint module
+entrypoint: examples.terminal_bench.entrypoints.main_tbench
+
+# Hydra config groups (+ prefix in CLI)
+config_groups:
+  terminal_bench_config: terminal_bench
+
+# Terminal bench / agentic environment settings
+terminal_bench:
+  agent_name: terminus
+  # Max episodes per task - generous for complex multi-step tasks
+  max_episodes: 32
+  # Sandbox resources - adequate for most agentic tasks
+  sandbox_cpu: 2
+  override_cpus: 2
+  override_memory_mb: 2048
+  override_storage_mb: 2048
+  # Enable summarization to compress long histories
+  # IMPORTANT: This helps keep prompts under budget as conversations grow
+  enable_summarize: true
+  store_all_messages: true
+  model_info:
+    # Context budget: 32k total = 24k prompt + 8k generation
+    # Prompts grow with conversation history, so reserve headroom for generation
+    max_input_tokens: 24576   # 24k - leaves 8k for generation
+    max_output_tokens: 8192   # 8k - sufficient for most agent responses
+
+# Trainer configuration
+trainer:
+  strategy: fsdp2
+  algorithm:
+    advantage_estimator: grpo
+    use_kl_loss: true
+    # GRPO-specific settings
+    kl_loss_coef: 0.001
+    grpo_norm_by_std: true
+    # Clip range for policy updates
+    eps_clip_low: 0.2
+    eps_clip_high: 0.2
+    # Token-level loss for better gradient signal on long sequences
+    loss_reduction: token_mean
+
+  # Training loop settings
+  epochs: 10
+  update_epochs_per_batch: 1
+
+  # Batch sizes optimized for sync RL
+  # Small train_batch_size reduces waiting time variance in sync RL
+  # When one agent is blocked, all others wait - smaller batches = less waiting
+  train_batch_size: 16
+  policy_mini_batch_size: 8  # 2 gradient steps per batch
+  eval_batch_size: 32
+
+  # Micro batch sizes - set to 1 for long context to avoid OOM
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+
+  # Context budget: 32k total = 24k prompt + 8k generation
+  # max_prompt_length truncates prompts BEFORE sending to vLLM
+  # Must leave room for generation within model's max_model_len
+  max_prompt_length: 24576  # 24k - matches model_info.max_input_tokens
+
+  # Evaluation and checkpointing
+  eval_interval: 10
+  eval_before_train: false
+  ckpt_interval: 5
+  resume_mode: latest
+
+  # Logging
+  project_name: dc-agent
+
+  # Paths derived from experiments_dir/job_name if null
+  run_name: null
+  ckpt_path: null
+  export_path: null
+
+  # Policy optimizer - conservative LR for base model fine-tuning
+  policy:
+    optimizer_config:
+      lr: 5.0e-7
+      weight_decay: 0.01
+      adam_betas: [0.9, 0.999]
+    # Gradient clipping important for long sequences
+    max_grad_norm: 1.0
+
+  # Reference model - CPU offload to save GPU memory
+  ref:
+    fsdp_config:
+      cpu_offload: true
+      reshard_after_forward: true
+
+  # Model placement for 16 GPUs
+  # Assuming 2 nodes x 8 GPUs or similar configuration
+  placement:
+    colocate_all: true
+    # Policy and ref share nodes (colocated)
+    policy_num_nodes: null  # Derived from num_nodes
+    ref_num_nodes: null
+    # 8 GPUs per node for standard H100/A100 setups
+    policy_num_gpus_per_node: 8
+    ref_num_gpus_per_node: 8
+
+# Generator (vLLM inference) configuration
+generator:
+  backend: vllm
+  model_dtype: bfloat16
+
+  # Tensor parallelism = 2 for 32k context with 8B model
+  # This gives us 8 inference engines (16 GPUs / TP=2)
+  # Each engine pair has 160GB effective memory for KV cache
+  inference_engine_tensor_parallel_size: 2
+  # Computed automatically: (num_nodes * gpus_per_node) / tensor_parallel_size
+  num_inference_engines: null
+
+  # GRPO typically uses 4-8 samples per prompt for advantage estimation
+  n_samples_per_prompt: 4
+  eval_n_samples_per_prompt: 4
+
+  # Memory utilization - aggressive but leave headroom for 32k KV cache
+  gpu_memory_utilization: 0.90
+
+  # Sequence limits for 32k context (24k prompt + 8k gen)
+  # max_num_seqs: concurrent sequences per engine
+  # Lower value = more memory per sequence for long contexts
+  max_num_seqs: 64
+  # max_num_batched_tokens: tokens processed per batch
+  # Should accommodate at least one full sequence (32k) with some headroom
+  max_num_batched_tokens: 32768
+
+  # Memory optimization for long contexts
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+
+  # Engine settings
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: true
+  enable_http_endpoint: true
+
+  # Multi-turn agentic conversation handling
+  append_eos_token_after_stop_str_in_multi_turn: true
+  max_turns: 32  # Match max_episodes
+
+  # Sampling parameters for generation
+  sampling_params:
+    # Context budget: 32k total = 24k prompt + 8k generation
+    # This caps generation to stay within model's max_model_len
+    max_generate_length: 8192  # 8k - matches model_info.max_output_tokens
+    # Temperature 1.0 for exploration during training
+    temperature: 1.0
+    top_p: 0.95
+    top_k: -1  # Disabled
+
+  # Engine initialization kwargs
+  engine_init_kwargs:
+    # Chat template for Qwen3 Base model
+    # Note: You may need to provide a custom template for base models
+    custom_chat_template_chat_completion_path: skyrl-train/examples/terminal_bench/qwen3_thinking_acc.jinja2
+    # Enforce eager mode for long context (avoids CUDA graph issues)
+    enforce_eager: false
+    # Trust remote code for Qwen models
+    trust_remote_code: true
+
+# Data paths (set via CLI --train_data, --val_data)
+data:
+  train_data: []
+  val_data: []

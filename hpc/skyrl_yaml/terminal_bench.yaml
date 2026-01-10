@@ -1,0 +1,97 @@
+# SkyRL Terminal Bench Configuration
+# This YAML replaces 50+ Hydra CLI arguments for terminal-bench RL training
+#
+# Usage:
+#   python -m hpc.launch \
+#       --job_type rl \
+#       --rl_config terminal_bench.yaml \
+#       --job_name my_run \
+#       --train_data '["mlfoundations-dev/dataset"]' \
+#       --model_path Qwen/Qwen2.5-7B-Instruct
+
+# SkyRL entrypoint module
+entrypoint: examples.terminal_bench.entrypoints.main_tbench
+
+# Hydra config groups (+ prefix in CLI)
+config_groups:
+  terminal_bench_config: terminal_bench
+
+# Terminal bench settings
+terminal_bench:
+  agent_name: terminus
+  max_episodes: 32
+  sandbox_cpu: 1
+  override_cpus: 1
+  override_memory_mb: 1024
+  override_storage_mb: 1024
+  enable_summarize: true
+  store_all_messages: true
+  model_info:
+    max_input_tokens: 2048
+    max_output_tokens: 40000
+
+# Trainer configuration
+trainer:
+  strategy: fsdp2
+  algorithm:
+    advantage_estimator: grpo
+    use_kl_loss: true
+  epochs: 10
+  train_batch_size: 8
+  eval_batch_size: 128
+  eval_interval: 20
+  eval_before_train: false
+  update_epochs_per_batch: 1
+  policy_mini_batch_size: 8
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  ckpt_interval: 5
+  max_prompt_length: 2048
+  resume_mode: latest
+  project_name: dc-agent
+  # Paths derived from experiments_dir/job_name if null
+  run_name: null
+  ckpt_path: null
+  export_path: null
+
+  policy:
+    optimizer_config:
+      lr: 1.0e-6
+
+  ref:
+    fsdp_config:
+      cpu_offload: true
+
+  placement:
+    colocate_all: true
+    # Derived from num_nodes if null
+    policy_num_nodes: null
+    ref_num_nodes: null
+    policy_num_gpus_per_node: 4
+    ref_num_gpus_per_node: 4
+
+# Generator (vLLM inference)
+generator:
+  backend: vllm
+  # Computed: (num_nodes * gpus_per_node) / tensor_parallel_size
+  num_inference_engines: null
+  inference_engine_tensor_parallel_size: 1
+  n_samples_per_prompt: 4
+  eval_n_samples_per_prompt: 8
+  gpu_memory_utilization: 0.85
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: true
+  enable_http_endpoint: true
+  append_eos_token_after_stop_str_in_multi_turn: true
+  sampling_params:
+    max_generate_length: 30720
+  engine_init_kwargs:
+    # Relative to SKYRL_HOME
+    custom_chat_template_chat_completion_path: skyrl-train/examples/terminal_bench/qwen3_thinking_acc.jinja2
+
+# Data paths (set via CLI --train_data, --val_data)
+data:
+  train_data: []
+  val_data: []

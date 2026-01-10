@@ -279,6 +279,7 @@ jureca = HPC(
     modules=["CUDA/12.3"],
     env_vars={
         "PYTHONFAULTHANDLER": "1",
+        "WANDB_MODE": "offline",  # No internet on compute nodes
     },
     # NCCL/networking settings for SFT training (InfiniBand, no internet)
     nccl_settings={
@@ -306,6 +307,9 @@ jupiter = HPC(
     gpus_type="GH200 96GB",
     total_partition_nodes=48,
     gpu_directive_format="--gres=gpu:{n}",
+    env_vars={
+        "WANDB_MODE": "offline",  # No internet on compute nodes
+    },
     # NCCL/networking settings for SFT training (InfiniBand, no internet)
     nccl_settings={
         "NCCL_NET_GDR_LEVEL": "0",
@@ -334,6 +338,9 @@ juwels = HPC(
     total_partition_nodes=936,
     node_exclusion_list="jwb[0059,0067,0069,0193,0198,0215,0266,0284,0287,0294,0359,0418,0637,0647,0829,0832,0838,0898,0907,0921,0971,1004,1023,1029,1213]",
     gpu_directive_format="--gres=gpu:{n}",
+    env_vars={
+        "WANDB_MODE": "offline",  # No internet on compute nodes
+    },
     # NCCL/networking settings for SFT training (InfiniBand, no internet)
     nccl_settings={
         "NCCL_NET_GDR_LEVEL": "0",
@@ -359,6 +366,9 @@ leonardo = HPC(
     internet_node=False,
     gpus_type="A100 64GB",
     total_partition_nodes=3456,
+    env_vars={
+        "WANDB_MODE": "offline",  # No internet on compute nodes
+    },
     node_exclusion_list="lrdn[1606,2776,2425,2808,3064,3064,1953,2414,1506,1718,1779,2828,2354,3279,1370,2595,2751,2921,2368,2976,2733,2277,3136,2013,2952,1427,2682,2349,1655,1390,3151,3130,2002,2654,2101,2358,1597,2585,2900,2687,3165,3031,2798,2530,2344,1384,1420,1474,1509,1520,1556,1607,1647,1810,1927,2000,2028,2056,2120,2136,2371,2384,2444,2465,2479,2563,2598,2652,2716,2731,2746,2755,2772,2775,2792,2794,2917,2926,2927,3110,3221,3395,0666,0291,0043,1743,3299,3434,2379,2660,2711,2855,3444,3354,3111,2736,2345,0021,0037,2350,2201,2674,2642,2734,2690,3004,3091,1670,2689,3002,2362,1714,2071,1399,2940,2581,1357,3439,1569,1591,3439,1507,1531,2297,3379,3277,2912,1930,2878,2363,2984,3012,2663,2139,1457,2197]",
     gpu_directive_format="--gres=gpu:{n}",
     pretok_qos="boost_qos_dbg",

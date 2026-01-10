@@ -636,6 +636,70 @@ class ConsolidateArgs:
     )
 
 
+@dataclass
+class RLArgs:
+    """Arguments for RL (reinforcement learning) training jobs using SkyRL."""
+
+    rl_config: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Path to RL config YAML file (e.g., terminal_bench.yaml). "
+            "Can be absolute path or name of built-in config in hpc/skyrl_yaml/"
+        }
+    )
+    skyrl_override: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "SkyRL Hydra override (key=value). Can be specified multiple times. "
+            "Example: --skyrl_override trainer.epochs=5",
+            "action": "append",
+        }
+    )
+    model_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Model path for RL training (e.g., Qwen/Qwen2.5-7B-Instruct)"}
+    )
+    train_data: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Training dataset path(s). Use JSON list format for multiple: "
+            "'[\"org/dataset1\",\"org/dataset2\"]'"
+        }
+    )
+    val_data: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Validation dataset path(s). Use JSON list format for multiple: "
+            "'[\"org/val-dataset\"]'"
+        }
+    )
+    skyrl_entrypoint: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Override SkyRL entrypoint module. "
+            "Default: inferred from rl_config YAML"
+        }
+    )
+    policy_num_nodes: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Number of nodes for policy (actor) workers. "
+            "If not set, defaults to num_nodes (symmetric setup)"
+        }
+    )
+    tensor_parallel_size: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Tensor parallel size for vLLM inference engines. "
+            "Higher values needed for larger models (70B+). Default from config or 1"
+        }
+    )
+    ray_port: Optional[int] = field(
+        default=None,
+        metadata={"help": "Ray head node port (default: 6379)"}
+    )
+
+
 def _option_strings(field_name: str) -> list[str]:
     primary = f"--{field_name}"
     dashed = f"--{field_name.replace('_', '-')}"
@@ -663,6 +727,7 @@ def _add_dataclass_arguments(arg_group, dataclass_type, exclude_fields=None, *, 
         help_text = field.metadata.get("help")
         choices = field.metadata.get("choices")
         required = field.metadata.get("required", False)
+        action = field.metadata.get("action")
 
         if field.metadata.get("store_true"):
             arg_group.add_argument(
@@ -674,6 +739,15 @@ def _add_dataclass_arguments(arg_group, dataclass_type, exclude_fields=None, *, 
             )
             if bool_fields is not None:
                 bool_fields.add(field.name)
+        elif action == "append":
+            # Handle append action (e.g., --skyrl_override can be repeated)
+            arg_group.add_argument(
+                *option_strings,
+                dest=field.name,
+                action="append",
+                default=[],
+                help=help_text,
+            )
         elif isinstance(field.default, bool):
             kwargs = {
                 "dest": field.name,
@@ -729,6 +803,7 @@ def parse_args():
     train_group = parser.add_argument_group("Training Arguments")
     datagen_group = parser.add_argument_group("Data Generation Arguments")
     consolidate_group = parser.add_argument_group("Consolidation Arguments")
+    rl_group = parser.add_argument_group("RL Training Arguments")
 
     # Add LaunchArgs arguments
     _add_dataclass_arguments(launch_group, LaunchArgs, bool_fields=bool_keys)
@@ -736,6 +811,9 @@ def parse_args():
     # Add DataGenArgs arguments
     _add_dataclass_arguments(datagen_group, DataGenArgs, bool_fields=bool_keys)
     _add_dataclass_arguments(consolidate_group, ConsolidateArgs, bool_fields=bool_keys)
+
+    # Add RLArgs arguments
+    _add_dataclass_arguments(rl_group, RLArgs, bool_fields=bool_keys)
 
     # Add HPC arguments
     # Note: HPC is a Pydantic model, not a dataclass, so we need to handle it differently

@@ -1,0 +1,66 @@
+# SkyRL GRPO Default Configuration
+# Minimal GRPO config for general RL training
+#
+# Usage:
+#   python -m hpc.launch \
+#       --job_type rl \
+#       --rl_config grpo_default.yaml \
+#       --job_name my_run \
+#       --train_data '["dataset"]' \
+#       --model_path Qwen/Qwen2.5-7B-Instruct
+
+# SkyRL entrypoint module
+entrypoint: skyrl_train.entrypoints.main_base
+
+# Trainer configuration
+trainer:
+  strategy: fsdp2
+  algorithm:
+    advantage_estimator: grpo
+    use_kl_loss: true
+  epochs: 3
+  train_batch_size: 4
+  eval_batch_size: 64
+  eval_interval: 50
+  eval_before_train: false
+  update_epochs_per_batch: 1
+  ckpt_interval: 10
+  max_prompt_length: 2048
+  resume_mode: latest
+  project_name: dc-agent
+  # Paths derived from experiments_dir/job_name if null
+  run_name: null
+  ckpt_path: null
+  export_path: null
+
+  policy:
+    optimizer_config:
+      lr: 1.0e-6
+
+  ref:
+    fsdp_config:
+      cpu_offload: true
+
+  placement:
+    colocate_all: true
+    policy_num_nodes: null
+    ref_num_nodes: null
+    policy_num_gpus_per_node: 4
+    ref_num_gpus_per_node: 4
+
+# Generator (vLLM inference)
+generator:
+  backend: vllm
+  num_inference_engines: null
+  inference_engine_tensor_parallel_size: 1
+  n_samples_per_prompt: 4
+  gpu_memory_utilization: 0.8
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: true
+
+# Data paths (set via CLI --train_data, --val_data)
+data:
+  train_data: []
+  val_data: []

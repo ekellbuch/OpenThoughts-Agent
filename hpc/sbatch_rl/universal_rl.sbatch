@@ -8,10 +8,10 @@
 {sbatch_extra_directives}
 
 # ==============================================================================
-# Universal SFT Training SBATCH Template
+# Universal RL Training SBATCH Template
 # ==============================================================================
-# This template replaces the cluster-specific *_train.sbatch scripts by delegating
-# all logic to the SFTJobRunner Python class.
+# This template handles SkyRL-based reinforcement learning training jobs.
+# It sets up Ray cluster, environment variables, and runs the SkyRL entrypoint.
 #
 # Usage: The launcher writes a JSON config file and substitutes {config_path}
 # ==============================================================================
@@ -53,6 +53,21 @@ set +u
 {conda_activate}
 set -u
 
+# --- RL Environment Activation ---
+# The RL environment is separate from datagen due to dependency conflicts.
+# It's created by: ./hpc/setup_rl_env.sh
+RL_ENV_DIR="${RL_ENV_DIR:-$WORKDIR/envs/rl}"
+if [[ -d "$RL_ENV_DIR" ]]; then
+  echo "Activating RL environment: $RL_ENV_DIR"
+  source "$RL_ENV_DIR/bin/activate"
+elif [[ -n "${DCFT_RL_ENV:-}" ]] && [[ -d "$DCFT_RL_ENV" ]]; then
+  echo "Activating RL environment from DCFT_RL_ENV: $DCFT_RL_ENV"
+  source "$DCFT_RL_ENV/bin/activate"
+else
+  echo "Warning: RL environment not found at $RL_ENV_DIR"
+  echo "Run ./hpc/setup_rl_env.sh to create it, or set DCFT_RL_ENV"
+fi
+
 # --- Source environment files ---
 if [ -n "${DCFT:-}" ] && [ -f "$DCFT/hpc/dotenv/{cluster_env_file}" ]; then
   source "$DCFT/hpc/dotenv/{cluster_env_file}"
@@ -80,7 +95,13 @@ export CUDA_LAUNCH_BLOCKING=0
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export OMP_NUM_THREADS=1
 export PYTHONPATH="$WORKDIR:${PYTHONPATH:-}"
-export DISABLE_VERSION_CHECK=1  # Skip LlamaFactory transformers version check
+
+# --- RL-specific environment variables ---
+{rl_env_exports}
+
+# --- vLLM/Ray settings ---
+export VLLM_USE_V1=1
+export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
 
 # --- Distributed training setup ---
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
@@ -96,25 +117,68 @@ export WANDB_DIR="${DCFT_WANDB_DIR:-$DCFT/{experiments_dir}/wandb}"
 # --- Create experiment directories ---
 mkdir -p "$DCFT/{experiments_dir}"
 mkdir -p "$DCFT/{experiments_dir}/logs"
-mkdir -p "$DCFT/{experiments_dir}/tmp"
-
-# --- Supabase environment variables for DB registration ---
-for _supabase_var in SUPABASE_URL SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY; do
-    if [[ -n "${!_supabase_var:-}" ]]; then
-        export "${_supabase_var}=${!_supabase_var}"
-    else
-        echo "Warning: ${_supabase_var} is not set; Supabase registration may fail." >&2
-    fi
-done
+mkdir -p "$DCFT/{experiments_dir}/exports"
 
 # --- SSH Tunneling (JSC clusters only) ---
 {ssh_tunnel_setup}
 
-# --- Run the SFT job via Python runner ---
-echo "=== Universal SFT Training Runner ==="
-echo "Config: {config_path}"
-echo "Working directory: $WORKDIR"
-echo "Nodes: $NUM_NODES, GPUs/node: $NUM_GPUS_PER_NODE"
-echo "======================================"
+# --- Ray cluster setup ---
+RAY_PORT={ray_port}
 
-{srun_command}
+echo "=== Ray Cluster Setup ==="
+echo "MASTER_ADDR: $MASTER_ADDR"
+echo "SLURM_NODEID: $SLURM_NODEID"
+echo "NUM_NODES: $NUM_NODES"
+echo "NUM_GPUS_PER_NODE: $NUM_GPUS_PER_NODE"
+
+if [ "$SLURM_NODEID" = "0" ]; then
+  echo "Starting Ray head node on $HOSTNAME..."
+  ray start --head \
+    --port=$RAY_PORT \
+    --num-cpus={cpus_per_node} \
+    --num-gpus={gpus_per_node} \
+    --block &
+  RAY_PID=$!
+  sleep 15
+  echo "Ray head started (PID: $RAY_PID)"
+else
+  echo "Starting Ray worker on $HOSTNAME, connecting to $MASTER_ADDR:$RAY_PORT..."
+  sleep 10  # Wait for head to start
+  ray start \
+    --address="$MASTER_ADDR:$RAY_PORT" \
+    --num-cpus={cpus_per_node} \
+    --num-gpus={gpus_per_node} \
+    --block &
+  RAY_PID=$!
+  sleep 5
+  echo "Ray worker started (PID: $RAY_PID)"
+fi
+
+# --- Run SkyRL on head node only ---
+if [ "$SLURM_NODEID" = "0" ]; then
+  echo "=== Universal RL Training Runner ==="
+  echo "Config: {config_path}"
+  echo "Working directory: $WORKDIR"
+  echo "Nodes: $NUM_NODES, GPUs/node: $NUM_GPUS_PER_NODE"
+  echo "======================================"
+
+  # Change to SkyRL directory if available
+  if [ -n "${SKYRL_HOME:-}" ] && [ -d "$SKYRL_HOME/skyrl-train" ]; then
+    cd "$SKYRL_HOME/skyrl-train"
+    echo "Changed to SKYRL_HOME: $(pwd)"
+  fi
+
+  # Run SkyRL
+  {skyrl_command}
+  EXIT_CODE=$?
+
+  echo "SkyRL exited with code: $EXIT_CODE"
+
+  # Cleanup Ray
+  ray stop
+  exit $EXIT_CODE
+else
+  # Worker nodes just keep Ray running
+  echo "Worker node $SLURM_NODEID waiting for head node..."
+  wait $RAY_PID
+fi
