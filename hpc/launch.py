@@ -261,7 +261,9 @@ def _configure_output_and_logging(base_config: dict, exp_args: dict, checkpoints
     os.makedirs(output_dir, exist_ok=True)
     base_config["output_dir"] = output_dir
 
-    wandb_dir = os.path.join(exp_args["experiments_dir"], "wandb", exp_args["job_name"])
+    # experiments_dir defaults to ./experiments/<job_name> if not specified
+    experiments_dir = exp_args.get("experiments_dir") or os.path.join("experiments", exp_args["job_name"])
+    wandb_dir = os.path.join(experiments_dir, "wandb", exp_args["job_name"])
     os.makedirs(wandb_dir, exist_ok=True)
     os.environ["WANDB_DIR"] = wandb_dir
 
