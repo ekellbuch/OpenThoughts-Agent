@@ -107,8 +107,9 @@ export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
 export HYDRA_FULL_ERROR=1
 
 # --- Ray logging (store all logs in experiments_dir) ---
-export RAY_TMPDIR="$DCFT/{experiments_dir}/ray_tmp"
-export RAY_LOG_DIR="$DCFT/{experiments_dir}/ray_logs"
+# Note: {experiments_dir} is an absolute path substituted by the launcher
+export RAY_TMPDIR="{experiments_dir}/ray_tmp"
+export RAY_LOG_DIR="{experiments_dir}/ray_logs"
 
 # --- Distributed training setup ---
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
@@ -119,14 +120,15 @@ export NUM_GPUS=$((NUM_GPUS_PER_NODE*SLURM_NNODES))
 
 # --- HuggingFace/WandB paths ---
 export HF_HOME="${HF_HOME:-${HF_HUB_CACHE:-/tmp/hf_home}}"
-export WANDB_DIR="${DCFT_WANDB_DIR:-$DCFT/{experiments_dir}/wandb}"
+export WANDB_DIR="${DCFT_WANDB_DIR:-{experiments_dir}/wandb}"
 
 # --- Create experiment directories ---
-mkdir -p "$DCFT/{experiments_dir}"
-mkdir -p "$DCFT/{experiments_dir}/logs"
-mkdir -p "$DCFT/{experiments_dir}/exports"
-mkdir -p "$DCFT/{experiments_dir}/ray_tmp"
-mkdir -p "$DCFT/{experiments_dir}/ray_logs"
+# Note: {experiments_dir} is an absolute path substituted by the launcher
+mkdir -p "{experiments_dir}"
+mkdir -p "{experiments_dir}/logs"
+mkdir -p "{experiments_dir}/exports"
+mkdir -p "{experiments_dir}/ray_tmp"
+mkdir -p "{experiments_dir}/ray_logs"
 
 # --- SSH Tunneling (JSC clusters only) ---
 {ssh_tunnel_setup}

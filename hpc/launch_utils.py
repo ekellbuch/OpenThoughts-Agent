@@ -817,7 +817,55 @@ def derive_rl_job_name(cli_args: Mapping[str, Any]) -> str:
 
     # Sanitize using shared utility (strips brackets, quotes, special chars)
     job_name = sanitize_repo_for_job(job_name).lower()
-    return job_name[:63]  # SLURM job name limit
+    # 63 char limit is for SkyPilot/DNS compatibility, not SLURM (which allows 1024+).
+    # If not using SkyPilot, you can increase this limit.
+    return job_name[:63]
+
+
+def derive_sft_job_name(cli_args: Mapping[str, Any], use_mca: bool = False) -> str:
+    """Construct job name for SFT training jobs.
+
+    Pattern: sft_{model}_{dataset}_{nodes}n (or sft_mca_ prefix for MCA jobs)
+
+    Args:
+        cli_args: Command line arguments dictionary.
+        use_mca: If True, use sft_mca_ prefix instead of sft_.
+
+    Returns:
+        Derived job name string (max 63 chars for SLURM compatibility).
+    """
+    prefix = "sft_mca" if use_mca else "sft"
+    components = [prefix]
+
+    # Extract model name (strip org prefix)
+    model_path = cli_args.get("model_path") or cli_args.get("model_name_or_path", "")
+    if model_path:
+        model_name = str(model_path).split("/")[-1]
+        # Truncate long model names
+        if len(model_name) > 30:
+            model_name = model_name[:30]
+        components.append(model_name)
+
+    # Extract dataset name (strip org prefix)
+    dataset = cli_args.get("dataset", "")
+    if dataset:
+        dataset_name = str(dataset).split("/")[-1]
+        # Truncate long dataset names
+        if len(dataset_name) > 30:
+            dataset_name = dataset_name[:30]
+        components.append(dataset_name)
+
+    # Add node count
+    num_nodes = cli_args.get("num_nodes", 1)
+    components.append(f"{num_nodes}n")
+
+    job_name = "_".join(components)
+
+    # Sanitize using shared utility (strips brackets, quotes, special chars)
+    job_name = sanitize_repo_for_job(job_name).lower()
+    # 63 char limit is for SkyPilot/DNS compatibility, not SLURM (which allows 1024+).
+    # If not using SkyPilot, you can increase this limit.
+    return job_name[:63]
 
 
 def derive_default_job_name(cli_args: Mapping[str, Any]) -> str:
@@ -893,6 +941,10 @@ def get_job_name(cli_args: Mapping[str, Any]) -> str:
         return derive_datagen_job_name(cli_args)
     if job_type == JobType.RL.value:
         return derive_rl_job_name(cli_args)
+    if job_type == JobType.SFT.value:
+        return derive_sft_job_name(cli_args, use_mca=False)
+    if job_type == JobType.SFT_MCA.value:
+        return derive_sft_job_name(cli_args, use_mca=True)
     return derive_default_job_name(cli_args)
 
 def _parse_optional_int(value: Any, label: Optional[str] = None) -> Optional[int]:
@@ -1519,6 +1571,7 @@ __all__ = [
     # Job naming
     "derive_datagen_job_name",
     "derive_rl_job_name",
+    "derive_sft_job_name",
     "get_job_name",
     "sanitize_repo_for_job",
     "sanitize_repo_component",
