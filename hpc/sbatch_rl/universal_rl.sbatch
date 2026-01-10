@@ -103,6 +103,10 @@ export PYTHONPATH="$WORKDIR:${PYTHONPATH:-}"
 export VLLM_USE_V1=1
 export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
 
+# --- Ray logging (store all logs in experiments_dir) ---
+export RAY_TMPDIR="$DCFT/{experiments_dir}/ray_tmp"
+export RAY_LOG_DIR="$DCFT/{experiments_dir}/ray_logs"
+
 # --- Distributed training setup ---
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT={master_port}
@@ -118,6 +122,8 @@ export WANDB_DIR="${DCFT_WANDB_DIR:-$DCFT/{experiments_dir}/wandb}"
 mkdir -p "$DCFT/{experiments_dir}"
 mkdir -p "$DCFT/{experiments_dir}/logs"
 mkdir -p "$DCFT/{experiments_dir}/exports"
+mkdir -p "$DCFT/{experiments_dir}/ray_tmp"
+mkdir -p "$DCFT/{experiments_dir}/ray_logs"
 
 # --- SSH Tunneling (JSC clusters only) ---
 {ssh_tunnel_setup}
