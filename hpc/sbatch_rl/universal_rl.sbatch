@@ -112,13 +112,6 @@ export HYDRA_FULL_ERROR=1
 export RAY_TMPDIR="${SCRATCH:-/tmp}/ray_tmp"
 export RAY_LOG_DIR="${SCRATCH:-/tmp}/ray_logs"
 
-# --- Distributed training setup ---
-export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-export MASTER_PORT={master_port}
-export NUM_NODES=$SLURM_JOB_NUM_NODES
-export NUM_GPUS_PER_NODE={gpus_per_node}
-export NUM_GPUS=$((NUM_GPUS_PER_NODE*SLURM_NNODES))
-
 # --- HuggingFace/WandB paths ---
 export HF_HOME="${HF_HOME:-${HF_HUB_CACHE:-/tmp/hf_home}}"
 export WANDB_DIR="${DCFT_WANDB_DIR:-{experiments_dir}/wandb}"
@@ -136,63 +129,11 @@ mkdir -p "${SCRATCH:-/tmp}/ray_logs"
 # --- SSH Tunneling (JSC clusters only) ---
 {ssh_tunnel_setup}
 
-# --- Ray cluster setup ---
-RAY_PORT={ray_port}
+# --- Run the RL training job via Python runner ---
+# Ray cluster management is handled by hpc/ray_utils.py using proper srun calls
+echo "=== Universal RL Training Runner ==="
+echo "Config: {config_path}"
+echo "Working directory: $WORKDIR"
+echo "========================================"
 
-echo "=== Ray Cluster Setup ==="
-echo "MASTER_ADDR: $MASTER_ADDR"
-echo "SLURM_NODEID: $SLURM_NODEID"
-echo "NUM_NODES: $NUM_NODES"
-echo "NUM_GPUS_PER_NODE: $NUM_GPUS_PER_NODE"
-
-if [ "$SLURM_NODEID" = "0" ]; then
-  echo "Starting Ray head node on $HOSTNAME..."
-  ray start --head \
-    --port=$RAY_PORT \
-    --num-cpus={cpus_per_node} \
-    --num-gpus={gpus_per_node} \
-    --block &
-  RAY_PID=$!
-  sleep 15
-  echo "Ray head started (PID: $RAY_PID)"
-else
-  echo "Starting Ray worker on $HOSTNAME, connecting to $MASTER_ADDR:$RAY_PORT..."
-  sleep 10  # Wait for head to start
-  ray start \
-    --address="$MASTER_ADDR:$RAY_PORT" \
-    --num-cpus={cpus_per_node} \
-    --num-gpus={gpus_per_node} \
-    --block &
-  RAY_PID=$!
-  sleep 5
-  echo "Ray worker started (PID: $RAY_PID)"
-fi
-
-# --- Run SkyRL on head node only ---
-if [ "$SLURM_NODEID" = "0" ]; then
-  echo "=== Universal RL Training Runner ==="
-  echo "Config: {config_path}"
-  echo "Working directory: $WORKDIR"
-  echo "Nodes: $NUM_NODES, GPUs/node: $NUM_GPUS_PER_NODE"
-  echo "======================================"
-
-  # Change to SkyRL directory if available
-  if [ -n "${SKYRL_HOME:-}" ] && [ -d "$SKYRL_HOME/skyrl-train" ]; then
-    cd "$SKYRL_HOME/skyrl-train"
-    echo "Changed to SKYRL_HOME: $(pwd)"
-  fi
-
-  # Run SkyRL
-  {skyrl_command}
-  EXIT_CODE=$?
-
-  echo "SkyRL exited with code: $EXIT_CODE"
-
-  # Cleanup Ray
-  ray stop
-  exit $EXIT_CODE
-else
-  # Worker nodes just keep Ray running
-  echo "Worker node $SLURM_NODEID waiting for head node..."
-  wait $RAY_PID
-fi
+python -m hpc.rl_launch_utils --config "{config_path}"

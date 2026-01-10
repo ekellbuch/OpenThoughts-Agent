@@ -610,13 +610,32 @@ class RLJobRunner:
     """Runner for RL training jobs executed from sbatch.
 
     This class is instantiated within the sbatch script and handles:
-    - Ray cluster setup
+    - Ray cluster setup (using shared RayCluster utility)
     - Environment configuration
     - SkyRL execution
+
+    Usage (from sbatch):
+        python -m hpc.rl_launch_utils --config /path/to/config.json
     """
 
     def __init__(self, config: RLJobConfig):
         self.config = config
+        self._hpc = None
+
+    def _get_hpc(self):
+        """Lazy-load HPC configuration."""
+        if self._hpc is None:
+            from hpc.hpc import detect_hpc, clusters
+            if self.config.cluster_name:
+                for c in clusters:
+                    if c.name.lower() == self.config.cluster_name.lower():
+                        self._hpc = c
+                        break
+                if self._hpc is None:
+                    raise ValueError(f"Unknown cluster: {self.config.cluster_name}")
+            else:
+                self._hpc = detect_hpc()
+        return self._hpc
 
     def run(self) -> int:
         """Execute the RL training job.
@@ -624,10 +643,11 @@ class RLJobRunner:
         Returns:
             Exit code (0 for success, non-zero for failure).
         """
+        print(f"=== RLJobRunner: {self.config.job_name} ===")
+
         try:
             self._setup_environment()
-            self._setup_ray_cluster()
-            return self._run_skyrl()
+            return self._run_with_ray()
         except Exception as e:
             print(f"RL job failed: {e}", file=sys.stderr)
             import traceback
@@ -658,33 +678,39 @@ class RLJobRunner:
         print(f"  NUM_INFERENCE_ENGINES={os.environ['NUM_INFERENCE_ENGINES']}")
         print(f"  POLICY_NUM_NODES={os.environ['POLICY_NUM_NODES']}")
 
-    def _setup_ray_cluster(self) -> None:
-        """Initialize Ray cluster (head node starts head, workers connect)."""
-        import socket
+    def _run_with_ray(self) -> int:
+        """Run SkyRL training with managed Ray cluster.
 
-        slurm_nodeid = int(os.environ.get("SLURM_NODEID", "0"))
-        master_addr = os.environ.get("MASTER_ADDR", socket.gethostname())
+        Uses RayCluster.from_slurm() to properly start Ray across all SLURM nodes
+        using srun, ensuring all nodes join the cluster before training begins.
+        """
+        from hpc.ray_utils import RayCluster, RayClusterConfig
 
-        if slurm_nodeid == 0:
-            # Head node
-            cmd = [
-                "ray", "start", "--head",
-                f"--port={self.config.ray_port}",
-                f"--num-cpus={self.config.cpus_per_node}",
-                f"--num-gpus={self.config.gpus_per_node}",
-            ]
-            print(f"Starting Ray head: {' '.join(cmd)}")
-            subprocess.run(cmd, check=True)
-        else:
-            # Worker node
-            cmd = [
-                "ray", "start",
-                f"--address={master_addr}:{self.config.ray_port}",
-                f"--num-cpus={self.config.cpus_per_node}",
-                f"--num-gpus={self.config.gpus_per_node}",
-            ]
-            print(f"Joining Ray cluster: {' '.join(cmd)}")
-            subprocess.run(cmd, check=True)
+        hpc = self._get_hpc()
+        num_nodes = int(os.environ.get("SLURM_JOB_NUM_NODES", self.config.num_nodes))
+
+        # Use config values (from CLI overrides) instead of cluster defaults
+        gpus_per_node = self.config.gpus_per_node or hpc.gpus_per_node
+        cpus_per_node = self.config.cpus_per_node or hpc.cpus_per_node
+
+        ray_cfg = RayClusterConfig(
+            num_nodes=num_nodes,
+            gpus_per_node=gpus_per_node,
+            cpus_per_node=cpus_per_node,
+            ray_port=self.config.ray_port,
+            srun_export_env=hpc.get_srun_export_env(),
+            ray_env_vars=hpc.get_ray_env_vars(),
+        )
+
+        print(f"Starting Ray cluster with {num_nodes} nodes, {gpus_per_node} GPUs/node")
+
+        with RayCluster.from_slurm(ray_cfg) as ray_cluster:
+            # Set RAY_ADDRESS for SkyRL to connect
+            os.environ["RAY_ADDRESS"] = ray_cluster.address
+            print(f"Ray cluster ready at {ray_cluster.address}")
+            print(f"Total GPUs available: {ray_cluster.total_gpus}")
+
+            return self._run_skyrl()
 
     def _run_skyrl(self) -> int:
         """Execute SkyRL training.
