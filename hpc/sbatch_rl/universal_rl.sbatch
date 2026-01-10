@@ -106,17 +106,6 @@ export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
 # --- Hydra debugging ---
 export HYDRA_FULL_ERROR=1
 
-# --- Ray logging ---
-# Use $SCRATCH for Ray temp/logs because Ray creates very long socket paths
-# that can exceed the 107-byte Unix socket path limit (AF_UNIX).
-# Keep per-job subdirs short to avoid hitting path-length limits while still
-# preventing stale sessions from reusing the same plasma sockets.
-RAY_TMP_BASE="${SCRATCH:-/tmp}/ray_tmp"
-RAY_LOG_BASE="${SCRATCH:-/tmp}/ray_logs"
-RAY_JOB_TAG="${SLURM_JOB_ID:-$$}"
-export RAY_TMPDIR="${RAY_TMP_BASE}/${RAY_JOB_TAG}"
-export RAY_LOG_DIR="${RAY_LOG_BASE}"
-
 # --- HuggingFace/WandB paths ---
 export HF_HOME="${HF_HOME:-${HF_HUB_CACHE:-/tmp/hf_home}}"
 export WANDB_DIR="${DCFT_WANDB_DIR:-{experiments_dir}/wandb}"
@@ -126,10 +115,6 @@ export WANDB_DIR="${DCFT_WANDB_DIR:-{experiments_dir}/wandb}"
 mkdir -p "{experiments_dir}"
 mkdir -p "{experiments_dir}/logs"
 mkdir -p "{experiments_dir}/exports"
-
-# Ray directories in $SCRATCH (shorter paths for Unix socket limit)
-mkdir -p "$RAY_TMPDIR"
-mkdir -p "$RAY_LOG_DIR"
 
 # --- SSH Tunneling (JSC clusters only) ---
 {ssh_tunnel_setup}
