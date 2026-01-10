@@ -5,28 +5,21 @@
 #SBATCH --ntasks-per-node 1
 #SBATCH --cpus-per-task=64
 #SBATCH --account CCR24067
-#SBATCH --output=/scratch/10000/eguha3/dc-agent/data/sbatches/logs/harbor_32node_8way_dp_%j.out
-#SBATCH --job-name=harbor_32node_8way_dp
+#SBATCH --output=/scratch/10000/eguha3/dc-agent/data/ablation_experiments/logs/timeout_multiplier_0.25_%j.out
+#SBATCH --job-name=abl_timeout_0.25
 
 set -eo pipefail
 
-if [ -z "$1" ]; then
-    echo "Usage: sbatch run_harbor_32node_8way_dp_glm47.sbatch <hf_dataset_repo_id>"
-    exit 1
-fi
+EXPERIMENT_NAME="timeout_multiplier_0.25"
+INPUT_REPO_ID="mlfoundations-dev/stackexchange-tezos-sandboxes"
+OUTPUT_REPO_ID="DCAgent/exp_tas_timeout_multiplier_0.25_traces"
 
-source /scratch/10000/eguha3/old-dc-agent/secret.env
-
-INPUT_REPO_ID="$1"
-DATASET_NAME="${INPUT_REPO_ID##*/}"
-OUTPUT_REPO_ID="DCAgent/${DATASET_NAME}_glm_4.7_traces_locetash"
-
-SBATCHES_DIR="${DCAGENT_DIR}/data/sbatches"
+EXPERIMENTS_DIR="/scratch/10000/eguha3/dc-agent/data/ablation_experiments"
 NUM_SHARDS=8
 NODES_PER_SHARD=4
 
 echo "============================================"
-echo "vLLM + Harbor 8-Way Data Parallel Experiment"
+echo "Ablation Experiment: $EXPERIMENT_NAME"
 echo "============================================"
 echo "Total Nodes: $SLURM_JOB_NUM_NODES"
 echo "Shards: $NUM_SHARDS"
@@ -35,7 +28,8 @@ echo "Input Dataset: $INPUT_REPO_ID"
 echo "Output Traces: $OUTPUT_REPO_ID"
 echo "============================================"
 
-mkdir -p "$SBATCHES_DIR/logs"
+mkdir -p "$EXPERIMENTS_DIR/logs"
+mkdir -p "$EXPERIMENTS_DIR/results/$EXPERIMENT_NAME"
 
 echo ""
 echo "=== Step 1: Environment Setup ==="
@@ -59,6 +53,7 @@ export HYDRA_FULL_ERROR=1
 export HF_CACHE_DIR=/scratch/08134/negin/dc-agent-shared/.hf_cache
 export HF_HUB_CACHE=$SCRATCH/hub
 
+source /scratch/10000/eguha3/old-dc-agent/secret.env
 
 ln -sf /home1/apps/gcc/15.1.0/lib64/libstdc++.so.6 /scratch/10000/eguha3/vllm_sandboxes_backup/lib/libstdc++.so.6
 export LD_LIBRARY_PATH=/home1/apps/gcc/15.1.0/lib64:/scratch/10000/eguha3/vllm_sandboxes_backup/lib/python3.12/site-packages/torch/lib:$LD_LIBRARY_PATH
@@ -92,9 +87,10 @@ VLLM_PIPELINE_PARALLEL_SIZE=1
 echo ""
 echo "=== Step 2: Downloading and Sharding Dataset ==="
 
-export PYTHONPATH="${DCAGENT_DIR}:${DCAGENT_DIR}/scripts/harbor:$PYTHONPATH"
-TEACHER_SCRIPTS_DIR="${DCAGENT_DIR}/data/ablation_experiments/sbatch/teacher_scripts"
+export PYTHONPATH="/scratch/10000/eguha3/dc-agent:/scratch/10000/eguha3/dc-agent/scripts/harbor:$PYTHONPATH"
+TEACHER_SCRIPTS_DIR="/scratch/10000/eguha3/dc-agent/data/ablation_experiments/sbatch/teacher_scripts"
 
+# Download and shard dataset (handles caching internally)
 SHARD_OUTPUT_FILE=$(mktemp)
 LD_LIBRARY_PATH="" /scratch/10000/eguha3/vllm_sandboxes_backup/bin/python3 "$TEACHER_SCRIPTS_DIR/shard_dataset.py" "$INPUT_REPO_ID" "$NUM_SHARDS" "$SHARD_OUTPUT_FILE"
 source "$SHARD_OUTPUT_FILE"
@@ -188,7 +184,7 @@ start_vllm_for_shard() {
     local api_port=${API_PORTS[$shard_idx]}
     local ray_address="${head_ip}:${ray_port}"
 
-    local vllm_log="${SBATCHES_DIR}/logs/vllm_${DATASET_NAME}_shard${shard_idx}_${SLURM_JOB_ID}.log"
+    local vllm_log="${EXPERIMENTS_DIR}/logs/vllm_${EXPERIMENT_NAME}_shard${shard_idx}_${SLURM_JOB_ID}.log"
 
     echo "  Starting vLLM for shard $shard_idx on $head_node (port $api_port)..."
 
@@ -215,7 +211,7 @@ start_vllm_for_shard() {
             VLLM_ALL2ALL_BACKEND="pplx" \
             VLLM_ENABLE_EPLB="false" \
             SERVE_HTTP_PORT="$api_port" \
-        $PYTHON_BIN ${DCAGENT_DIR}/scripts/vllm/dp_debug.py \
+        $PYTHON_BIN /scratch/10000/eguha3/dc-agent/scripts/vllm/dp_debug.py \
         >> "$vllm_log" 2>&1 &
 
     VLLM_PIDS[$shard_idx]=$!
@@ -254,8 +250,9 @@ echo "All vLLM servers are ready!"
 echo ""
 echo "=== Step 5: Running $NUM_SHARDS Harbor Jobs in Parallel ==="
 
-HARBOR_CONFIG="${DCAGENT_DIR}/eval/tacc/dcagent_eval_config.yaml"
-CONFIG_NAME="${DATASET_NAME}_32node_8way_dp_${DATASET_FINGERPRINT}"
+HARBOR_CONFIG="/scratch/10000/eguha3/dc-agent/eval/tacc/dcagent_eval_config.yaml"
+# Use deterministic job name based on experiment name and dataset fingerprint (not timestamp)
+CONFIG_NAME="${EXPERIMENT_NAME}_${DATASET_FINGERPRINT}"
 
 declare -a HARBOR_PIDS
 declare -a HARBOR_LOGS
@@ -267,7 +264,7 @@ run_harbor_for_shard() {
     local api_port=${API_PORTS[$shard_idx]}
     local shard_dataset="$SHARD_DIR/shard_${shard_idx}"
     local run_tag="${CONFIG_NAME}_shard${shard_idx}"
-    local harbor_log="${SBATCHES_DIR}/logs/harbor_${DATASET_NAME}_shard${shard_idx}_${SLURM_JOB_ID}.log"
+    local harbor_log="${EXPERIMENTS_DIR}/logs/harbor_${EXPERIMENT_NAME}_shard${shard_idx}_${SLURM_JOB_ID}.log"
 
     HARBOR_LOGS[$shard_idx]="$harbor_log"
 
@@ -283,21 +280,28 @@ run_harbor_for_shard() {
             --agent terminus-2 \
             --model "hosted_vllm/glm" \
             --env "daytona" \
-            --agent-kwarg "api_base=http://localhost:${api_port}/v1" \
-            --agent-kwarg "key=fake_key" \
-  	        --n-attempts 1 \
+            --n-attempts 1 \
             --max-retries 0 \
             --job-name "$run_tag" \
             --auto-resume \
             --auto-resume-filter-error-type DaytonaRateLimitError \
             --auto-resume-filter-error-type EnvironmentStartTimeoutError \
             --auto-resume-filter-error-type DaytonaError \
-            --timeout-multiplier 2.0 \
+            --timeout-multiplier 0.25 \
             --config "$HARBOR_CONFIG" \
             --disable-verification \
+            --agent-kwarg "api_base=http://localhost:${api_port}/v1" \
+            --agent-kwarg "key=fake_key" \
+            --agent-kwarg "temperature=1.0" \
+            --agent-kwarg "max_episodes=128" \
+            --agent-kwarg "enable_summarize=true" \
+            --agent-kwarg "proactive_summarization_threshold=8192" \
+            --agent-kwarg "interleaved_thinking=false" \
+            --agent-kwarg "parser_name=json" \
+            --agent-kwarg "tmux_pane_width=160" \
+            --agent-kwarg "tmux_pane_height=40" \
             --agent-kwarg 'trajectory_config={"raw_content":true,"linear_history":true}' \
-            --agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}' \
-        >> "$harbor_log" 2>&1 &
+            --agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'         >> "$harbor_log" 2>&1 &
 
     HARBOR_PIDS[$shard_idx]=$!
     echo "    PID: ${HARBOR_PIDS[$shard_idx]}, Log: $harbor_log"
@@ -331,6 +335,7 @@ done
 echo "Job directories: $JOB_DIRS"
 echo "Uploading traces to: $OUTPUT_REPO_ID"
 
+# Upload traces using external script
 LD_LIBRARY_PATH="" TRANSFORMERS_NO_TORCH=1 /scratch/10000/eguha3/vllm_sandboxes_backup/bin/python3 "$TEACHER_SCRIPTS_DIR/upload_traces.py" "$OUTPUT_REPO_ID" $JOB_DIRS
 
 EXPORT_EXIT=$?
@@ -359,12 +364,12 @@ conda deactivate || true
 echo ""
 echo "============================================"
 if [ $FAILED -eq 0 ]; then
-    echo "Experiment COMPLETED"
+    echo "Experiment COMPLETED: $EXPERIMENT_NAME"
     echo "  Input: $INPUT_REPO_ID"
     echo "  Output: $OUTPUT_REPO_ID"
     echo "  All $NUM_SHARDS shards completed successfully!"
 else
-    echo "Experiment PARTIALLY FAILED"
+    echo "Experiment PARTIALLY FAILED: $EXPERIMENT_NAME"
     echo "  $FAILED out of $NUM_SHARDS shards failed"
 fi
 echo "============================================"

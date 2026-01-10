@@ -22,6 +22,7 @@ def main() -> str:
     dockerfiles = [dockerfile] * len(instances)
     task_tomls = [task_toml] * len(instances)
 
+
     hdf5_path = generate_tasks_to_hdf5(
         instructions=instructions,
         metadata=metadata,
@@ -29,6 +30,7 @@ def main() -> str:
         task_toml=task_tomls,
         dataset_prefix="r2egym_wo_docker",
     )
+
     extracted_paths = extract_hdf5_to_task_paths(hdf5_path)
     extracted_dir = str(extracted_paths[0]).rsplit('/', 1)[0]
     upload_tasks_to_hf(extracted_dir, "DCAgent/exp-swd-r2egym-wo-docker")

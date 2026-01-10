@@ -808,6 +808,29 @@ def upsample_tasks_directory(
     return str(temp_dir)
 
 
+def upsample_list(items: List[Any], target_count: int) -> List[Any]:
+    """
+    Upsample a list by repeating items until reaching target count.
+
+    Args:
+        items: List of items to upsample
+        target_count: Target number of items after upsampling
+
+    Returns:
+        List of upsampled items (length = target_count)
+    """
+    if len(items) >= target_count:
+        return items[:target_count]
+
+    upsampled = []
+    idx = 0
+    while len(upsampled) < target_count:
+        upsampled.append(items[idx % len(items)])
+        idx += 1
+
+    return upsampled
+
+
 def clean_empty_structs(dataset: Dataset) -> Dataset:
     """
     Automatically detect and remove empty struct columns from a HuggingFace dataset.
@@ -1674,7 +1697,7 @@ def extract_hdf5_to_task_paths(
     output_dir: Optional[str] = None,
     task_indices: Optional[List[int]] = None,
     max_workers: Optional[int] = None
-) -> List[str]:
+) -> str:
     """
     Extract tasks from an HDF5 file back to individual task directories in parallel.
 
@@ -1685,7 +1708,7 @@ def extract_hdf5_to_task_paths(
         max_workers: Maximum number of parallel workers. If None, uses os.cpu_count().
 
     Returns:
-        List[str]: Paths to extracted task directories
+        str: Path to the parent directory containing extracted task directories
     """
     try:
         import h5py
@@ -1729,7 +1752,7 @@ def extract_hdf5_to_task_paths(
                 print(f"Error extracting {task_group_name}: {e}")
 
     print(f"Successfully extracted {len(extracted_paths)} tasks")
-    return extracted_paths
+    return str(output_path)
 
 
 def subsample_tasks_hdf5(
