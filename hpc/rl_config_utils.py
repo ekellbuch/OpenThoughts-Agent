@@ -243,6 +243,11 @@ def build_skyrl_hydra_args(
         placement["policy_num_nodes"] = policy_num_nodes if policy_num_nodes is not None else num_nodes
     if placement.get("ref_num_nodes") is None:
         placement["ref_num_nodes"] = policy_num_nodes if policy_num_nodes is not None else num_nodes
+    # Derive gpus_per_node from CLI (cluster-specific, not hardcoded in YAML)
+    if placement.get("policy_num_gpus_per_node") is None or exp_args.get("gpus_per_node"):
+        placement["policy_num_gpus_per_node"] = gpus_per_node
+    if placement.get("ref_num_gpus_per_node") is None or exp_args.get("gpus_per_node"):
+        placement["ref_num_gpus_per_node"] = gpus_per_node
     trainer["placement"] = placement
 
     # Compute num_inference_engines

@@ -37,7 +37,9 @@ trainer:
     advantage_estimator: grpo
     use_kl_loss: true
   epochs: 10
-  train_batch_size: 8
+  # IMPORTANT: train_batch_size must be >= total GPUs (data parallel size)
+  # Override with --skyrl_override trainer.train_batch_size=N if needed
+  train_batch_size: 16
   eval_batch_size: 128
   eval_interval: 20
   eval_before_train: false
@@ -65,13 +67,13 @@ trainer:
     fsdp_config:
       cpu_offload: true
 
+  # Model placement - derived from CLI args (--num_nodes, --gpus_per_node)
   placement:
     colocate_all: true
-    # Derived from num_nodes if null
     policy_num_nodes: null
     ref_num_nodes: null
-    policy_num_gpus_per_node: 4
-    ref_num_gpus_per_node: 4
+    policy_num_gpus_per_node: null
+    ref_num_gpus_per_node: null
 
 # Generator (vLLM inference)
 generator:

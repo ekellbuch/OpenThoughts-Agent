@@ -76,8 +76,9 @@ trainer:
   update_epochs_per_batch: 1
 
   # Batch sizes optimized for sync RL
-  # Small train_batch_size reduces waiting time variance in sync RL
-  # When one agent is blocked, all others wait - smaller batches = less waiting
+  # IMPORTANT: train_batch_size must be >= total GPUs (data parallel size)
+  # For 4 nodes x 4 GPUs = 16 GPUs, use train_batch_size >= 16
+  # Override with --skyrl_override trainer.train_batch_size=N if needed
   train_batch_size: 16
   policy_mini_batch_size: 8  # 2 gradient steps per batch
   eval_batch_size: 32
@@ -120,16 +121,15 @@ trainer:
       cpu_offload: true
       reshard_after_forward: true
 
-  # Model placement for 16 GPUs
-  # Assuming 2 nodes x 8 GPUs or similar configuration
+  # Model placement - derived from CLI args (--num_nodes, --gpus_per_node)
   placement:
     colocate_all: true
-    # Policy and ref share nodes (colocated)
-    policy_num_nodes: null  # Derived from num_nodes
+    # Derived from CLI --num_nodes
+    policy_num_nodes: null
     ref_num_nodes: null
-    # 8 GPUs per node for standard H100/A100 setups
-    policy_num_gpus_per_node: 8
-    ref_num_gpus_per_node: 8
+    # Derived from CLI --gpus_per_node (cluster-specific: 4 for ZIH, 8 for TACC H100s)
+    policy_num_gpus_per_node: null
+    ref_num_gpus_per_node: null
 
 # Generator (vLLM inference) configuration
 generator:
