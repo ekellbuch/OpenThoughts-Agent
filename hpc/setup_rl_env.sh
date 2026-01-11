@@ -23,11 +23,12 @@ set -euo pipefail
 RL_ENV_NAME="rl"
 PYTHON_VERSION="3.12"
 
-# Determine base directory
-if [[ -n "${DCFT:-}" ]]; then
-    BASE_DIR="$DCFT"
-elif [[ -n "${DCFT_PRIVATE:-}" ]]; then
+# Determine base directory (project root with pyproject.toml)
+# DCFT_PRIVATE is the project dir on clusters where DCFT is a parent scratch dir
+if [[ -n "${DCFT_PRIVATE:-}" ]]; then
     BASE_DIR="$DCFT_PRIVATE"
+elif [[ -n "${DCFT:-}" ]]; then
+    BASE_DIR="$DCFT"
 else
     BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
