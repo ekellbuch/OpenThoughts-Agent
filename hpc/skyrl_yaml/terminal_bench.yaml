@@ -92,7 +92,8 @@ generator:
   append_eos_token_after_stop_str_in_multi_turn: true
   sampling_params:
     max_generate_length: 30720
-  # Note: engine_init_kwargs keys get + prefix automatically since base config has empty struct
+  # Note: engine_init_kwargs keys get ++ prefix automatically to add-or-override in the base config
+  # DO NOT set enforce_eager here - SkyRL handles it internally and will cause a duplicate error
   engine_init_kwargs:
     custom_chat_template_chat_completion_path: skyrl-train/examples/terminal_bench/qwen3_thinking_acc.jinja2
     trust_remote_code: true
