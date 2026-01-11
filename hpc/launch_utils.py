@@ -547,7 +547,7 @@ def build_sbatch_directives(
     if account:
         directives.append(f"#SBATCH --account {account}")
     if qos:
-        directives.append(f"#SBATCH -q {qos}")
+        directives.append(f"#SBATCH --qos {qos}")
     # Add GPU directive if the cluster uses one
     gpu_directive = hpc.get_gpu_directive(gpus_requested, gpu_type_resolved)
     if gpu_directive:

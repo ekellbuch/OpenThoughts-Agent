@@ -170,7 +170,7 @@ class HPC(BaseModel):
         if self.account:
             lines.append(f"#SBATCH --account {self.account}")
         if qos:
-            lines.append(f"#SBATCH -q {qos}")
+            lines.append(f"#SBATCH --qos {qos}")
         gpu_directive = self.get_gpu_directive(gpus, gpu_type)
         if gpu_directive:
             lines.append(gpu_directive)
@@ -652,7 +652,7 @@ perlmutter = HPC(
     name="perlmutter",
     hostname_pattern=r"login\d+\.perlmutter\.nersc\.gov",
     dotenv_filename="perlmutter.env",
-    account="m5091_g",  # _g suffix required for GPU allocations
+    account="m5091",
     partition="",
     gpus_per_node=4,
     cpus_per_node=64,
