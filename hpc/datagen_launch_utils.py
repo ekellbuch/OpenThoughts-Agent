@@ -32,6 +32,7 @@ from hpc.harbor_utils import (
     resolve_harbor_config_path,
 )
 from hpc.hf_utils import resolve_dataset_path, derive_default_hf_repo_id, sanitize_hf_repo_id
+from hpc.cli_utils import is_nullish
 
 # Backward compatibility aliases
 _normalize_cli_args = normalize_cli_args
@@ -119,10 +120,10 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
     # Auto-configure when trace_input_path is provided
     # (user is providing pre-existing tasks, so task gen is unnecessary but trace gen is implied)
     if exp_args.get("trace_input_path"):
-        if exp_args.get("enable_task_gen") is None:
+        if is_nullish(exp_args.get("enable_task_gen")):
             exp_args["enable_task_gen"] = False
             print("[datagen] Auto-disabled task generation (--trace-input-path provided)")
-        if exp_args.get("enable_trace_gen") is None:
+        if is_nullish(exp_args.get("enable_trace_gen")):
             exp_args["enable_trace_gen"] = True
             print("[datagen] Auto-enabled trace generation (--trace-input-path provided)")
 

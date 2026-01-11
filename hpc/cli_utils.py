@@ -221,6 +221,43 @@ def coerce_numeric_cli_values(args_dict: dict[str, Any]) -> dict[str, Any]:
     return args_dict
 
 
+def is_nullish(value: Any) -> bool:
+    """Check if a value is nullish (not explicitly set by user).
+
+    Returns True for values that indicate "not set":
+    - None
+    - Empty string ""
+    - Whitespace-only strings
+
+    Useful for determining whether to apply auto-derived defaults.
+
+    Args:
+        value: Any value to check.
+
+    Returns:
+        True if the value is nullish, False otherwise.
+
+    Examples:
+        >>> is_nullish(None)
+        True
+        >>> is_nullish("")
+        True
+        >>> is_nullish("   ")
+        True
+        >>> is_nullish(False)  # Explicit False is NOT nullish
+        False
+        >>> is_nullish(0)  # Explicit 0 is NOT nullish
+        False
+        >>> is_nullish("value")
+        False
+    """
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    return False
+
+
 def normalize_job_type(exp_args: dict) -> str | None:
     """Normalize job_type string without applying a default.
 
@@ -231,7 +268,7 @@ def normalize_job_type(exp_args: dict) -> str | None:
         Normalized job_type string (lowercase, stripped) or None if not set
     """
     raw_value = exp_args.get("job_type")
-    if raw_value is None or raw_value == "":
+    if is_nullish(raw_value):
         return None
     return str(raw_value).strip().lower()
 
@@ -242,6 +279,7 @@ __all__ = [
     "parse_comma_separated",
     "normalize_cli_args",
     "normalize_job_type",
+    "is_nullish",
     "parse_bool_flag",
     "coerce_str_bool_none",
     "coerce_numeric_cli_values",
