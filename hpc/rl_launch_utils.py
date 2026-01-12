@@ -333,6 +333,8 @@ def get_rl_env_activation(exp_args: Dict[str, Any]) -> str:
     if use_conda:
         return f'''# Using conda environment for RL: {conda_env}
 echo "Activating conda environment: {conda_env}"
+# Disable unbound variable check during conda operations (conda scripts reference unset vars)
+set +u
 # Initialize conda for non-interactive shell (required before conda activate)
 if [[ -n "${{CONDA_EXE:-}}" ]]; then
   # Use CONDA_EXE to find conda.sh
@@ -346,9 +348,12 @@ elif command -v conda &>/dev/null; then
   eval "$(conda shell.bash hook)"
 else
   echo "ERROR: Could not find conda installation for initialization"
+  set -u
   exit 1
 fi
-conda activate {conda_env}'''
+conda activate {conda_env}
+# Re-enable unbound variable check
+set -u'''
     else:
         return '''# Using venv for RL (created by ./hpc/setup_rl_env.sh)
 RL_ENV_DIR="${RL_ENV_DIR:-$WORKDIR/envs/rl}"
