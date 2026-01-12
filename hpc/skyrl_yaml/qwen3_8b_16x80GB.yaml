@@ -39,19 +39,76 @@ config_groups:
 # Terminal bench / agentic environment settings
 terminal_bench:
   agent_name: terminus
-  # Max episodes per task - "fail fast" assumption
-  max_episodes: 16
   # trials_dir: Directory for Harbor trial artifacts (derived from experiments_dir if null)
   trials_dir: null
-  # Sandbox resources - adequate for most agentic tasks
-  sandbox_cpu: 1
-  override_cpus: 1
-  override_memory_mb: 2048
-  override_storage_mb: 2048
-  # Enable summarization to compress long histories
-  # IMPORTANT: This helps keep prompts under budget as conversations grow
-  enable_summarize: true
-  store_all_messages: true
+
+  # Harbor configuration - schema-driven mapping to TrialConfig
+  # See examples/terminal_bench/harbor_config.py for full list of supported fields.
+  # Unknown fields will generate warnings (typo protection + version compatibility).
+  harbor:
+    # ==========================================================================
+    # Agent settings (maps to Harbor AgentConfig)
+    # ==========================================================================
+    # Max agent-environment turns before Harbor forces termination
+    max_episodes: 16
+    # Disable summarization, consistent with prior RL work
+    enable_summarize: false
+    # Store full message history for trajectory reconstruction
+    store_all_messages: true
+
+    # Agent timeout overrides
+    override_timeout_sec: 240        # Agent execution timeout (seconds)
+    # override_setup_timeout_sec: 120  # Agent setup timeout
+    # max_timeout_sec: 1800          # Cap timeout (useful for runaway tasks)
+
+    # ==========================================================================
+    # Environment settings (maps to Harbor EnvironmentConfig)
+    # ==========================================================================
+    # Sandbox resources - adequate for most agentic tasks
+    override_cpus: 1
+    override_memory_mb: 2048
+    override_storage_mb: 2048
+    # override_gpus: 0              # GPU allocation per sandbox
+    # environment_type: daytona     # Environment backend (daytona, docker, modal)
+
+    # ==========================================================================
+    # Trial-level settings (maps to Harbor TrialConfig)
+    # ==========================================================================
+    # timeout_multiplier: 1.0       # Multiply all timeouts by this factor
+
+    # ==========================================================================
+    # Verifier settings (maps to Harbor VerifierConfig)
+    # ==========================================================================
+    # verifier_disable: false       # Disable verification (for debugging)
+    verifier_override_timeout_sec: 120  # Override verifier timeout
+
+    # ==========================================================================
+    # Retry settings (maps to Harbor RetryConfig for QueueOrchestrator)
+    # ==========================================================================
+    # Retry logic with exponential backoff for transient failures
+    max_retries: 2                 # Max retry attempts per trial
+    min_wait_sec: 1.0              # Initial backoff delay (seconds)
+    max_wait_sec: 60.0             # Maximum backoff delay
+    wait_multiplier: 2.0           # Exponential backoff multiplier
+
+    # Exception filtering - don't retry permanent failures
+    # Default Harbor exclusions: AgentTimeoutError, VerifierTimeoutError,
+    #   RewardFileNotFoundError, RewardFileEmptyError, VerifierOutputParseError
+    # We add ContextLengthExceededError since summarization is disabled
+    exclude_exceptions:
+      - AgentTimeoutError
+      - VerifierTimeoutError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - VerifierOutputParseError
+      - ContextLengthExceededError  # Permanent when enable_summarize=false
+
+    # ==========================================================================
+    # Orchestrator settings (QueueOrchestrator concurrency control)
+    # ==========================================================================
+    n_concurrent_trials: 16        # Number of parallel trial workers
+
+  # Model info for Harbor's hosted_vllm validation (token limits and costs)
   model_info:
     # Context budget: 32k total = 24k prompt + 8k generation
     # Prompts grow with conversation history, so reserve headroom for generation
@@ -101,7 +158,7 @@ trainer:
   resume_mode: latest
 
   # Logging
-  project_name: dc-agent
+  project_name: ot-agent
 
   # Paths derived from experiments_dir/job_name if null
   run_name: null
