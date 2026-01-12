@@ -821,11 +821,13 @@ class RLJobRunner:
         Returns:
             Exit code from SkyRL process.
         """
-        # Build command
-        cmd = ["python", "-m", self.config.skyrl_entrypoint]
+        # Build command - use sys.executable to ensure we use the same Python
+        # as the current process (respects conda/venv activation)
+        cmd = [sys.executable, "-m", self.config.skyrl_entrypoint]
         cmd.extend(self.config.skyrl_hydra_args)
 
         print(f"\nRunning SkyRL:", flush=True)
+        print(f"  Python: {sys.executable}", flush=True)
         print(f"  Entrypoint: {self.config.skyrl_entrypoint}", flush=True)
         print(f"  Args: {len(self.config.skyrl_hydra_args)} Hydra arguments", flush=True)
 

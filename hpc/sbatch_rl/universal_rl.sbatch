@@ -140,6 +140,8 @@ trap cleanup_ray_logs EXIT
 echo "=== Universal RL Training Runner ==="
 echo "Config: {config_path}"
 echo "Working directory: $WORKDIR"
+echo "Python: $(which python)"
+echo "Python version: $(python --version)"
 echo "========================================"
 
 python -m hpc.rl_launch_utils --config "{config_path}"
