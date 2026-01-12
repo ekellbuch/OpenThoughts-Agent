@@ -682,6 +682,18 @@ perlmutter = HPC(
         "A100 80GB": '"gpu&hbm80g"',
         "A100 40GB": '"gpu"',
     },
+    # Modules to load (CUDA toolkit and native GCC for compilation)
+    modules=["cudatoolkit/12.9", "gcc-native/13.2"],
+    # Compiler environment variables for flash_attn and other CUDA builds
+    env_vars={
+        "CC": "gcc",
+        "CXX": "g++",
+        "CUDAHOSTCXX": "g++",
+    },
+    # Library paths for CUDA
+    library_paths={
+        "LIBRARY_PATH": "${CUDA_HOME}/lib64:${LIBRARY_PATH:-}",
+    },
     # NCCL/networking settings for SFT training
     nccl_settings={
         "NCCL_DEBUG": "INFO",
