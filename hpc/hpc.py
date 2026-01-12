@@ -72,6 +72,12 @@ class HPC(BaseModel):
     # Extra SBATCH directives (cluster-specific, e.g., licenses)
     extra_sbatch_directives: List[str] = []
 
+    # GPU type to constraint mapping (e.g., Perlmutter needs --constraint for A100 variants)
+    # Keys are GPU type strings (matching gpus_type or user-specified gpu_type)
+    # Values are constraint strings (without #SBATCH prefix)
+    # Special key "_default" is used when no gpu_type is specified
+    gpu_type_constraints: Dict[str, str] = {}
+
     def model_post_init(self, __context) -> None:
         # Derive a default CPU-per-GPU ratio when not explicitly provided.
         if not self.cpus_per_gpu:
@@ -170,7 +176,7 @@ class HPC(BaseModel):
         if self.account:
             lines.append(f"#SBATCH --account {self.account}")
         if qos:
-            lines.append(f"#SBATCH -q {qos}")
+            lines.append(f"#SBATCH --qos {qos}")
         gpu_directive = self.get_gpu_directive(gpus, gpu_type)
         if gpu_directive:
             lines.append(gpu_directive)
@@ -179,6 +185,12 @@ class HPC(BaseModel):
             lines.append(mem_directive)
         if self.node_exclusion_list:
             lines.append(f"#SBATCH --exclude={self.node_exclusion_list}")
+        # Add constraint directive based on GPU type (e.g., Perlmutter A100 variants)
+        if self.gpu_type_constraints:
+            constraint_key = gpu_type if gpu_type else "_default"
+            constraint = self.gpu_type_constraints.get(constraint_key)
+            if constraint:
+                lines.append(f"#SBATCH --constraint {constraint}")
         # Add any extra cluster-specific directives (e.g., licenses)
         for directive in self.extra_sbatch_directives:
             lines.append(directive)
@@ -279,6 +291,7 @@ jureca = HPC(
     modules=["CUDA/12.3"],
     env_vars={
         "PYTHONFAULTHANDLER": "1",
+        "WANDB_MODE": "offline",  # No internet on compute nodes
     },
     # NCCL/networking settings for SFT training (InfiniBand, no internet)
     nccl_settings={
@@ -306,6 +319,9 @@ jupiter = HPC(
     gpus_type="GH200 96GB",
     total_partition_nodes=48,
     gpu_directive_format="--gres=gpu:{n}",
+    env_vars={
+        "WANDB_MODE": "offline",  # No internet on compute nodes
+    },
     # NCCL/networking settings for SFT training (InfiniBand, no internet)
     nccl_settings={
         "NCCL_NET_GDR_LEVEL": "0",
@@ -334,6 +350,9 @@ juwels = HPC(
     total_partition_nodes=936,
     node_exclusion_list="jwb[0059,0067,0069,0193,0198,0215,0266,0284,0287,0294,0359,0418,0637,0647,0829,0832,0838,0898,0907,0921,0971,1004,1023,1029,1213]",
     gpu_directive_format="--gres=gpu:{n}",
+    env_vars={
+        "WANDB_MODE": "offline",  # No internet on compute nodes
+    },
     # NCCL/networking settings for SFT training (InfiniBand, no internet)
     nccl_settings={
         "NCCL_NET_GDR_LEVEL": "0",
@@ -359,6 +378,9 @@ leonardo = HPC(
     internet_node=False,
     gpus_type="A100 64GB",
     total_partition_nodes=3456,
+    env_vars={
+        "WANDB_MODE": "offline",  # No internet on compute nodes
+    },
     node_exclusion_list="lrdn[1606,2776,2425,2808,3064,3064,1953,2414,1506,1718,1779,2828,2354,3279,1370,2595,2751,2921,2368,2976,2733,2277,3136,2013,2952,1427,2682,2349,1655,1390,3151,3130,2002,2654,2101,2358,1597,2585,2900,2687,3165,3031,2798,2530,2344,1384,1420,1474,1509,1520,1556,1607,1647,1810,1927,2000,2028,2056,2120,2136,2371,2384,2444,2465,2479,2563,2598,2652,2716,2731,2746,2755,2772,2775,2792,2794,2917,2926,2927,3110,3221,3395,0666,0291,0043,1743,3299,3434,2379,2660,2711,2855,3444,3354,3111,2736,2345,0021,0037,2350,2201,2674,2642,2734,2690,3004,3091,1670,2689,3002,2362,1714,2071,1399,2940,2581,1357,3439,1569,1591,3439,1507,1531,2297,3379,3277,2912,1930,2878,2363,2984,3012,2663,2139,1457,2197]",
     gpu_directive_format="--gres=gpu:{n}",
     pretok_qos="boost_qos_dbg",
@@ -646,12 +668,32 @@ perlmutter = HPC(
     partition="",
     gpus_per_node=4,
     cpus_per_node=64,
-    mem_per_node="256GB",
+    mem_per_node="",  # Perlmutter doesn't accept explicit memory requests
     internet_node=True,
     gpus_type="A100 80GB",
     total_partition_nodes=256,
-    qos="regular",
+    qos="premium",
     gpu_directive_format="--gpus-per-node={n}",
+    # GPU type constraints for A100 variants
+    # _default (80GB): requires hbm80g constraint
+    # A100 40GB: requires gpu constraint only
+    gpu_type_constraints={
+        "_default": '"gpu&hbm80g"',
+        "A100 80GB": '"gpu&hbm80g"',
+        "A100 40GB": '"gpu"',
+    },
+    # Modules to load (CUDA toolkit and native GCC for compilation)
+    modules=["cudatoolkit/12.9", "gcc-native/13.2"],
+    # Compiler environment variables for flash_attn and other CUDA builds
+    env_vars={
+        "CC": "gcc",
+        "CXX": "g++",
+        "CUDAHOSTCXX": "g++",
+    },
+    # Library paths for CUDA
+    library_paths={
+        "LIBRARY_PATH": "${CUDA_HOME}/lib64:${LIBRARY_PATH:-}",
+    },
     # NCCL/networking settings for SFT training
     nccl_settings={
         "NCCL_DEBUG": "INFO",

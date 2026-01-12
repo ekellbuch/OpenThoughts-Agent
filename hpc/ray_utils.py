@@ -152,7 +152,7 @@ class RayCluster:
         This ensures a clean slate before starting a new cluster,
         preventing conflicts with lingering processes from previous jobs.
         """
-        print("Cleaning up existing Ray instances...")
+        print("Cleaning up existing Ray instances...", flush=True)
         for node in self.node_list:
             try:
                 subprocess.run(
@@ -189,32 +189,32 @@ class RayCluster:
         # Clean up any lingering Ray instances from previous jobs
         self._cleanup_existing_ray()
 
-        print(f"=== Starting Ray Cluster ===")
-        print(f"  Nodes: {len(self.node_list)}")
-        print(f"  GPUs per node: {self.config.gpus_per_node}")
-        print(f"  CPUs per node: {self.config.cpus_per_node}")
-        print(f"  Head node: {self.node_list[0]} ({self.head_ip})")
-        print(f"  Ray port: {self.config.ray_port}")
-        print(f"============================")
+        print(f"=== Starting Ray Cluster ===", flush=True)
+        print(f"  Nodes: {len(self.node_list)}", flush=True)
+        print(f"  GPUs per node: {self.config.gpus_per_node}", flush=True)
+        print(f"  CPUs per node: {self.config.cpus_per_node}", flush=True)
+        print(f"  Head node: {self.node_list[0]} ({self.head_ip})", flush=True)
+        print(f"  Ray port: {self.config.ray_port}", flush=True)
+        print(f"============================", flush=True)
 
         # Start head node
         self._start_node(self.node_list[0], is_head=True)
-        print(f"  Started Ray head on {self.node_list[0]}")
+        print(f"  Started Ray head on {self.node_list[0]}", flush=True)
 
         # Start worker nodes with delay
         for i, node in enumerate(self.node_list[1:], start=1):
             self._start_node(node, is_head=False)
-            print(f"  Started Ray worker {i} on {node}")
+            print(f"  Started Ray worker {i} on {node}", flush=True)
             time.sleep(3)  # Small delay between workers
 
         # Wait for cluster to be ready
         self._wait_for_cluster()
         self._started = True
 
-        print(f"=== Ray Cluster Ready ===")
-        print(f"  Address: {self.address}")
-        print(f"  Total GPUs: {self.total_gpus}")
-        print(f"=========================")
+        print(f"=== Ray Cluster Ready ===", flush=True)
+        print(f"  Address: {self.address}", flush=True)
+        print(f"  Total GPUs: {self.total_gpus}", flush=True)
+        print(f"=========================", flush=True)
 
     def stop(self) -> None:
         """Stop the Ray cluster.
@@ -224,7 +224,7 @@ class RayCluster:
         if not self._started and not self._ray_procs:
             return
 
-        print("Stopping Ray cluster...")
+        print("Stopping Ray cluster...", flush=True)
 
         # Stop Ray on all nodes
         for node in self.node_list:
@@ -258,7 +258,7 @@ class RayCluster:
         self._ray_procs.clear()
         self._ray_pids.clear()
         self._started = False
-        print("Ray cluster stopped")
+        print("Ray cluster stopped", flush=True)
 
     def _start_node(self, node: str, is_head: bool) -> None:
         """Start Ray on a single node."""
@@ -311,7 +311,11 @@ class RayCluster:
         self._ray_pids.append(proc.pid)
 
     def _wait_for_cluster(self) -> None:
-        """Wait for the Ray cluster to be ready with expected resources."""
+        """Wait for the Ray cluster to be ready with expected resources.
+
+        The wait script must run ON the head node (via srun) because ray.init()
+        needs to connect to a local raylet to register as a driver.
+        """
         script_path = Path(self.config.wait_for_cluster_script)
 
         if not script_path.exists():
@@ -322,52 +326,93 @@ class RayCluster:
             self._fallback_wait()
             return
 
-        cmd = [
+        # Build the wait command
+        wait_cmd = " ".join([
             sys.executable,
             str(script_path),
-            "--address",
-            self.address,
-            "--expected-gpus",
-            str(self.total_gpus),
-            "--expected-nodes",
-            str(len(self.node_list)),
-            "--timeout",
-            str(self.config.startup_timeout),
-            "--poll-interval",
-            str(self.config.poll_interval),
+            "--address", self.address,
+            "--expected-gpus", str(self.total_gpus),
+            "--expected-nodes", str(len(self.node_list)),
+            "--timeout", str(self.config.startup_timeout),
+            "--poll-interval", str(self.config.poll_interval),
+        ])
+
+        # Run on the head node via srun so ray.init() can connect to the local raylet
+        srun_cmd = [
+            "srun",
+            f"--export={self.config.srun_export_env}",
+            "--nodes=1",
+            "--ntasks=1",
+            "--overlap",
+            "-w", self.node_list[0],  # Head node
+            "bash", "-c", wait_cmd,
         ]
 
-        print(f"  Waiting for cluster ({self.total_gpus} GPUs, {len(self.node_list)} nodes)...")
+        print(f"  Waiting for cluster ({self.total_gpus} GPUs, {len(self.node_list)} nodes)...", flush=True)
         try:
-            subprocess.run(cmd, check=True)
+            subprocess.run(srun_cmd, check=True)
         except subprocess.CalledProcessError as e:
             raise RuntimeError(
                 f"Ray cluster failed to start within {self.config.startup_timeout}s"
             ) from e
 
     def _fallback_wait(self) -> None:
-        """Fallback wait using ray.init() to check cluster status."""
-        import ray
+        """Fallback wait using ray.init() to check cluster status.
 
-        start_time = time.time()
-        while time.time() - start_time < self.config.startup_timeout:
-            try:
-                ray.init(address=self.address, ignore_reinit_error=True)
-                resources = ray.cluster_resources()
-                gpu_count = resources.get("GPU", 0)
-                if gpu_count >= self.total_gpus:
-                    print(f"  Cluster ready with {gpu_count} GPUs")
-                    ray.shutdown()
-                    return
-                ray.shutdown()
-            except Exception:
-                pass
-            time.sleep(self.config.poll_interval)
+        This runs a polling loop ON the head node via srun, since ray.init()
+        requires a local raylet connection.
+        """
+        # Build inline Python script for polling
+        poll_script = f'''
+import ray
+import time
+import sys
 
-        raise RuntimeError(
-            f"Ray cluster failed to reach {self.total_gpus} GPUs "
-            f"within {self.config.startup_timeout}s"
-        )
+address = "{self.address}"
+expected_gpus = {self.total_gpus}
+timeout = {self.config.startup_timeout}
+poll_interval = {self.config.poll_interval}
+
+start_time = time.time()
+while time.time() - start_time < timeout:
+    try:
+        ray.init(address=address, ignore_reinit_error=True)
+        resources = ray.cluster_resources()
+        gpu_count = resources.get("GPU", 0)
+        num_nodes = len(ray.nodes())
+        print(f"[Ray wait] nodes={{num_nodes}} GPUs={{gpu_count}}/{{expected_gpus}}", flush=True)
+        if gpu_count >= expected_gpus:
+            print("Cluster ready", flush=True)
+            ray.shutdown()
+            sys.exit(0)
+        ray.shutdown()
+    except Exception as e:
+        print(f"[Ray wait] Connection error: {{e}}", flush=True)
+    time.sleep(poll_interval)
+
+print(f"Timeout: cluster did not reach {{expected_gpus}} GPUs within {{timeout}}s", flush=True)
+sys.exit(1)
+'''
+
+        # Run on head node via srun
+        srun_cmd = [
+            "srun",
+            f"--export={self.config.srun_export_env}",
+            "--nodes=1",
+            "--ntasks=1",
+            "--overlap",
+            "-w", self.node_list[0],
+            sys.executable, "-c", poll_script,
+        ]
+
+        print(f"  Waiting for cluster ({self.total_gpus} GPUs, fallback mode)...", flush=True)
+        try:
+            subprocess.run(srun_cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"Ray cluster failed to reach {self.total_gpus} GPUs "
+                f"within {self.config.startup_timeout}s"
+            ) from e
 
     def __enter__(self) -> RayCluster:
         """Context manager entry - start the cluster."""

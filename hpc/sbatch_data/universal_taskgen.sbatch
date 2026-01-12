@@ -17,6 +17,7 @@
 # ==============================================================================
 
 set -euo pipefail
+ulimit -c 0  # Disable core dumps to avoid filling disk space
 
 # Handle bash completion scripts that use BASH_COMPLETION_DEBUG
 if [ -z "${BASH_COMPLETION_DEBUG+x}" ]; then

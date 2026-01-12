@@ -336,15 +336,132 @@ def add_log_path_args(parser: ArgTarget) -> None:
     )
 
 
+def add_rl_training_args(
+    parser: ArgTarget,
+    *,
+    default_chat_template: str = "skyrl-train/examples/terminal_bench/qwen3_thinking_acc.jinja2",
+    default_eval_interval: int = 20,
+) -> None:
+    """Add RL (reinforcement learning) training arguments.
+
+    These arguments are specific to SkyRL-based RL training jobs.
+
+    Args:
+        parser: ArgumentParser or argument group to add arguments to.
+        default_chat_template: Default chat template path relative to SKYRL_HOME.
+        default_eval_interval: Default evaluation interval in steps.
+    """
+    _add_arg_with_alias(
+        parser,
+        "--chat_template_path",
+        "--chat-template-path",
+        default=default_chat_template,
+        help=(
+            "Path to Jinja2 chat template for model inference. "
+            "Relative to SKYRL_HOME or absolute path. "
+            f"Default: {default_chat_template}"
+        ),
+    )
+    _add_arg_with_alias(
+        parser,
+        "--eval_interval",
+        "--eval-interval",
+        type=int,
+        default=default_eval_interval,
+        help=(
+            "Number of training steps between evaluations. "
+            f"Set to 0 to disable periodic evaluation. Default: {default_eval_interval}"
+        ),
+    )
+    _add_arg_with_alias(
+        parser,
+        "--policy_num_nodes",
+        "--policy-num-nodes",
+        type=int,
+        default=None,
+        help=(
+            "Number of nodes to use for policy (actor) workers. "
+            "If not set, defaults to num_nodes (symmetric setup). "
+            "Use for asymmetric actor/learner configurations."
+        ),
+    )
+    _add_arg_with_alias(
+        parser,
+        "--tensor_parallel_size",
+        "--tensor-parallel-size",
+        type=int,
+        default=1,
+        help=(
+            "Tensor parallel size for vLLM inference engines. "
+            "Higher values needed for larger models (70B+). Default: 1"
+        ),
+    )
+    _add_arg_with_alias(
+        parser,
+        "--train_batch_size",
+        "--train-batch-size",
+        type=int,
+        default=None,
+        help="Training batch size per GPU. If not set, uses SkyRL default.",
+    )
+    _add_arg_with_alias(
+        parser,
+        "--eval_batch_size",
+        "--eval-batch-size",
+        type=int,
+        default=None,
+        help="Evaluation batch size. If not set, uses SkyRL default.",
+    )
+    _add_arg_with_alias(
+        parser,
+        "--max_episodes",
+        "--max-episodes",
+        type=int,
+        default=None,
+        help=(
+            "Maximum number of episodes per task during rollout. "
+            "If not set, uses SkyRL default."
+        ),
+    )
+    _add_arg_with_alias(
+        parser,
+        "--skyrl_export_path",
+        "--skyrl-export-path",
+        default=None,
+        help=(
+            "Path for SkyRL to export model checkpoints. "
+            "If not set, derived from experiments_dir/run_name/exports."
+        ),
+    )
+    _add_arg_with_alias(
+        parser,
+        "--rl_use_conda",
+        "--rl-use-conda",
+        action="store_true",
+        default=False,
+        help=(
+            "Use conda environment for RL instead of venv. "
+            "Useful for clusters like Perlmutter where conda is preferred."
+        ),
+    )
+    _add_arg_with_alias(
+        parser,
+        "--rl_conda_env",
+        "--rl-conda-env",
+        default="dcagent-rl",
+        help=(
+            "Name of conda environment to use for RL when --rl_use_conda is set. "
+            "Default: dcagent-rl"
+        ),
+    )
+
+
 def add_tasks_input_arg(
     parser: ArgTarget,
     *,
     required: bool = True,
 ) -> None:
-    """Add tasks input path argument with aliases.
-
-    Provides both --tasks_input_path and --trace_input_path for compatibility
-    with HPC launcher naming.
+    """Add tasks input path argument with alias.
 
     Args:
         parser: ArgumentParser or argument group to add arguments to.
@@ -355,19 +472,9 @@ def add_tasks_input_arg(
         required=required,
         help="Path to tasks directory (input for trace generation).",
     )
-    # Aliases for compatibility
+    # Hyphenated alias
     parser.add_argument(
         "--tasks-input-path",
-        dest="tasks_input_path",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--trace_input_path",
-        dest="tasks_input_path",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--trace-input-path",
         dest="tasks_input_path",
         help=argparse.SUPPRESS,
     )
@@ -381,5 +488,6 @@ __all__ = [
     "add_database_upload_args",
     "add_ray_vllm_args",
     "add_log_path_args",
+    "add_rl_training_args",
     "add_tasks_input_arg",
 ]

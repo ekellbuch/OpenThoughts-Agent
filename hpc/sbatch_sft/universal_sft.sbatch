@@ -17,6 +17,7 @@
 # ==============================================================================
 
 set -euo pipefail
+ulimit -c 0  # Disable core dumps to avoid filling disk space
 
 # Handle bash completion scripts that use BASH_COMPLETION_DEBUG
 if [ -z "${BASH_COMPLETION_DEBUG+x}" ]; then
@@ -91,6 +92,10 @@ export NUM_GPUS=$((NUM_GPUS_PER_NODE*SLURM_NNODES))
 # --- HuggingFace/WandB paths ---
 export HF_HOME="${HF_HOME:-${HF_HUB_CACHE:-/tmp/hf_home}}"
 export WANDB_DIR="${DCFT_WANDB_DIR:-$DCFT/{experiments_dir}/wandb}"
+
+# --- Triton/TorchInductor cache settings (node-local to avoid shared FS issues) ---
+export TRITON_CACHE_VERBOSE=1
+source "$WORKDIR/hpc/shell_utils/triton_cache.sh"
 
 # --- Create experiment directories ---
 mkdir -p "$DCFT/{experiments_dir}"

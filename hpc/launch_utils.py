@@ -39,6 +39,25 @@ _VALID_TRACE_BACKENDS = {"vllm", "ray", "vllm_local", "none"}
 _HOSTED_VLLM_PREFIX = "hosted_vllm/"
 """Provider prefix expected by LiteLLM when routing to managed vLLM endpoints."""
 
+# Cloud/SkyPilot job name length limit (DNS label constraint)
+CLOUD_JOB_NAME_MAX_LENGTH = 63
+"""Maximum job name length for cloud runs (SkyPilot/Kubernetes DNS label limit)."""
+
+
+def truncate_for_cloud(job_name: str) -> str:
+    """Truncate a job name to be compatible with cloud/SkyPilot runs.
+
+    SkyPilot cluster names must be valid DNS labels, which are limited to 63 chars.
+    This function is used by cloud launchers; HPC/SLURM launchers don't need it.
+
+    Args:
+        job_name: The job name to truncate.
+
+    Returns:
+        Job name truncated to 63 characters.
+    """
+    return job_name[:CLOUD_JOB_NAME_MAX_LENGTH]
+
 
 # =============================================================================
 # Memory Scaling Utilities
@@ -547,7 +566,7 @@ def build_sbatch_directives(
     if account:
         directives.append(f"#SBATCH --account {account}")
     if qos:
-        directives.append(f"#SBATCH -q {qos}")
+        directives.append(f"#SBATCH --qos {qos}")
     # Add GPU directive if the cluster uses one
     gpu_directive = hpc.get_gpu_directive(gpus_requested, gpu_type_resolved)
     if gpu_directive:
@@ -570,6 +589,13 @@ def build_sbatch_directives(
         directives.append(mem_directive)
     if hpc.node_exclusion_list:
         directives.append(f"#SBATCH --exclude={hpc.node_exclusion_list}")
+    # Add constraint directive based on GPU type (e.g., Perlmutter A100 variants)
+    gpu_type_constraints = getattr(hpc, "gpu_type_constraints", {})
+    if gpu_type_constraints:
+        constraint_key = gpu_type_resolved if gpu_type_resolved else "_default"
+        constraint = gpu_type_constraints.get(constraint_key)
+        if constraint:
+            directives.append(f"#SBATCH --constraint {constraint}")
     # Add any extra cluster-specific directives (e.g., licenses)
     for directive in getattr(hpc, "extra_sbatch_directives", []):
         directives.append(directive)
@@ -696,12 +722,24 @@ def submit_script(
     return launch_sbatch(script_path, dependency=dependency, array=array)
 
 
-def sanitize_repo_for_job(repo_id: str) -> str:
-    """Return a filesystem-safe representation of a repo identifier."""
+def sanitize_repo_for_job(repo_id: str, keep_periods: bool = True) -> str:
+    """Return a filesystem-safe representation of a repo identifier.
 
-    safe = re.sub(r"[^A-Za-z0-9._\-]+", "-", repo_id.strip())
+    Args:
+        repo_id: The identifier to sanitize.
+        keep_periods: If True, periods are kept. If False, periods are replaced
+                      with hyphens (useful for job names where .yaml etc. is unwanted).
+
+    Returns:
+        Sanitized string safe for filesystem and job names.
+    """
+    if keep_periods:
+        safe = re.sub(r"[^A-Za-z0-9._\-]+", "-", repo_id.strip())
+    else:
+        safe = re.sub(r"[^A-Za-z0-9_\-]+", "-", repo_id.strip())
+    safe = re.sub(r"-+", "-", safe)  # collapse multiple hyphens
     safe = safe.strip("-_")
-    return safe or "consolidate"
+    return safe or "job"
 
 
 def sanitize_repo_component(value: Optional[str]) -> Optional[str]:
@@ -735,7 +773,7 @@ def derive_datagen_job_name(cli_args: Mapping[str, Any]) -> str:
 
     dataset_component = None
     dataset_slug = cli_args.get("harbor_dataset")
-    dataset_path = cli_args.get("trace_input_path") or cli_args.get("eval_dataset_path")
+    dataset_path = cli_args.get("tasks_input_path") or cli_args.get("eval_dataset_path")
     if dataset_slug:
         dataset_component = _sanitize_component(str(dataset_slug))
     elif dataset_path:
@@ -806,16 +844,7 @@ def derive_default_job_name(cli_args: Mapping[str, Any]) -> str:
             job_name_components.append(value_str.split("/")[-1])
 
     job_name = "_".join(job_name_components)
-    job_name = (
-        job_name.replace("/", "_")
-        .replace("?", "")
-        .replace("*", "")
-        .replace("{", "")
-        .replace("}", "")
-        .replace(":", "")
-        .replace('"', "")
-        .replace(" ", "_")
-    )
+    job_name = sanitize_repo_for_job(job_name, keep_periods=False)
     if job_name_suffix:
         job_name += job_name_suffix
 
@@ -842,7 +871,19 @@ def get_job_name(cli_args: Mapping[str, Any]) -> str:
         return derive_consolidate_job_name(cli_args)
     if job_type in (JobType.DATAGEN.value, JobType.EVAL.value):
         return derive_datagen_job_name(cli_args)
-    return derive_default_job_name(cli_args)
+
+    # SFT, RL, and other job types use derive_default_job_name which includes
+    # all CLI args (learning_rate, batch_size, etc.) except those in JOB_NAME_IGNORE_KEYS
+    base_name = derive_default_job_name(cli_args)
+
+    # Add job type prefix
+    if job_type == JobType.RL.value:
+        return f"rl_{base_name}"
+    if job_type == JobType.SFT.value:
+        return f"sft_{base_name}"
+    if job_type == JobType.SFT_MCA.value:
+        return f"sft_mca_{base_name}"
+    return base_name
 
 def _parse_optional_int(value: Any, label: Optional[str] = None) -> Optional[int]:
     """Parse a value as int, returning None if empty/missing.

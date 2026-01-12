@@ -17,6 +17,7 @@
 # ==============================================================================
 
 set -euo pipefail
+ulimit -c 0  # Disable core dumps to avoid filling disk space
 
 # Handle bash completion scripts that use BASH_COMPLETION_DEBUG
 if [ -z "${BASH_COMPLETION_DEBUG+x}" ]; then
@@ -67,6 +68,10 @@ export NCCL_TIMEOUT=1800
 export NCCL_IB_TIMEOUT=23
 export PYTORCH_CUDA_ALLOC_CONF="garbage_collection_threshold:0.6,max_split_size_mb:128"
 export PYTHONPATH="$WORKDIR:${PYTHONPATH:-}"
+
+# --- Triton/TorchInductor cache settings (node-local to avoid shared FS issues) ---
+export TRITON_CACHE_VERBOSE=1
+source "$WORKDIR/hpc/shell_utils/triton_cache.sh"
 
 # --- Run the trace generation job via Python runner ---
 echo "=== Universal Trace Generation Runner ==="
