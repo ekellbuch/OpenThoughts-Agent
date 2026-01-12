@@ -63,9 +63,9 @@ ENV RL_ENV_DIR=/opt/openthoughts/envs/rl
 # Create RL environment with Python 3.12
 RUN uv venv --python 3.12 $RL_ENV_DIR
 
-# Install RL dependencies (SkyRL with vllm)
+# Install RL dependencies (SkyRL with vllm from penfever fork)
 RUN . $RL_ENV_DIR/bin/activate && \
-    uv pip install "skyrl[vllm] @ git+https://github.com/mlfoundations/skyrl.git" && \
+    uv pip install "skyrl[vllm] @ git+https://github.com/penfever/SkyRL.git@penfever/working" && \
     uv pip install Jinja2 pyyaml ray[default] && \
     uv pip install -e /opt/openthoughts
 
@@ -78,7 +78,7 @@ ENV SKYRL_BRANCH=penfever/working
 RUN git clone --branch $SKYRL_BRANCH https://github.com/penfever/SkyRL.git $SKYRL_HOME
 
 # Set up PYTHONPATH for SkyRL
-ENV PYTHONPATH="$SKYRL_HOME/skyrl-train:/opt/openthoughts:$PYTHONPATH"
+ENV PYTHONPATH="$SKYRL_HOME/skyrl-train:/opt/openthoughts"
 
 # =============================================================================
 # Environment Configuration
