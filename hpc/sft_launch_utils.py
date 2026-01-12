@@ -18,7 +18,6 @@ from hpc.launch_utils import (
     build_sbatch_directives,
     coerce_positive_int,
     parse_bool_with_default,
-    derive_default_job_name,
 )
 
 
@@ -509,11 +508,10 @@ def construct_sft_sbatch_script(exp_args: dict, hpc) -> str:
     """
     print("\n=== SFT MODE (Universal Launcher) ===")
 
-    # Resolve job_name and paths (auto-derives job_name if not provided)
+    # Resolve job_name and paths (job_name already set by get_job_name() in launch.py)
     job_setup = resolve_job_and_paths(
         exp_args,
         job_type_label="SFT",
-        derive_job_name_fn=derive_default_job_name,
     )
     job_name = job_setup.job_name
     exp_paths = job_setup.paths

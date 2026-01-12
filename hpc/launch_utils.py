@@ -39,6 +39,25 @@ _VALID_TRACE_BACKENDS = {"vllm", "ray", "vllm_local", "none"}
 _HOSTED_VLLM_PREFIX = "hosted_vllm/"
 """Provider prefix expected by LiteLLM when routing to managed vLLM endpoints."""
 
+# Cloud/SkyPilot job name length limit (DNS label constraint)
+CLOUD_JOB_NAME_MAX_LENGTH = 63
+"""Maximum job name length for cloud runs (SkyPilot/Kubernetes DNS label limit)."""
+
+
+def truncate_for_cloud(job_name: str) -> str:
+    """Truncate a job name to be compatible with cloud/SkyPilot runs.
+
+    SkyPilot cluster names must be valid DNS labels, which are limited to 63 chars.
+    This function is used by cloud launchers; HPC/SLURM launchers don't need it.
+
+    Args:
+        job_name: The job name to truncate.
+
+    Returns:
+        Job name truncated to 63 characters.
+    """
+    return job_name[:CLOUD_JOB_NAME_MAX_LENGTH]
+
 
 # =============================================================================
 # Memory Scaling Utilities
@@ -778,103 +797,6 @@ def derive_consolidate_job_name(cli_args: Mapping[str, Any]) -> str:
     return f"{identifier}{suffix}"
 
 
-def derive_rl_job_name(cli_args: Mapping[str, Any]) -> str:
-    """Construct job name for RL training jobs.
-
-    Pattern: rl_{model}_{dataset}_{nodes}n
-
-    Args:
-        cli_args: Command line arguments dictionary.
-
-    Returns:
-        Derived job name string (max 63 chars for SLURM compatibility).
-    """
-    components = ["rl"]
-
-    # Extract model name (strip org prefix)
-    model_path = cli_args.get("model_path") or cli_args.get("model_name_or_path", "")
-    if model_path:
-        model_name = str(model_path).split("/")[-1]
-        # Truncate long model names
-        if len(model_name) > 30:
-            model_name = model_name[:30]
-        components.append(model_name)
-
-    # Extract dataset name (strip org prefix, take first if list)
-    train_data = cli_args.get("train_data", [])
-    if isinstance(train_data, list) and train_data:
-        dataset = train_data[0]
-    elif isinstance(train_data, str):
-        dataset = train_data
-    else:
-        dataset = ""
-
-    if dataset:
-        dataset_name = str(dataset).split("/")[-1]
-        # Truncate long dataset names
-        if len(dataset_name) > 30:
-            dataset_name = dataset_name[:30]
-        components.append(dataset_name)
-
-    # Add node count
-    num_nodes = cli_args.get("num_nodes", 1)
-    components.append(f"{num_nodes}n")
-
-    job_name = "_".join(components)
-
-    # Sanitize using shared utility (strips brackets, quotes, special chars)
-    job_name = sanitize_repo_for_job(job_name).lower()
-    # 63 char limit is for SkyPilot/DNS compatibility, not SLURM (which allows 1024+).
-    # If not using SkyPilot, you can increase this limit.
-    return job_name[:63]
-
-
-def derive_sft_job_name(cli_args: Mapping[str, Any], use_mca: bool = False) -> str:
-    """Construct job name for SFT training jobs.
-
-    Pattern: sft_{model}_{dataset}_{nodes}n (or sft_mca_ prefix for MCA jobs)
-
-    Args:
-        cli_args: Command line arguments dictionary.
-        use_mca: If True, use sft_mca_ prefix instead of sft_.
-
-    Returns:
-        Derived job name string (max 63 chars for SLURM compatibility).
-    """
-    prefix = "sft_mca" if use_mca else "sft"
-    components = [prefix]
-
-    # Extract model name (strip org prefix)
-    model_path = cli_args.get("model_path") or cli_args.get("model_name_or_path", "")
-    if model_path:
-        model_name = str(model_path).split("/")[-1]
-        # Truncate long model names
-        if len(model_name) > 30:
-            model_name = model_name[:30]
-        components.append(model_name)
-
-    # Extract dataset name (strip org prefix)
-    dataset = cli_args.get("dataset", "")
-    if dataset:
-        dataset_name = str(dataset).split("/")[-1]
-        # Truncate long dataset names
-        if len(dataset_name) > 30:
-            dataset_name = dataset_name[:30]
-        components.append(dataset_name)
-
-    # Add node count
-    num_nodes = cli_args.get("num_nodes", 1)
-    components.append(f"{num_nodes}n")
-
-    job_name = "_".join(components)
-
-    # Sanitize using shared utility (strips brackets, quotes, special chars)
-    job_name = sanitize_repo_for_job(job_name).lower()
-    # 63 char limit is for SkyPilot/DNS compatibility, not SLURM (which allows 1024+).
-    # If not using SkyPilot, you can increase this limit.
-    return job_name[:63]
-
-
 def derive_default_job_name(cli_args: Mapping[str, Any]) -> str:
     """Construct job names for non-datagen, non-consolidate workloads."""
 
@@ -946,13 +868,19 @@ def get_job_name(cli_args: Mapping[str, Any]) -> str:
         return derive_consolidate_job_name(cli_args)
     if job_type in (JobType.DATAGEN.value, JobType.EVAL.value):
         return derive_datagen_job_name(cli_args)
+
+    # SFT, RL, and other job types use derive_default_job_name which includes
+    # all CLI args (learning_rate, batch_size, etc.) except those in JOB_NAME_IGNORE_KEYS
+    base_name = derive_default_job_name(cli_args)
+
+    # Add job type prefix
     if job_type == JobType.RL.value:
-        return derive_rl_job_name(cli_args)
+        return f"rl_{base_name}"
     if job_type == JobType.SFT.value:
-        return derive_sft_job_name(cli_args, use_mca=False)
+        return f"sft_{base_name}"
     if job_type == JobType.SFT_MCA.value:
-        return derive_sft_job_name(cli_args, use_mca=True)
-    return derive_default_job_name(cli_args)
+        return f"sft_mca_{base_name}"
+    return base_name
 
 def _parse_optional_int(value: Any, label: Optional[str] = None) -> Optional[int]:
     """Parse a value as int, returning None if empty/missing.
@@ -1577,8 +1505,6 @@ __all__ = [
     "submit_script",
     # Job naming
     "derive_datagen_job_name",
-    "derive_rl_job_name",
-    "derive_sft_job_name",
     "get_job_name",
     "sanitize_repo_for_job",
     "sanitize_repo_component",

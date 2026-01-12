@@ -99,8 +99,9 @@ def derive_cloud_job_name(args: "argparse.Namespace", task_prefix: str = "cloud"
 
     job_name = "_".join(filter(None, parts))
 
-    # SkyPilot cluster names must be <= 63 chars and lowercase
-    job_name = job_name[:63].lower()
+    # SkyPilot cluster names must be valid DNS labels (<= 63 chars, lowercase)
+    from hpc.launch_utils import truncate_for_cloud
+    job_name = truncate_for_cloud(job_name).lower()
     return job_name
 
 # Combined cloud dependency install command.

@@ -238,10 +238,6 @@ def derive_skyrl_export_path(
     return str(Path(experiments_dir) / run_name / exports_subdir)
 
 
-# Import derive_rl_job_name from launch_utils (centralized job name derivation)
-from hpc.launch_utils import derive_rl_job_name  # noqa: E402 - re-exported for backward compat
-
-
 def build_rl_env_vars(
     exp_args: Dict[str, Any],
     hpc: Optional[Any] = None,
@@ -505,11 +501,10 @@ def construct_rl_sbatch_script(exp_args: dict, hpc) -> str:
         hydra_args.extend(skyrl_overrides)
         print(f"Applied {len(skyrl_overrides)} CLI overrides")
 
-    # Resolve job_name and paths
+    # Resolve job_name and paths (job_name already set by get_job_name() in launch.py)
     job_setup = resolve_job_and_paths(
         exp_args,
         job_type_label="RL",
-        derive_job_name_fn=derive_rl_job_name,
     )
     job_name = job_setup.job_name
     exp_paths = job_setup.paths
