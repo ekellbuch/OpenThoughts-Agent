@@ -53,14 +53,8 @@ set +u
 {conda_activate}
 set -u
 
-# --- RL Environment Activation ---
-# The RL environment is separate from datagen due to dependency conflicts.
-# Options:
-#   1. venv created by ./hpc/setup_rl_env.sh (default)
-#   2. Conda environment specified by --rl_use_conda --rl_conda_env NAME
-{rl_env_activation}
-
-# --- Source environment files ---
+# --- Source environment files (before RL env activation) ---
+# Source dotenv and secrets first, but NOT DCFT_ACTIVATE_ENV which would clobber RL env
 if [ -n "${DCFT:-}" ] && [ -f "$DCFT/hpc/dotenv/{cluster_env_file}" ]; then
   source "$DCFT/hpc/dotenv/{cluster_env_file}"
 fi
@@ -69,11 +63,18 @@ if [ -n "${DC_AGENT_SECRET_ENV:-}" ] && [ -f "$DC_AGENT_SECRET_ENV" ]; then
   source "$DC_AGENT_SECRET_ENV"
   set +a
 fi
-if [ -n "${DCFT_ACTIVATE_ENV:-}" ]; then
-  set +u
-  eval "$DCFT_ACTIVATE_ENV"
-  set -u
-fi
+
+# --- RL Environment Activation ---
+# The RL environment is separate from datagen due to dependency conflicts.
+# Options:
+#   1. venv created by ./hpc/setup_rl_env.sh (default)
+#   2. Conda environment specified by --rl_use_conda --rl_conda_env NAME
+# NOTE: We intentionally skip DCFT_ACTIVATE_ENV here - it would clobber the RL environment.
+# The RL environment is explicitly specified via --rl_use_conda/--rl_conda_env flags.
+{rl_env_activation}
+
+# Skip DCFT_ACTIVATE_ENV for RL jobs - we use {rl_env_activation} instead
+# (DCFT_ACTIVATE_ENV typically activates the datagen/SFT environment which conflicts with RL)
 
 # --- CUDA path detection (Perlmutter and similar) ---
 {cuda_setup}
