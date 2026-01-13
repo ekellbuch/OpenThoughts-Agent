@@ -415,8 +415,6 @@ capella = HPC(
         "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
         "CUDA_LAUNCH_BLOCKING": "0",
         "PYTORCH_CUDA_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
-        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-        "RAY_NOSET_CUDA_VISIBLE_DEVICES": "1",
     },
     # NCCL/networking settings for SFT training (InfiniBand)
     nccl_settings={

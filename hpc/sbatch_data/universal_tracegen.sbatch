@@ -71,6 +71,13 @@ export NCCL_IB_TIMEOUT=23
 export PYTORCH_CUDA_ALLOC_CONF="garbage_collection_threshold:0.6,max_split_size_mb:128"
 export PYTHONPATH="$WORKDIR:${PYTHONPATH:-}"
 
+# --- Ray/vLLM GPU visibility fix ---
+# Prevent Ray from modifying CUDA_VISIBLE_DEVICES per-actor.
+# Without these, Ray sets CVD to a single physical GPU index (e.g. "3") per actor,
+# but vLLM uses Ray-reported indices as torch ordinals, causing "invalid device ordinal".
+export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
+export RAY_NOSET_CUDA_VISIBLE_DEVICES=1
+
 # --- Triton/TorchInductor cache settings (node-local to avoid shared FS issues) ---
 export TRITON_CACHE_VERBOSE=1
 source "$WORKDIR/hpc/shell_utils/triton_cache.sh"
