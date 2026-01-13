@@ -73,7 +73,7 @@ fi
 # The RL environment is explicitly specified via --rl_use_conda/--rl_conda_env flags.
 {rl_env_activation}
 
-# Skip DCFT_ACTIVATE_ENV for RL jobs - we use {rl_env_activation} instead
+# Skip DCFT_ACTIVATE_ENV for RL jobs - we use the RL environment activation above instead
 # (DCFT_ACTIVATE_ENV typically activates the datagen/SFT environment which conflicts with RL)
 
 # --- CUDA path detection (Perlmutter and similar) ---
