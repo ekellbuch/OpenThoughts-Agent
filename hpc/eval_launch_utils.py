@@ -70,6 +70,8 @@ def prepare_eval_configuration(exp_args: dict) -> dict:
         raise ValueError(
             "Eval jobs accept either --tasks-input-path or --harbor-dataset, but not both."
         )
+    # Preserve original dataset path for benchmark name derivation (before HF resolution)
+    original_dataset_path = dataset_path
     if dataset_path:
         # Use shared utility to handle both HF repos and local paths
         resolved_dataset = resolve_dataset_path(dataset_path, verbose=True)
@@ -88,10 +90,11 @@ def prepare_eval_configuration(exp_args: dict) -> dict:
         )
 
     # Derive eval_benchmark_repo using shared utility
+    # Use the ORIGINAL dataset path (e.g., "DCAgent2/my-dataset") not the resolved HF snapshot path
     from hpc.launch_utils import derive_benchmark_repo
     benchmark_repo = derive_benchmark_repo(
         harbor_dataset=exp_args.get("harbor_dataset"),
-        dataset_path=exp_args.get("_eval_dataset_path_resolved"),
+        dataset_path=original_dataset_path,
         explicit_repo=exp_args.get("eval_benchmark_repo"),
     )
     if benchmark_repo == "unknown-benchmark":
@@ -577,6 +580,7 @@ def launch_eval_job_v2(exp_args: dict, hpc) -> None:
         "conda_activate": hpc.conda_activate or "# No conda activation configured",
         "cluster_env_file": cluster_env_file,
         "config_path": str(config_path),
+        "email_address": os.environ.get("EMAIL_ADDRESS", ""),
     }
 
     sbatch_text = substitute_template(template_text, substitutions)

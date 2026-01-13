@@ -174,7 +174,7 @@ trainer:
   resume_mode: latest
 
   # Logging
-  project_name: ot-agent
+  project_name: OpenThoughts-Agent
   log_level: INFO  # SkyRL logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
 
   # Paths derived from experiments_dir/job_name if null

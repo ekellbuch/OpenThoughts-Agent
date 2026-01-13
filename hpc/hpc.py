@@ -415,8 +415,6 @@ capella = HPC(
         "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
         "CUDA_LAUNCH_BLOCKING": "0",
         "PYTORCH_CUDA_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
-        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-        "RAY_NOSET_CUDA_VISIBLE_DEVICES": "1",
     },
     # NCCL/networking settings for SFT training (InfiniBand)
     nccl_settings={
@@ -613,13 +611,19 @@ nyutorch = HPC(
     account="torch_pr_40_tandon_advanced",
     partition="",
     gpus_per_node=8,
-    cpus_per_node=24,
-    mem_per_node="192G",
+    cpus_per_node=96,  # H200 nodes have ~128 cores; request 96 to leave headroom
+    mem_per_node="1536G",  # H200 nodes have ~2TB RAM; request 1.5TB to leave headroom
     internet_node=True,
     gpus_type="H200 141GB / L40S 48GB",
     total_partition_nodes=48,
     gpu_directive_format="--gres=gpu:{type}:{n}",
     default_gpu_type="h200",  # Options: h200, l40s
+    # GPU type to constraint mapping for SLURM scheduling
+    gpu_type_constraints={
+        "_default": "h200",
+        "h200": "h200",
+        "l40s": "l40s",
+    },
     # Runtime configuration for Ray/vLLM (from legacy scripts)
     conda_activate="source $SCRATCH/miniconda3/etc/profile.d/conda.sh && conda activate dcagent312",
     env_vars={
