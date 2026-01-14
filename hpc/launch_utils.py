@@ -1396,6 +1396,9 @@ def upload_traces_to_hf(
             "Ensure the database module is installed or on PYTHONPATH."
         ) from exc
 
+    # Defensive sanitization - ensure repo ID complies with HF naming rules
+    hf_repo_id = sanitize_hf_repo_id(hf_repo_id)
+
     print(f"[upload] Uploading traces from {job_path} to HuggingFace: {hf_repo_id}")
     try:
         hf_url = _hf_upload(
@@ -1495,6 +1498,10 @@ def sync_eval_to_database(
     if hf_repo_id and not token:
         print("[upload] HF repo requested but no token provided; skipping HF upload step.")
         hf_repo_id = None
+
+    # Sanitize HF repo ID if provided (defensive - callers should also sanitize)
+    if hf_repo_id:
+        hf_repo_id = sanitize_hf_repo_id(hf_repo_id)
 
     # Generate benchmark_version_hash if not provided
     resolved_version_hash = benchmark_version_hash

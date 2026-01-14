@@ -158,8 +158,10 @@ def derive_benchmark_name(job_dir: Path) -> str:
 
 
 def derive_hf_repo_id(job_name: str, org: str = "DCAgent2") -> str:
-    """Derive HuggingFace repo ID from job name."""
-    # Sanitize job name for HF repo
+    """Derive HuggingFace repo ID from job name.
+
+    Note: Sanitization happens in launch_utils.sync_eval_to_database().
+    """
     sanitized = job_name.replace("@", "-").replace(" ", "-")
     return f"{org}/{sanitized}-traces"
 
@@ -186,6 +188,7 @@ def main() -> None:
     benchmark_name = args.benchmark_name or derive_benchmark_name(job_dir)
 
     # Derive HF repo ID if not provided and not skipping HF
+    # (sanitization happens in launch_utils.sync_eval_to_database)
     hf_repo_id = None
     if not args.skip_hf:
         if args.hf_repo:

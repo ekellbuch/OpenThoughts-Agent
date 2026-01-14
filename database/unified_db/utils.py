@@ -2822,9 +2822,8 @@ def _extract_trial_metadata(
     config = json.loads(config_path.read_text())
     result = json.loads(result_path.read_text())
 
-    # STRICT VALIDATION: Only accept fully completed trials
-    # A valid trial MUST have BOTH agent_execution AND verifier_result
-    # Exception info is NOT sufficient - we only accept complete runs
+    # VALIDATION: Accept trials with agent_execution and either verifier_result OR reward
+    # This allows trials where verifier was disabled but reward was set externally
     agent_execution = result.get("agent_execution")
     verifier_result = result.get("verifier_result")
 
@@ -2834,10 +2833,18 @@ def _extract_trial_metadata(
             f"Only fully completed trials are accepted."
         )
 
-    if verifier_result is None:
+    # Extract reward - check verifier_result first, then top-level result
+    reward = None
+    if verifier_result is not None:
+        reward = verifier_result.get("reward")
+    if reward is None:
+        reward = result.get("reward")
+
+    # Require either verifier_result OR a reward value
+    if verifier_result is None and reward is None:
         raise ValueError(
-            f"Trial {result['trial_name']} is incomplete: missing verifier_result data. "
-            f"Only fully completed trials are accepted."
+            f"Trial {result['trial_name']} is incomplete: missing both verifier_result and reward. "
+            f"Trials must have either verifier_result data or a reward value."
         )
 
     exception_info = result.get("exception_info")
@@ -2849,7 +2856,7 @@ def _extract_trial_metadata(
         "task_checksum": task_checksum,
         "config": result["config"],
         "job_id": str(job_id),
-        "reward": (verifier_result or {}).get("reward"),
+        "reward": reward,
         "exception_info": exception_info,
         "started_at": _parse_datetime(result.get("started_at")),
         "ended_at": _parse_datetime(result.get("finished_at")),
