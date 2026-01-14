@@ -18,7 +18,6 @@ config_groups:
 
 # Terminal bench / agentic environment settings
 terminal_bench:
-  agent_name: terminus
   # trials_dir: Directory for Harbor trial artifacts (derived from experiments_dir if null)
   trials_dir: null
 
@@ -29,6 +28,8 @@ terminal_bench:
     # ==========================================================================
     # Agent settings (maps to Harbor AgentConfig)
     # ==========================================================================
+    # Agent name - must be a valid Harbor AgentName (e.g., terminus-2, oracle)
+    name: terminus-2
     # Max agent-environment turns before Harbor forces termination
     max_episodes: 32
     # Enable summarization to compress long histories

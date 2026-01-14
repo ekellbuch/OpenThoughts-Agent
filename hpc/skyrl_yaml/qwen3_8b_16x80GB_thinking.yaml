@@ -1,8 +1,12 @@
-# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs (Binary Rewards)
-# Optimized for 32k context agentic RL with synchronous training
+# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs (Interleaved Thinking)
+# Ablation: Enables interleaved thinking mode for Terminus-2 agent
 #
-# REWARD MODE: Binary (0/1) - original verifier reward without shaping
-# Use qwen3_8b_16x80GB_shaped.yaml for partial credit based on test pass ratios
+# AGENT: Terminus-2 with interleaved thinking enabled
+# Base config: qwen3_8b_16x80GB_binary.yaml
+#
+# INTERLEAVED THINKING:
+# - interleaved_thinking: true - includes reasoning content in chat history
+# - extra_body.chat_template_kwargs.enable_thinking: true - enables thinking in LLM
 #
 # Hardware: 16 GPUs with 80GB VRAM each (e.g., 2x8 H100/A100-80GB or 4x4)
 # Model: Qwen3 8B Base (~16GB bf16 weights)
@@ -12,22 +16,15 @@
 #   - max_generate_length: 8k tokens (agent responses)
 #   - Total: 24k + 8k = 32k (model's max_model_len)
 #
-# vLLM enforces prompt + generation <= max_model_len, so we must budget.
-# For multi-turn agentic tasks, prompts grow with history - enable_summarize
-# helps compress old turns to stay within budget.
-#
-# Key Design Decisions:
-# - TP=2 for inference engines: 8 engines with 160GB effective memory each
-#   This provides headroom for 32k KV cache with multiple concurrent sequences
-# - Small train_batch_size (16): Reduces sync RL waiting time variance
-# - Aggressive memory settings: 0.90 utilization with prefix caching enabled
-# - GRPO with 4 samples: Good gradient signal for policy improvement
+# Note: Interleaved thinking may increase context usage due to reasoning tokens
+# being included in the chat history. Consider enabling summarization if
+# context limits become an issue.
 #
 # Usage:
 #   python -m hpc.launch \
 #       --job_type rl \
-#       --rl_config qwen3_8b_16x80GB_binary.yaml \
-#       --job_name qwen3_8b_agentic \
+#       --rl_config qwen3_8b_16x80GB_thinking.yaml \
+#       --job_name qwen3_8b_thinking \
 #       --train_data '["mlfoundations-dev/your-dataset"]' \
 #       --model_path Qwen/Qwen3-8B \
 #       --num_nodes 2
@@ -59,6 +56,16 @@ terminal_bench:
     enable_summarize: false
     # Store full message history for trajectory reconstruction
     store_all_messages: true
+
+    # ==========================================================================
+    # Interleaved Thinking Settings (KEY ABLATION)
+    # ==========================================================================
+    # Include reasoning content in chat history and send to LLM in next round
+    interleaved_thinking: true
+    # Enable thinking in the LLM via chat template kwargs
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: true
 
     # Agent timeout overrides
     override_timeout_sec: 240        # Agent execution timeout (seconds)

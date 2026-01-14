@@ -1,8 +1,12 @@
-# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs (Binary Rewards)
-# Optimized for 32k context agentic RL with synchronous training
+# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs (GSPO Policy Loss)
+# Ablation: Uses GSPO policy loss with sequence_mean reduction
 #
-# REWARD MODE: Binary (0/1) - original verifier reward without shaping
-# Use qwen3_8b_16x80GB_shaped.yaml for partial credit based on test pass ratios
+# POLICY LOSS: GSPO (Group-wise SPO) with sequence_mean reduction
+# Base config: qwen3_8b_16x80GB_binary.yaml
+#
+# GSPO (Group-wise Sequence Policy Optimization) treats each sequence equally
+# in the loss computation, regardless of length. The GSPO paper recommends
+# using sequence_mean reduction for stability.
 #
 # Hardware: 16 GPUs with 80GB VRAM each (e.g., 2x8 H100/A100-80GB or 4x4)
 # Model: Qwen3 8B Base (~16GB bf16 weights)
@@ -12,22 +16,11 @@
 #   - max_generate_length: 8k tokens (agent responses)
 #   - Total: 24k + 8k = 32k (model's max_model_len)
 #
-# vLLM enforces prompt + generation <= max_model_len, so we must budget.
-# For multi-turn agentic tasks, prompts grow with history - enable_summarize
-# helps compress old turns to stay within budget.
-#
-# Key Design Decisions:
-# - TP=2 for inference engines: 8 engines with 160GB effective memory each
-#   This provides headroom for 32k KV cache with multiple concurrent sequences
-# - Small train_batch_size (16): Reduces sync RL waiting time variance
-# - Aggressive memory settings: 0.90 utilization with prefix caching enabled
-# - GRPO with 4 samples: Good gradient signal for policy improvement
-#
 # Usage:
 #   python -m hpc.launch \
 #       --job_type rl \
-#       --rl_config qwen3_8b_16x80GB_binary.yaml \
-#       --job_name qwen3_8b_agentic \
+#       --rl_config qwen3_8b_16x80GB_gspo.yaml \
+#       --job_name qwen3_8b_gspo \
 #       --train_data '["mlfoundations-dev/your-dataset"]' \
 #       --model_path Qwen/Qwen3-8B \
 #       --num_nodes 2
@@ -62,8 +55,6 @@ terminal_bench:
 
     # Agent timeout overrides
     override_timeout_sec: 240        # Agent execution timeout (seconds)
-    # override_setup_timeout_sec: 120  # Agent setup timeout
-    # max_timeout_sec: 1800          # Cap timeout (useful for runaway tasks)
 
     # ==========================================================================
     # Environment settings (maps to Harbor EnvironmentConfig)
@@ -72,33 +63,21 @@ terminal_bench:
     override_cpus: 1
     override_memory_mb: 2048
     override_storage_mb: 2048
-    # override_gpus: 0              # GPU allocation per sandbox
-    # environment_type: daytona     # Environment backend (daytona, docker, modal)
-
-    # ==========================================================================
-    # Trial-level settings (maps to Harbor TrialConfig)
-    # ==========================================================================
-    # timeout_multiplier: 1.0       # Multiply all timeouts by this factor
 
     # ==========================================================================
     # Verifier settings (maps to Harbor VerifierConfig)
     # ==========================================================================
-    # verifier_disable: false       # Disable verification (for debugging)
     verifier_override_timeout_sec: 120  # Override verifier timeout
 
     # ==========================================================================
     # Retry settings (maps to Harbor RetryConfig for QueueOrchestrator)
     # ==========================================================================
-    # Retry logic with exponential backoff for transient failures
     max_retries: 2                 # Max retry attempts per trial
     min_wait_sec: 1.0              # Initial backoff delay (seconds)
     max_wait_sec: 60.0             # Maximum backoff delay
     wait_multiplier: 2.0           # Exponential backoff multiplier
 
     # Exception filtering - don't retry permanent failures
-    # Default Harbor exclusions: AgentTimeoutError, VerifierTimeoutError,
-    #   RewardFileNotFoundError, RewardFileEmptyError, VerifierOutputParseError
-    # We add ContextLengthExceededError since summarization is disabled
     exclude_exceptions:
       - AgentTimeoutError
       - VerifierTimeoutError
@@ -125,7 +104,6 @@ terminal_bench:
   # Model info for Harbor's hosted_vllm validation (token limits and costs)
   model_info:
     # Context budget: 32k total = 24k prompt + 8k generation
-    # Prompts grow with conversation history, so reserve headroom for generation
     max_input_tokens: 24576   # 24k - leaves 8k for generation
     max_output_tokens: 8192   # 8k - sufficient for most agent responses
 
@@ -134,15 +112,22 @@ trainer:
   strategy: fsdp2
   algorithm:
     advantage_estimator: grpo
+    # ==========================================================================
+    # GSPO Policy Loss Configuration (KEY ABLATION)
+    # ==========================================================================
+    # GSPO (Group-wise Sequence Policy Optimization) policy loss
+    # Each sequence contributes equally to the loss, regardless of length
+    policy_loss_type: gspo
+    # sequence_mean reduction is REQUIRED for GSPO (per the paper)
+    # Per-sequence token-mean first, then batch-mean
+    loss_reduction: sequence_mean
+    # ==========================================================================
     use_kl_loss: true
-    # GRPO-specific settings
     kl_loss_coef: 0.001
     grpo_norm_by_std: true
     # Clip range for policy updates
     eps_clip_low: 0.2
     eps_clip_high: 0.2
-    # Token-level loss for better gradient signal on long sequences
-    loss_reduction: token_mean
 
   # Training loop settings
   epochs: 10
@@ -150,8 +135,6 @@ trainer:
 
   # Batch sizes optimized for sync RL
   # IMPORTANT: train_batch_size must be >= total GPUs (data parallel size)
-  # For 4 nodes x 4 GPUs = 16 GPUs, use train_batch_size >= 16
-  # Override with --skyrl_override trainer.train_batch_size=N if needed
   train_batch_size: 16
   policy_mini_batch_size: 8  # 2 gradient steps per batch
   eval_batch_size: 32
@@ -161,8 +144,6 @@ trainer:
   micro_train_batch_size_per_gpu: 1
 
   # Context budget: 32k total = 24k prompt + 8k generation
-  # max_prompt_length truncates prompts BEFORE sending to vLLM
-  # Must leave room for generation within model's max_model_len
   max_prompt_length: 24576  # 24k - matches model_info.max_input_tokens
 
   # Evaluation and checkpointing
@@ -173,7 +154,7 @@ trainer:
 
   # Logging
   project_name: OpenThoughts-Agent
-  log_level: INFO  # SkyRL logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+  log_level: INFO
 
   # Paths derived from experiments_dir/job_name if null
   run_name: null
@@ -186,7 +167,6 @@ trainer:
       lr: 5.0e-7
       weight_decay: 0.01
       adam_betas: [0.9, 0.999]
-      # Gradient clipping important for long sequences
       max_grad_norm: 1.0
 
   # Reference model - CPU offload to save GPU memory
@@ -198,10 +178,8 @@ trainer:
   # Model placement - derived from CLI args (--num_nodes, --gpus_per_node)
   placement:
     colocate_all: true
-    # Derived from CLI --num_nodes
     policy_num_nodes: null
     ref_num_nodes: null
-    # Derived from CLI --gpus_per_node (cluster-specific: 4 for ZIH, 8 for TACC H100s)
     policy_num_gpus_per_node: null
     ref_num_gpus_per_node: null
 
@@ -211,10 +189,7 @@ generator:
   model_dtype: bfloat16
 
   # Tensor parallelism = 2 for 32k context with 8B model
-  # This gives us 8 engines (16 GPUs / TP=2)
-  # Each engine pair has 160GB effective memory for KV cache
   inference_engine_tensor_parallel_size: 2
-  # Computed automatically: (num_nodes * gpus_per_node) / tensor_parallel_size
   num_inference_engines: null
 
   # GRPO typically uses 4-8 samples per prompt for advantage estimation
@@ -224,12 +199,8 @@ generator:
   # Memory utilization - aggressive but leave headroom for 32k KV cache
   gpu_memory_utilization: 0.90
 
-  # Sequence limits for 32k context (24k prompt + 8k gen)
-  # max_num_seqs: concurrent sequences per engine
-  # Lower value = more memory per sequence for long contexts
+  # Sequence limits for 32k context
   max_num_seqs: 64
-  # max_num_batched_tokens: tokens processed per batch
-  # Should accommodate at least one full sequence (32k) with some headroom
   max_num_batched_tokens: 32768
 
   # Memory optimization for long contexts
@@ -249,20 +220,13 @@ generator:
 
   # Sampling parameters for generation
   sampling_params:
-    # Context budget: 32k total = 24k prompt + 8k generation
-    # This caps generation to stay within model's max_model_len
     max_generate_length: 8192  # 8k - matches model_info.max_output_tokens
-    # Temperature 1.0 for exploration during training
     temperature: 1.0
     top_p: 0.95
     top_k: -1  # Disabled
 
-  # Engine initialization kwargs - passed directly to vLLM/SGLang engine
-  # WARNING: Many kwargs are set by SkyRL internally (trust_remote_code, enforce_eager, etc.)
-  # The launcher validates this at parse time and will error with a full list if you set forbidden keys.
-  # SAFE TO SET: custom_chat_template_*, kv_cache_dtype, quantization, cpu_offload_gb, etc.
+  # Engine initialization kwargs
   engine_init_kwargs:
-    # Chat template for Qwen3 Base model (path relative to working directory or absolute)
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
 
 # Data paths (set via CLI --train_data, --val_data)

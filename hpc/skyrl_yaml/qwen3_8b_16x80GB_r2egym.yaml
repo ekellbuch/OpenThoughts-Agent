@@ -40,13 +40,14 @@ config_groups:
 
 # Terminal bench / agentic environment settings
 terminal_bench:
-  agent_name: terminus
   trials_dir: null
 
   harbor:
     # ==========================================================================
     # Agent settings - OpenHands uses 50 max iterations
     # ==========================================================================
+    # Agent name - must be a valid Harbor AgentName (e.g., terminus-2, oracle)
+    name: terminus-2
     max_episodes: 50
     enable_summarize: false
     store_all_messages: true

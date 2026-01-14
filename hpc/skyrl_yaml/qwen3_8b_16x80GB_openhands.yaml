@@ -1,8 +1,8 @@
-# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs (Binary Rewards)
-# Optimized for 32k context agentic RL with synchronous training
+# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs (OpenHands Agent)
+# Ablation: Uses OpenHands agent instead of Terminus-2
 #
-# REWARD MODE: Binary (0/1) - original verifier reward without shaping
-# Use qwen3_8b_16x80GB_shaped.yaml for partial credit based on test pass ratios
+# AGENT: OpenHands (openhands) - All Hands AI agent
+# Base config: qwen3_8b_16x80GB_binary.yaml
 #
 # Hardware: 16 GPUs with 80GB VRAM each (e.g., 2x8 H100/A100-80GB or 4x4)
 # Model: Qwen3 8B Base (~16GB bf16 weights)
@@ -12,22 +12,17 @@
 #   - max_generate_length: 8k tokens (agent responses)
 #   - Total: 24k + 8k = 32k (model's max_model_len)
 #
-# vLLM enforces prompt + generation <= max_model_len, so we must budget.
-# For multi-turn agentic tasks, prompts grow with history - enable_summarize
-# helps compress old turns to stay within budget.
-#
-# Key Design Decisions:
-# - TP=2 for inference engines: 8 engines with 160GB effective memory each
-#   This provides headroom for 32k KV cache with multiple concurrent sequences
-# - Small train_batch_size (16): Reduces sync RL waiting time variance
-# - Aggressive memory settings: 0.90 utilization with prefix caching enabled
-# - GRPO with 4 samples: Good gradient signal for policy improvement
+# OpenHands-specific notes:
+# - Uses its own context management (no enable_summarize)
+# - Has its own trajectory format (no store_all_messages)
+# - Supports reasoning_effort parameter
+# - Runs as a separate process with its own environment handling
 #
 # Usage:
 #   python -m hpc.launch \
 #       --job_type rl \
-#       --rl_config qwen3_8b_16x80GB_binary.yaml \
-#       --job_name qwen3_8b_agentic \
+#       --rl_config qwen3_8b_16x80GB_openhands.yaml \
+#       --job_name qwen3_8b_openhands \
 #       --train_data '["mlfoundations-dev/your-dataset"]' \
 #       --model_path Qwen/Qwen3-8B \
 #       --num_nodes 2
@@ -51,19 +46,19 @@ terminal_bench:
     # ==========================================================================
     # Agent settings (maps to Harbor AgentConfig)
     # ==========================================================================
-    # Agent name - must be a valid Harbor AgentName (e.g., terminus-2, oracle)
-    name: terminus-2
+    # Agent name - OpenHands agent
+    name: openhands
     # Max agent-environment turns before Harbor forces termination
     max_episodes: 64
-    # Disable summarization, consistent with prior RL work
-    enable_summarize: false
-    # Store full message history for trajectory reconstruction
-    store_all_messages: true
+
+    # OpenHands-specific kwargs
+    # reasoning_effort: Reasoning effort level (low, medium, high)
+    reasoning_effort: medium
+    # disable_tool_calls: Whether to disable native function calling
+    # disable_tool_calls: false
 
     # Agent timeout overrides
     override_timeout_sec: 240        # Agent execution timeout (seconds)
-    # override_setup_timeout_sec: 120  # Agent setup timeout
-    # max_timeout_sec: 1800          # Cap timeout (useful for runaway tasks)
 
     # ==========================================================================
     # Environment settings (maps to Harbor EnvironmentConfig)
@@ -72,40 +67,28 @@ terminal_bench:
     override_cpus: 1
     override_memory_mb: 2048
     override_storage_mb: 2048
-    # override_gpus: 0              # GPU allocation per sandbox
-    # environment_type: daytona     # Environment backend (daytona, docker, modal)
-
-    # ==========================================================================
-    # Trial-level settings (maps to Harbor TrialConfig)
-    # ==========================================================================
-    # timeout_multiplier: 1.0       # Multiply all timeouts by this factor
 
     # ==========================================================================
     # Verifier settings (maps to Harbor VerifierConfig)
     # ==========================================================================
-    # verifier_disable: false       # Disable verification (for debugging)
     verifier_override_timeout_sec: 120  # Override verifier timeout
 
     # ==========================================================================
     # Retry settings (maps to Harbor RetryConfig for QueueOrchestrator)
     # ==========================================================================
-    # Retry logic with exponential backoff for transient failures
     max_retries: 2                 # Max retry attempts per trial
     min_wait_sec: 1.0              # Initial backoff delay (seconds)
     max_wait_sec: 60.0             # Maximum backoff delay
     wait_multiplier: 2.0           # Exponential backoff multiplier
 
     # Exception filtering - don't retry permanent failures
-    # Default Harbor exclusions: AgentTimeoutError, VerifierTimeoutError,
-    #   RewardFileNotFoundError, RewardFileEmptyError, VerifierOutputParseError
-    # We add ContextLengthExceededError since summarization is disabled
     exclude_exceptions:
       - AgentTimeoutError
       - VerifierTimeoutError
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - VerifierOutputParseError
-      - ContextLengthExceededError  # Permanent when enable_summarize=false
+      - ContextLengthExceededError
 
     # ==========================================================================
     # Orchestrator settings (QueueOrchestrator concurrency control)
