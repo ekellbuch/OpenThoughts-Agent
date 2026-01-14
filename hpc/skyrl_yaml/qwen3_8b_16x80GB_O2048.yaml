@@ -37,7 +37,6 @@ config_groups:
 
 # Terminal bench / agentic environment settings
 terminal_bench:
-  agent_name: terminus
   # trials_dir: Directory for Harbor trial artifacts (derived from experiments_dir if null)
   trials_dir: null
 
@@ -48,6 +47,8 @@ terminal_bench:
     # ==========================================================================
     # Agent settings (maps to Harbor AgentConfig)
     # ==========================================================================
+    # Agent name - must be a valid Harbor AgentName (e.g., terminus-2, oracle)
+    name: terminus-2
     # Max agent-environment turns before Harbor forces termination
     max_episodes: 64
     # Disable summarization, consistent with prior RL work
@@ -155,10 +156,7 @@ trainer:
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
 
-  # Context budget: 32k total = 24k prompt + 8k generation
-  # max_prompt_length truncates prompts BEFORE sending to vLLM
-  # Must leave room for generation within model's max_model_len
-  max_prompt_length: 30720  # 30,720 tokens
+  max_prompt_length: 999999
 
   # Evaluation and checkpointing
   eval_interval: 20

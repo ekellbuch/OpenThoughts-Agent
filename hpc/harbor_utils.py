@@ -325,7 +325,7 @@ def load_endpoint_metadata(endpoint_json: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def extract_agent_kwargs_from_config(harbor_config: dict, agent_name: str) -> dict:
+def extract_agent_kwargs_from_config(harbor_config: dict, agent_name: Optional[str]) -> dict:
     """Extract kwargs for the specified agent from harbor config.
 
     The Harbor YAML is the ground truth for agent configuration. This function
@@ -333,7 +333,7 @@ def extract_agent_kwargs_from_config(harbor_config: dict, agent_name: str) -> di
 
     Args:
         harbor_config: Parsed harbor config dict (from YAML)
-        agent_name: Name of the agent to find (e.g., "terminus-2")
+        agent_name: Name of the agent to find (e.g., "terminus-2"). If None, uses first agent.
 
     Returns:
         Copy of the agent's kwargs dict, or empty dict if not found
@@ -482,7 +482,7 @@ def collect_extra_agent_kwargs(
 
 def merge_agent_kwargs(
     harbor_config_data: dict,
-    agent_name: str,
+    agent_name: Optional[str],
     endpoint_meta: Optional[Dict[str, Any]] = None,
     extra_kwargs: Optional[Dict[str, Any]] = None,
     cli_overrides: Optional[List[str]] = None,
@@ -497,7 +497,7 @@ def merge_agent_kwargs(
 
     Args:
         harbor_config_data: Parsed Harbor config dict
-        agent_name: Agent name to extract kwargs for
+        agent_name: Agent name to extract kwargs for. If None, uses first agent from config.
         endpoint_meta: Dict with api_base/metrics_endpoint from vLLM (None for API engines)
         extra_kwargs: Additional kwargs from datagen config or other sources
         cli_overrides: Raw --agent-kwarg strings from CLI (e.g., ["key=value", "nested.key=value"])
@@ -537,7 +537,7 @@ def build_harbor_command(
     harbor_config_path: str,
     harbor_config_data: dict,
     job_name: str,
-    agent_name: str,
+    agent_name: Optional[str],
     model_name: str,
     env_type: str,
     n_concurrent: int,
@@ -564,7 +564,7 @@ def build_harbor_command(
         harbor_config_path: Path to harbor config YAML
         harbor_config_data: Parsed harbor config dict
         job_name: Name for this harbor job
-        agent_name: Agent to run (e.g., "terminus-2")
+        agent_name: Agent to run (e.g., "terminus-2"). If None, uses the agent from harbor config.
         model_name: Model identifier for --model flag
         env_type: Environment type for --env flag (daytona, docker, modal, apptainer)
         n_concurrent: Number of concurrent trials
@@ -589,19 +589,44 @@ def build_harbor_command(
         cli_overrides=agent_kwarg_overrides,
     )
 
-    # Build base command
+    # Create a modified config with model_name and kwargs merged directly.
+    # This avoids using --agent/--model CLI flags which would cause Harbor to
+    # create a fresh AgentConfig and lose settings like override_setup_timeout_sec.
+    modified_config = copy.deepcopy(harbor_config_data)
+
+    # Update all agents in the config with model_name and merged kwargs
+    agents = modified_config.get("agents", [])
+    for agent in agents:
+        # Set model_name directly in config
+        agent["model_name"] = model_name
+        # Merge kwargs into the agent's existing kwargs
+        existing_kwargs = agent.get("kwargs", {})
+        existing_kwargs.update(agent_kwargs)
+        agent["kwargs"] = existing_kwargs
+
+    # Write the modified config to the experiment directory (jobs_dir).
+    # This keeps the merged config alongside the experiment outputs for reproducibility.
+    if jobs_dir:
+        config_dir = Path(jobs_dir) / job_name
+        config_dir.mkdir(parents=True, exist_ok=True)
+        merged_config_path = config_dir / "merged_harbor_config.yaml"
+    else:
+        # Fallback to current directory if no jobs_dir specified
+        merged_config_path = Path(f"merged_harbor_config_{job_name}.yaml")
+
+    with open(merged_config_path, "w") as f:
+        yaml.safe_dump(modified_config, f)
+    temp_config_path = str(merged_config_path)
+
+    # Build base command using the temp config (no --model or --agent needed)
     cmd = [
         harbor_binary,
         "jobs",
         "start",
         "--config",
-        harbor_config_path,
+        temp_config_path,
         "--job-name",
         job_name,
-        "--agent",
-        agent_name,
-        "--model",
-        model_name,
         "--env",
         env_type,
         "--n-concurrent",
@@ -620,9 +645,7 @@ def build_harbor_command(
     if jobs_dir:
         cmd.extend(["--jobs-dir", jobs_dir])
 
-    # Add serialized agent kwargs
-    for kw in serialize_agent_kwargs(agent_kwargs):
-        cmd.extend(["--agent-kwarg", kw])
+    # Add passthrough kwargs that couldn't be parsed (e.g., complex nested structures)
     for passthrough_kw in passthrough:
         cmd.extend(["--agent-kwarg", passthrough_kw])
 

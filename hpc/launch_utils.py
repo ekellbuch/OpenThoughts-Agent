@@ -760,6 +760,18 @@ def derive_datagen_job_name(cli_args: Mapping[str, Any]) -> str:
             value = value.split("/")[-1]
         return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-_") or "repo"
 
+    def _extract_harbor_config_label(config_path: str) -> str:
+        """Extract a short label from harbor config path (e.g., '16concurrency_eval')."""
+        filename = Path(config_path).stem  # Remove .yaml extension
+        # Remove common prefixes like 'trace_'
+        for prefix in ("trace_", "harbor_"):
+            if filename.startswith(prefix):
+                filename = filename[len(prefix):]
+        # Truncate if too long (keep first 30 chars)
+        if len(filename) > 30:
+            filename = filename[:30].rstrip("-_")
+        return filename
+
     job_type_hint = str(cli_args.get("job_type") or "").lower()
     prefix = "eval" if job_type_hint == JobType.EVAL.value else "datagen"
     parts: list[str] = [prefix]
@@ -770,6 +782,13 @@ def derive_datagen_job_name(cli_args: Mapping[str, Any]) -> str:
         parts.append(_sanitize_component(str(model_candidate)))
     elif repo_candidate:
         parts.append(_sanitize_component(str(repo_candidate)))
+
+    # Include harbor config label for better job identification
+    harbor_config = cli_args.get("trace_harbor_config")
+    if harbor_config:
+        config_label = _extract_harbor_config_label(str(harbor_config))
+        if config_label:
+            parts.append(config_label)
 
     dataset_component = None
     dataset_slug = cli_args.get("harbor_dataset")
@@ -1396,6 +1415,9 @@ def upload_traces_to_hf(
             "Ensure the database module is installed or on PYTHONPATH."
         ) from exc
 
+    # Defensive sanitization - ensure repo ID complies with HF naming rules
+    hf_repo_id = sanitize_hf_repo_id(hf_repo_id)
+
     print(f"[upload] Uploading traces from {job_path} to HuggingFace: {hf_repo_id}")
     try:
         hf_url = _hf_upload(
@@ -1495,6 +1517,10 @@ def sync_eval_to_database(
     if hf_repo_id and not token:
         print("[upload] HF repo requested but no token provided; skipping HF upload step.")
         hf_repo_id = None
+
+    # Sanitize HF repo ID if provided (defensive - callers should also sanitize)
+    if hf_repo_id:
+        hf_repo_id = sanitize_hf_repo_id(hf_repo_id)
 
     # Generate benchmark_version_hash if not provided
     resolved_version_hash = benchmark_version_hash
