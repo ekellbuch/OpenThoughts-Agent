@@ -149,27 +149,12 @@ def _parse_args() -> argparse.Namespace:
 
 
 def derive_benchmark_name(job_dir: Path) -> str:
-    """Derive benchmark name from job directory name."""
-    # Job dir names often look like: eval-terminal-bench@2.0-gpt-5-nano-20260113_145348
-    # Extract the dataset part before the model name
-    name = job_dir.name
+    """Derive benchmark name from job config or directory name.
 
-    # Try to extract benchmark slug (e.g., "terminal-bench@2.0")
-    if name.startswith("eval-"):
-        name = name[5:]  # Remove "eval-" prefix
-
-    # Split by common model name patterns and take the first part
-    for sep in ["-gpt-", "-claude-", "-qwen", "-llama", "-gemini", "-o1-", "-o3-"]:
-        if sep in name.lower():
-            idx = name.lower().index(sep)
-            return name[:idx]
-
-    # Fallback: use full name without timestamp suffix
-    parts = name.rsplit("-", 1)
-    if len(parts) == 2 and parts[1].replace("_", "").isdigit():
-        return parts[0]
-
-    return name
+    Delegates to the shared utility in hpc.launch_utils for consistency.
+    """
+    from hpc.launch_utils import derive_benchmark_from_job_dir
+    return derive_benchmark_from_job_dir(job_dir)
 
 
 def derive_hf_repo_id(job_name: str, org: str = "DCAgent2") -> str:
