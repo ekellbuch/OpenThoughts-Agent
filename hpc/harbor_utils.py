@@ -20,6 +20,7 @@ import os
 import pty
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
@@ -604,22 +605,42 @@ def build_harbor_command(
         cli_overrides=agent_kwarg_overrides,
     )
 
-    # Resolve agent name: use explicit value or fall back to config's first agent.
-    # We must always pass --agent to Harbor CLI so that --model override works
-    # (Harbor only applies --model when creating a new AgentConfig from CLI args).
-    resolved_agent_name = agent_name or get_agent_name_from_config(harbor_config_data)
+    # Create a modified config with model_name and kwargs merged directly.
+    # This avoids using --agent/--model CLI flags which would cause Harbor to
+    # create a fresh AgentConfig and lose settings like override_setup_timeout_sec.
+    modified_config = copy.deepcopy(harbor_config_data)
 
-    # Build base command
+    # Update all agents in the config with model_name and merged kwargs
+    agents = modified_config.get("agents", [])
+    for agent in agents:
+        # Set model_name directly in config
+        agent["model_name"] = model_name
+        # Merge kwargs into the agent's existing kwargs
+        existing_kwargs = agent.get("kwargs", {})
+        existing_kwargs.update(agent_kwargs)
+        agent["kwargs"] = existing_kwargs
+
+    # Write the modified config to a temp file that persists until process exit
+    # Use delete=False so the file remains available for Harbor to read
+    temp_config = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".yaml",
+        prefix="harbor_config_",
+        delete=False,
+    )
+    yaml.safe_dump(modified_config, temp_config)
+    temp_config.close()
+    temp_config_path = temp_config.name
+
+    # Build base command using the temp config (no --model or --agent needed)
     cmd = [
         harbor_binary,
         "jobs",
         "start",
         "--config",
-        harbor_config_path,
+        temp_config_path,
         "--job-name",
         job_name,
-        "--model",
-        model_name,
         "--env",
         env_type,
         "--n-concurrent",
@@ -627,10 +648,6 @@ def build_harbor_command(
         "--n-attempts",
         str(n_attempts),
     ]
-
-    # Always pass --agent so that --model override works in Harbor CLI
-    if resolved_agent_name is not None:
-        cmd.extend(["--agent", resolved_agent_name])
 
     # Add dataset (slug or path)
     if dataset_slug:
@@ -642,9 +659,7 @@ def build_harbor_command(
     if jobs_dir:
         cmd.extend(["--jobs-dir", jobs_dir])
 
-    # Add serialized agent kwargs
-    for kw in serialize_agent_kwargs(agent_kwargs):
-        cmd.extend(["--agent-kwarg", kw])
+    # Add passthrough kwargs that couldn't be parsed (e.g., complex nested structures)
     for passthrough_kw in passthrough:
         cmd.extend(["--agent-kwarg", passthrough_kw])
 
