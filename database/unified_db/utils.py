@@ -3879,6 +3879,7 @@ def upload_traces_to_hf(
     episodes: str = "last",
     success_filter: Optional[str] = None,
     verbose: bool = False,
+    include_verifier_output: bool = True,
 ) -> str:
     """
     Upload job trial execution traces to HuggingFace Hub as a conversation dataset.
@@ -3906,6 +3907,7 @@ def upload_traces_to_hf(
         episodes: "all" or "last" - which episodes to export per trial (default: "all")
         success_filter: Filter trials by success ("success", "failure", or None)
         verbose: Enable verbose logging (default: False)
+        include_verifier_output: Include verifier stdout/stderr in traces (default: True)
 
     Returns:
         str: HuggingFace dataset URL (e.g., 'https://huggingface.co/datasets/username/dataset-name')
@@ -3982,6 +3984,7 @@ def upload_traces_to_hf(
             push=False,
             verbose=verbose,
             success_filter=success_filter,
+            include_verifier_output=include_verifier_output,
         )
         logger.info(f"Extracted {len(dataset)} conversation rows from trials")
     except Exception as e:

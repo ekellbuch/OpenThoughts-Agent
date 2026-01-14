@@ -1276,6 +1276,7 @@ def upload_traces_to_hf(
     hf_episodes: str = "last",
     hf_success_filter: Optional[str] = None,
     hf_verbose: bool = False,
+    hf_include_verifier_output: bool = True,
     dry_run: bool = False,
 ) -> Optional[str]:
     """Upload Harbor job traces to HuggingFace.
@@ -1291,6 +1292,7 @@ def upload_traces_to_hf(
         hf_episodes: Which episodes to export: "all" or "last".
         hf_success_filter: Filter by success status: "success", "failure", or None.
         hf_verbose: Enable verbose logging for HF upload.
+        hf_include_verifier_output: Include verifier stdout/stderr in traces (default: True).
         dry_run: If True, skip actual upload and return None.
 
     Returns:
@@ -1336,6 +1338,7 @@ def upload_traces_to_hf(
             episodes=hf_episodes,
             success_filter=hf_success_filter,
             verbose=hf_verbose,
+            include_verifier_output=hf_include_verifier_output,
         )
         print(f"[upload] HuggingFace upload complete: {hf_url}")
         return hf_url
