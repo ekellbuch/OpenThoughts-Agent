@@ -126,6 +126,15 @@ terminal_bench:
     # Reward shaping settings (DISABLED - binary rewards)
     # ==========================================================================
     enable_reward_shaping: false   # Use original binary (0/1) verifier rewards
+    # ==========================================================================
+    # Interleaved Thinking Settings (KEY ABLATION)
+    # ==========================================================================
+    # Include reasoning content in chat history and send to LLM in next round
+    interleaved_thinking: true
+    # Enable thinking in the LLM via chat template kwargs
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: true
 
   # Model info for Harbor's hosted_vllm validation (token limits and costs)
   model_info:
@@ -153,10 +162,8 @@ trainer:
   epochs: 10
   update_epochs_per_batch: 1
 
-  # Batch sizes - async training allows more flexible batching
-  # train_batch_size can be smaller since we don't wait for full batches
-  train_batch_size: 16
-  policy_mini_batch_size: 8  # 2 gradient steps per batch
+  train_batch_size: 64
+  policy_mini_batch_size: 8  
   eval_batch_size: 32
 
   # Micro batch sizes - set to 1 for long context to avoid OOM
