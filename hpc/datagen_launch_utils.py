@@ -317,7 +317,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             agent=exp_args.get("trace_agent_name") or "",
             trace_env=exp_args.get("trace_env") or get_harbor_env_from_config(harbor_config_resolved),
             n_concurrent=int(exp_args.get("trace_n_concurrent") or 64),
-            n_attempts=int(exp_args.get("trace_n_attempts") or 3),
+            n_attempts=int(exp_args.get("trace_n_attempts") or 1),
             agent_kwargs=agent_kwargs,
             num_nodes=int(exp_args.get("num_nodes") or 1),
             gpus_per_node=gpus_per_node,
@@ -628,7 +628,7 @@ class TracegenJobConfig:
     agent: str = ""
     trace_env: str = "daytona"
     n_concurrent: int = 64
-    n_attempts: int = 3
+    n_attempts: int = 1
 
     # Agent kwargs (serialized as JSON)
     agent_kwargs: Dict[str, Any] = field(default_factory=dict)
