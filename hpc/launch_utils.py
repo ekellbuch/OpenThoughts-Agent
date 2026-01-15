@@ -910,10 +910,12 @@ def derive_default_job_name(cli_args: Mapping[str, Any]) -> str:
             for chunk in job_name.split("_")
         )
         if len(job_name) > 96:
-            raise ValueError(
-                f"Job name {job_name} is still too long (96 characters) after truncation. "
-                "Try renaming the dataset or providing a shorter YAML config."
+            # Hard truncate to 96 chars with warning instead of failing
+            print(
+                f"Warning: Job name still {len(job_name)} chars after smart truncation, "
+                f"hard truncating to 96 chars: {job_name[:96]}"
             )
+            job_name = job_name[:96]
 
     return job_name or "ot_agent_job"
 
