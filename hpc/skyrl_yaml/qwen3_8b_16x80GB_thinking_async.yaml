@@ -183,6 +183,8 @@ trainer:
   # Logging
   project_name: OpenThoughts-Agent
   log_level: INFO  # SkyRL logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+  # Commit to WandB after each step (for real-time monitoring in async training)
+  tracker_commit_each_step: true
 
   # Paths derived from experiments_dir/job_name if null
   run_name: null
