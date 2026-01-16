@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 # Headroom scales with node size to handle CUDA graph capture and system overhead
 DEFAULT_MEMORY_HEADROOM_MB = 32768  # 32GB default headroom
 MIN_MEMORY_HEADROOM_MB = 16384  # 16GB minimum
-MEMORY_HEADROOM_PERCENT = 0.03  # 3% of total memory as headroom for large nodes
+MEMORY_HEADROOM_PERCENT = 0.05  # 5% of total memory as headroom for large nodes
 DEFAULT_OBJECT_STORE_MEMORY_BYTES = 40 * 1024 * 1024 * 1024  # 40GB for Ray plasma store
 
 
