@@ -412,10 +412,10 @@ class LaunchArgs:
             "help": "Persistent Pinggy hostname (e.g., xxxxx.a.pinggy.link) to reuse for tunnels",
         },
     )
-    pinggy_ssh_command: Optional[str] = field(
+    pinggy_token: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Custom Pinggy SSH tunnel command template (use {PORT} for HAProxy port)",
+            "help": "Pinggy auth token (e.g., 'oVxgHq855Ln') for SSH tunnel authentication",
         },
     )
     pinggy_debugger_url: Optional[str] = field(
@@ -535,8 +535,8 @@ class DataGenArgs:
         metadata={"help": "Override Harbor agent model for trace generation"}
     )
     trace_agent_name: Optional[str] = field(
-        default="terminus-2",
-        metadata={"help": "Agent name for trace generation and run_summary.json (default: terminus-2)"}
+        default=None,
+        metadata={"help": "Agent name override for trace generation (default: read from Harbor config)"}
     )
     trace_agent_kwargs: Optional[str] = field(
         default=None,
