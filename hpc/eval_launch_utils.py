@@ -258,7 +258,7 @@ class EvalJobConfig:
 
     # Pinggy tunnel settings (for cloud backends that can't reach local vLLM)
     pinggy_persistent_url: Optional[str] = None
-    pinggy_ssh_command: Optional[str] = None
+    pinggy_token: Optional[str] = None
 
 
 class EvalJobRunner:
@@ -440,19 +440,24 @@ class EvalJobRunner:
                     needs_pinggy_tunnel,
                     PinggyTunnel,
                     PinggyConfig,
+                    parse_endpoint_host_port,
                 )
 
                 use_pinggy = (
                     self.config.pinggy_persistent_url
-                    and self.config.pinggy_ssh_command
+                    and self.config.pinggy_token
                     and needs_pinggy_tunnel(self.config.agent, self.config.eval_env)
                 )
 
                 if use_pinggy:
+                    # Parse the vLLM endpoint to get the actual host:port
+                    # (vLLM may bind to a specific IP, not localhost)
+                    local_host, local_port = parse_endpoint_host_port(vllm_server.endpoint)
                     pinggy_cfg = PinggyConfig(
                         persistent_url=self.config.pinggy_persistent_url,
-                        ssh_command=self.config.pinggy_ssh_command,
-                        local_port=self.config.api_port,
+                        token=self.config.pinggy_token,
+                        local_port=local_port,
+                        local_host=local_host,
                     )
                     pinggy_log = log_dir / f"{self.config.job_name}_pinggy.log"
                     pinggy_tunnel = PinggyTunnel(pinggy_cfg, log_path=pinggy_log)
@@ -618,7 +623,7 @@ def launch_eval_job_v2(exp_args: dict, hpc) -> None:
         upload_forced_update=bool(exp_args.get("upload_forced_update")),
         # Pinggy tunnel settings
         pinggy_persistent_url=exp_args.get("pinggy_persistent_url"),
-        pinggy_ssh_command=exp_args.get("pinggy_ssh_command"),
+        pinggy_token=exp_args.get("pinggy_token"),
     )
 
     # Write config JSON

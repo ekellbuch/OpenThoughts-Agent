@@ -33,13 +33,33 @@ import urllib.error
 
 @dataclass
 class PinggyConfig:
-    """Configuration for Pinggy tunnel."""
+    """Configuration for Pinggy tunnel.
+
+    Only requires persistent_url and token - the SSH command is built automatically.
+    """
 
     persistent_url: str  # e.g., "bjfqkhfxtx.a.pinggy.link"
-    ssh_command: str  # Full SSH command for the tunnel
+    token: str  # Pinggy auth token (e.g., "oVxgHq855Ln")
     local_port: int = 8000  # Local vLLM port to tunnel
+    local_host: str = "localhost"  # Local host to tunnel (can be IP from vLLM endpoint)
     health_check_timeout: int = 60  # Seconds to wait for tunnel to be ready
     health_check_interval: int = 2  # Seconds between health checks
+    pinggy_host: str = "pro.pinggy.io"  # Pinggy server (pro.pinggy.io or free.pinggy.io)
+
+    def get_ssh_command(self) -> str:
+        """Build the SSH command for the Pinggy tunnel."""
+        # Build a robust SSH command with auto-reconnect loop
+        return (
+            f"while true; do "
+            f"ssh -p 443 "
+            f"-R0:{self.local_host}:{self.local_port} "
+            f"-o StrictHostKeyChecking=no "
+            f"-o ServerAliveInterval=30 "
+            f"-o ExitOnForwardFailure=yes "
+            f"{self.token}@{self.pinggy_host}; "
+            f"sleep 10; "
+            f"done"
+        )
 
 
 @dataclass
@@ -86,7 +106,7 @@ class PinggyTunnel:
 
         print(f"=== Starting Pinggy Tunnel ===")
         print(f"  Persistent URL: {self.config.persistent_url}")
-        print(f"  Local port: {self.config.local_port}")
+        print(f"  Local target: {self.config.local_host}:{self.config.local_port}")
         print(f"==============================")
 
         # Open log file if path provided
@@ -99,9 +119,10 @@ class PinggyTunnel:
             stdout_dest = subprocess.DEVNULL
             stderr_dest = subprocess.DEVNULL
 
-        # Parse and execute the SSH command
+        # Parse and execute the SSH command (with host:port placeholders resolved)
         # The command is typically a shell loop, so we run it via bash
-        cmd = ["bash", "-c", self.config.ssh_command]
+        ssh_cmd = self.config.get_ssh_command()
+        cmd = ["bash", "-c", ssh_cmd]
 
         try:
             self._process = subprocess.Popen(
@@ -236,6 +257,32 @@ def needs_pinggy_tunnel(agent_name: Optional[str], env_type: Optional[str]) -> b
     return True
 
 
+def parse_endpoint_host_port(endpoint: str) -> tuple[str, int]:
+    """Parse a vLLM endpoint URL and extract the host and port.
+
+    Args:
+        endpoint: vLLM endpoint URL (e.g., "http://172.24.74.235:8000/v1")
+
+    Returns:
+        Tuple of (host, port). Defaults to ("localhost", 8000) if parsing fails.
+
+    Examples:
+        >>> parse_endpoint_host_port("http://172.24.74.235:8000/v1")
+        ('172.24.74.235', 8000)
+        >>> parse_endpoint_host_port("http://localhost:8000/v1")
+        ('localhost', 8000)
+    """
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(endpoint)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 8000
+        return (host, port)
+    except Exception:
+        return ("localhost", 8000)
+
+
 def build_pinggy_endpoint_meta(pinggy_url: str) -> Dict[str, str]:
     """Build endpoint metadata dict from a Pinggy tunnel URL.
 
@@ -263,38 +310,35 @@ def build_pinggy_endpoint_meta(pinggy_url: str) -> Dict[str, str]:
 
 def create_pinggy_config_from_args(
     persistent_url: Optional[str],
-    ssh_command: Optional[str],
+    token: Optional[str],
     local_port: int = 8000,
+    local_host: str = "localhost",
 ) -> Optional[PinggyConfig]:
     """Create PinggyConfig from CLI arguments.
 
     Args:
         persistent_url: Pinggy persistent URL (e.g., "bjfqkhfxtx.a.pinggy.link")
-        ssh_command: Full SSH command for the tunnel
+        token: Pinggy auth token (e.g., "oVxgHq855Ln")
         local_port: Local port to tunnel (default: 8000)
+        local_host: Local host to tunnel (default: "localhost")
 
     Returns:
-        PinggyConfig if both URL and command provided, None otherwise
+        PinggyConfig if both URL and token provided, None otherwise
     """
-    if not persistent_url or not ssh_command:
+    if not persistent_url or not token:
         return None
 
     return PinggyConfig(
         persistent_url=persistent_url,
-        ssh_command=ssh_command,
+        token=token,
         local_port=local_port,
+        local_host=local_host,
     )
 
 
-# Default Pinggy configuration (can be overridden via CLI)
-DEFAULT_PINGGY_SSH_COMMAND = (
-    "while true; do "
-    "ssh -p 443 -R0:localhost:8000 -L4300:localhost:4300 "
-    "-o StrictHostKeyChecking=no -o ServerAliveInterval=30 "
-    "oVxgHq855Ln@pro.pinggy.io; "
-    "sleep 10; "
-    "done"
-)
+# Default Pinggy token (can be overridden via CLI or environment variable)
+# This is an example token - users should use their own from https://pinggy.io
+DEFAULT_PINGGY_TOKEN = "oVxgHq855Ln"
 
 
 if __name__ == "__main__":
@@ -308,15 +352,20 @@ if __name__ == "__main__":
         help="Pinggy persistent URL",
     )
     parser.add_argument(
-        "--ssh-command",
-        default=DEFAULT_PINGGY_SSH_COMMAND,
-        help="SSH command for tunnel",
+        "--token",
+        default=DEFAULT_PINGGY_TOKEN,
+        help="Pinggy auth token",
     )
     parser.add_argument(
         "--local-port",
         type=int,
         default=8000,
         help="Local port to tunnel",
+    )
+    parser.add_argument(
+        "--local-host",
+        default="localhost",
+        help="Local host to tunnel",
     )
     parser.add_argument(
         "--timeout",
@@ -329,12 +378,14 @@ if __name__ == "__main__":
 
     config = PinggyConfig(
         persistent_url=args.persistent_url,
-        ssh_command=args.ssh_command,
+        token=args.token,
         local_port=args.local_port,
+        local_host=args.local_host,
         health_check_timeout=args.timeout,
     )
 
     print(f"Testing Pinggy tunnel to {config.persistent_url}")
+    print(f"SSH command: {config.get_ssh_command()}")
     print(f"Press Ctrl+C to stop")
 
     try:
@@ -345,3 +396,13 @@ if __name__ == "__main__":
                 time.sleep(1)
     except KeyboardInterrupt:
         print("\nStopping...")
+
+
+# TODO: Add Pinggy tunnel support to RL training jobs (hpc/rl_launch_utils.py)
+#       when RL jobs need to expose vLLM endpoints to cloud-based environments.
+#       Follow the same pattern as eval_launch_utils.py and datagen_launch_utils.py:
+#       1. Add pinggy_persistent_url and pinggy_token fields to RLJobConfig
+#       2. In the job runner's _run_with_vllm() method, check needs_pinggy_tunnel()
+#       3. Wrap the agent/training call with PinggyTunnel context manager when needed
+#       4. Pass exp_args.get("pinggy_persistent_url") and exp_args.get("pinggy_token")
+#          when building the job config in launch_rl_job()
