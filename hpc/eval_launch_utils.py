@@ -143,11 +143,15 @@ def prepare_eval_configuration(exp_args: dict) -> dict:
     exp_args["trace_model"] = model_name
 
     agent_cfg = harbor_job.agents[0]
+    # Debug: print what we're getting from the Harbor config
+    print(f"[prepare_eval] Harbor agent config: name={agent_cfg.name!r}, import_path={agent_cfg.import_path!r}")
+    print(f"[prepare_eval] CLI trace_agent_name={exp_args.get('trace_agent_name')!r}")
     agent_name = (
         exp_args.get("trace_agent_name")
         or agent_cfg.name
         or (agent_cfg.import_path or "terminus-2")
     )
+    print(f"[prepare_eval] Resolved agent_name={agent_name!r}")
     exp_args["_eval_agent_name"] = agent_name
     if "trace_agent_name" not in exp_args:
         exp_args["trace_agent_name"] = agent_name
