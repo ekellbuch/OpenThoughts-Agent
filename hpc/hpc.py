@@ -414,7 +414,7 @@ capella = HPC(
         "NCCL_DEBUG": "INFO",
         "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
         "CUDA_LAUNCH_BLOCKING": "0",
-        "PYTORCH_CUDA_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
+        "PYTORCH_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
     },
     # NCCL/networking settings for SFT training (InfiniBand)
     nccl_settings={
@@ -521,7 +521,7 @@ vista = HPC(
         "PYTHONFAULTHANDLER": "1",
         "NCCL_TIMEOUT": "1800",
         "NCCL_IB_TIMEOUT": "23",
-        "PYTORCH_CUDA_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
+        "PYTORCH_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
     },
     library_paths={
         "TRITON_CC": "/home1/apps/gcc/15.1.0/bin/gcc",
@@ -630,7 +630,7 @@ nyutorch = HPC(
         "PYTHONFAULTHANDLER": "1",
         "NCCL_TIMEOUT": "1800",
         "NCCL_IB_TIMEOUT": "23",
-        "PYTORCH_CUDA_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
+        "PYTORCH_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
     },
     library_paths={
         "TRITON_CC": "/usr/bin/gcc",
