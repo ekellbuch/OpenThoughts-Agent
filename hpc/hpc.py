@@ -85,6 +85,10 @@ class HPC(BaseModel):
     # When True, adds --cpu-bind=none to srun commands for Ray startup
     disable_cpu_bind: bool = False
 
+    # Environment variables to unset after module loading (e.g., ROCR_VISIBLE_DEVICES on Frontier)
+    # Modules may set these but they conflict with Ray/vLLM
+    env_unsets: List[str] = []
+
     def model_post_init(self, __context) -> None:
         # Derive a default CPU-per-GPU ratio when not explicitly provided.
         if not self.cpus_per_gpu:
@@ -125,11 +129,18 @@ class HPC(BaseModel):
     # =========================================================================
 
     def get_module_commands(self) -> str:
-        """Generate module load commands for SBATCH scripts."""
-        if not self.modules:
+        """Generate module load commands for SBATCH scripts.
+
+        Also includes unset commands for env vars that modules set but
+        conflict with Ray/vLLM (e.g., ROCR_VISIBLE_DEVICES on Frontier).
+        """
+        if not self.modules and not self.env_unsets:
             return ""
         lines = ["set +u"]
         lines.extend(f"module load {m}" for m in self.modules)
+        # Unset env vars that modules set but conflict with Ray/vLLM
+        for var in self.env_unsets:
+            lines.append(f"unset {var}")
         lines.append("set -u")
         return "\n".join(lines)
 
@@ -766,6 +777,8 @@ frontier = HPC(
         "ROCM_PATH": "/opt/rocm",
         "HIP_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
     },
+    # Unset env vars that ROCm modules set but conflict with Ray
+    env_unsets=["ROCR_VISIBLE_DEVICES"],
     # Frontier scheduling bins (node-count-based time limits)
     # Bin 5: 1-91 nodes -> 2 hours max
     # Bin 4: 92-183 nodes -> 6 hours max
