@@ -12,7 +12,7 @@
 
 engine:
   type: vllm_local
-  model: nvidia/Nemotron-3-Nano-30B-A3B-BF16
+  model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
   max_output_tokens: 8192
   healthcheck_interval: 300
   vllm_local: {}
@@ -22,7 +22,7 @@ backend:
   wait_for_endpoint: true
 
 vllm_server:
-  model_path: nvidia/Nemotron-3-Nano-30B-A3B-BF16
+  model_path: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
   num_replicas: 1
   tensor_parallel_size: 1
   pipeline_parallel_size: 1
