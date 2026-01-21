@@ -124,6 +124,25 @@ if [[ "$USE_ROCM" == "true" ]]; then
     fi
     # Re-add ~/.local/bin to PATH after module loads (they can reset PATH)
     export PATH="$HOME/.local/bin:$PATH"
+
+    # Check for uv again after module loads (conda deactivation may have removed it)
+    if ! command -v uv &> /dev/null; then
+        echo "'uv' not found after module loads. Installing uv to ~/.local/bin..."
+        if command -v pip &> /dev/null; then
+            pip install --user uv 2>/dev/null || pip install --user uv --break-system-packages
+        elif command -v pip3 &> /dev/null; then
+            pip3 install --user uv 2>/dev/null || pip3 install --user uv --break-system-packages
+        else
+            echo "pip not found, trying curl installer..."
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+        fi
+        if ! command -v uv &> /dev/null; then
+            echo "Error: Failed to install uv after module loads."
+            exit 1
+        fi
+        echo "uv installed successfully."
+    fi
 fi
 
 # Check Python 3.12 availability
