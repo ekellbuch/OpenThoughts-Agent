@@ -8,10 +8,11 @@
 # (torch 2.9, vllm 0.11.2).
 #
 # Usage:
-#   ./hpc/setup_rl_env.sh [--force]
+#   ./hpc/setup_rl_env.sh [--force] [--rocm]
 #
 # Options:
 #   --force    Remove existing RL environment and recreate
+#   --rocm     Install ROCm/AMD GPU dependencies instead of CUDA (for Frontier)
 #
 # The environment is created at: $DCFT/envs/rl or ./envs/rl
 # The RL launcher (hpc/launch.py --job_type rl) will automatically use this.
@@ -22,6 +23,17 @@ set -euo pipefail
 # Configuration
 RL_ENV_NAME="rl"
 PYTHON_VERSION="3.12"
+USE_ROCM=false
+
+# ROCm configuration (for OLCF Frontier with AMD MI250X GPUs)
+# See: https://docs.olcf.ornl.gov/software/analytics/pytorch_frontier.html
+ROCM_VERSION="6.4.1"
+ROCM_MODULES=(
+    "PrgEnv-gnu/8.6.0"
+    "miniforge3/23.11.0-0"
+    "rocm/6.4.1"
+    "craype-accel-amd-gfx90a"
+)
 
 # Determine base directory (project root with pyproject.toml)
 # DCFT_PRIVATE is the project dir on clusters where DCFT is a parent scratch dir
@@ -44,9 +56,13 @@ while [[ $# -gt 0 ]]; do
             FORCE=true
             shift
             ;;
+        --rocm)
+            USE_ROCM=true
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--force]"
+            echo "Usage: $0 [--force] [--rocm]"
             exit 1
             ;;
     esac
@@ -56,7 +72,29 @@ echo "=== RL Environment Setup ==="
 echo "Base directory: $BASE_DIR"
 echo "Environment directory: $RL_ENV_DIR"
 echo "Python version: $PYTHON_VERSION"
+if [[ "$USE_ROCM" == "true" ]]; then
+    echo "GPU Backend: ROCm $ROCM_VERSION (AMD)"
+else
+    echo "GPU Backend: CUDA (NVIDIA)"
+fi
 echo ""
+
+# Load ROCm modules if requested (for Frontier/AMD systems)
+if [[ "$USE_ROCM" == "true" ]]; then
+    echo "Loading ROCm modules for AMD GPU support..."
+    # Check if module command exists (HPC systems)
+    if command -v module &> /dev/null; then
+        for mod in "${ROCM_MODULES[@]}"; do
+            echo "  module load $mod"
+            module load "$mod" 2>/dev/null || echo "    Warning: Could not load $mod"
+        done
+        echo ""
+    else
+        echo "Warning: 'module' command not found. Skipping module loads."
+        echo "Make sure ROCm is available in your PATH."
+        echo ""
+    fi
+fi
 
 # Check for uv
 if ! command -v uv &> /dev/null; then
@@ -99,35 +137,52 @@ echo "Installing RL dependencies..."
 # =============================================================================
 # flash-attn (a dependency of skyrl-train) requires torch to be present during
 # its build phase. We install torch first to avoid build failures.
-# Version must match skyrl-train[vllm] requirement (torch==2.8.0 with CUDA 12.8)
+# Version must match skyrl-train[vllm] requirement (torch==2.8.0)
 echo "Installing PyTorch first (required for flash-attn build)..."
-uv pip install "torch==2.8.0" --index-url https://download.pytorch.org/whl/cu128
+if [[ "$USE_ROCM" == "true" ]]; then
+    # ROCm/AMD version for Frontier (MI250X GPUs)
+    # See: https://docs.olcf.ornl.gov/software/analytics/pytorch_frontier.html
+    echo "Installing PyTorch with ROCm $ROCM_VERSION support..."
+    uv pip install "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
+        --index-url https://download.pytorch.org/whl/rocm6.4
+else
+    # CUDA/NVIDIA version (default)
+    uv pip install "torch==2.8.0" --index-url https://download.pytorch.org/whl/cu128
+fi
 
 # =============================================================================
-# Try to install flash-attn (optional but recommended)
+# Try to install flash-attn (optional but recommended) - CUDA only
 # =============================================================================
-echo ""
-echo "=== Installing Flash Attention 2 (optional) ==="
-echo "Note: flash-attn can be difficult to build on some systems."
-echo "If installation fails, training will still work (just slower)."
-echo ""
-
-# Try to install flash-attn with --no-build-isolation (uses installed torch)
-if uv pip install "flash-attn>=2.8.3" --no-build-isolation 2>&1; then
-    echo "flash-attn installed successfully!"
-    FLASH_ATTN_INSTALLED=true
+FLASH_ATTN_INSTALLED=false
+if [[ "$USE_ROCM" == "true" ]]; then
+    echo ""
+    echo "=== Skipping Flash Attention 2 (ROCm) ==="
+    echo "flash-attn is CUDA-specific and not available for ROCm/AMD GPUs."
+    echo "PyTorch will use its built-in attention implementation instead."
+    echo ""
 else
     echo ""
-    echo "========================================================================"
-    echo "WARNING: flash-attn installation failed."
-    echo "This is common on systems without CUDA or with incompatible compilers."
-    echo "Training will still work, but attention computation may be slower."
+    echo "=== Installing Flash Attention 2 (optional) ==="
+    echo "Note: flash-attn can be difficult to build on some systems."
+    echo "If installation fails, training will still work (just slower)."
     echo ""
-    echo "To try installing manually later:"
-    echo "  pip install flash-attn --no-build-isolation"
-    echo "========================================================================"
-    echo ""
-    FLASH_ATTN_INSTALLED=false
+
+    # Try to install flash-attn with --no-build-isolation (uses installed torch)
+    if uv pip install "flash-attn>=2.8.3" --no-build-isolation 2>&1; then
+        echo "flash-attn installed successfully!"
+        FLASH_ATTN_INSTALLED=true
+    else
+        echo ""
+        echo "========================================================================"
+        echo "WARNING: flash-attn installation failed."
+        echo "This is common on systems without CUDA or with incompatible compilers."
+        echo "Training will still work, but attention computation may be slower."
+        echo ""
+        echo "To try installing manually later:"
+        echo "  pip install flash-attn --no-build-isolation"
+        echo "========================================================================"
+        echo ""
+    fi
 fi
 
 # =============================================================================
@@ -218,10 +273,20 @@ echo "  export PYTHONPATH=\"\$SKYRL_HOME/skyrl-train:\$PYTHONPATH\""
 echo ""
 echo "Verifying installation..."
 python -c "import torch; print(f'PyTorch: {torch.__version__}')"
-python -c "import vllm; print(f'vLLM: {vllm.__version__}')" || echo "Warning: vLLM not installed (may be CPU-only system)"
+
+# Check GPU backend
+if [[ "$USE_ROCM" == "true" ]]; then
+    python -c "import torch; print(f'ROCm available: {torch.cuda.is_available()} (AMD uses CUDA API)')"
+    python -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')" 2>/dev/null || true
+    echo "flash-attn: N/A (ROCm uses PyTorch native attention)"
+else
+    python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+    python -c "import flash_attn; print(f'flash-attn: {flash_attn.__version__}')" 2>/dev/null || echo "flash-attn: NOT installed (optional - training will be slower)"
+fi
+
+python -c "import vllm; print(f'vLLM: {vllm.__version__}')" || echo "Warning: vLLM not installed (may be CPU-only system or ROCm)"
 python -c "import ray; print(f'Ray: {ray.__version__}')"
 python -c "import transformers; print(f'Transformers: {transformers.__version__}')"
-python -c "import flash_attn; print(f'flash-attn: {flash_attn.__version__}')" 2>/dev/null || echo "flash-attn: NOT installed (optional - training will be slower)"
 python -c "import skyrl_gym; print(f'skyrl-gym: installed')"
 python -c "import skyrl_train; print(f'skyrl-train: installed')"
 
@@ -239,7 +304,25 @@ echo ""
 
 # Create activation helper script
 ACTIVATE_SCRIPT="$BASE_DIR/hpc/activate_rl_env.sh"
-cat > "$ACTIVATE_SCRIPT" << EOF
+if [[ "$USE_ROCM" == "true" ]]; then
+    cat > "$ACTIVATE_SCRIPT" << EOF
+#!/bin/bash
+# Source this script to activate the RL environment (ROCm/AMD)
+# Usage: source hpc/activate_rl_env.sh
+
+# Load ROCm modules (for Frontier/AMD systems)
+if command -v module &> /dev/null; then
+    module load PrgEnv-gnu/8.6.0 2>/dev/null || true
+    module load rocm/6.4.1 2>/dev/null || true
+    module load craype-accel-amd-gfx90a 2>/dev/null || true
+fi
+
+export RL_ENV_DIR="$RL_ENV_DIR"
+source "\$RL_ENV_DIR/bin/activate"
+echo "Activated RL environment (ROCm): \$RL_ENV_DIR"
+EOF
+else
+    cat > "$ACTIVATE_SCRIPT" << EOF
 #!/bin/bash
 # Source this script to activate the RL environment
 # Usage: source hpc/activate_rl_env.sh
@@ -248,5 +331,6 @@ export RL_ENV_DIR="$RL_ENV_DIR"
 source "\$RL_ENV_DIR/bin/activate"
 echo "Activated RL environment: \$RL_ENV_DIR"
 EOF
+fi
 chmod +x "$ACTIVATE_SCRIPT"
 echo "Created activation helper: $ACTIVATE_SCRIPT"

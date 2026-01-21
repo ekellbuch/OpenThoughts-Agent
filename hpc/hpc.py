@@ -754,6 +754,13 @@ frontier = HPC(
     total_partition_nodes=9216,
     qos="normal",
     gpu_directive_format="--gpus-per-node={n}",
+    # ROCm modules for AMD MI250X GPUs
+    # See: https://docs.olcf.ornl.gov/software/analytics/pytorch_frontier.html
+    modules=["PrgEnv-gnu/8.6.0", "rocm/6.4.1", "craype-accel-amd-gfx90a"],
+    env_vars={
+        "ROCM_PATH": "/opt/rocm-6.4.1",
+        "HIP_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+    },
     # Frontier scheduling bins (node-count-based time limits)
     # Bin 5: 1-91 nodes -> 2 hours max
     # Bin 4: 92-183 nodes -> 6 hours max
