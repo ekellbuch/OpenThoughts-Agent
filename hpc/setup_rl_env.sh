@@ -227,6 +227,12 @@ else
 fi
 
 # =============================================================================
+# Install build dependencies (needed for flash-attn and harbor)
+# =============================================================================
+echo "Installing build dependencies (packaging, uv_build)..."
+uv pip install packaging "uv_build>=0.8.4,<0.9.0" || true
+
+# =============================================================================
 # Try to install flash-attn (optional but recommended) - CUDA only
 # =============================================================================
 FLASH_ATTN_INSTALLED=false
@@ -260,13 +266,6 @@ else
         echo ""
     fi
 fi
-
-# =============================================================================
-# Install build dependencies
-# =============================================================================
-# Some packages (harbor, flash-attn) need these to build properly
-echo "Installing build dependencies (packaging, uv_build)..."
-uv pip install packaging "uv_build>=0.8.4,<0.9.0" || true
 
 # =============================================================================
 # Install remaining dependencies
