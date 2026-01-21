@@ -270,6 +270,8 @@ def build_sky_resources(
     use_spot: bool,
     docker_image: Optional[str],
     resolve_cloud_fn,  # Callable to resolve provider name to sky.Cloud
+    memory: Optional[str] = None,
+    cpus: Optional[str] = None,
 ) -> Union["sky.Resources", Set["sky.Resources"]]:
     """Build SkyPilot resource configurations for all provider/accelerator/region combinations.
 
@@ -282,6 +284,8 @@ def build_sky_resources(
         use_spot: Whether to use spot instances
         docker_image: Docker image (already normalized with docker: prefix)
         resolve_cloud_fn: Function to resolve provider name to sky.Cloud object
+        memory: Minimum system RAM in GB (e.g., "128" or "128+")
+        cpus: Minimum number of vCPUs (e.g., "32" or "32+")
 
     Returns:
         Single sky.Resources if only one combination, otherwise set of resources
@@ -304,6 +308,10 @@ def build_sky_resources(
                     kwargs["zone"] = zone
                 if docker_image and pconfig.supports_docker_runtime:
                     kwargs["image_id"] = docker_image
+                if memory:
+                    kwargs["memory"] = memory
+                if cpus:
+                    kwargs["cpus"] = cpus
 
                 all_resources.append(sky.Resources(**kwargs))
 
@@ -672,6 +680,14 @@ class CloudLauncher:
             default="A100:1",
             help="SkyPilot accelerator spec(s). Comma-separated for fallback options.",
         )
+        parser.add_argument(
+            "--memory",
+            help="Minimum system RAM in GB (e.g., '128' or '128+' for at least 128GB).",
+        )
+        parser.add_argument(
+            "--cpus",
+            help="Minimum number of vCPUs (e.g., '32' or '32+' for at least 32 vCPUs).",
+        )
         _add("--use_spot", "--use-spot", action="store_true", help="Use spot/preemptible instances.")
         _add(
             "--docker_image", "--docker-image",
@@ -894,6 +910,8 @@ class CloudLauncher:
             use_spot=args.use_spot,
             docker_image=docker_image,
             resolve_cloud_fn=resolve_cloud,
+            memory=getattr(args, "memory", None),
+            cpus=getattr(args, "cpus", None),
         )
 
     # -------------------------------------------------------------------------
@@ -920,6 +938,10 @@ class CloudLauncher:
         print(f"[cloud]   Provider(s): {provider_status}")
         print(f"[cloud]   Region(s): {region_status}")
         print(f"[cloud]   Accelerator(s): {accel_status}")
+        if getattr(args, "memory", None):
+            print(f"[cloud]   Memory: {args.memory} GB")
+        if getattr(args, "cpus", None):
+            print(f"[cloud]   CPUs: {args.cpus}")
         print(f"[cloud]   Image: {image_status}")
         print(f"[cloud]   Code sync: {sync_status}")
         print(f"[cloud]   Autostop: {autostop_status}")

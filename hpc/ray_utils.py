@@ -126,6 +126,7 @@ class RayCluster:
     node_list: List[str]
     _ray_pids: List[int] = field(default_factory=list)
     _ray_procs: List[subprocess.Popen] = field(default_factory=list)
+    _ray_log_files: List = field(default_factory=list)  # Log file handles
     _started: bool = False
 
     @classmethod
@@ -277,8 +278,11 @@ class RayCluster:
 
         # Verify the Ray head process is still running
         if self._ray_procs and self._ray_procs[0].poll() is not None:
+            log_dir = Path(os.environ.get("DCFT", ".")) / "experiments" / "logs"
+            ray_log = log_dir / f"ray_head_{self.node_list[0]}.log"
             raise RuntimeError(
-                f"Ray head process exited prematurely with code {self._ray_procs[0].returncode}"
+                f"Ray head process exited prematurely with code {self._ray_procs[0].returncode}. "
+                f"Check log file: {ray_log}"
             )
 
         # Start worker nodes with delay
@@ -338,6 +342,15 @@ class RayCluster:
         self._ray_procs.clear()
         self._ray_pids.clear()
         self._started = False
+
+        # Close log files
+        for log_file in self._ray_log_files:
+            try:
+                log_file.close()
+            except Exception:
+                pass
+        self._ray_log_files.clear()
+
         print("Ray cluster stopped", flush=True)
 
     def _start_node(self, node: str, is_head: bool) -> None:
@@ -388,13 +401,28 @@ class RayCluster:
             bash_cmd,
         ]
 
+        # Log Ray startup command and output for debugging
+        role = "head" if is_head else "worker"
+        log_dir = Path(os.environ.get("DCFT", ".")) / "experiments" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        ray_log_path = log_dir / f"ray_{role}_{node}.log"
+
+        # Open log file for Ray output
+        ray_log_file = open(ray_log_path, "w")
+        ray_log_file.write(f"Ray {role} startup on {node}\n")
+        ray_log_file.write(f"Command: {' '.join(srun_cmd)}\n")
+        ray_log_file.write(f"Bash command: {bash_cmd}\n")
+        ray_log_file.write("=" * 60 + "\n")
+        ray_log_file.flush()
+
         proc = subprocess.Popen(
             srun_cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=ray_log_file,
+            stderr=subprocess.STDOUT,
         )
         self._ray_procs.append(proc)
         self._ray_pids.append(proc.pid)
+        self._ray_log_files.append(ray_log_file)  # Keep reference to close later
 
     def _wait_for_cluster(self) -> None:
         """Wait for the Ray cluster to be ready with expected resources.

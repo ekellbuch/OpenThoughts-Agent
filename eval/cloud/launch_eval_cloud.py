@@ -76,6 +76,11 @@ class EvalCloudLauncher(CloudLauncher):
                             help="Path to tasks directory (exclusive with --dataset).")
         parser.add_argument("--dataset-path", dest="dataset_path", help=argparse.SUPPRESS)
 
+        # Ray memory configuration (for cloud VMs with limited RAM)
+        parser.add_argument("--ray_object_store_gb", "--ray-object-store-gb",
+                            type=float, default=None,
+                            help="Ray object store (plasma) size in GB. Default 40GB may OOM on small VMs.")
+
         # Upload options (shared from arg_groups)
         add_hf_upload_args(parser)
         add_database_upload_args(parser)
@@ -164,6 +169,10 @@ class EvalCloudLauncher(CloudLauncher):
             cmd.extend(["--job_name", args.job_name])
         if args.dry_run:
             cmd.append("--dry_run")
+
+        # Ray memory configuration
+        if args.ray_object_store_gb is not None:
+            cmd.extend(["--ray_object_store_gb", str(args.ray_object_store_gb)])
 
         for kwarg in args.agent_kwarg:
             cmd.extend(["--agent_kwarg", kwarg])
