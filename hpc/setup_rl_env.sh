@@ -27,8 +27,16 @@ USE_ROCM=false
 
 # ROCm configuration (for OLCF Frontier with AMD MI250X GPUs)
 # See: https://docs.olcf.ornl.gov/software/analytics/pytorch_frontier.html
-ROCM_VERSION="6.4.1"
+# Note: vLLM wheels are available for ROCm 7.0.0 - try that first, fallback to 6.4.1
+ROCM_VERSION="7.0.2"
+ROCM_VERSION_FALLBACK="6.4.1"
 ROCM_MODULES=(
+    "PrgEnv-gnu/8.6.0"
+    "miniforge3/23.11.0-0"
+    "rocm/7.0.2"
+    "craype-accel-amd-gfx90a"
+)
+ROCM_MODULES_FALLBACK=(
     "PrgEnv-gnu/8.6.0"
     "miniforge3/23.11.0-0"
     "rocm/6.4.1"
@@ -110,11 +118,27 @@ if [[ "$USE_ROCM" == "true" ]]; then
     echo "Loading ROCm modules for AMD GPU support..."
     # Check if module command exists (HPC systems)
     if command -v module &> /dev/null; then
+        # Try ROCm 7.0.0 first (required for vLLM wheel), fall back to 6.4.1
+        ROCM_LOADED=false
         for mod in "${ROCM_MODULES[@]}"; do
             echo "  module load $mod"
-            module load "$mod" 2>/dev/null || echo "    Warning: Could not load $mod"
+            if module load "$mod" 2>/dev/null; then
+                ROCM_LOADED=true
+            else
+                echo "    Warning: Could not load $mod"
+                # If ROCm 7.0.0 failed, try fallback
+                if [[ "$mod" == "rocm/7.0.2" ]]; then
+                    echo "    Trying fallback: rocm/${ROCM_VERSION_FALLBACK}..."
+                    if module load "rocm/${ROCM_VERSION_FALLBACK}" 2>/dev/null; then
+                        ROCM_VERSION="$ROCM_VERSION_FALLBACK"
+                        ROCM_LOADED=true
+                        echo "    Loaded ROCm ${ROCM_VERSION_FALLBACK} (fallback)"
+                    fi
+                fi
+            fi
         done
         echo ""
+        echo "Using ROCm version: $ROCM_VERSION"
     else
         echo "Warning: 'module' command not found. Skipping module loads."
         echo "Make sure ROCm is available in your PATH."
@@ -236,21 +260,35 @@ fi
 # =============================================================================
 # Install remaining dependencies
 # =============================================================================
-# Install from requirements file if it exists, otherwise use pyproject.toml
-if [[ -f "$RL_REQUIREMENTS" ]]; then
-    echo "Using requirements file: $RL_REQUIREMENTS"
-    # Use --no-build-isolation so packages use our installed torch/flash-attn
-    uv pip install -r "$RL_REQUIREMENTS" --no-build-isolation || {
-        echo "Standard install failed, trying without flash-attn..."
-        # Create a temp requirements file excluding skyrl-train (we'll install it separately)
-        grep -v "skyrl-train" "$RL_REQUIREMENTS" > /tmp/rl_requirements_no_skyrl.txt || true
-        uv pip install -r /tmp/rl_requirements_no_skyrl.txt --no-build-isolation || true
-    }
+if [[ "$USE_ROCM" == "true" ]]; then
+    # ROCm: Skip requirements file (contains skyrl-train[vllm] which pulls CUDA deps)
+    # We'll install dependencies manually in the SkyRL section below
+    echo "ROCm mode: Skipping requirements file (will install deps manually)"
+
+    # Install Harbor and other non-CUDA deps from requirements
+    echo "Installing Harbor and utilities..."
+    uv pip install \
+        "harbor @ git+https://github.com/laude-institute/harbor.git@penfever/temp-override" \
+        "Jinja2" \
+        "pyyaml" \
+        || true
 else
-    echo "Using pyproject.toml [rl] extra..."
-    # Install the project with rl extra
-    # Note: We install in editable mode so changes to hpc/ are reflected
-    uv pip install -e "$BASE_DIR[rl]" --no-build-isolation || true
+    # CUDA: Use requirements file as normal
+    if [[ -f "$RL_REQUIREMENTS" ]]; then
+        echo "Using requirements file: $RL_REQUIREMENTS"
+        # Use --no-build-isolation so packages use our installed torch/flash-attn
+        uv pip install -r "$RL_REQUIREMENTS" --no-build-isolation || {
+            echo "Standard install failed, trying without flash-attn..."
+            # Create a temp requirements file excluding skyrl-train (we'll install it separately)
+            grep -v "skyrl-train" "$RL_REQUIREMENTS" > /tmp/rl_requirements_no_skyrl.txt || true
+            uv pip install -r /tmp/rl_requirements_no_skyrl.txt --no-build-isolation || true
+        }
+    else
+        echo "Using pyproject.toml [rl] extra..."
+        # Install the project with rl extra
+        # Note: We install in editable mode so changes to hpc/ are reflected
+        uv pip install -e "$BASE_DIR[rl]" --no-build-isolation || true
+    fi
 fi
 
 # =============================================================================
@@ -304,13 +342,78 @@ echo "Installing skyrl-gym (environment implementations)..."
 uv pip install -e "$SKYRL_DIR/skyrl-gym" --no-build-isolation || uv pip install -e "$SKYRL_DIR/skyrl-gym"
 
 echo "Installing skyrl-train (RL training framework)..."
-# Use --no-build-isolation so it uses our pre-installed torch/flash-attn
-uv pip install -e "$SKYRL_DIR/skyrl-train" --no-build-isolation || {
-    echo "Trying fallback installation..."
-    # Install deps first, then editable package with --no-deps
-    uv pip install ray transformers accelerate datasets omegaconf hydra-core loguru wandb vllm || true
+
+if [[ "$USE_ROCM" == "true" ]]; then
+    # ==========================================================================
+    # ROCm-specific installation path
+    # ==========================================================================
+    # flash-attn is CUDA-only - we skip it and use PyTorch native attention
+    # vLLM now has official ROCm wheels (as of Jan 2025)!
+    echo "Using ROCm-compatible installation (skipping flash-attn)..."
+
+    # Install non-CUDA dependencies manually
+    echo "Installing ROCm-compatible dependencies..."
+    uv pip install \
+        "ray>=2.50.0" \
+        "transformers>=4.51.0" \
+        "accelerate" \
+        "datasets>=4.0.0" \
+        "omegaconf" \
+        "hydra-core==1.3.2" \
+        "loguru" \
+        "wandb" \
+        "peft" \
+        "tensorboard" \
+        "tqdm" \
+        "polars" \
+        "fastapi" \
+        "uvicorn" \
+        "jaxtyping" \
+        "tensordict" \
+        || true
+
+    # Install skyrl-train without dependencies (to avoid flash-attn)
+    echo "Installing skyrl-train (--no-deps to skip flash-attn)..."
     uv pip install -e "$SKYRL_DIR/skyrl-train" --no-deps
-}
+
+    # Install vLLM ROCm wheel (available for ROCm 7.0.x)
+    # See: https://www.phoronix.com/news/AMD-ROCm-vLLM-Wheel
+    if [[ "$ROCM_VERSION" == 7.0.* ]]; then
+        echo "Installing vLLM with ROCm 7.0.0 wheel..."
+        uv pip install "vllm==0.14.0+rocm700" \
+            --extra-index-url https://wheels.vllm.ai/rocm/0.14.0/rocm700 \
+            || echo "Warning: vLLM ROCm wheel installation failed"
+    else
+        echo ""
+        echo "NOTE: vLLM ROCm wheel requires ROCm 7.0.0, but ROCm $ROCM_VERSION is loaded."
+        echo "vLLM will not be installed. For manual installation, see:"
+        echo "  https://docs.vllm.ai/en/latest/getting_started/amd-installation.html"
+    fi
+
+    # Re-install ROCm PyTorch to ensure it wasn't clobbered
+    echo "Re-installing ROCm PyTorch to ensure correct version..."
+    if [[ "$ROCM_VERSION" == 7.0.* ]]; then
+        # ROCm 7.0.x - try latest PyTorch ROCm wheels
+        uv pip install "torch>=2.6.0" "torchvision" "torchaudio" \
+            --index-url https://download.pytorch.org/whl/rocm6.4 --force-reinstall \
+            || uv pip install "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
+                --index-url https://download.pytorch.org/whl/rocm6.4 --force-reinstall
+    else
+        uv pip install "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
+            --index-url https://download.pytorch.org/whl/rocm6.4 --force-reinstall
+    fi
+else
+    # ==========================================================================
+    # CUDA installation path (original)
+    # ==========================================================================
+    # Use --no-build-isolation so it uses our pre-installed torch/flash-attn
+    uv pip install -e "$SKYRL_DIR/skyrl-train" --no-build-isolation || {
+        echo "Trying fallback installation..."
+        # Install deps first, then editable package with --no-deps
+        uv pip install ray transformers accelerate datasets omegaconf hydra-core loguru wandb vllm || true
+        uv pip install -e "$SKYRL_DIR/skyrl-train" --no-deps
+    }
+fi
 
 echo ""
 echo "IMPORTANT: Add this to your shell or source your cluster's dotenv file:"
@@ -361,7 +464,8 @@ if [[ "$USE_ROCM" == "true" ]]; then
 # Load ROCm modules (for Frontier/AMD systems)
 if command -v module &> /dev/null; then
     module load PrgEnv-gnu/8.6.0 2>/dev/null || true
-    module load rocm/6.4.1 2>/dev/null || true
+    # Try ROCm 7.0.0 first (for vLLM), fall back to 6.4.1
+    module load rocm/7.0.2 2>/dev/null || module load rocm/6.4.1 2>/dev/null || true
     module load craype-accel-amd-gfx90a 2>/dev/null || true
 fi
 

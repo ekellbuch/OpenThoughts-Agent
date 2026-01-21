@@ -756,9 +756,10 @@ frontier = HPC(
     gpu_directive_format="--gpus-per-node={n}",
     # ROCm modules for AMD MI250X GPUs
     # See: https://docs.olcf.ornl.gov/software/analytics/pytorch_frontier.html
-    modules=["PrgEnv-gnu/8.6.0", "rocm/6.4.1", "craype-accel-amd-gfx90a"],
+    # Note: ROCm 7.0.x required for vLLM wheel; fall back to 6.4.1 if unavailable
+    modules=["PrgEnv-gnu/8.6.0", "rocm/7.0.2", "craype-accel-amd-gfx90a"],
     env_vars={
-        "ROCM_PATH": "/opt/rocm-6.4.1",
+        "ROCM_PATH": "/opt/rocm",
         "HIP_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
     },
     # Frontier scheduling bins (node-count-based time limits)
