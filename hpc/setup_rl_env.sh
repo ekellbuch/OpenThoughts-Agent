@@ -79,7 +79,35 @@ else
 fi
 echo ""
 
+# Ensure ~/.local/bin is in PATH (for user-installed tools like uv)
+export PATH="$HOME/.local/bin:$PATH"
+
+# Check for uv and install if not available BEFORE loading modules
+# (module loads can deactivate conda and change PATH)
+if ! command -v uv &> /dev/null; then
+    echo "'uv' not found. Installing uv to ~/.local/bin..."
+    # Try pip install with --user flag to install to ~/.local/bin
+    if command -v pip &> /dev/null; then
+        pip install --user uv --quiet 2>/dev/null || pip install --user uv
+    elif command -v pip3 &> /dev/null; then
+        pip3 install --user uv --quiet 2>/dev/null || pip3 install --user uv
+    else
+        # Fallback: use curl to install uv directly
+        echo "pip not found, trying curl installer..."
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+    fi
+    # Verify installation
+    if ! command -v uv &> /dev/null; then
+        echo "Error: Failed to install uv. Please install manually:"
+        echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"
+        echo "  # or: pip install --user uv"
+        exit 1
+    fi
+    echo "uv installed successfully."
+fi
+
 # Load ROCm modules if requested (for Frontier/AMD systems)
+# This is done AFTER uv install since module loads can change PATH
 if [[ "$USE_ROCM" == "true" ]]; then
     echo "Loading ROCm modules for AMD GPU support..."
     # Check if module command exists (HPC systems)
@@ -94,26 +122,8 @@ if [[ "$USE_ROCM" == "true" ]]; then
         echo "Make sure ROCm is available in your PATH."
         echo ""
     fi
-fi
-
-# Check for uv and install if not available
-if ! command -v uv &> /dev/null; then
-    echo "'uv' not found. Installing uv..."
-    # Try pip install first (works on most systems including HPC with miniforge)
-    if command -v pip &> /dev/null; then
-        pip install uv --quiet
-    elif command -v pip3 &> /dev/null; then
-        pip3 install uv --quiet
-    else
-        echo "Error: Neither pip nor pip3 found. Cannot install uv."
-        exit 1
-    fi
-    # Verify installation
-    if ! command -v uv &> /dev/null; then
-        echo "Error: Failed to install uv. Please install manually: pip install uv"
-        exit 1
-    fi
-    echo "uv installed successfully."
+    # Re-add ~/.local/bin to PATH after module loads (they can reset PATH)
+    export PATH="$HOME/.local/bin:$PATH"
 fi
 
 # Check Python 3.12 availability
