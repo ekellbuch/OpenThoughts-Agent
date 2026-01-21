@@ -378,29 +378,18 @@ if [[ "$USE_ROCM" == "true" ]]; then
 
     # Install vLLM ROCm wheel (available for ROCm 7.0.x)
     # See: https://www.phoronix.com/news/AMD-ROCm-vLLM-Wheel
+    # Note: vLLM ROCm requires pre-release aiter dependency, so we use --prerelease=allow
     if [[ "$ROCM_VERSION" == 7.0.* ]]; then
         echo "Installing vLLM with ROCm 7.0.0 wheel..."
         uv pip install "vllm==0.14.0+rocm700" \
             --extra-index-url https://wheels.vllm.ai/rocm/0.14.0/rocm700 \
+            --prerelease=allow \
             || echo "Warning: vLLM ROCm wheel installation failed"
     else
         echo ""
         echo "NOTE: vLLM ROCm wheel requires ROCm 7.0.0, but ROCm $ROCM_VERSION is loaded."
         echo "vLLM will not be installed. For manual installation, see:"
         echo "  https://docs.vllm.ai/en/latest/getting_started/amd-installation.html"
-    fi
-
-    # Re-install ROCm PyTorch to ensure it wasn't clobbered
-    echo "Re-installing ROCm PyTorch to ensure correct version..."
-    if [[ "$ROCM_VERSION" == 7.0.* ]]; then
-        # ROCm 7.0.x - try latest PyTorch ROCm wheels
-        uv pip install "torch>=2.6.0" "torchvision" "torchaudio" \
-            --index-url https://download.pytorch.org/whl/rocm6.4 --force-reinstall \
-            || uv pip install "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
-                --index-url https://download.pytorch.org/whl/rocm6.4 --force-reinstall
-    else
-        uv pip install "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
-            --index-url https://download.pytorch.org/whl/rocm6.4 --force-reinstall
     fi
 else
     # ==========================================================================
