@@ -748,7 +748,7 @@ frontier = HPC(
     partition="batch",
     gpus_per_node=4,
     cpus_per_node=48,
-    mem_per_node="512GB",
+    mem_per_node="",  # Frontier doesn't accept explicit memory requests; uses exclusive nodes
     internet_node=False,
     gpus_type="AMD Instinct MI250X",
     total_partition_nodes=9216,
@@ -773,6 +773,8 @@ frontier = HPC(
     num_nodes_slow=16,
     num_nodes_default=64,
     num_nodes_fast=91,  # Max nodes for Bin 5 (2h limit)
+    # Frontier requires exclusive node allocation
+    extra_sbatch_directives=["#SBATCH --exclusive"],
 )
 
 clusters = [jureca, jupiter, juwels, leonardo, capella, alpha, dip, lrz, vista, lonestar, claix, nyugreene, nyutorch, oumi, perlmutter, frontier]
