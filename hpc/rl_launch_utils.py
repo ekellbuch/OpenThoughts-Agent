@@ -690,9 +690,14 @@ def launch_rl_job(exp_args: dict, hpc) -> Optional[str]:
     # Construct the sbatch script
     sbatch_path = construct_rl_sbatch_script(exp_args, hpc)
 
+    # Get dependency if specified
+    dependency = exp_args.get("dependency")
+
     # Dry run handling
     if exp_args.get("dry_run"):
         print(f"\nDRY RUN: RL sbatch script written to {sbatch_path}")
+        if dependency:
+            print(f"  Would submit with dependency: {dependency}")
 
         # Show command preview
         rl_config_path = exp_args.get("rl_config")
@@ -706,8 +711,8 @@ def launch_rl_job(exp_args: dict, hpc) -> Optional[str]:
 
         return None
 
-    # Submit the job
-    job_id = launch_sbatch(sbatch_path)
+    # Submit the job with optional dependency
+    job_id = launch_sbatch(sbatch_path, dependency=dependency)
     print(f"\nRL job submitted: {job_id}")
 
     return job_id
