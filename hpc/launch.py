@@ -47,8 +47,6 @@ from hpc.eval_launch_utils import (
     prepare_eval_configuration,
     remap_eval_cli_args,
 )
-from database.unified_db.utils import load_supabase_keys
-
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -409,6 +407,8 @@ def display_args(exp_args, name):
     print()
 
 def main():
+    # Lazy import to avoid torch dependency at module load time
+    from database.unified_db.utils import load_supabase_keys
     load_supabase_keys()
     # this is where defaults are stored for experiments_dir and deepspeed
     cli_args = parse_args()
