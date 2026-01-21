@@ -181,25 +181,51 @@ class RayCluster:
 
     @staticmethod
     def _get_node_ip(node: str, srun_export: str) -> str:
-        """Get IP address for a node using srun."""
-        result = subprocess.run(
-            [
-                "srun",
-                f"--export={srun_export}",
-                "--nodes=1",
-                "--ntasks=1",
-                "--overlap",
-                "-w",
-                node,
-                "hostname",
-                "--ip-address",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        # hostname --ip-address can return multiple IPs; take the first
-        return result.stdout.strip().split()[0]
+        """Get IP address for a node using srun.
+
+        Tries 'hostname -i' first (portable), then '--ip-address' as fallback.
+        Frontier's Cray compute nodes don't support --ip-address long form.
+        """
+        srun_base = [
+            "srun",
+            f"--export={srun_export}",
+            "--nodes=1",
+            "--ntasks=1",
+            "--overlap",
+            "-w",
+            node,
+        ]
+
+        # Try long form first (original behavior), fall back to short form (Frontier)
+        last_error = None
+        for hostname_flag in ["--ip-address", "-i"]:
+            try:
+                result = subprocess.run(
+                    srun_base + ["hostname", hostname_flag],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                # hostname -i can return multiple IPs; take the first
+                ip = result.stdout.strip().split()[0]
+                if ip:
+                    return ip
+            except subprocess.CalledProcessError as e:
+                last_error = e
+                print(
+                    f"[ray_utils] hostname {hostname_flag} failed on {node} "
+                    f"(code {e.returncode}), trying next method...",
+                    file=sys.stderr,
+                )
+                continue
+
+        # Include details from last error in the exception
+        error_msg = f"Failed to get IP address for node {node}"
+        if last_error:
+            error_msg += f": exit code {last_error.returncode}"
+            if last_error.stderr:
+                error_msg += f", stderr: {last_error.stderr.strip()}"
+        raise RuntimeError(error_msg)
 
     @property
     def address(self) -> str:
