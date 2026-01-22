@@ -771,11 +771,14 @@ frontier = HPC(
     gpu_directive_format="--gpus-per-node={n}",
     # ROCm modules for AMD MI250X GPUs
     # See: https://docs.olcf.ornl.gov/software/analytics/pytorch_frontier.html
-    # Note: ROCm 7.0.x required for vLLM wheel; fall back to 6.4.1 if unavailable
-    modules=["PrgEnv-gnu/8.6.0", "cray-mpich/9.0.0", "gcc-native/14.2", "rocm/7.0.2", "craype-accel-amd-gfx90a"],
+    # Note: cray-mpich removed - not needed for vLLM/Ray and causes libmpi_cxx.so.40 errors
+    modules=["PrgEnv-gnu/8.6.0", "gcc-native/14.2", "rocm/6.2.4", "craype-accel-amd-gfx90a"],
     env_vars={
         "ROCM_PATH": "/opt/rocm",
         "HIP_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+    },
+    library_paths={
+        "LD_LIBRARY_PATH": "$CONDA_PREFIX/lib:$ROCM_PATH/lib:${LD_LIBRARY_PATH:-}",
     },
     # Unset env vars that ROCm modules set but conflict with Ray
     env_unsets=["ROCR_VISIBLE_DEVICES"],
