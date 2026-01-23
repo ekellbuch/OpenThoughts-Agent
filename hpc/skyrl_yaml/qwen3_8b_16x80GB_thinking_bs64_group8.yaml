@@ -116,7 +116,7 @@ terminal_bench:
     # ==========================================================================
     # Orchestrator settings (QueueOrchestrator concurrency control)
     # ==========================================================================
-    n_concurrent_trials: 256        # Number of parallel trial workers. train_batch_size * n_samples_per_prompt
+    n_concurrent_trials: 64  # Set low because of Daytona errors
 
     # ==========================================================================
     # Logging settings

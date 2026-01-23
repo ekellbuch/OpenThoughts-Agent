@@ -509,6 +509,17 @@ def construct_rl_sbatch_script(exp_args: dict, hpc) -> str:
         exp_args["val_data"] = resolved_val_data
         print(f"Resolved val_data: {resolved_val_data}")
 
+    # Pre-download model if on a no-internet cluster (e.g., Perlmutter, JSC)
+    from hpc.checkpoint_utils import needs_pre_download, pre_download_model
+    model_path = exp_args.get("model_path") or parsed.model.get("model_name_or_path", "")
+    if model_path and needs_pre_download(hpc):
+        print(f"Pre-downloading model for no-internet cluster: {model_path}")
+        result = pre_download_model(model_path)
+        exp_args["model_path"] = result.local_path
+        print(f"Model available at: {result.local_path}")
+    elif model_path:
+        exp_args["model_path"] = model_path
+
     # Build Hydra args from YAML + CLI overrides
     hydra_args = build_skyrl_hydra_args(parsed, exp_args, hpc)
 
