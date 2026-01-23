@@ -30,6 +30,7 @@ fi
 export CONDA_BACKUP_CXX="${CONDA_BACKUP_CXX:-}"
 export CONDA_BACKUP_CC="${CONDA_BACKUP_CC:-}"
 export CONDA_BACKUP_FC="${CONDA_BACKUP_FC:-}"
+export CONDA_BACKUP_GXX="${CONDA_BACKUP_GXX:-}"
 
 # --- Module loading (cluster-specific, substituted by launcher) ---
 set +u
