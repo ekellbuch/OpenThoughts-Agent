@@ -51,10 +51,9 @@ fi
 # --- Conda activation (cluster-specific, substituted by launcher) ---
 {conda_activate}
 
-# Re-enable strict unbound variable checking
-set -u
-
 # --- Source environment files (before RL env activation) ---
+# Keep set +u active - dotenv files and RL env activation may trigger module reloads
+# which can trigger conda deactivation scripts with unset variables
 # Source dotenv and secrets first, but NOT DCFT_ACTIVATE_ENV which would clobber RL env
 if [ -n "${DCFT:-}" ] && [ -f "$DCFT/hpc/dotenv/{cluster_env_file}" ]; then
   source "$DCFT/hpc/dotenv/{cluster_env_file}"
@@ -82,6 +81,9 @@ fi
 
 # --- NCCL/Networking settings (cluster-specific) ---
 {nccl_exports}
+
+# Re-enable strict unbound variable checking after all env setup is complete
+set -u
 
 # --- Standard environment variables ---
 export PYTHONFAULTHANDLER=1

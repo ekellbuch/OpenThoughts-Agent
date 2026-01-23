@@ -51,10 +51,9 @@ fi
 # --- Conda activation (cluster-specific, substituted by launcher) ---
 {conda_activate}
 
-# Re-enable strict unbound variable checking
-set -u
-
 # --- Source environment files ---
+# Keep set +u active - dotenv files and DCFT_ACTIVATE_ENV may trigger module reloads
+# which can trigger conda deactivation scripts with unset variables
 if [ -n "${DCFT:-}" ] && [ -f "$DCFT/hpc/dotenv/{cluster_env_file}" ]; then
   source "$DCFT/hpc/dotenv/{cluster_env_file}"
 fi
@@ -64,6 +63,9 @@ fi
 if [ -n "${DCFT_ACTIVATE_ENV:-}" ]; then
   eval "$DCFT_ACTIVATE_ENV"
 fi
+
+# Re-enable strict unbound variable checking after all env setup is complete
+set -u
 
 # --- Standard environment variables ---
 export HF_HOME="/tmp/hf_home"
