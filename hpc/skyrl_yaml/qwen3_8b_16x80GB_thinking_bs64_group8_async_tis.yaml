@@ -1,4 +1,4 @@
-# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs (Async Training with TIS)
+# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs (Binary Rewards, Async Training + TIS)
 # Optimized for 32k context agentic RL with ASYNCHRONOUS training + TIS correction
 #
 # TIS (Truncated Importance Sampling): Corrects for off-policy bias in async training
@@ -21,6 +21,8 @@
 #   - Continuous policy updates as trajectories complete
 #   - TIS corrects for policy drift between rollout and training
 #   - Better sample efficiency in high-staleness scenarios
+#   - Better GPU utilization during generation
+#   - Reduced wall-clock time for same number of samples
 #
 # CONTEXT BUDGET (32k total model context):
 #   - max_generate_length: 8k tokens (agent responses)
@@ -29,14 +31,15 @@
 # Key Design Decisions:
 # - TP=1 for inference engines: 8 independent engines for maximum parallelism
 # - batched=false: Each async worker handles its own requests
-# - num_parallel_generation_workers=16: Matches mini_batch_size
+# - num_parallel_generation_workers=128: High parallelism for async training
+# - n_samples_per_prompt=8: GRPO advantage estimation with more samples
 # - collect_rollout_details=true: Captures logprobs for TIS correction
 # - use_tis=true with tis_imp_ratio_cap=2.0: Standard TIS hyperparameters
 #
 # Usage:
 #   python -m hpc.launch \
 #       --job_type rl \
-#       --rl_config qwen3_8b_16x80GB_thinking_async_tis.yaml \
+#       --rl_config qwen3_8b_16x80GB_thinking_bs64_group8_async_tis.yaml \
 #       --job_name qwen3_8b_agentic_async_tis \
 #       --train_data '["mlfoundations-dev/your-dataset"]' \
 #       --model_path Qwen/Qwen3-8B \
@@ -77,8 +80,20 @@ terminal_bench:
     # NOTE: Rollout details may be incomplete if context summarization occurs.
     collect_rollout_details: true
 
+    # ==========================================================================
+    # Interleaved Thinking Settings (KEY ABLATION)
+    # ==========================================================================
+    # Include reasoning content in chat history and send to LLM in next round
+    interleaved_thinking: true
+    # Enable thinking in the LLM via chat template kwargs
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: true
+
     # Agent timeout overrides
     override_timeout_sec: 240        # Agent execution timeout (seconds)
+    # override_setup_timeout_sec: 120  # Agent setup timeout
+    # max_timeout_sec: 1800          # Cap timeout (useful for runaway tasks)
 
     # ==========================================================================
     # Environment settings (maps to Harbor EnvironmentConfig)
@@ -87,10 +102,18 @@ terminal_bench:
     override_cpus: 1
     override_memory_mb: 2048
     override_storage_mb: 2048
+    # override_gpus: 0              # GPU allocation per sandbox
+    # environment_type: daytona     # Environment backend (daytona, docker, modal)
+
+    # ==========================================================================
+    # Trial-level settings (maps to Harbor TrialConfig)
+    # ==========================================================================
+    # timeout_multiplier: 1.0       # Multiply all timeouts by this factor
 
     # ==========================================================================
     # Verifier settings (maps to Harbor VerifierConfig)
     # ==========================================================================
+    # verifier_disable: false       # Disable verification (for debugging)
     verifier_override_timeout_sec: 120  # Override verifier timeout
 
     # ==========================================================================
@@ -103,6 +126,9 @@ terminal_bench:
     wait_multiplier: 2.0           # Exponential backoff multiplier
 
     # Exception filtering - don't retry permanent failures
+    # Default Harbor exclusions: AgentTimeoutError, VerifierTimeoutError,
+    #   RewardFileNotFoundError, RewardFileEmptyError, VerifierOutputParseError
+    # We add ContextLengthExceededError since summarization is disabled
     exclude_exceptions:
       - AgentTimeoutError
       - VerifierTimeoutError
@@ -114,7 +140,7 @@ terminal_bench:
     # ==========================================================================
     # Orchestrator settings (QueueOrchestrator concurrency control)
     # ==========================================================================
-    n_concurrent_trials: 16        # Number of parallel trial workers
+    n_concurrent_trials: 128       # Set at 1/2 of recommended for stability
 
     # ==========================================================================
     # Logging settings
@@ -125,16 +151,6 @@ terminal_bench:
     # Reward shaping settings (DISABLED - binary rewards)
     # ==========================================================================
     enable_reward_shaping: false   # Use original binary (0/1) verifier rewards
-
-    # ==========================================================================
-    # Interleaved Thinking Settings
-    # ==========================================================================
-    # Include reasoning content in chat history and send to LLM in next round
-    interleaved_thinking: true
-    # Enable thinking in the LLM via chat template kwargs
-    extra_body:
-      chat_template_kwargs:
-        enable_thinking: true
 
   # Model info for Harbor's hosted_vllm validation (token limits and costs)
   model_info:
@@ -172,8 +188,8 @@ trainer:
 
   # Batch sizes - async training requires train_batch_size == policy_mini_batch_size
   # (no mini-batching in fully async mode)
-  train_batch_size: 16
-  policy_mini_batch_size: 16
+  train_batch_size: 64
+  policy_mini_batch_size: 64
   eval_batch_size: 32
 
   # Micro batch sizes - set to 1 for long context to avoid OOM
@@ -202,7 +218,7 @@ trainer:
   # Policy optimizer - conservative LR for base model fine-tuning
   policy:
     optimizer_config:
-      lr: 5.0e-7
+      lr: 1e-6
       weight_decay: 0.01
       adam_betas: [0.9, 0.999]
       # Gradient clipping important for long sequences
@@ -237,7 +253,8 @@ trainer:
     # Number of parallel generation workers
     # Constraint: mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1)
     # With mini_batch_size=16 and max_staleness_steps=4: 16 <= workers <= 80
-    num_parallel_generation_workers: 16
+    max_staleness_steps: 4
+    num_parallel_generation_workers: 128
 
 # Generator (vLLM inference) configuration
 generator:
@@ -253,8 +270,8 @@ generator:
   # 8 engines = 8 GPUs dedicated to inference
   num_inference_engines: 8
 
-  # GRPO samples per prompt - 4 is typical for advantage estimation
-  n_samples_per_prompt: 4
+  # GRPO samples per prompt - 8 for advantage estimation with more samples
+  n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 4
 
   # Memory utilization - aggressive but leave headroom for 32k KV cache
@@ -276,7 +293,6 @@ generator:
   run_engines_locally: true
   weight_sync_backend: nccl
   async_engine: true
-  # batched=false for async: each worker handles its own requests
   batched: false
   enable_http_endpoint: true
 
