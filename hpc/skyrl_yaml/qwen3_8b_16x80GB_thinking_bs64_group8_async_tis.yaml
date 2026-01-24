@@ -140,7 +140,7 @@ terminal_bench:
     # ==========================================================================
     # Orchestrator settings (QueueOrchestrator concurrency control)
     # ==========================================================================
-    n_concurrent_trials: 128       # Set at 1/2 of recommended for stability
+    n_concurrent_trials: 192
 
     # ==========================================================================
     # Logging settings
@@ -254,7 +254,7 @@ trainer:
     # Constraint: mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1)
     # With mini_batch_size=16 and max_staleness_steps=4: 16 <= workers <= 80
     max_staleness_steps: 4
-    num_parallel_generation_workers: 128
+    num_parallel_generation_workers: 80
 
 # Generator (vLLM inference) configuration
 generator:
@@ -320,8 +320,6 @@ generator:
   engine_init_kwargs:
     # Explicit context limit - ensures vLLM enforces 32k total context
     max_model_len: 32768
-    # Chat template for Qwen3 Base model (path relative to working directory or absolute)
-    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
 
 # Data paths (set via CLI --train_data, --val_data)
 data:
