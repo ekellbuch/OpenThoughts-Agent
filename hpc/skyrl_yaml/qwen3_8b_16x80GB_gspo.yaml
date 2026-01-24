@@ -225,6 +225,8 @@ generator:
 
   # Engine initialization kwargs
   engine_init_kwargs:
+    # Explicit context limit - ensures vLLM enforces 32k total context
+    max_model_len: 32768
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
 
 # Data paths (set via CLI --train_data, --val_data)

@@ -66,6 +66,8 @@ fi
 # --- Standard environment variables ---
 export HF_HOME="/tmp/hf_home"
 export PYTHONFAULTHANDLER=1
+export TORCH_SHOW_CPP_STACKTRACES=1
+export CUDA_LAUNCH_BLOCKING=0
 export NCCL_TIMEOUT=1800
 export NCCL_IB_TIMEOUT=23
 export PYTORCH_ALLOC_CONF="garbage_collection_threshold:0.6,max_split_size_mb:128"

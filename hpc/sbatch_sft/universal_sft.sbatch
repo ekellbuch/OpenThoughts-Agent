@@ -78,6 +78,7 @@ fi
 
 # --- Standard environment variables ---
 export PYTHONFAULTHANDLER=1
+export TORCH_SHOW_CPP_STACKTRACES=1
 export CUDA_LAUNCH_BLOCKING=0
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export OMP_NUM_THREADS=1

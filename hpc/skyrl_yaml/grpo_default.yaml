@@ -67,6 +67,11 @@ generator:
   async_engine: true
   batched: true
 
+  # Engine initialization kwargs
+  engine_init_kwargs:
+    # Explicit context limit - ensures vLLM enforces 32k total context
+    max_model_len: 32768
+
 # Data paths (set via CLI --train_data, --val_data)
 data:
   train_data: []
