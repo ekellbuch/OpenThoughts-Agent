@@ -309,8 +309,9 @@ generator:
     temperature: 1.0
     top_p: 0.95
     top_k: -1  # Disabled
-    # TIS requires logprobs from vLLM - set to 0 to return logprobs for sampled tokens
-    logprobs: 0
+    # NOTE: For terminal_bench with TIS, logprobs are collected by Harbor via
+    # collect_rollout_details=true, NOT through this sampling_params.logprobs setting.
+    # Harbor's LiteLLM backend requests logprobs directly from vLLM's OpenAI API.
 
   # Engine initialization kwargs - passed directly to vLLM/SGLang engine
   # WARNING: Many kwargs are set by SkyRL internally (trust_remote_code, enforce_eager, etc.)
