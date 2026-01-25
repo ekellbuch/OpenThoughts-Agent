@@ -136,7 +136,7 @@ terminal_bench:
     # ==========================================================================
     # Orchestrator settings (QueueOrchestrator concurrency control)
     # ==========================================================================
-    n_concurrent_trials: 256
+    n_concurrent_trials: 128       # Set at 1/2 of recommended for stability
 
     # ==========================================================================
     # Logging settings
@@ -147,14 +147,6 @@ terminal_bench:
     # Reward shaping settings (DISABLED - binary rewards)
     # ==========================================================================
     enable_reward_shaping: false   # Use original binary (0/1) verifier rewards
-
-    # ==========================================================================
-    # Eval-specific settings
-    # ==========================================================================
-    # Timeout override for evaluation runs (seconds)
-    # Eval tasks may need more time than training since we don't retry
-    # Each eval run gets a fresh QueueOrchestrator with this timeout
-    eval_timeout_override_sec: 900  # 15 minutes default
 
     # ==========================================================================
     # RLOO-N ERROR HANDLING: Classify failures as infrastructure vs agent errors
@@ -205,7 +197,7 @@ trainer:
     advantage_estimator: rloo_n
     use_kl_loss: true
     # KL loss coefficient - controls divergence from reference model
-    kl_loss_coef: 1e-5
+    kl_loss_coef: 0.001
     # Clip range for policy updates
     eps_clip_low: 0.2
     eps_clip_high: 0.2
@@ -230,7 +222,7 @@ trainer:
 
   # Evaluation and checkpointing
   eval_interval: 20
-  eval_before_train: true
+  eval_before_train: false
   ckpt_interval: 10
   resume_mode: latest
 
@@ -249,10 +241,10 @@ trainer:
   policy:
     optimizer_config:
       lr: 1e-6
-      weight_decay: 1e-4
+      weight_decay: 0.01
       adam_betas: [0.9, 0.999]
       # Gradient clipping important for long sequences
-      max_grad_norm: 1e-3
+      max_grad_norm: 1.0
 
   # Reference model - CPU offload to save GPU memory
   # With colocate_all=false, ref shares GPUs with policy but offloads weights
@@ -280,8 +272,11 @@ trainer:
   # ==========================================================================
   # Enable async RL training loop
   fully_async:
-    max_staleness_steps: 8
-    num_parallel_generation_workers: 90
+    # Number of parallel generation workers
+    # Constraint: mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1)
+    # With mini_batch_size=16 and max_staleness_steps=4: 16 <= workers <= 80
+    max_staleness_steps: 4
+    num_parallel_generation_workers: 128
 
 # Generator (vLLM inference) configuration
 generator:
@@ -300,16 +295,16 @@ generator:
   # RLOO-N samples per prompt - 8 for advantage estimation with more samples
   # More samples per prompt gives better leave-one-out baselines
   n_samples_per_prompt: 8
-  eval_n_samples_per_prompt: 8
+  eval_n_samples_per_prompt: 4
 
   # Memory utilization - aggressive but leave headroom for 32k KV cache
-  gpu_memory_utilization: 0.92
+  gpu_memory_utilization: 0.90
 
   # Sequence limits for 32k context (24k prompt + 8k gen)
   # With TP=1, each engine handles fewer concurrent sequences
   max_num_seqs: 32
   # max_num_batched_tokens: tokens processed per batch
-  max_num_batched_tokens: 16384
+  max_num_batched_tokens: 32768
 
   # Memory optimization for long contexts
   enable_prefix_caching: true
@@ -325,7 +320,7 @@ generator:
   enable_http_endpoint: true
 
   # Multi-turn agentic conversation handling
-  append_eos_token_after_stop_str_in_multi_turn: false
+  append_eos_token_after_stop_str_in_multi_turn: true
   max_turns: 64  # Match max_episodes
 
   # Sampling parameters for generation
@@ -345,6 +340,7 @@ generator:
   engine_init_kwargs:
     # Explicit context limit - ensures vLLM enforces 32k total context
     max_model_len: 32768
+    # Chat template for Qwen3 Base model (path relative to working directory or absolute)
 
 # Data paths (set via CLI --train_data, --val_data)
 data:
