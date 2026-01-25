@@ -152,6 +152,14 @@ terminal_bench:
     # ==========================================================================
     enable_reward_shaping: false   # Use original binary (0/1) verifier rewards
 
+    # ==========================================================================
+    # Eval-specific settings
+    # ==========================================================================
+    # Timeout override for evaluation runs (seconds)
+    # Eval tasks may need more time than training since we don't retry
+    # Each eval run gets a fresh QueueOrchestrator with this timeout
+    eval_timeout_override_sec: 900  # 15 minutes default
+
   # Model info for Harbor's hosted_vllm validation (token limits and costs)
   model_info:
     # Context budget: 32k total = 24k prompt + 8k generation
