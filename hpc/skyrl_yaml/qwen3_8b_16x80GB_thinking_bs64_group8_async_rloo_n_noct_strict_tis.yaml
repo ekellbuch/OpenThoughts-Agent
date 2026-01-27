@@ -1,10 +1,15 @@
-# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs (RLOO-N + Strict JSON + Trial Archiving)
+# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs (RLOO-N + Strict JSON + TIS)
 # Based on: qwen3_8b_16x80GB_thinking_bs64_group8_async_rloo_n_noct_strict.yaml
 #
-# ARCHIVING VARIANT: This config adds trial archiving to prevent disk space exhaustion:
-#   - Archives completed trials to tar.gz every 5 training steps
-#   - Deletes original trial directories after successful archiving
-#   - Uses TrialArchiveCallback with TrialPathTracker for async archiving
+# TIS VARIANT: This config adds Truncated Importance Sampling for async training:
+#   - use_tis: true with tis_imp_ratio_cap: 2.0
+#   - collect_rollout_details: true (captures per-token logprobs during rollout)
+#   - TIS corrects for off-policy bias when training on stale rollouts
+#
+# TIS (Truncated Importance Sampling) Benefits:
+#   - Corrects for policy drift between rollout and training
+#   - Better sample efficiency in high-staleness scenarios
+#   - Reweights policy loss based on importance ratio
 #
 # All other settings are identical to the strict variant:
 #   - strict_json_parser: true
@@ -14,8 +19,8 @@
 # Usage:
 #   python -m hpc.launch \
 #       --job_type rl \
-#       --rl_config qwen3_8b_16x80GB_thinking_bs64_group8_async_rloo_n_noct_strict_archive.yaml \
-#       --job_name qwen3_8b_agentic_async_rloo_n_strict_archive \
+#       --rl_config qwen3_8b_16x80GB_thinking_bs64_group8_async_rloo_n_noct_strict_tis.yaml \
+#       --job_name qwen3_8b_agentic_async_rloo_n_strict_tis \
 #       --train_data '["mlfoundations-dev/your-dataset"]' \
 #       --model_path Qwen/Qwen3-8B \
 #       --num_nodes 2
@@ -41,6 +46,13 @@ terminal_bench:
     store_all_messages: true
     # Disable episode-* folder creation to reduce disk I/O (SkyRL uses TrialResult directly)
     enable_episode_logging: false
+
+    # ==========================================================================
+    # TIS REQUIREMENT: Collect rollout details for importance sampling
+    # ==========================================================================
+    # When true, collects per-token logprobs during rollout. Required for TIS.
+    # NOTE: Rollout details may be incomplete if context summarization occurs.
+    collect_rollout_details: true
 
     # Strict JSON parser
     strict_json_parser: true
@@ -104,24 +116,9 @@ terminal_bench:
     max_input_tokens: 24576
     max_output_tokens: 8192
 
-  # ==========================================================================
-  # TRIAL ARCHIVING CONFIGURATION (NEW IN THIS VARIANT)
-  # ==========================================================================
-  # Archive completed trials to tar.gz files to prevent disk exhaustion
-  # during long training runs with many trials.
   archiving:
     # Enable trial archiving callback
-    enabled: true
-    # Archive completed trials every N training steps
-    archive_every_steps: 5
-    # Directory for archives (null = trials_dir/archives)
-    archive_dir: null
-    # Compression type: "gz" (gzip), "bz2" (bzip2), "xz" (lzma), or "" (no compression)
-    compression: gz
-    # Delete original trial directories after successful archiving
-    delete_after_archive: true
-    # Minimum number of completed trials before triggering archive
-    min_trials_to_archive: 1
+    enabled: false
 
 # Trainer configuration
 trainer:
@@ -135,6 +132,14 @@ trainer:
     eps_clip_high: 0.2
     loss_reduction: token_mean
 
+    # ==========================================================================
+    # TIS (Truncated Importance Sampling) for async training
+    # ==========================================================================
+    # Corrects for off-policy bias when training on stale rollouts
+    # Requires collect_rollout_details=true in Harbor config
+    use_tis: true
+    tis_imp_ratio_cap: 2.0  # Standard cap from flash_rl examples
+
   # Training loop settings
   epochs: 10
   update_epochs_per_batch: 1
@@ -142,7 +147,7 @@ trainer:
   # Batch sizes
   train_batch_size: 64
   policy_mini_batch_size: 64
-  eval_batch_size: 32
+  eval_batch_size: 64
 
   # Micro batch sizes
   micro_forward_batch_size_per_gpu: 1
@@ -205,7 +210,7 @@ generator:
   num_inference_engines: 8
 
   n_samples_per_prompt: 8
-  eval_n_samples_per_prompt: 4
+  eval_n_samples_per_prompt: 8
 
   gpu_memory_utilization: 0.90
 

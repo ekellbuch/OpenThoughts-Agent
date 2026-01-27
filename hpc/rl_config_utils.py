@@ -358,8 +358,10 @@ def build_skyrl_hydra_args(
         trainer["run_name"] = job_name
     if not trainer.get("export_path") and experiments_dir and job_name:
         trainer["export_path"] = f"{experiments_dir}/{job_name}/exports"
+        print(f"Auto-set trainer.export_path: {trainer['export_path']}")
     if not trainer.get("ckpt_path") and experiments_dir and job_name:
-        trainer["ckpt_path"] = f"{experiments_dir}/{job_name}/exports"
+        trainer["ckpt_path"] = f"{experiments_dir}/{job_name}/checkpoints"
+        print(f"Auto-set trainer.ckpt_path: {trainer['ckpt_path']}")
 
     # Derive placement from num_nodes
     num_nodes = int(exp_args.get("num_nodes", 1))
