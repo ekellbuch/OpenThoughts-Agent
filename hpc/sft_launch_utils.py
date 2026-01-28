@@ -416,12 +416,22 @@ class SFTJobRunner:
         gpus_per_node = int(os.environ.get("NUM_GPUS_PER_NODE", self.config.gpus_per_node))
         master_addr = os.environ.get("MASTER_ADDR", "localhost")
         master_port = os.environ.get("MASTER_PORT", str(self.config.master_port))
-        slurm_procid = os.environ.get("SLURM_PROCID", "0")
+        # Use SLURM_NODEID for machine rank (node index within the allocation)
+        # SLURM_PROCID is the global task ID which may not match node index
+        slurm_nodeid = os.environ.get("SLURM_NODEID", os.environ.get("SLURM_PROCID", "0"))
 
         # Build accelerate config if not provided
         accelerate_config = self.config.accelerate_config_path
         if not accelerate_config:
             accelerate_config = self._generate_accelerate_config(num_nodes, gpus_per_node)
+
+        # Debug: print multi-node configuration
+        print(f"Multi-node config: num_nodes={num_nodes}, gpus_per_node={gpus_per_node}, "
+              f"machine_rank={slurm_nodeid}, master_addr={master_addr}:{master_port}")
+        print(f"SLURM env: SLURM_NODEID={os.environ.get('SLURM_NODEID')}, "
+              f"SLURM_PROCID={os.environ.get('SLURM_PROCID')}, "
+              f"SLURM_JOB_NUM_NODES={os.environ.get('SLURM_JOB_NUM_NODES')}")
+        sys.stdout.flush()
 
         cmd = [
             "python", "-u", "-m", "accelerate.commands.launch",
@@ -429,7 +439,9 @@ class SFTJobRunner:
             f"--config_file={accelerate_config}",
             f"--main_process_ip={master_addr}",
             f"--main_process_port={master_port}",
-            f"--machine_rank={slurm_procid}",
+            f"--machine_rank={slurm_nodeid}",
+            f"--num_machines={num_nodes}",
+            f"--num_processes={num_nodes * gpus_per_node}",
             "--tee=3",
             "sft/llamafactory/src/train.py",
             self.config.train_config_path,
@@ -567,11 +579,14 @@ def construct_sft_sbatch_script(exp_args: dict, hpc) -> str:
 # Additional CUDA setup can be done in SFTJobRunner._setup_environment()"""
 
     # Generate srun command based on launcher
+    # Use --nodes and --ntasks-per-node=1 to ensure one process per node for multi-node training
+    # Each node then launches its own accelerate processes for local GPUs
+    srun_base = "srun --nodes=$SLURM_JOB_NUM_NODES --ntasks-per-node=1"
     if hpc.needs_ssh_tunnel:
         # JSC clusters use proxychains4 for internet access
-        srun_command = f'srun $PROXY_CMD python -m hpc.sft_launch_utils --config "{config_path}"'
+        srun_command = f'{srun_base} $PROXY_CMD python -m hpc.sft_launch_utils --config "{config_path}"'
     else:
-        srun_command = f'srun python -m hpc.sft_launch_utils --config "{config_path}"'
+        srun_command = f'{srun_base} python -m hpc.sft_launch_utils --config "{config_path}"'
 
     substitutions = {
         "time_limit": exp_args.get("time_limit") or "24:00:00",
