@@ -165,7 +165,10 @@ trainer:
       weight_decay: 0.01
       adam_betas: [0.9, 0.999]
       max_grad_norm: 1.0
-
+    fsdp_config:
+      cpu_offload: false
+      reshard_after_forward: false
+      fsdp_size: 4
   # Reference model
   ref:
     fsdp_config:
