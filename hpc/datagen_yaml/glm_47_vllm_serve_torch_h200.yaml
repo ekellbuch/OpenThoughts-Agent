@@ -16,6 +16,7 @@ backend:
   ray_cgraph_max_inflight_executions: 16
   healthcheck_max_attempts: 160
   healthcheck_retry_delay: 15
+# Setting GLM reasoning parser per https://github.com/vllm-project/vllm/pull/31788
 vllm_server:
   model_path: QuantTrio/GLM-4.7-AWQ
   num_replicas: 1
@@ -29,8 +30,10 @@ vllm_server:
   swap_space: 32
   enable_expert_parallel: true
   enable_auto_tool_choice: true
-  tool_call_parser: glm47
-  reasoning_parser: glm45
+  tool_call_parser: glm45
+  reasoning_parser: deepseek_v3
+  default_chat_template_kwargs:
+    enable_thinking: true
   trust_remote_code: true
   extra_args:
   - --dtype
