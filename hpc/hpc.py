@@ -365,7 +365,8 @@ jupiter = HPC(
     modules=["GCC/14.3.0", "NVHPC/25.9-CUDA-13"],
     env_vars={
         "PYTHONFAULTHANDLER": "1",
-        "WANDB_MODE": "offline",  # Compute nodes have no internet
+        "WANDB_MODE": "disabled",  # Compute nodes have no internet
+        "WANDB_DISABLED": "true",  # Completely disable WandB to avoid network retries
     },
     # NCCL/networking settings for SFT training (InfiniBand NDR)
     nccl_settings={
