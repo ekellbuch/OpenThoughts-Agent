@@ -80,7 +80,7 @@ terminal_bench:
     n_concurrent_trials: 192
 
     # Logging settings
-    log_level: WARNING
+    log_level: INFO
 
     # Reward shaping (disabled - binary rewards)
     enable_reward_shaping: false
