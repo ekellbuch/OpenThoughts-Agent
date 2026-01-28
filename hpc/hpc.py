@@ -350,29 +350,32 @@ jureca = HPC(
 
 jupiter = HPC(
     name="jupiter",
-    hostname_pattern=r"j.*?.jupiter.internal",
+    # Matches login nodes like jpbl-s01-01 (jupiter booster login) and compute nodes
+    hostname_pattern=r"jp(bl|cn|c)-.*",
     dotenv_filename="jupiter.env",
-    account="jureap1",
-    partition="all",
-    gpus_per_node=4,
-    cpus_per_node=48,
-    internet_node=False,
-    gpus_type="GH200 96GB",
-    total_partition_nodes=48,
+    account="jureap59",
+    partition="booster",
+    gpus_per_node=4,  # 4x GH200 superchips per node
+    cpus_per_node=72,  # 288 ARM cores total, but request subset; 72 per Grace CPU
+    internet_node=True,  # Jupiter login nodes have internet
+    gpus_type="GH200 96GB (H100 + Grace)",
+    total_partition_nodes=6000,  # ~6000 booster nodes
     gpu_directive_format="--gres=gpu:{n}",
     env_vars={
-        "WANDB_MODE": "offline",  # No internet on compute nodes
+        "PYTHONFAULTHANDLER": "1",
     },
-    # NCCL/networking settings for SFT training (InfiniBand, no internet)
+    # NCCL/networking settings for SFT training (InfiniBand NDR)
     nccl_settings={
+        "NCCL_DEBUG": "INFO",
         "NCCL_NET_GDR_LEVEL": "0",
         "NCCL_SOCKET_IFNAME": "ib0",
         "NCCL_IB_TIMEOUT": "60",
     },
     training_launcher="accelerate",
-    needs_ssh_tunnel=True,
-    # Job scaling (from jupiter.env)
+    needs_ssh_tunnel=False,  # Login nodes have internet
+    # Job scaling
     default_time_limit="12:00:00",
+    max_time_limit="24:00:00",
     num_nodes_slow=1,
     num_nodes_default=4,
     num_nodes_fast=8,
