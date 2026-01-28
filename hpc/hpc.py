@@ -361,6 +361,8 @@ jupiter = HPC(
     gpus_type="GH200 96GB (H100 + Grace)",
     total_partition_nodes=6000,  # ~6000 booster nodes
     gpu_directive_format="--gres=gpu:{n}",
+    # Modules: GCC compiler + NVHPC SDK (includes CUDA toolkit, nvcc, cuBLAS, etc.)
+    modules=["GCC/14.3.0", "NVHPC/25.9-CUDA-13"],
     env_vars={
         "PYTHONFAULTHANDLER": "1",
     },
