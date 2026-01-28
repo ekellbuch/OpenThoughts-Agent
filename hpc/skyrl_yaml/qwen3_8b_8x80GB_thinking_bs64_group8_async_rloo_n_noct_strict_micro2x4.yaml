@@ -2,10 +2,10 @@
 # Based on: qwen3_8b_16x80GB_thinking_bs64_group8_async_rloo_n_noct_strict_micro2x4.yaml
 #
 # 8-GPU VARIANT: Adjusted for 2 nodes × 4 GPUs = 8 GPUs total:
-#   - colocate_all: true (policy, ref, and inference share GPUs)
-#   - num_inference_engines: 4 (reduced from 8)
-#   - num_parallel_generation_workers: 64 (reduced from 128)
-#   - policy/ref on 2 nodes × 4 GPUs each (colocated)
+#   - colocate_all: false (truly async: training and inference on separate GPUs)
+#   - Policy/ref: 4 GPUs (1 node × 4)
+#   - Inference: 4 engines (4 GPUs)
+#   - num_parallel_generation_workers: 32 (reduced for 4 inference engines)
 #
 # All other settings preserved:
 #   - micro_train_batch_size_per_gpu: 2
@@ -173,18 +173,18 @@ trainer:
       reshard_after_forward: false
       fsdp_size: 4
 
-  # Model placement (8-GPU setup with colocation)
+  # Model placement (8-GPU async: 4 training + 4 inference)
   placement:
-    colocate_all: true  # Share GPUs between policy, ref, and inference
-    policy_num_nodes: 2
-    ref_num_nodes: 2
+    colocate_all: false  # Truly async: training and inference on separate GPUs
+    policy_num_nodes: 1
+    ref_num_nodes: 1
     policy_num_gpus_per_node: 4
     ref_num_gpus_per_node: 4
 
-  # Fully async generation (reduced for 8 GPUs)
+  # Fully async generation (reduced for 4 inference engines)
   fully_async:
     max_staleness_steps: 8
-    num_parallel_generation_workers: 64
+    num_parallel_generation_workers: 32
 
 # Generator configuration
 generator:
@@ -192,7 +192,7 @@ generator:
   model_dtype: bfloat16
 
   inference_engine_tensor_parallel_size: 1
-  num_inference_engines: 4  # Reduced from 8 for 8-GPU setup
+  num_inference_engines: 4  # 4 inference GPUs for async generation
 
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
