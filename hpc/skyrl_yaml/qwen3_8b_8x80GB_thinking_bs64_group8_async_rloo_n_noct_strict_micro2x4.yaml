@@ -114,6 +114,7 @@ terminal_bench:
 # Trainer configuration
 trainer:
   strategy: fsdp2
+  use_sample_packing: true
   algorithm:
     advantage_estimator: rloo_n
     use_kl_loss: true
