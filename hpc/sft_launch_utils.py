@@ -585,6 +585,7 @@ def construct_sft_sbatch_script(exp_args: dict, hpc) -> str:
         "cluster_env_file": hpc.dotenv_filename,
         "cuda_setup": cuda_setup,
         "nccl_exports": hpc.get_nccl_exports(),
+        "env_exports": hpc.get_env_exports(),
         "ssh_tunnel_setup": hpc.get_ssh_tunnel_setup(),
         "master_port": str(job_config.master_port),
         "gpus_per_node": str(gpus_per_node),

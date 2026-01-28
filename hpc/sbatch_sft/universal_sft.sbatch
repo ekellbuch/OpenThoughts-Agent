@@ -76,6 +76,9 @@ fi
 # --- NCCL/Networking settings (cluster-specific) ---
 {nccl_exports}
 
+# --- Cluster-specific environment variables ---
+{env_exports}
+
 # --- Standard environment variables ---
 export PYTHONFAULTHANDLER=1
 export TORCH_SHOW_CPP_STACKTRACES=1
