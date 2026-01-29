@@ -76,8 +76,12 @@ fi
 # --- NCCL/Networking settings (cluster-specific) ---
 {nccl_exports}
 
+# --- Cluster-specific environment variables ---
+{env_exports}
+
 # --- Standard environment variables ---
 export PYTHONFAULTHANDLER=1
+export TORCH_SHOW_CPP_STACKTRACES=1
 export CUDA_LAUNCH_BLOCKING=0
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export OMP_NUM_THREADS=1
@@ -85,7 +89,8 @@ export PYTHONPATH="$WORKDIR:${PYTHONPATH:-}"
 export DISABLE_VERSION_CHECK=1  # Skip LlamaFactory transformers version check
 
 # --- Distributed training setup ---
-export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
+MASTER_HOST=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
+export MASTER_ADDR="${MASTER_HOST}{master_addr_suffix}"
 export MASTER_PORT={master_port}
 export NUM_NODES=$SLURM_JOB_NUM_NODES
 export NUM_GPUS_PER_NODE={gpus_per_node}

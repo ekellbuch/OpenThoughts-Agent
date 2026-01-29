@@ -18,6 +18,7 @@ from hpc.launch_utils import (
     sanitize_repo_component,
     resolve_job_and_paths,
     derive_default_job_name,
+    setup_hosted_vllm_api_key,
     update_exp_args,
 )
 from hpc.pretokenize_launch_utils import schedule_pretokenize, should_run_pretokenize
@@ -46,9 +47,6 @@ from hpc.eval_launch_utils import (
     prepare_eval_configuration,
     remap_eval_cli_args,
 )
-from scripts.harbor.tasks_parquet_converter import from_parquet
-from database.unified_db.utils import load_supabase_keys
-
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -244,6 +242,8 @@ def _materialize_dataset_and_model(
         tasks_output_dir = os.path.join(tasks_base_dir, dataset_name)
 
         print(f"Converting parquet to tasks folder at {tasks_output_dir}")
+        # Lazy import to avoid torch dependency at module load time
+        from scripts.harbor.tasks_parquet_converter import from_parquet
         from_parquet(parquet_file_path, tasks_output_dir, on_exist="skip")
         dataset_path = tasks_output_dir
         print(f"Converted parquet to tasks folder: {dataset_path}")
@@ -407,6 +407,8 @@ def display_args(exp_args, name):
     print()
 
 def main():
+    # Lazy import to avoid torch dependency at module load time
+    from database.unified_db.utils import load_supabase_keys
     load_supabase_keys()
     # this is where defaults are stored for experiments_dir and deepspeed
     cli_args = parse_args()
@@ -422,6 +424,9 @@ def main():
     # Add arguments to experiment from automatically detecting HPC
     hpc = detect_hpc()
     set_environment(hpc)
+
+    # Set placeholder API keys for hosted_vllm models (Harbor agents require these)
+    setup_hosted_vllm_api_key()
 
     # Add arguments and validate
     exp_args = update_exp_args(exp_args, hpc.model_dump())

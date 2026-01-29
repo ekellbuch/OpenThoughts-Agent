@@ -24,7 +24,9 @@
 #       --job_name qwen3_8b_openhands \
 #       --train_data '["mlfoundations-dev/your-dataset"]' \
 #       --model_path Qwen/Qwen3-8B \
-#       --num_nodes 2
+#       --num_nodes 2 \
+#       --pinggy_persistent_url your-tunnel.a.pinggy.link \
+#       --pinggy_token your_token
 
 # SkyRL entrypoint module
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
@@ -37,6 +39,11 @@ config_groups:
 terminal_bench:
   # trials_dir: Directory for Harbor trial artifacts (derived from experiments_dir if null)
   trials_dir: null
+
+  # Harbor environment backend: daytona (cloud), docker (local/podman), modal
+  # Installed agents (openhands, etc.) running in cloud backends need Pinggy tunnels
+  # to reach the vLLM endpoint on the HPC cluster
+  harbor_env: daytona
 
   # Harbor configuration - schema-driven mapping to TrialConfig
   # See examples/terminal_bench/harbor_config.py for full list of supported fields.
@@ -57,7 +64,7 @@ terminal_bench:
     # disable_tool_calls: false
 
     # Agent timeout overrides
-    override_timeout_sec: 240        # Agent execution timeout (seconds)
+    override_timeout_sec: 1200 #OpenHands takes longer because it's an installed agent
 
     # ==========================================================================
     # Environment settings (maps to Harbor EnvironmentConfig)
@@ -75,9 +82,9 @@ terminal_bench:
     # ==========================================================================
     # Retry settings (maps to Harbor RetryConfig for QueueOrchestrator)
     # ==========================================================================
-    max_retries: 2                 # Max retry attempts per trial
-    min_wait_sec: 1.0              # Initial backoff delay (seconds)
-    max_wait_sec: 60.0             # Maximum backoff delay
+    max_retries: 3                 # Max retry attempts per trial
+    min_wait_sec: 60.0              # Initial backoff delay (seconds)
+    max_wait_sec: 600.0             # Maximum backoff delay
     wait_multiplier: 2.0           # Exponential backoff multiplier
 
     # Exception filtering - don't retry permanent failures
@@ -145,7 +152,7 @@ trainer:
   max_prompt_length: 999999
 
   # Evaluation and checkpointing
-  eval_interval: 20
+  eval_interval: 999999
   eval_before_train: false
   ckpt_interval: 10
   resume_mode: latest
@@ -171,7 +178,7 @@ trainer:
   # Reference model - CPU offload to save GPU memory
   ref:
     fsdp_config:
-      cpu_offload: true
+      cpu_offload: false
       reshard_after_forward: true
 
   # Model placement - derived from CLI args (--num_nodes, --gpus_per_node)
@@ -241,6 +248,8 @@ generator:
   # The launcher validates this at parse time and will error with a full list if you set forbidden keys.
   # SAFE TO SET: custom_chat_template_*, kv_cache_dtype, quantization, cpu_offload_gb, etc.
   engine_init_kwargs:
+    # Explicit context limit - ensures vLLM enforces 32k total context
+    max_model_len: 32768
     # Chat template for Qwen3 Base model (path relative to working directory or absolute)
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
 

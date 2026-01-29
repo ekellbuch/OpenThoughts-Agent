@@ -45,7 +45,7 @@ trainer:
 
   ref:
     fsdp_config:
-      cpu_offload: true
+      cpu_offload: false
 
   # Model placement - derived from CLI args (--num_nodes, --gpus_per_node)
   placement:
@@ -66,6 +66,11 @@ generator:
   weight_sync_backend: nccl
   async_engine: true
   batched: true
+
+  # Engine initialization kwargs
+  engine_init_kwargs:
+    # Explicit context limit - ensures vLLM enforces 32k total context
+    max_model_len: 32768
 
 # Data paths (set via CLI --train_data, --val_data)
 data:

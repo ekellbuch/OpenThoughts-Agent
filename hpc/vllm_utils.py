@@ -118,6 +118,9 @@ def _build_vllm_cli_args(server_config: dict) -> tuple[list[str], dict[str, str]
         if isinstance(value, bool):
             # Non-flag booleans: pass as true/false string
             cli_args.extend([f"--{arg_name}", str(value).lower()])
+        elif isinstance(value, dict):
+            # Dict values need to be JSON-encoded (e.g., default_chat_template_kwargs)
+            cli_args.extend([f"--{arg_name}", json.dumps(value)])
         else:
             cli_args.extend([f"--{arg_name}", str(value)])
 
@@ -191,6 +194,14 @@ class VLLMServer:
         if self._process is not None:
             print(f"vLLM server already started at {self.endpoint}")
             return self.endpoint
+
+        # Clean up any stale endpoint JSON from a previous job to avoid IP mismatch
+        if self.config.endpoint_json_path and os.path.exists(self.config.endpoint_json_path):
+            print(f"Removing stale endpoint JSON: {self.config.endpoint_json_path}")
+            try:
+                os.remove(self.config.endpoint_json_path)
+            except OSError as e:
+                print(f"  Warning: could not remove stale endpoint file: {e}")
 
         print(f"=== Starting vLLM Server ===")
         print(f"  Model: {self.config.model_path}")

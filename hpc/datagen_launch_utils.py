@@ -239,11 +239,16 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
         task_sbatch_output.write_text(sbatch_text)
         os.chmod(task_sbatch_output, 0o750)
 
+        # Get CLI dependency for first job in pipeline
+        cli_dependency = exp_args.get("dependency")
+
         if exp_args.get("dry_run"):
             print(f"DRY RUN: Taskgen sbatch script written to {task_sbatch_output}")
+            if cli_dependency:
+                print(f"  Would submit with dependency: {cli_dependency}")
             task_job_id = "dry_run_task_job_id"
         else:
-            task_job_id = launch_sbatch(str(task_sbatch_output))
+            task_job_id = launch_sbatch(str(task_sbatch_output), dependency=cli_dependency)
             print(f"✓ Task generation job submitted: {task_job_id}")
 
     # === Trace Generation ===
@@ -317,7 +322,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             agent=exp_args.get("trace_agent_name") or "",
             trace_env=exp_args.get("trace_env") or get_harbor_env_from_config(harbor_config_resolved),
             n_concurrent=int(exp_args.get("trace_n_concurrent") or 64),
-            n_attempts=int(exp_args.get("trace_n_attempts") or 3),
+            n_attempts=int(exp_args.get("trace_n_attempts") or 1),
             agent_kwargs=agent_kwargs,
             num_nodes=int(exp_args.get("num_nodes") or 1),
             gpus_per_node=gpus_per_node,
@@ -327,6 +332,9 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             hf_repo_id=exp_args.get("upload_hf_repo") or trace_target_repo,
             hf_private=bool(exp_args.get("upload_hf_private")),
             hf_episodes=exp_args.get("upload_hf_episodes") or "last",
+            # Pinggy tunnel settings (for cloud backends that can't reach local vLLM)
+            pinggy_persistent_url=exp_args.get("pinggy_persistent_url"),
+            pinggy_token=exp_args.get("pinggy_token"),
         )
 
         # Write trace config JSON
@@ -343,6 +351,9 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
         # Build SBATCH directives using shared utility
         sbatch_directives = build_sbatch_directives(hpc, exp_args)
 
+        # Determine harbor_env for conditional docker setup
+        harbor_env = exp_args.get("trace_env") or get_harbor_env_from_config(harbor_config_resolved)
+
         substitutions = {
             "time_limit": exp_args.get("time_limit") or "24:00:00",
             "num_nodes": str(exp_args.get("num_nodes") or 1),
@@ -355,6 +366,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             "cluster_env_file": cluster_env_file,
             "config_path": str(trace_config_path),
             "email_address": os.environ.get("EMAIL_ADDRESS", ""),
+            "harbor_env": harbor_env,
         }
 
         sbatch_text = substitute_template(template_text, substitutions)
@@ -363,16 +375,20 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
         trace_sbatch_output.write_text(sbatch_text)
         os.chmod(trace_sbatch_output, 0o750)
 
-        # Set dependency on task job if both are enabled
-        dependency = f"afterok:{task_job_id}" if task_enabled and task_job_id and task_job_id != "dry_run_task_job_id" else None
+        # Set dependency on task job if both are enabled, otherwise use CLI dependency
+        if task_enabled and task_job_id and task_job_id != "dry_run_task_job_id":
+            # Task job already waited for CLI dependency, so trace only needs to wait for task
+            dependency = f"afterok:{task_job_id}"
+        else:
+            # No task job, use CLI dependency if provided
+            dependency = exp_args.get("dependency")
 
         if exp_args.get("dry_run"):
             print(f"DRY RUN: Tracegen sbatch script written to {trace_sbatch_output}")
-        else:
             if dependency:
-                job_id = launch_sbatch(str(trace_sbatch_output), dependency=dependency)
-            else:
-                job_id = launch_sbatch(str(trace_sbatch_output))
+                print(f"  Would submit with dependency: {dependency}")
+        else:
+            job_id = launch_sbatch(str(trace_sbatch_output), dependency=dependency)
             print(f"✓ Trace generation job submitted: {job_id}")
 
 
@@ -511,6 +527,7 @@ class TaskgenJobRunner:
             ray_env_vars=hpc.get_ray_env_vars(),
             memory_per_node=ray_memory,
             object_store_memory=DEFAULT_OBJECT_STORE_MEMORY_BYTES,
+            disable_cpu_bind=getattr(hpc, "disable_cpu_bind", False),
         )
 
         model_path = self.config.vllm_model_path or ""
@@ -628,7 +645,7 @@ class TracegenJobConfig:
     agent: str = ""
     trace_env: str = "daytona"
     n_concurrent: int = 64
-    n_attempts: int = 3
+    n_attempts: int = 1
 
     # Agent kwargs (serialized as JSON)
     agent_kwargs: Dict[str, Any] = field(default_factory=dict)
@@ -643,6 +660,10 @@ class TracegenJobConfig:
     num_nodes: int = 1
     gpus_per_node: Optional[int] = None
     cpus_per_node: Optional[int] = None
+
+    # Pinggy tunnel settings (for cloud backends that can't reach local vLLM)
+    pinggy_persistent_url: Optional[str] = None
+    pinggy_token: Optional[str] = None
 
 
 class TracegenJobRunner:
@@ -760,6 +781,7 @@ class TracegenJobRunner:
             ray_env_vars=hpc.get_ray_env_vars(),
             memory_per_node=ray_memory,
             object_store_memory=DEFAULT_OBJECT_STORE_MEMORY_BYTES,
+            disable_cpu_bind=getattr(hpc, "disable_cpu_bind", False),
         )
 
         raw_model_path = self.config.vllm_model_path or self.config.model
@@ -796,7 +818,47 @@ class TracegenJobRunner:
                 extra_env_vars=extra_env_vars if extra_env_vars else None,
             )
             with vllm_server:
-                return self._run_harbor(endpoint=vllm_server.endpoint)
+                # Check if we need Pinggy tunnel for cloud backends with installed agents
+                from hpc.pinggy_utils import (
+                    needs_pinggy_tunnel,
+                    PinggyTunnel,
+                    PinggyConfig,
+                    parse_endpoint_host_port,
+                )
+
+                # Evaluate Pinggy conditions with diagnostic logging
+                has_url = bool(self.config.pinggy_persistent_url)
+                has_token = bool(self.config.pinggy_token)
+                needs_tunnel = needs_pinggy_tunnel(self.config.agent, self.config.trace_env)
+                use_pinggy = has_url and has_token and needs_tunnel
+
+                print(f"[TracegenJobRunner] Pinggy check: url={has_url}, token={has_token}, "
+                      f"needs_tunnel={needs_tunnel} (agent={self.config.agent}, env={self.config.trace_env})")
+                print(f"[TracegenJobRunner] use_pinggy={use_pinggy}, vllm_endpoint={vllm_server.endpoint}")
+
+                if use_pinggy:
+                    # Parse the vLLM endpoint to get the actual host:port
+                    # (vLLM may bind to a specific IP, not localhost)
+                    local_host, local_port = parse_endpoint_host_port(vllm_server.endpoint)
+                    print(f"[TracegenJobRunner] Starting Pinggy tunnel: {local_host}:{local_port} -> {self.config.pinggy_persistent_url}")
+                    pinggy_cfg = PinggyConfig(
+                        persistent_url=self.config.pinggy_persistent_url,
+                        token=self.config.pinggy_token,
+                        local_port=local_port,
+                        local_host=local_host,
+                    )
+                    pinggy_log = log_dir / f"{self.config.job_name}_pinggy.log"
+                    pinggy_tunnel = PinggyTunnel(pinggy_cfg, log_path=pinggy_log)
+
+                    with pinggy_tunnel:
+                        # Use Pinggy's public endpoint instead of local vLLM endpoint
+                        public_endpoint = pinggy_tunnel.public_endpoint
+                        print(f"[TracegenJobRunner] Using Pinggy endpoint for Harbor: {public_endpoint}")
+                        return self._run_harbor(endpoint=public_endpoint)
+                else:
+                    # Use local vLLM endpoint directly
+                    print(f"[TracegenJobRunner] Using local vLLM endpoint for Harbor: {vllm_server.endpoint}")
+                    return self._run_harbor(endpoint=vllm_server.endpoint)
 
     def _run_harbor(self, endpoint: Optional[str]) -> int:
         """Execute the Harbor CLI for trace generation."""

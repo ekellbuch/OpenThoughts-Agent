@@ -54,6 +54,8 @@ terminal_bench:
     enable_summarize: false
     # Store full message history for trajectory reconstruction
     store_all_messages: true
+    # Disable episode-* folder creation to reduce disk I/O (SkyRL uses TrialResult directly)
+    enable_episode_logging: false
 
     # Agent timeout overrides
     override_timeout_sec: 240        # Agent execution timeout (seconds)
@@ -85,9 +87,9 @@ terminal_bench:
     # Retry settings (maps to Harbor RetryConfig for QueueOrchestrator)
     # ==========================================================================
     # Retry logic with exponential backoff for transient failures
-    max_retries: 2                 # Max retry attempts per trial
-    min_wait_sec: 1.0              # Initial backoff delay (seconds)
-    max_wait_sec: 60.0             # Maximum backoff delay
+    max_retries: 3                 # Max retry attempts per trial
+    min_wait_sec: 60.0              # Initial backoff delay (seconds)
+    max_wait_sec: 600.0             # Maximum backoff delay
     wait_multiplier: 2.0           # Exponential backoff multiplier
 
     # Exception filtering - don't retry permanent failures
@@ -116,6 +118,14 @@ terminal_bench:
     # Reward shaping settings (DISABLED - binary rewards)
     # ==========================================================================
     enable_reward_shaping: false   # Use original binary (0/1) verifier rewards
+
+    # ==========================================================================
+    # Eval-specific settings
+    # ==========================================================================
+    # Timeout override for evaluation runs (seconds)
+    # Eval tasks may need more time than training since we don't retry
+    # Each eval run gets a fresh QueueOrchestrator with this timeout
+    eval_timeout_override_sec: 900  # 15 minutes default
 
   # Model info for Harbor's hosted_vllm validation (token limits and costs)
   model_info:
@@ -156,7 +166,7 @@ trainer:
   max_prompt_length: 999999
 
   # Evaluation and checkpointing
-  eval_interval: 20
+  eval_interval: 999999
   eval_before_train: false
   ckpt_interval: 10
   resume_mode: latest
@@ -182,7 +192,7 @@ trainer:
   # Reference model - CPU offload to save GPU memory
   ref:
     fsdp_config:
-      cpu_offload: true
+      cpu_offload: false
       reshard_after_forward: true
 
   # Model placement - derived from CLI args (--num_nodes, --gpus_per_node)
@@ -252,6 +262,8 @@ generator:
   # The launcher validates this at parse time and will error with a full list if you set forbidden keys.
   # SAFE TO SET: custom_chat_template_*, kv_cache_dtype, quantization, cpu_offload_gb, etc.
   engine_init_kwargs:
+    # Explicit context limit - ensures vLLM enforces 32k total context
+    max_model_len: 32768
     # Chat template for Qwen3 Base model (path relative to working directory or absolute)
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
 

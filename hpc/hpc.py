@@ -57,12 +57,24 @@ class HPC(BaseModel):
     # SSH tunneling for no-internet clusters (JSC)
     needs_ssh_tunnel: bool = False
 
+    # InfiniBand hostname suffix for MASTER_ADDR (JSC clusters use "i" suffix)
+    master_addr_suffix: str = ""
+
+    # SOCKS5 proxy configuration for no-internet clusters (JSC)
+    # Alternative to SSH tunneling - uses existing proxy on login node
+    proxy_host: str = ""
+    proxy_port: int = 0
+    proxychains_preload: str = ""
+
     # CUDA path detection for complex clusters (Perlmutter)
     needs_cuda_detection: bool = False
 
     # Job time limits (cluster-specific)
     default_time_limit: str = "24:00:00"
     max_time_limit: str = "48:00:00"
+    # Node-count-based time limits: list of (max_nodes, max_time) tuples, sorted by max_nodes ascending
+    # Example: [(91, "02:00:00"), (183, "06:00:00")] means 1-91 nodes -> 2h, 92-183 nodes -> 6h
+    time_limit_by_nodes: List[tuple[int, str]] = []
 
     # Node scaling presets for gosmall/gotrain/gofast helpers
     num_nodes_slow: int = 1
@@ -78,12 +90,43 @@ class HPC(BaseModel):
     # Special key "_default" is used when no gpu_type is specified
     gpu_type_constraints: Dict[str, str] = {}
 
+    # Disable CPU binding for srun commands (needed for Frontier/Cray systems)
+    # When True, adds --cpu-bind=none to srun commands for Ray startup
+    disable_cpu_bind: bool = False
+
+    # Environment variables to unset after module loading (e.g., ROCR_VISIBLE_DEVICES on Frontier)
+    # Modules may set these but they conflict with Ray/vLLM
+    env_unsets: List[str] = []
+
     def model_post_init(self, __context) -> None:
         # Derive a default CPU-per-GPU ratio when not explicitly provided.
         if not self.cpus_per_gpu:
             gpus = max(self.gpus_per_node, 1)
             if self.cpus_per_node:
                 self.cpus_per_gpu = math.ceil(self.cpus_per_node / gpus)
+
+    def get_max_time_limit(self, num_nodes: int) -> str:
+        """Get the maximum allowed time limit for a given number of nodes.
+
+        For clusters with node-count-based scheduling policies (e.g., Frontier),
+        returns the max walltime for the appropriate bin. Falls back to max_time_limit
+        if no node-based limits are configured.
+
+        Args:
+            num_nodes: Number of nodes requested for the job.
+
+        Returns:
+            Maximum allowed time limit string (e.g., "02:00:00").
+        """
+        if not self.time_limit_by_nodes:
+            return self.max_time_limit
+
+        for max_nodes, max_time in self.time_limit_by_nodes:
+            if num_nodes <= max_nodes:
+                return max_time
+
+        # If num_nodes exceeds all bins, return the last (largest) bin's limit
+        return self.time_limit_by_nodes[-1][1] if self.time_limit_by_nodes else self.max_time_limit
 
     @computed_field
     def dotenv_path(self) -> str:
@@ -95,11 +138,18 @@ class HPC(BaseModel):
     # =========================================================================
 
     def get_module_commands(self) -> str:
-        """Generate module load commands for SBATCH scripts."""
-        if not self.modules:
+        """Generate module load commands for SBATCH scripts.
+
+        Also includes unset commands for env vars that modules set but
+        conflict with Ray/vLLM (e.g., ROCR_VISIBLE_DEVICES on Frontier).
+        """
+        if not self.modules and not self.env_unsets:
             return ""
         lines = ["set +u"]
         lines.extend(f"module load {m}" for m in self.modules)
+        # Unset env vars that modules set but conflict with Ray/vLLM
+        for var in self.env_unsets:
+            lines.append(f"unset {var}")
         lines.append("set -u")
         return "\n".join(lines)
 
@@ -274,6 +324,49 @@ else
     PROXY_CMD=""
 fi'''
 
+    def get_proxy_setup(self) -> str:
+        """Generate SOCKS5 proxy setup script for no-internet clusters (JSC).
+
+        This configures proxychains to use an existing SOCKS5 proxy on the login node,
+        which is an alternative to setting up SSH tunnels. The proxy is typically
+        pre-configured by cluster admins for compute node internet access.
+
+        Returns:
+            Bash script for proxy configuration, or comment if no proxy is configured.
+        """
+        if not self.proxy_host or not self.proxy_port:
+            return "# No SOCKS5 proxy configured for this cluster"
+
+        preload_export = ""
+        if self.proxychains_preload:
+            preload_export = f'export PROXYCHAINS_PRELOAD="{self.proxychains_preload}"'
+
+        return f'''# ============================================================================
+# SOCKS5 Proxy Setup (JSC clusters)
+# Use existing proxy on login node - no SSH tunnel needed
+# ============================================================================
+PROXY_HOST="{self.proxy_host}"
+PROXY_PORT="{self.proxy_port}"
+
+# Check proxy is reachable (skip if nc not available)
+if command -v nc &>/dev/null; then
+    if nc -z $PROXY_HOST $PROXY_PORT 2>/dev/null; then
+        echo "[proxy] ✓ Proxy reachable at $PROXY_HOST:$PROXY_PORT"
+    else
+        echo "[proxy] WARNING: Proxy not reachable at $PROXY_HOST:$PROXY_PORT"
+        echo "[proxy] Internet access may fail on compute nodes!"
+    fi
+else
+    echo "[proxy] Skipping proxy check (nc not available)"
+fi
+
+# Configure proxychains environment variables
+export PROXYCHAINS_SOCKS5_HOST=$PROXY_HOST
+export PROXYCHAINS_SOCKS5_PORT=$PROXY_PORT
+{preload_export}
+
+echo "[proxy] Configured SOCKS5 proxy: $PROXY_HOST:$PROXY_PORT"'''
+
 
 jureca = HPC(
     name="jureca",
@@ -301,6 +394,11 @@ jureca = HPC(
     },
     training_launcher="accelerate",
     needs_ssh_tunnel=True,
+    # SOCKS5 proxy for RL training (alternative to SSH tunnel)
+    # Existing proxy on login node for compute node internet access
+    proxy_host="10.14.0.53",
+    proxy_port=1080,
+    proxychains_preload="/p/scratch/laionize/raj3/proxychains-ng/libproxychains4.so",
     # Job scaling (from jureca.env)
     default_time_limit="24:00:00",
     num_nodes_default=1,
@@ -309,29 +407,42 @@ jureca = HPC(
 
 jupiter = HPC(
     name="jupiter",
-    hostname_pattern=r"j.*?.jupiter.internal",
+    # Matches login nodes like jpbl-s01-01 (jupiter booster login) and compute nodes
+    hostname_pattern=r"jp(bl|cn|c)-.*",
     dotenv_filename="jupiter.env",
-    account="jureap1",
-    partition="all",
-    gpus_per_node=4,
-    cpus_per_node=48,
-    internet_node=False,
-    gpus_type="GH200 96GB",
-    total_partition_nodes=48,
+    account="jureap59",
+    partition="booster",
+    gpus_per_node=4,  # 4x GH200 superchips per node
+    cpus_per_node=72,  # 288 ARM cores total, but request subset; 72 per Grace CPU
+    internet_node=False,  # Compute nodes have no internet (like other JSC clusters)
+    gpus_type="GH200 96GB (H100 + Grace)",
+    total_partition_nodes=6000,  # ~6000 booster nodes
     gpu_directive_format="--gres=gpu:{n}",
+    # Modules: nvidia-compilers includes CUDA toolkit, nvcc, cuBLAS, etc.
+    # Note: GCC is auto-loaded; NVHPC is deprecated in favor of nvidia-compilers
+    modules=["nvidia-compilers/25.9-CUDA-13"],
     env_vars={
-        "WANDB_MODE": "offline",  # No internet on compute nodes
+        "WANDB_MODE": "offline",  # Compute nodes have no internet
     },
-    # NCCL/networking settings for SFT training (InfiniBand, no internet)
+    # NOTE: Do NOT use master_addr_suffix="i" - the "i" suffixed hostname is not DNS-resolvable
+    # InfiniBand routing is handled by NCCL_SOCKET_IFNAME=ib0 instead
+    # NCCL/networking settings for SFT training (InfiniBand NDR)
     nccl_settings={
+        "NCCL_DEBUG": "INFO",
         "NCCL_NET_GDR_LEVEL": "0",
         "NCCL_SOCKET_IFNAME": "ib0",
         "NCCL_IB_TIMEOUT": "60",
     },
     training_launcher="accelerate",
-    needs_ssh_tunnel=True,
-    # Job scaling (from jupiter.env)
+    needs_ssh_tunnel=True,  # Compute nodes need SSH tunnel for external access
+    # SOCKS5 proxy for RL training (alternative to SSH tunnel)
+    # Existing proxy on login node for compute node internet access
+    proxy_host="10.14.0.53",
+    proxy_port=1080,
+    proxychains_preload="/p/scratch/laionize/raj3/proxychains-ng/libproxychains4.so",
+    # Job scaling
     default_time_limit="12:00:00",
+    max_time_limit="24:00:00",
     num_nodes_slow=1,
     num_nodes_default=4,
     num_nodes_fast=8,
@@ -361,6 +472,11 @@ juwels = HPC(
     },
     training_launcher="accelerate",
     needs_ssh_tunnel=True,
+    # SOCKS5 proxy for RL training (alternative to SSH tunnel)
+    # Existing proxy on login node for compute node internet access
+    proxy_host="10.14.0.53",
+    proxy_port=1080,
+    proxychains_preload="/p/scratch/laionize/raj3/proxychains-ng/libproxychains4.so",
     # Job scaling (from juwels.env)
     default_time_limit="24:00:00",
     num_nodes_default=4,
@@ -414,7 +530,7 @@ capella = HPC(
         "NCCL_DEBUG": "INFO",
         "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
         "CUDA_LAUNCH_BLOCKING": "0",
-        "PYTORCH_CUDA_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
+        "PYTORCH_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
     },
     # NCCL/networking settings for SFT training (InfiniBand)
     nccl_settings={
@@ -521,7 +637,7 @@ vista = HPC(
         "PYTHONFAULTHANDLER": "1",
         "NCCL_TIMEOUT": "1800",
         "NCCL_IB_TIMEOUT": "23",
-        "PYTORCH_CUDA_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
+        "PYTORCH_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
     },
     library_paths={
         "TRITON_CC": "/home1/apps/gcc/15.1.0/bin/gcc",
@@ -612,7 +728,7 @@ nyutorch = HPC(
     partition="",
     gpus_per_node=8,
     cpus_per_node=96,  # H200 nodes have ~128 cores; request 96 to leave headroom
-    mem_per_node="1536G",  # H200 nodes have ~2TB RAM; request 1.5TB to leave headroom
+    mem_per_node="1800G",  # H200 nodes have ~2TB RAM; request less to leave headroom
     internet_node=True,
     gpus_type="H200 141GB / L40S 48GB",
     total_partition_nodes=48,
@@ -630,7 +746,7 @@ nyutorch = HPC(
         "PYTHONFAULTHANDLER": "1",
         "NCCL_TIMEOUT": "1800",
         "NCCL_IB_TIMEOUT": "23",
-        "PYTORCH_CUDA_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
+        "PYTORCH_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
     },
     library_paths={
         "TRITON_CC": "/usr/bin/gcc",
@@ -722,12 +838,41 @@ frontier = HPC(
     partition="batch",
     gpus_per_node=4,
     cpus_per_node=48,
-    mem_per_node="512GB",
+    mem_per_node="",  # Frontier doesn't accept explicit memory requests; uses exclusive nodes
     internet_node=False,
     gpus_type="AMD Instinct MI250X",
     total_partition_nodes=9216,
     qos="normal",
     gpu_directive_format="--gpus-per-node={n}",
+    # ROCm modules for AMD MI250X GPUs
+    # See: https://docs.olcf.ornl.gov/software/analytics/pytorch_frontier.html
+    # Note: cray-mpich removed - not needed for vLLM/Ray and causes libmpi_cxx.so.40 errors
+    # rocm/7.0.2 required for vLLM wheel compatibility
+    modules=["PrgEnv-gnu/8.6.0", "gcc-native/14.2", "rocm/7.0.2", "craype-accel-amd-gfx90a"],
+    env_vars={
+        "ROCM_PATH": "/opt/rocm",
+        "HIP_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+    },
+    library_paths={
+        "LD_LIBRARY_PATH": "$CONDA_PREFIX/lib:$ROCM_PATH/lib:${LD_LIBRARY_PATH:-}",
+    },
+    # Unset env vars that ROCm modules set but conflict with Ray
+    env_unsets=["ROCR_VISIBLE_DEVICES"],
+    # Frontier scheduling bins (node-count-based time limits)
+    # Bin 5: 1-91 nodes -> 2 hours max
+    # Bin 4: 92-183 nodes -> 6 hours max
+    # Bin 3: 184+ nodes -> 12 hours max
+    time_limit_by_nodes=[(91, "02:00:00"), (183, "06:00:00"), (9216, "12:00:00")],
+    default_time_limit="12:00:00",
+    max_time_limit="12:00:00",
+    # Node scaling presets for Frontier
+    num_nodes_slow=16,
+    num_nodes_default=64,
+    num_nodes_fast=91,  # Max nodes for Bin 5 (2h limit)
+    # Frontier requires exclusive node allocation
+    extra_sbatch_directives=["#SBATCH --exclusive"],
+    # Frontier/Cray needs --cpu-bind=none for srun commands
+    disable_cpu_bind=True,
 )
 
 clusters = [jureca, jupiter, juwels, leonardo, capella, alpha, dip, lrz, vista, lonestar, claix, nyugreene, nyutorch, oumi, perlmutter, frontier]
