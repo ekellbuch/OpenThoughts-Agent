@@ -640,6 +640,7 @@ fi"""
         "rl_env_exports": rl_env_exports,
         "rl_env_activation": rl_env_activation,
         "ssh_tunnel_setup": hpc.get_ssh_tunnel_setup(),
+        "proxy_setup": hpc.get_proxy_setup(),
         "ray_port": str(job_config.ray_port),
         "master_port": str(job_config.master_port),
         "gpus_per_node": str(gpus_per_node),

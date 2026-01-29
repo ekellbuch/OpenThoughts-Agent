@@ -60,6 +60,12 @@ class HPC(BaseModel):
     # InfiniBand hostname suffix for MASTER_ADDR (JSC clusters use "i" suffix)
     master_addr_suffix: str = ""
 
+    # SOCKS5 proxy configuration for no-internet clusters (JSC)
+    # Alternative to SSH tunneling - uses existing proxy on login node
+    proxy_host: str = ""
+    proxy_port: int = 0
+    proxychains_preload: str = ""
+
     # CUDA path detection for complex clusters (Perlmutter)
     needs_cuda_detection: bool = False
 
@@ -318,6 +324,49 @@ else
     PROXY_CMD=""
 fi'''
 
+    def get_proxy_setup(self) -> str:
+        """Generate SOCKS5 proxy setup script for no-internet clusters (JSC).
+
+        This configures proxychains to use an existing SOCKS5 proxy on the login node,
+        which is an alternative to setting up SSH tunnels. The proxy is typically
+        pre-configured by cluster admins for compute node internet access.
+
+        Returns:
+            Bash script for proxy configuration, or comment if no proxy is configured.
+        """
+        if not self.proxy_host or not self.proxy_port:
+            return "# No SOCKS5 proxy configured for this cluster"
+
+        preload_export = ""
+        if self.proxychains_preload:
+            preload_export = f'export PROXYCHAINS_PRELOAD="{self.proxychains_preload}"'
+
+        return f'''# ============================================================================
+# SOCKS5 Proxy Setup (JSC clusters)
+# Use existing proxy on login node - no SSH tunnel needed
+# ============================================================================
+PROXY_HOST="{self.proxy_host}"
+PROXY_PORT="{self.proxy_port}"
+
+# Check proxy is reachable (skip if nc not available)
+if command -v nc &>/dev/null; then
+    if nc -z $PROXY_HOST $PROXY_PORT 2>/dev/null; then
+        echo "[proxy] ✓ Proxy reachable at $PROXY_HOST:$PROXY_PORT"
+    else
+        echo "[proxy] WARNING: Proxy not reachable at $PROXY_HOST:$PROXY_PORT"
+        echo "[proxy] Internet access may fail on compute nodes!"
+    fi
+else
+    echo "[proxy] Skipping proxy check (nc not available)"
+fi
+
+# Configure proxychains environment variables
+export PROXYCHAINS_SOCKS5_HOST=$PROXY_HOST
+export PROXYCHAINS_SOCKS5_PORT=$PROXY_PORT
+{preload_export}
+
+echo "[proxy] Configured SOCKS5 proxy: $PROXY_HOST:$PROXY_PORT"'''
+
 
 jureca = HPC(
     name="jureca",
@@ -345,6 +394,11 @@ jureca = HPC(
     },
     training_launcher="accelerate",
     needs_ssh_tunnel=True,
+    # SOCKS5 proxy for RL training (alternative to SSH tunnel)
+    # Existing proxy on login node for compute node internet access
+    proxy_host="10.14.0.53",
+    proxy_port=1080,
+    proxychains_preload="/p/scratch/laionize/raj3/proxychains-ng/libproxychains4.so",
     # Job scaling (from jureca.env)
     default_time_limit="24:00:00",
     num_nodes_default=1,
@@ -381,6 +435,11 @@ jupiter = HPC(
     },
     training_launcher="accelerate",
     needs_ssh_tunnel=True,  # Compute nodes need SSH tunnel for external access
+    # SOCKS5 proxy for RL training (alternative to SSH tunnel)
+    # Existing proxy on login node for compute node internet access
+    proxy_host="10.14.0.53",
+    proxy_port=1080,
+    proxychains_preload="/p/scratch/laionize/raj3/proxychains-ng/libproxychains4.so",
     # Job scaling
     default_time_limit="12:00:00",
     max_time_limit="24:00:00",
@@ -413,6 +472,11 @@ juwels = HPC(
     },
     training_launcher="accelerate",
     needs_ssh_tunnel=True,
+    # SOCKS5 proxy for RL training (alternative to SSH tunnel)
+    # Existing proxy on login node for compute node internet access
+    proxy_host="10.14.0.53",
+    proxy_port=1080,
+    proxychains_preload="/p/scratch/laionize/raj3/proxychains-ng/libproxychains4.so",
     # Job scaling (from juwels.env)
     default_time_limit="24:00:00",
     num_nodes_default=4,

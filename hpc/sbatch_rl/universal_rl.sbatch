@@ -140,6 +140,9 @@ trap cleanup_ray_logs EXIT
 # --- SSH Tunneling (JSC clusters only) ---
 {ssh_tunnel_setup}
 
+# --- SOCKS5 Proxy Setup (JSC clusters - alternative to SSH tunnel) ---
+{proxy_setup}
+
 # --- Docker/Podman Runtime Setup (for Harbor Docker backend) ---
 # Only run if harbor_env is "docker" - other backends (daytona, modal) don't need this.
 if [ "{harbor_env}" = "docker" ]; then
