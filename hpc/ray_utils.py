@@ -592,9 +592,10 @@ class RayCluster:
         This runs a polling loop ON the head node via srun, since ray.init()
         requires a local raylet connection.
         """
-        # Build inline Python script for polling
-        poll_script = f'''
-import ray
+        import tempfile
+
+        # Build Python script for polling
+        poll_script = f'''import ray
 import time
 import sys
 
@@ -624,28 +625,42 @@ print(f"Timeout: cluster did not reach {{expected_gpus}} GPUs within {{timeout}}
 sys.exit(1)
 '''
 
-        # Run on head node via srun
-        # Wrap in bash to unset proxychains env vars before running Python with ray.init()
-        bash_cmd = f"unset LD_PRELOAD PROXYCHAINS_CONF_FILE 2>/dev/null; {sys.executable} -c {repr(poll_script)}"
-        srun_cmd = [
-            "srun",
-            f"--export={self.config.srun_export_env}",
-            "--nodes=1",
-            "--ntasks=1",
-            "--overlap",
-            "--cpu-bind=none",  # No binding needed for polling script
-            "-w", self.node_list[0],
-            "bash", "-c", bash_cmd,
-        ]
+        # Write script to a temp file (on shared filesystem) to avoid shell escaping issues
+        # Using a file avoids the repr() escaping problems with inline -c scripts
+        script_dir = os.environ.get("RAY_TMPDIR", "/tmp")
+        os.makedirs(script_dir, exist_ok=True)
+        script_path = os.path.join(script_dir, f"ray_wait_{os.getpid()}.py")
 
-        print(f"  Waiting for cluster ({self.total_gpus} GPUs, fallback mode)...", flush=True)
         try:
-            subprocess.run(srun_cmd, check=True)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"Ray cluster failed to reach {self.total_gpus} GPUs "
-                f"within {self.config.startup_timeout}s"
-            ) from e
+            with open(script_path, "w") as f:
+                f.write(poll_script)
+
+            # Run on head node via srun
+            # Wrap in bash to unset proxychains env vars before running Python with ray.init()
+            bash_cmd = f"unset LD_PRELOAD PROXYCHAINS_CONF_FILE 2>/dev/null; {sys.executable} {script_path}"
+            srun_cmd = [
+                "srun",
+                f"--export={self.config.srun_export_env}",
+                "--nodes=1",
+                "--ntasks=1",
+                "--overlap",
+                "--cpu-bind=none",  # No binding needed for polling script
+                "-w", self.node_list[0],
+                "bash", "-c", bash_cmd,
+            ]
+
+            print(f"  Waiting for cluster ({self.total_gpus} GPUs, fallback mode)...", flush=True)
+            try:
+                subprocess.run(srun_cmd, check=True)
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(
+                    f"Ray cluster failed to reach {self.total_gpus} GPUs "
+                    f"within {self.config.startup_timeout}s"
+                ) from e
+        finally:
+            # Clean up temp script
+            if os.path.exists(script_path):
+                os.remove(script_path)
 
     def __enter__(self) -> RayCluster:
         """Context manager entry - start the cluster."""

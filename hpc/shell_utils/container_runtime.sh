@@ -62,12 +62,12 @@ setup_tmux_for_containers() {
     cd "$tools_dir" || return 1
     tar -xzf "$tarball_path"
 
-    # Find and move the tmux binary
+    # Find and move the tmux binary (exclude the destination path from search)
     local extracted_tmux
-    extracted_tmux=$(find . -name "tmux" -type f -executable 2>/dev/null | head -1)
+    extracted_tmux=$(find . -path "./tmux" -prune -o -name "tmux" -type f -executable -print 2>/dev/null | head -1)
 
-    if [ -n "$extracted_tmux" ] && [ -f "$extracted_tmux" ]; then
-        mv "$extracted_tmux" "$tmux_path"
+    if [ -n "$extracted_tmux" ] && [ -f "$extracted_tmux" ] && [ "$extracted_tmux" != "./tmux" ]; then
+        mv -f "$extracted_tmux" "$tmux_path"
         chmod +x "$tmux_path"
         # Cleanup extracted directory and tarball
         rm -rf tmux-* "$tarball_path" 2>/dev/null
