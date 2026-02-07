@@ -454,6 +454,7 @@ class RLJobConfig:
     agent_name: str = "terminus-2"
     harbor_env: str = "daytona"
 
+    proxychains_binary: Optional[str] = None
 
 def build_skyrl_command_string(config: RLJobConfig) -> str:
     """Build the full SkyRL command string for the sbatch template.
@@ -874,6 +875,7 @@ class RLJobRunner:
         )
 
         hpc = self._get_hpc()
+        setattr(self.config, "proxychains_binary", getattr(hpc, "proxychains_binary", None))
         num_nodes = int(os.environ.get("SLURM_JOB_NUM_NODES", self.config.num_nodes))
 
         # Use config values (from CLI overrides) instead of cluster defaults
@@ -895,6 +897,7 @@ class RLJobRunner:
             memory_per_node=ray_memory,
             object_store_memory=DEFAULT_OBJECT_STORE_MEMORY_BYTES,
             disable_cpu_bind=getattr(hpc, "disable_cpu_bind", False),
+            proxychains_binary=getattr(hpc, "proxychains_binary", None),
         )
 
         print(f"Starting Ray cluster with {num_nodes} nodes, {gpus_per_node} GPUs/node", flush=True)
@@ -976,7 +979,15 @@ class RLJobRunner:
             else:
                 cwd = None
 
-        result = subprocess.run(cmd, cwd=cwd)
+        if self.config.proxychains_binary:
+            print(f"Using proxychains binary: {self.config.proxychains_binary}", flush=True)
+            cmd = [f'{self.config.proxychains_binary}', '-f', "$PROXYCHAINS_CONF_FILE"] + cmd
+
+        srun_cmd = cmd
+
+        print(f"\nExecuting command with srun: {' '.join(srun_cmd)}", flush=True)
+
+        result = subprocess.run(srun_cmd, cwd=cwd)
         return result.returncode
 
 

@@ -448,9 +448,9 @@ class RayCluster:
             ray_cmd_str = ' '.join(cmd)
             proxychains_wrap = f'{self.config.proxychains_binary} -f "$PROXYCHAINS_CONF_FILE" '
             if self.config.ray_env_vars:
-                bash_cmd = f"{unset_proxychains}env {self.config.ray_env_vars} {proxychains_wrap}{ray_cmd_str}"
+                bash_cmd = f"{proxychains_wrap}{ray_cmd_str}"
             else:
-                bash_cmd = f"{unset_proxychains}{proxychains_wrap}{ray_cmd_str}"
+                bash_cmd = f"{proxychains_wrap}{ray_cmd_str}"
         elif self.config.use_proxychains:
             # LD_PRELOAD approach: preserve proxychains env vars for external API calls
             # The proxychains config should have localnet exclusions for internal IPs
@@ -468,9 +468,10 @@ class RayCluster:
 
         srun_cmd = [
             "srun",
-            f"--export={self.config.srun_export_env}",
+            f"--export=ALL,VLLM_HOST_IP={node_ip}",
             "--nodes=1",
             "--ntasks=1",
+            f"--gres=gpu:{self.config.gpus_per_node}",
             "--overlap",
         ]
         # Add --cpu-bind=none for Frontier/Cray systems
@@ -491,6 +492,9 @@ class RayCluster:
         ray_log_file.write(f"Bash command: {bash_cmd}\n")
         ray_log_file.write("=" * 60 + "\n")
         ray_log_file.flush()
+
+        print(f"  Starting Ray {role} on {node} (logging to {ray_log_path})...", flush=True)
+        print(f"  Command: {' '.join(srun_cmd)}", flush=True)
 
         proc = subprocess.Popen(
             srun_cmd,
