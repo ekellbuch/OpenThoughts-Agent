@@ -105,7 +105,7 @@ terminal_bench:
   # Model info for Harbor's hosted_vllm validation
   model_info:
     # Context budget: 32k total = 30k prompt + 2k generation
-    max_input_tokens: 30720   # 30k - more room for conversation history
+    max_input_tokens: 30900   # 30k - more room for conversation history
     max_output_tokens: 2048   # 2k - MUCH shorter than our 8k default
 
 # Trainer configuration - OpenHands style
@@ -211,7 +211,7 @@ generator:
   max_num_batched_tokens: 32768
 
   # Max input length for generator (OpenHands: 31232)
-  max_input_length: 30720
+  max_input_length: 30900
 
   # Memory optimization
   enable_prefix_caching: true

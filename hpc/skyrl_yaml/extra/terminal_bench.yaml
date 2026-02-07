@@ -41,7 +41,7 @@ terminal_bench:
     enable_episode_logging: false
 
     # Agent timeout overrides
-    override_timeout_sec: 720        # Agent execution timeout (seconds)
+    override_timeout_sec: 900        # Agent execution timeout (seconds)
     # override_setup_timeout_sec: 120  # Agent setup timeout
     # max_timeout_sec: 1800          # Cap timeout (useful for runaway tasks)
 
@@ -157,7 +157,7 @@ generator:
   enable_http_endpoint: true
   append_eos_token_after_stop_str_in_multi_turn: true
   sampling_params:
-    max_generate_length: 30720
+    max_generate_length: 30900
   # Engine initialization kwargs - passed directly to vLLM/SGLang engine
   # WARNING: Many kwargs are set by SkyRL internally (trust_remote_code, enforce_eager, etc.)
   # The launcher validates this at parse time and will error with a full list if you set forbidden keys.

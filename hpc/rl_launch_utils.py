@@ -854,6 +854,28 @@ class RLJobRunner:
         )
         os.environ["WANDB_DIR"] = wandb_dir
 
+        # HuggingFace Hub settings for checkpoint uploads
+        # Pass through HF_TOKEN if set (needed for hub uploads and private model access)
+        hf_token = os.environ.get("HF_TOKEN")
+        hf_hub_cache = os.environ.get("HF_HUB_CACHE") or os.environ.get("HF_HOME")
+        if hf_token:
+            # HF_TOKEN is already in environment, just log it's available
+            print(f"  HF_TOKEN=****{hf_token[-4:] if len(hf_token) > 4 else '****'}", flush=True)
+        if hf_hub_cache:
+            os.environ["HF_HUB_CACHE"] = hf_hub_cache
+            print(f"  HF_HUB_CACHE={hf_hub_cache}", flush=True)
+
+        # Supabase credentials for database registration callback
+        # KEYS should point to a file with SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+        keys_path = os.environ.get("KEYS")
+        if keys_path:
+            print(f"  KEYS={keys_path} (Supabase credentials for DB registration)", flush=True)
+        else:
+            # Also check if Supabase vars are set directly
+            supabase_url = os.environ.get("SUPABASE_URL")
+            if supabase_url:
+                print(f"  SUPABASE_URL={supabase_url[:30]}... (direct Supabase config)", flush=True)
+
         print(f"Environment configured:", flush=True)
         print(f"  TENSOR_PARALLEL_SIZE={os.environ['TENSOR_PARALLEL_SIZE']}", flush=True)
         print(f"  NUM_INFERENCE_ENGINES={os.environ['NUM_INFERENCE_ENGINES']}", flush=True)

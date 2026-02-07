@@ -485,6 +485,21 @@ def build_skyrl_hydra_args(
         served_model_name = model_path.split("/")[-1] if "/" in model_path else model_path
         generator.setdefault("engine_init_kwargs", {})["served_model_name"] = served_model_name
 
+    # HuggingFace Hub upload settings (for automatic checkpoint uploads)
+    # Default to laion/<job_name> if not explicitly provided
+    hf_hub_repo_id = exp_args.get("hf_hub_repo_id")
+    if not hf_hub_repo_id and job_name:
+        hf_hub_repo_id = f"laion/{job_name}"
+        print(f"HF Hub upload auto-defaulted to: {hf_hub_repo_id}")
+    if hf_hub_repo_id:
+        trainer["hf_hub_repo_id"] = hf_hub_repo_id
+        if exp_args.get("hf_hub_repo_id"):
+            # Only print "enabled" if user explicitly provided the repo ID
+            print(f"HF Hub upload enabled: {hf_hub_repo_id}")
+    hf_hub_private = exp_args.get("hf_hub_private", False)
+    if hf_hub_private:
+        trainer["hf_hub_private"] = True
+
     # Build args for each section
     # Keys under engine_init_kwargs need ++ prefix (add or override) since some keys
     # may already exist in SkyRL's base config while others are new

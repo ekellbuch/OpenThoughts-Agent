@@ -54,7 +54,7 @@ terminal_bench:
         enable_thinking: true
 
     # Timeout settings
-    override_timeout_sec: 720
+    override_timeout_sec: 900
 
     # Environment settings
     override_cpus: 1
@@ -153,6 +153,14 @@ trainer:
   resume_mode: latest
   # HF upload-ready checkpoints
   hf_save_interval: 20
+  # HuggingFace Hub upload (set via CLI: trainer.hf_hub_repo_id=org/repo)
+  hf_hub_repo_id: null
+  hf_hub_private: false
+  hf_hub_revision: main
+
+  # Database registration (auto-registers trained model to Supabase)
+  # Requires KEYS env var pointing to Supabase credentials file
+  enable_db_registration: true
 
   # Logging
   logger: console

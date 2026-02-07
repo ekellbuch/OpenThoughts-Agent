@@ -35,8 +35,8 @@ terminal_bench:
     # Environment settings
     environment_type: podman_hpc
     override_cpus: 1
-    override_memory_mb: 2048
-    override_storage_mb: 2048
+    override_memory_mb: 512
+    override_storage_mb: 1024
 
     # Verifier settings
     verifier_override_timeout_sec: 120
@@ -130,6 +130,14 @@ trainer:
   resume_mode: latest
   # HF upload-ready checkpoints
   hf_save_interval: 20
+  # HuggingFace Hub upload (set via CLI: trainer.hf_hub_repo_id=org/repo)
+  hf_hub_repo_id: null
+  hf_hub_private: false
+  hf_hub_revision: main
+
+  # Database registration (auto-registers trained model to Supabase)
+  # Requires KEYS env var pointing to Supabase credentials file
+  enable_db_registration: true
 
   # Logging
   project_name: OpenThoughts-Agent

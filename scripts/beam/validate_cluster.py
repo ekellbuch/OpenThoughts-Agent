@@ -10,6 +10,9 @@ from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
+# Module-level token cache to avoid re-fetching on each test
+_cached_token: Optional[str] = None
+
 
 @dataclass
 class ValidationResult:
@@ -58,18 +61,100 @@ class ValidationReport:
         return "\n".join(lines)
 
 
-def configure_beta9_endpoint(gateway_url: str, gateway_port: int = 1993, token: str = "local-test-token"):
+def get_or_create_token(gateway_host: str, gateway_port: int = 1993, force_refresh: bool = False) -> Optional[str]:
+    """Get an auth token from the Beta9 gateway.
+
+    On a fresh gateway, calling Authorize without a token will:
+    1. Create a new workspace
+    2. Return a new cluster admin token
+
+    Tokens are cached module-level to avoid re-fetching on each test.
+
+    Args:
+        gateway_host: Gateway hostname (without port).
+        gateway_port: Gateway gRPC port.
+        force_refresh: If True, ignore cached token and fetch new one.
+
+    Returns:
+        Auth token string, or None if failed.
+    """
+    global _cached_token
+
+    # Return cached token if available
+    if _cached_token and not force_refresh:
+        logger.debug(f"Using cached token")
+        return _cached_token
+
+    import grpc
+
+    try:
+        # Import from beta9 SDK (classes are in clients.gateway, not proto)
+        from beta9.clients.gateway import AuthorizeRequest, GatewayServiceStub
+    except ImportError:
+        logger.warning("beta9 SDK not installed, cannot get token")
+        return None
+
+    channel = None
+    try:
+        # Connect to gateway (insecure for local/direct connections)
+        # Add connection timeout
+        channel = grpc.insecure_channel(
+            f"{gateway_host}:{gateway_port}",
+            options=[
+                ('grpc.connect_timeout_ms', 10000),
+                ('grpc.keepalive_time_ms', 30000),
+            ]
+        )
+        stub = GatewayServiceStub(channel)
+
+        # Call authorize - this doesn't require auth and will create workspace/token on fresh gateway
+        logger.info(f"Calling authorize on {gateway_host}:{gateway_port}...")
+        response = stub.authorize(AuthorizeRequest())
+
+        if response.ok:
+            if response.new_token:
+                logger.info(f"Got new token from gateway (workspace: {response.workspace_id})")
+                _cached_token = response.new_token
+                return response.new_token
+            else:
+                logger.info(f"Authorized with existing workspace: {response.workspace_id}")
+                # Gateway already has a workspace but didn't give us a token
+                # This means we need to use an existing token
+                logger.warning("Gateway has existing workspace but no token returned - need existing token")
+                return None
+        else:
+            logger.warning(f"Authorization failed: {response.error_msg}")
+            return None
+
+    except grpc.RpcError as e:
+        logger.warning(f"gRPC error getting token: {e.code()} - {e.details()}")
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to get token from gateway: {e}")
+        return None
+    finally:
+        if channel:
+            try:
+                channel.close()
+            except Exception:
+                pass
+
+
+def configure_beta9_endpoint(gateway_url: str, gateway_port: int = 1993, token: Optional[str] = None):
     """Configure beta9 SDK to use custom gateway endpoint.
 
     This properly saves the config to ~/.beta9/ so the SDK uses the correct
     gateway host and port for gRPC connections.
 
+    If no token is provided, attempts to get one from the gateway's Authorize endpoint.
+
     Args:
         gateway_url: Full URL to Beta9 gateway (e.g., https://mybeam.a.pinggy.link).
         gateway_port: Gateway gRPC port (default 1993, or 443 for Pinggy tunnels).
-        token: Auth token for Beta9 gateway.
+        token: Auth token for Beta9 gateway (if None, will try to get from gateway).
     """
     from pathlib import Path
+    from urllib.parse import urlparse
 
     try:
         from beta9.config import ConfigContext, save_config
@@ -77,8 +162,16 @@ def configure_beta9_endpoint(gateway_url: str, gateway_port: int = 1993, token: 
         logger.warning("beta9 SDK not installed, skipping config save")
         return
 
-    # Extract hostname from URL
-    gateway_host = gateway_url.replace("https://", "").replace("http://", "").rstrip("/")
+    # Extract hostname from URL (strip any port - we use gateway_port for gRPC)
+    parsed = urlparse(gateway_url if "://" in gateway_url else f"http://{gateway_url}")
+    gateway_host = parsed.hostname or gateway_url.replace("https://", "").replace("http://", "").split(":")[0]
+
+    # If no token provided, try to get one from the gateway
+    if not token:
+        token = get_or_create_token(gateway_host, gateway_port)
+        if not token:
+            logger.warning("No token available - authentication will likely fail")
+            token = "no-token-available"
 
     # Create config context
     ctx = ConfigContext(
@@ -297,11 +390,50 @@ def validate_sandbox_isolation(gateway_url: str, gateway_port: int = 443) -> Val
                     logger.warning(f"[{test_name}] Failed to terminate sandbox {idx}: {cleanup_error}")
 
 
+def wait_for_grpc_ready(
+    gateway_host: str,
+    gateway_port: int = 1993,
+    max_attempts: int = 6,
+    delay_sec: int = 10,
+) -> bool:
+    """Wait for gRPC endpoint to be ready by attempting to get a token.
+
+    Args:
+        gateway_host: Gateway hostname.
+        gateway_port: Gateway gRPC port.
+        max_attempts: Maximum number of connection attempts.
+        delay_sec: Delay between attempts in seconds.
+
+    Returns:
+        True if endpoint is ready, False otherwise.
+    """
+    global _cached_token
+
+    for attempt in range(1, max_attempts + 1):
+        logger.info(f"Checking gRPC endpoint readiness (attempt {attempt}/{max_attempts})...")
+
+        # Try to get a token - this tests both connectivity and the Authorize endpoint
+        token = get_or_create_token(gateway_host, gateway_port, force_refresh=True)
+
+        if token:
+            logger.info("gRPC endpoint is ready and token obtained")
+            _cached_token = token
+            return True
+
+        if attempt < max_attempts:
+            logger.info(f"Endpoint not ready, waiting {delay_sec}s before retry...")
+            time.sleep(delay_sec)
+
+    logger.warning(f"gRPC endpoint not ready after {max_attempts} attempts")
+    return False
+
+
 def run_validation_suite(
     gateway_url: str,
     num_lifecycle_tests: int = 3,
     include_isolation_test: bool = True,
     gateway_port: int = 443,
+    wait_for_ready: bool = True,
 ) -> ValidationReport:
     """Run full validation suite.
 
@@ -310,16 +442,35 @@ def run_validation_suite(
         num_lifecycle_tests: Number of sandbox lifecycle tests to run.
         include_isolation_test: Whether to include isolation test.
         gateway_port: Gateway gRPC port (443 for Pinggy tunnels, 1993 for direct).
+        wait_for_ready: Whether to wait for gRPC endpoint to be ready before tests.
 
     Returns:
         ValidationReport with all test results.
     """
+    from urllib.parse import urlparse
+
     report = ValidationReport()
 
     logger.info(f"Running validation suite against: {gateway_url}")
     logger.info(f"  Lifecycle tests: {num_lifecycle_tests}")
     logger.info(f"  Isolation test: {include_isolation_test}")
     logger.info(f"  Gateway port: {gateway_port}")
+
+    # Extract hostname for gRPC connection
+    parsed = urlparse(gateway_url if "://" in gateway_url else f"http://{gateway_url}")
+    gateway_host = parsed.hostname or gateway_url.replace("https://", "").replace("http://", "").split(":")[0]
+
+    # Wait for gRPC endpoint to be ready (important for fresh LoadBalancer)
+    if wait_for_ready:
+        if not wait_for_grpc_ready(gateway_host, gateway_port):
+            # Add a failed result for connectivity
+            report.add_result(ValidationResult(
+                test_name="grpc_connectivity",
+                passed=False,
+                duration_sec=0,
+                error="gRPC endpoint not reachable after retries",
+            ))
+            return report
 
     # Run lifecycle tests
     for i in range(num_lifecycle_tests):

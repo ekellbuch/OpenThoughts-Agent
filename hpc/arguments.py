@@ -714,6 +714,20 @@ class RLArgs:
             "Default: dcagent-rl"
         }
     )
+    hf_hub_repo_id: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "HuggingFace Hub repo ID for checkpoint uploads (e.g., 'org/model-name'). "
+            "If set, HF-format checkpoints will be uploaded at hf_save_interval steps."
+        }
+    )
+    hf_hub_private: bool = field(
+        default=False,
+        metadata={
+            "help": "Create the HuggingFace Hub repo as private",
+            "store_true": True,
+        }
+    )
 
 
 def _option_strings(field_name: str) -> list[str]:

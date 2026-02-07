@@ -38,7 +38,7 @@ terminal_bench:
   harbor:
     # Agent settings
     name: terminus-2
-    max_episodes: 64
+    max_episodes: 999999
     enable_summarize: false
     store_all_messages: true
     # Disable episode-* folder creation to reduce disk I/O (SkyRL uses TrialResult directly)
@@ -52,9 +52,9 @@ terminal_bench:
     extra_body:
       chat_template_kwargs:
         enable_thinking: true
-
+    response_prefix: "<think>\n\n</think>\n\n{\n  \"analysis\": \""
     # Timeout settings
-    override_timeout_sec: 720
+    override_timeout_sec: 900
 
     # Environment settings
     override_cpus: 1
@@ -153,6 +153,14 @@ trainer:
   resume_mode: latest
   # HF upload-ready checkpoints
   hf_save_interval: 20
+  # HuggingFace Hub upload (set via CLI: trainer.hf_hub_repo_id=org/repo)
+  hf_hub_repo_id: null
+  hf_hub_private: false
+  hf_hub_revision: main
+
+  # Database registration (auto-registers trained model to Supabase)
+  # Requires KEYS env var pointing to Supabase credentials file
+  enable_db_registration: true
 
   # Logging
   project_name: OpenThoughts-Agent

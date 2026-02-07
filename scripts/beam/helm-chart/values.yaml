@@ -45,8 +45,16 @@ config:
       # S3 credentials provided via CONFIG_JSON env var (not in mounted config file)
   worker:
     imageRegistry: public.ecr.aws/n4e0e1y0
-    imagePVCName: "images"  # Must match the PVC name in manifests.resources
+    # imagePVCName not needed when using S3 registry store
   imageService:
+    # Use S3 for image storage instead of local PVC (scalable, multi-node)
+    registryStore: s3
+    registries:
+      s3:
+        bucketName: beta9-images
+        region: us-east-1
+        forcePathStyle: true  # Required for MinIO compatibility
+        # S3 credentials and endpoint provided via CONFIG_JSON env var
     runner:
       baseImageRegistry: public.ecr.aws/n4e0e1y0
 
@@ -156,12 +164,7 @@ controllers:
           echo "All internal systems ready! (External S3 will be tested by gateway)"
 
 persistence:
-  images:
-    enabled: true
-    type: persistentVolumeClaim
-    existingClaim: images  # Created by manifests.resources above
-    globalMounts:
-    - path: /images
+  # Images are now stored in S3 (registryStore: s3), no local PVC needed
   # emptyDir volume for copying config from symlinked secret to real file
   # This is needed because the gateway may have issues reading symlinked k8s secrets
   config-copy:
@@ -169,9 +172,6 @@ persistence:
     type: emptyDir
     globalMounts:
     - path: /config-copy
-
-# Note: The 'images' PVC is created via manifests.resources in this chart
-# using GKE standard storage (ReadWriteOnce, sufficient for single gateway replica)
 
 service:
   gateway:
@@ -415,18 +415,7 @@ fluent-bit:
 
 # -- Custom manifests to deploy alongside Beta9
 # These are raw Kubernetes resources that get merged with common labels
+# Note: Images PVC removed - now using S3 storage (registryStore: s3)
 manifests:
-  resources:
-    # PVC for container images storage (replaces external Filestore)
-    - apiVersion: v1
-      kind: PersistentVolumeClaim
-      metadata:
-        name: images
-      spec:
-        accessModes:
-          - ReadWriteOnce  # Single-node access (sufficient for single gateway replica)
-        resources:
-          requests:
-            storage: 50Gi
-        storageClassName: standard  # GKE default
+  resources: []  # No additional resources needed
   templates: []  # List of templated resources (processed through tpl)
