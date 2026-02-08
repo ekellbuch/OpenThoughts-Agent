@@ -435,6 +435,7 @@ else
 
     cat > "$CFG_PATH" <<PCEOF
 strict_chain
+quiet_mode
 tcp_read_time_out 30000
 tcp_connect_time_out 15000
 localnet 127.0.0.0/255.0.0.0
