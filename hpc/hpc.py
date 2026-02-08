@@ -698,7 +698,7 @@ jureca = HPC(
     # JSC-specific setup (disable core dumps to save disk space)
     pre_run_commands=["ulimit -c 0"],
     # Ray tmpdir on scratch (JSC /tmp is limited on compute nodes)
-    ray_tmpdir_base="$SCRATCH/ray",
+    #ray_tmpdir_base="$SCRATCH/ray",
     # Job scaling (from jureca.env)
     default_time_limit="24:00:00",
     num_nodes_default=1,
@@ -740,7 +740,7 @@ jupiter = HPC(
     proxychains_binary="/e/scratch/jureap59/feuer1/proxychains-ng-aarch64/bin/proxychains4",
     pre_run_commands=["ulimit -c 0"],
     # Ray tmpdir on scratch (JSC /tmp is limited on compute nodes)
-    ray_tmpdir_base="$SCRATCH/ray",
+    #ray_tmpdir_base="$SCRATCH/ray",
     default_time_limit="12:00:00",
     max_time_limit="23:59:00",
     num_nodes_slow=1,
@@ -781,8 +781,8 @@ juwels = HPC(
     proxychains_preload="/p/scratch/laionize/raj3/proxychains-ng/libproxychains4.so",
     # JSC-specific setup (disable core dumps to save disk space)
     pre_run_commands=["ulimit -c 0"],
-    # Ray tmpdir on scratch (JSC /tmp is limited on compute nodes)
-    ray_tmpdir_base="$SCRATCH/ray",
+    # Ray tmpdir on scratch (JSC /tmp is limited on compute nodes but $SCRATCH path is too long)
+    #ray_tmpdir_base="$SCRATCH/ray",
     # Job scaling (from juwels.env)
     default_time_limit="24:00:00",
     num_nodes_default=4,
