@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -438,6 +439,8 @@ def _build_config_json(s3_config: Optional[S3StorageConfig]) -> str:
         JSON string for CONFIG_JSON environment variable.
     """
     # Base config with correct service names
+    # IMPORTANT: Use camelCase keys to match Go struct `key` tags (used by koanf for YAML/JSON merging)
+    # The `json` tags are only used during final unmarshal, but koanf stores keys using `key` tag format
     config = {
         "database": {
             "postgres": {
@@ -480,6 +483,7 @@ def _build_config_json(s3_config: Optional[S3StorageConfig]) -> str:
 
         logger.info(f"[CONFIG] Using EXTERNAL S3 storage (not LocalStack)")
         logger.info(f"[CONFIG]   JuiceFS bucket URL: {juicefs_bucket_url}")
+        logger.info(f"[CONFIG]   JuiceFS fsName: beta9-fs")
         logger.info(f"[CONFIG]   Workspace endpoint: {s3_config.endpoint_url}")
 
         config["storage"]["juicefs"].update({
@@ -498,12 +502,13 @@ def _build_config_json(s3_config: Optional[S3StorageConfig]) -> str:
         })
 
         # Image service - store built images in S3 (scalable, multi-node)
-        logger.info(f"[CONFIG]   Image registry: S3 (bucket: beta9-images, endpoint: {s3_config.endpoint_url})")
+        # Use same bucket as other storage
+        logger.info(f"[CONFIG]   Image registry: S3 (bucket: {s3_config.bucket_name}, endpoint: {s3_config.endpoint_url})")
         config["imageService"] = {
             "registryStore": "s3",
             "registries": {
                 "s3": {
-                    "bucketName": "beta9-images",
+                    "bucketName": s3_config.bucket_name,  # Use same bucket as other storage
                     "region": "us-east-1",
                     "accessKey": s3_config.access_key,
                     "secretKey": s3_config.secret_key,
@@ -917,6 +922,41 @@ def wait_for_gateway_ready(
 
     logger.error(f"Gateway did not become ready within {timeout} seconds")
     return False
+
+
+def log_mounted_config(config: Beta9Config) -> None:
+    """Log the mounted gateway config with sensitive fields redacted."""
+    cmd = [
+        "kubectl", "exec", "-n", config.namespace,
+        "deploy/beta9-gateway", "--",
+        "cat", "/config-copy/beta9-config.yaml",
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.warning(f"Failed to read mounted config: {result.stderr.strip()}")
+        return
+
+    text = result.stdout
+    redacted_keys = [
+        "awsAccessKey",
+        "awsSecretKey",
+        "defaultAccessKey",
+        "defaultSecretKey",
+        "access_key",
+        "secret_key",
+        "token",
+    ]
+
+    for key in redacted_keys:
+        text = re.sub(
+            rf"({key}\s*:\s*)(\S+)",
+            r"\1***REDACTED***",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+    logger.info("Mounted gateway config (redacted):\n" + text)
 
 
 def get_deployment_status(config: Beta9Config) -> dict:

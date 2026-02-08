@@ -51,6 +51,7 @@ from scripts.beam.beta9_deploy import (
     delete_namespace_pvcs,
     deploy_beta9,
     get_deployment_status,
+    log_mounted_config,
     stop_log_collection,
     uninstall_beta9,
     wait_for_gateway_ready,
@@ -166,6 +167,7 @@ def cmd_create(args) -> int:
         if not args.dry_run:
             if not wait_for_gateway_ready(beta9_config):
                 return 1
+            log_mounted_config(beta9_config)
     else:
         logger.info("Skipping Beta9 deployment (--skip-beta9)")
 
@@ -462,6 +464,7 @@ def cmd_test(args) -> int:
         if not args.dry_run:
             if not wait_for_gateway_ready(beta9_config):
                 return 1
+            log_mounted_config(beta9_config)
 
         # Step 4: Expose cluster
         logger.info("")

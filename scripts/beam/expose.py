@@ -416,7 +416,7 @@ def setup_loadbalancer_exposure(
 # =============================================================================
 
 
-def verify_endpoint_health(public_url: str, timeout: int = 30) -> bool:
+def verify_endpoint_health(public_url: str, timeout: int = 30, grpc_port: int = 1993) -> bool:
     """Verify the public endpoint is reachable and healthy.
 
     Args:
@@ -426,7 +426,25 @@ def verify_endpoint_health(public_url: str, timeout: int = 30) -> bool:
     Returns:
         True if endpoint is healthy.
     """
-    # Beta9 health endpoint
+    from urllib.parse import urlparse
+
+    parsed = urlparse(public_url if "://" in public_url else f"http://{public_url}")
+    host = parsed.hostname or public_url
+
+    if parsed.port == 1994:
+        logger.info(f"Verifying endpoint health via gRPC: {host}:{grpc_port}")
+        try:
+            from scripts.beam.validate_cluster import get_or_create_token
+            token = get_or_create_token(host, grpc_port)
+            if token:
+                logger.info("gRPC endpoint is healthy")
+                return True
+            logger.warning("gRPC health check failed (no token)")
+            return False
+        except Exception as e:
+            logger.warning(f"gRPC endpoint check failed: {e}")
+            return False
+
     health_url = f"{public_url.rstrip('/')}/api/v1/health"
 
     logger.info(f"Verifying endpoint health: {health_url}")
