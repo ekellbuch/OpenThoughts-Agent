@@ -592,9 +592,9 @@ def construct_sft_sbatch_script(exp_args: dict, hpc) -> str:
     if hpc.needs_ssh_tunnel:
         # JSC clusters use proxychains4 for internet access
         srun_prefix += " $PROXY_CMD"
-    if os.environ.get("IMAGE"):
-        print(f"Using Apptainer image: {os.environ['IMAGE']}")
-        srun_prefix += f' apptainer exec --nv {os.environ["IMAGE"]}'
+    # if os.environ.get("IMAGE"):
+    #     print(f"Using Apptainer image: {os.environ['IMAGE']}")
+    #     srun_prefix += f' apptainer exec --nv {os.environ["IMAGE"]}'
 
     cmd = f'python -m hpc.sft_launch_utils --config "{config_path}"'
     srun_command = f"{srun_prefix} bash -c '{cmd}'"

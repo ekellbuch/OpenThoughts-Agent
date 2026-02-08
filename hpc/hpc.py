@@ -105,6 +105,11 @@ class HPC(BaseModel):
     # Modules may set these but they conflict with Ray/vLLM
     env_unsets: List[str] = []
 
+    # Ray tmpdir base path (used for RAY_TMPDIR)
+    # Default: /tmp/ray (suitable for most clusters)
+    # JSC clusters use $SCRATCH/ray due to /tmp limitations on compute nodes
+    ray_tmpdir_base: str = "/tmp/ray"
+
     def model_post_init(self, __context) -> None:
         # Derive a default CPU-per-GPU ratio when not explicitly provided.
         if not self.cpus_per_gpu:
@@ -287,12 +292,26 @@ class HPC(BaseModel):
         return "\n".join(lines)
 
     def get_ray_env_exports(self, experiments_dir: str) -> str:
-        """Generate Ray-specific environment defaults for SBATCH scripts."""
+        """Generate Ray-specific environment defaults for SBATCH scripts.
+
+        RAY_TMPDIR_BASE is configurable per-cluster (ray_tmpdir_base field).
+        For clusters using $SCRATCH, falls back to /tmp if SCRATCH is undefined.
+        """
+        # Handle env var references (e.g., "$SCRATCH/ray") with fallback to /tmp
+        if self.ray_tmpdir_base.startswith("$"):
+            # Extract var name and path suffix (e.g., "$SCRATCH/ray" -> "SCRATCH", "/ray")
+            parts = self.ray_tmpdir_base[1:].split("/", 1)
+            var_name = parts[0]
+            suffix = "/" + parts[1] if len(parts) > 1 else ""
+            tmpdir_base_line = f'  RAY_TMPDIR_BASE="${{{var_name}:-/tmp}}{suffix}"'
+        else:
+            tmpdir_base_line = f'  RAY_TMPDIR_BASE="{self.ray_tmpdir_base}"'
+
         lines = [
             "# --- Ray defaults ---",
             'export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"',
             'if [ -z "${RAY_TMPDIR:-}" ]; then',
-            '  RAY_TMPDIR_BASE="/tmp/ray"',
+            tmpdir_base_line,
             '  RAY_TMPDIR="${RAY_TMPDIR_BASE}/ray_${SLURM_JOB_ID:-$$}"',
             '  mkdir -p "$RAY_TMPDIR"',
             "fi",
@@ -678,6 +697,8 @@ jureca = HPC(
     proxychains_preload="/p/scratch/laionize/raj3/proxychains-ng/libproxychains4.so",
     # JSC-specific setup (disable core dumps to save disk space)
     pre_run_commands=["ulimit -c 0"],
+    # Ray tmpdir on scratch (JSC /tmp is limited on compute nodes)
+    ray_tmpdir_base="$SCRATCH/ray",
     # Job scaling (from jureca.env)
     default_time_limit="24:00:00",
     num_nodes_default=1,
@@ -697,9 +718,6 @@ jupiter = HPC(
     gpus_type="GH200 96GB (H100 + Grace)",
     total_partition_nodes=6000,  # ~6000 booster nodes
     gpu_directive_format="--gres=gpu:{n}",
-    # Modules: nvidia-compilers includes CUDA toolkit, nvcc, cuBLAS, etc.
-    # Note: GCC is auto-loaded; NVHPC is deprecated in favor of nvidia-compilers
-    # modules=["nvidia-compilers/25.9-CUDA-13"],
     env_vars={
         "WANDB_MODE": "offline",  # Compute nodes have no internet
         # Force GLOO and NCCL to use IPv4 (IPv6 doesn't work on Jupiter compute nodes)
@@ -718,15 +736,13 @@ jupiter = HPC(
         "NCCL_IB_TIMEOUT": "60",
     },
     training_launcher="accelerate",
-    # SSH tunnel for internet access (shared proxy 10.14.0.53 not reachable from Jupiter network)
     needs_ssh_tunnel=True,
-    # Use wrapped binary approach for proxychains (LD_PRELOAD doesn't work reliably on ARM GH200)
-    proxychains_binary="/e/home/jusers/nezhurina1/jupiter/.local/bin/proxychains4",
-    # JSC-specific setup (disable core dumps to save disk space)
+    proxychains_binary="/e/scratch/jureap59/feuer1/proxychains-ng-aarch64/bin/proxychains4",
     pre_run_commands=["ulimit -c 0"],
-    # Job scaling
+    # Ray tmpdir on scratch (JSC /tmp is limited on compute nodes)
+    ray_tmpdir_base="$SCRATCH/ray",
     default_time_limit="12:00:00",
-    max_time_limit="24:00:00",
+    max_time_limit="23:59:00",
     num_nodes_slow=1,
     num_nodes_default=4,
     num_nodes_fast=8,
@@ -762,6 +778,8 @@ juwels = HPC(
     proxychains_preload="/p/scratch/laionize/raj3/proxychains-ng/libproxychains4.so",
     # JSC-specific setup (disable core dumps to save disk space)
     pre_run_commands=["ulimit -c 0"],
+    # Ray tmpdir on scratch (JSC /tmp is limited on compute nodes)
+    ray_tmpdir_base="$SCRATCH/ray",
     # Job scaling (from juwels.env)
     default_time_limit="24:00:00",
     num_nodes_default=4,
