@@ -215,6 +215,7 @@ generator:
   async_engine: true
   batched: false
   enable_http_endpoint: true
+  enable_ray_prometheus_stats: false
 
   # vLLM stats logging interval (steps)
   vllm_stats_interval: 1

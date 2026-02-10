@@ -282,6 +282,7 @@ generator:
   # batched=false for async: each worker handles its own requests
   batched: false
   enable_http_endpoint: true
+  enable_ray_prometheus_stats: false
 
   # Multi-turn agentic conversation handling
   append_eos_token_after_stop_str_in_multi_turn: true

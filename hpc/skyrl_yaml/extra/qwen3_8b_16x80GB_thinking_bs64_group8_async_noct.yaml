@@ -272,6 +272,7 @@ generator:
   async_engine: true
   batched: false
   enable_http_endpoint: true
+  enable_ray_prometheus_stats: false
 
   # Sampling parameters for generation
   sampling_params:
