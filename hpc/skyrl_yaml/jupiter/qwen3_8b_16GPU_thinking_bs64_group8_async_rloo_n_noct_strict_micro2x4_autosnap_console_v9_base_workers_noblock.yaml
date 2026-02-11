@@ -84,7 +84,7 @@ terminal_bench:
       - ContextLengthExceededError
 
     # Orchestrator settings
-    n_concurrent_trials: 512
+    n_concurrent_trials: 384
 
     # Logging settings
     log_level: INFO
@@ -200,7 +200,7 @@ trainer:
   fully_async:
     max_staleness_steps: 32
     # Large worker count
-    num_parallel_generation_workers: 1536
+    num_parallel_generation_workers: 320
 
 # Generator configuration
 generator:

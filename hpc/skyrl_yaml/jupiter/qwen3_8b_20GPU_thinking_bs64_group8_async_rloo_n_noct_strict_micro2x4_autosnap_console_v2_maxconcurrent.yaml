@@ -57,7 +57,7 @@ terminal_bench:
       - ContextLengthExceededError
 
     # INCREASED: 256 -> 512 concurrent trials (2x)
-    n_concurrent_trials: 512
+    n_concurrent_trials: 384
 
     log_level: INFO
 
@@ -152,7 +152,7 @@ trainer:
     # INCREASED: 8 -> 12 staleness tolerance for more throughput
     max_staleness_steps: 12
     # INCREASED: 128 -> 320 generation workers
-    num_parallel_generation_workers: 1536
+    num_parallel_generation_workers: 320
 
 generator:
   backend: vllm

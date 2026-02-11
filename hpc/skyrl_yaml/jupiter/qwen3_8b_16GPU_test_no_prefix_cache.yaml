@@ -49,7 +49,7 @@ terminal_bench:
       - RewardFileEmptyError
       - VerifierOutputParseError
       - ContextLengthExceededError
-    n_concurrent_trials: 512
+    n_concurrent_trials: 384
     log_level: INFO
     enable_reward_shaping: false
     enable_error_classification: true
@@ -132,7 +132,7 @@ trainer:
 
   fully_async:
     max_staleness_steps: 32
-    num_parallel_generation_workers: 1536
+    num_parallel_generation_workers: 320
 
 generator:
   backend: vllm
