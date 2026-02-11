@@ -369,6 +369,11 @@ elif [[ $NODE_HOST == jpb* ]] || [[ $NODE_HOST == jpc* ]]; then
     # Jupiter uses aarch64 build - binary wrapper approach (LD_PRELOAD doesn't work reliably)
     PROXYCHAINS_BIN="/e/scratch/jureap59/feuer1/proxychains-ng-aarch64/bin/proxychains4"
     PROXYCHAINS_MODE="binary"
+elif [[ $NODE_HOST == lrdn* ]] || [[ $NODE_HOST == *.leonardo.local ]]; then
+    LOGIN_NODE="login05-ext.leonardo.cineca.it"
+    # Leonardo uses x86 build - binary wrapper approach
+    PROXYCHAINS_BIN="/leonardo/home/userexternal/bfeuer00/proxychains/bin/proxychains4"
+    PROXYCHAINS_MODE="binary"
 else
     echo "[proxy] Unknown cluster for node $NODE_HOST - skipping proxy setup"
     return 0
@@ -801,7 +806,7 @@ leonardo = HPC(
     name="leonardo",
     hostname_pattern=r".*?.leonardo.local",
     dotenv_filename="leonardo.env",
-    account="EUHPC_E03_068",
+    account="AIFAC_5C0_290",
     partition="boost_usr_prod",
     gpus_per_node=4,
     cpus_per_node=32,
@@ -811,7 +816,7 @@ leonardo = HPC(
     env_vars={
         "WANDB_MODE": "offline",  # No internet on compute nodes
     },
-    node_exclusion_list="lrdn[1606,2776,2425,2808,3064,3064,1953,2414,1506,1718,1779,2828,2354,3279,1370,2595,2751,2921,2368,2976,2733,2277,3136,2013,2952,1427,2682,2349,1655,1390,3151,3130,2002,2654,2101,2358,1597,2585,2900,2687,3165,3031,2798,2530,2344,1384,1420,1474,1509,1520,1556,1607,1647,1810,1927,2000,2028,2056,2120,2136,2371,2384,2444,2465,2479,2563,2598,2652,2716,2731,2746,2755,2772,2775,2792,2794,2917,2926,2927,3110,3221,3395,0666,0291,0043,1743,3299,3434,2379,2660,2711,2855,3444,3354,3111,2736,2345,0021,0037,2350,2201,2674,2642,2734,2690,3004,3091,1670,2689,3002,2362,1714,2071,1399,2940,2581,1357,3439,1569,1591,3439,1507,1531,2297,3379,3277,2912,1930,2878,2363,2984,3012,2663,2139,1457,2197]",
+    # node_exclusion_list="lrdn[1606,2776,2425,2808,3064,3064,1953,2414,1506,1718,1779,2828,2354,3279,1370,2595,2751,2921,2368,2976,2733,2277,3136,2013,2952,1427,2682,2349,1655,1390,3151,3130,2002,2654,2101,2358,1597,2585,2900,2687,3165,3031,2798,2530,2344,1384,1420,1474,1509,1520,1556,1607,1647,1810,1927,2000,2028,2056,2120,2136,2371,2384,2444,2465,2479,2563,2598,2652,2716,2731,2746,2755,2772,2775,2792,2794,2917,2926,2927,3110,3221,3395,0666,0291,0043,1743,3299,3434,2379,2660,2711,2855,3444,3354,3111,2736,2345,0021,0037,2350,2201,2674,2642,2734,2690,3004,3091,1670,2689,3002,2362,1714,2071,1399,2940,2581,1357,3439,1569,1591,3439,1507,1531,2297,3379,3277,2912,1930,2878,2363,2984,3012,2663,2139,1457,2197]",
     gpu_directive_format="--gres=gpu:{n}",
     pretok_qos="boost_qos_dbg",
     pretok_time_limit="00:30:00",
@@ -822,6 +827,9 @@ leonardo = HPC(
     # pretok_cpus_per_node=4,
     # pretok_time_limit="4:00:00",
     # pretok_partition="lrd_all_serial",
+    # SSH tunnel + proxychains for no-internet compute nodes (like JSC clusters)
+    needs_ssh_tunnel=True,
+    proxychains_binary="/leonardo/home/userexternal/bfeuer00/proxychains/bin/proxychains4",
 )
 
 capella = HPC(

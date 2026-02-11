@@ -29,6 +29,7 @@ from hpc.launch_utils import (
 from hpc.harbor_utils import (
     get_harbor_env_from_config,
     HARBOR_CONFIG_DIR,
+    load_harbor_config,
     resolve_harbor_config_path,
 )
 from hpc.hf_utils import resolve_dataset_path, derive_default_hf_repo_id, sanitize_hf_repo_id
@@ -265,6 +266,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
         if not harbor_config:
             raise ValueError("--trace-harbor-config is required for trace generation")
         harbor_config_resolved = str(resolve_harbor_config_path(harbor_config))
+        harbor_config_data = load_harbor_config(harbor_config_resolved)
 
         tasks_input_path = exp_args.get("tasks_input_path")
         if tasks_input_path:
@@ -290,11 +292,20 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
                 vllm_model_path = trace_model or ""
 
         # Collect extra agent kwargs using consolidated helper
-        from hpc.harbor_utils import collect_extra_agent_kwargs
+        from hpc.harbor_utils import collect_extra_agent_kwargs, derive_vllm_supports_tool_calling
         agent_kwargs = collect_extra_agent_kwargs(
             datagen_extras=exp_args.get("_datagen_extra_agent_kwargs"),
             cli_kwargs=exp_args.get("trace_agent_kwargs"),
         )
+        trace_agent_name = exp_args.get("trace_agent_name")
+        if not trace_agent_name:
+            agents = harbor_config_data.get("agents") or []
+            if agents and isinstance(agents[0], dict):
+                trace_agent_name = agents[0].get("name") or ""
+        if (trace_agent_name or "") == "swe-agent":
+            supports_tool_calling = derive_vllm_supports_tool_calling(vllm_cfg)
+            if supports_tool_calling is not None:
+                agent_kwargs.setdefault("supports_tool_calling", supports_tool_calling)
 
         # Convert vllm_cfg dataclass to dict for pass-through (if not already done)
         trace_vllm_server_config = asdict(vllm_cfg) if vllm_cfg else {}
@@ -320,7 +331,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             api_port=int(exp_args.get("datagen_api_port") or 8000),
             model=harbor_model_name,
             served_model_id=served_model_id,
-            agent=exp_args.get("trace_agent_name") or "",
+            agent=trace_agent_name or "",
             trace_env=exp_args.get("trace_env") or get_harbor_env_from_config(harbor_config_resolved),
             n_concurrent=int(exp_args.get("trace_n_concurrent") or 64),
             n_attempts=int(exp_args.get("trace_n_attempts") or 1),

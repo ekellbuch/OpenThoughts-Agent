@@ -158,11 +158,18 @@ def prepare_eval_configuration(exp_args: dict) -> dict:
 
     # Collect extra agent kwargs from datagen config and CLI
     # NOTE: Do NOT include Harbor YAML base kwargs here - merge_agent_kwargs() handles that
-    from hpc.harbor_utils import collect_extra_agent_kwargs
+    from hpc.harbor_utils import collect_extra_agent_kwargs, derive_vllm_supports_tool_calling
     exp_args["_eval_agent_kwargs"] = collect_extra_agent_kwargs(
         datagen_extras=exp_args.get("_datagen_extra_agent_kwargs"),
         cli_kwargs=exp_args.get("trace_agent_kwargs"),
     )
+    if agent_name == "swe-agent":
+        vllm_cfg = exp_args.get("_datagen_vllm_server_config")
+        supports_tool_calling = derive_vllm_supports_tool_calling(vllm_cfg)
+        if supports_tool_calling is not None:
+            exp_args["_eval_agent_kwargs"].setdefault(
+                "supports_tool_calling", supports_tool_calling
+            )
 
     if exp_args.get("trace_env"):
         eval_env = exp_args["trace_env"]
