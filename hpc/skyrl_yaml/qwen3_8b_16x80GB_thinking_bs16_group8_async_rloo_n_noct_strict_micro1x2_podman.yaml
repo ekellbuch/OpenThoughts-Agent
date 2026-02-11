@@ -28,6 +28,7 @@ terminal_bench:
     extra_body:
       chat_template_kwargs:
         enable_thinking: true
+      response_prefix: "<think>\n\n</think>\n\n{\n  \"analysis\": \""
 
     # Timeout settings
     override_timeout_sec: 360
