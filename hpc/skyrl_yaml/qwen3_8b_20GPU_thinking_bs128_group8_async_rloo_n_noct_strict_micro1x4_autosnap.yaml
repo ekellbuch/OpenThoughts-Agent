@@ -199,7 +199,7 @@ trainer:
   # Fully async generation (settings from v2_maxconcurrent)
   fully_async:
     max_staleness_steps: 12
-    num_parallel_generation_workers: 320
+    num_parallel_generation_workers: 1536
 
 # Generator configuration
 generator:
