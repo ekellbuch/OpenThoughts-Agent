@@ -135,7 +135,7 @@ trainer:
 
   fully_async:
     max_staleness_steps: 32
-    num_parallel_generation_workers: 1536
+    num_parallel_generation_workers: 768
 
 generator:
   backend: vllm

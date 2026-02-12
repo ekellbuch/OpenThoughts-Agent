@@ -142,7 +142,7 @@ trainer:
 
   fully_async:
     # 2x workers for 2x batch size
-    num_parallel_generation_workers: 128
+    num_parallel_generation_workers: 768
 
 # Generator (vLLM inference) configuration
 generator:

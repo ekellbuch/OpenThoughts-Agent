@@ -751,6 +751,10 @@ jupiter = HPC(
     proxychains_binary="/e/scratch/jureap59/feuer1/proxychains-ng-aarch64/bin/proxychains4",
     # Enable NUMA monitoring for GH200 unified memory debugging
     enable_numa_monitoring=True,
+    # GH200 NUMA topology: --gpu-bind=closest restricts CPU affinity to NUMA node 0 only
+    # (closest to GPU 0) even with all 4 GPUs allocated. --cpu-bind=none ensures Ray
+    # processes can use all 288 CPUs across all 4 Grace CPU NUMA domains.
+    disable_cpu_bind=True,
     pre_run_commands=["ulimit -c 0"],
     # Ray tmpdir on scratch (JSC /tmp is limited on compute nodes)
     #ray_tmpdir_base="$SCRATCH/ray",

@@ -4,7 +4,7 @@
 # THROUGHPUT OPTIMIZATION v2: Maximum Concurrent Trials
 # Key changes:
 #   - n_concurrent_trials: 256 -> 512 (2x concurrent trials - main bottleneck)
-#   - num_parallel_generation_workers: 128 -> 320 (2.5x workers to feed more trials)
+#   - num_parallel_generation_workers: 768 -> 320 (2.5x workers to feed more trials)
 #   - num_inference_engines: 8 -> 12 (for 20 total GPUs: 12 engines + 8 policy/ref)
 #   - max_staleness_steps: 8 -> 12 (allow more staleness for throughput)
 #
@@ -151,7 +151,7 @@ trainer:
     # INCREASED: 8 -> 12 staleness tolerance for more throughput
     max_staleness_steps: 12
     # INCREASED: 128 -> 320 generation workers
-    num_parallel_generation_workers: 1536
+    num_parallel_generation_workers: 768
 
 generator:
   backend: vllm

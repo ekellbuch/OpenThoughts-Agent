@@ -205,7 +205,7 @@ trainer:
   # ==========================================================================
   fully_async:
     # Constraint: mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1)
-    num_parallel_generation_workers: 64
+    num_parallel_generation_workers: 768
 
 # Generator (vLLM inference) configuration
 generator:

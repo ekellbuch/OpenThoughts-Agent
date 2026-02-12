@@ -6,7 +6,7 @@
 #   - num_inference_engines: 8 -> 12 (moderate increase)
 #   - max_num_seqs: 32 -> 56 (75% more sequences per engine for better batching)
 #   - max_num_batched_tokens: 32768 -> 65536 (2x tokens for longer sequences)
-#   - num_parallel_generation_workers: 128 -> 224 (matched to 2x engines)
+#   - num_parallel_generation_workers: 768 -> 224 (matched to 2x engines)
 #   - n_concurrent_trials: 256 -> 448 (matched to worker capacity)
 #   - timeout_multiplier: 2.0 -> 2.5 (more tolerance for larger batches)
 #
@@ -155,7 +155,7 @@ trainer:
     # EFFICIENT: Keep staleness reasonable for training stability
     max_staleness_steps: 10
     # EFFICIENT: 128 -> 224 workers (matched to ~18-19 per engine)
-    num_parallel_generation_workers: 224
+    num_parallel_generation_workers: 768
 
 generator:
   backend: vllm

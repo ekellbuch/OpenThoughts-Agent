@@ -278,7 +278,7 @@ trainer:
     # Constraint: mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1)
     # With mini_batch_size=16 and max_staleness_steps=4: 16 <= workers <= 80
     max_staleness_steps: 4
-    num_parallel_generation_workers: 128
+    num_parallel_generation_workers: 768
 
 # Generator (vLLM inference) configuration
 generator:

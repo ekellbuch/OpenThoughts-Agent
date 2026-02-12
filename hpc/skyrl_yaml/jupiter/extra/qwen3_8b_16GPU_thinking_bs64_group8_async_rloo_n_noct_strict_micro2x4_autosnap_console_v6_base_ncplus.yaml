@@ -204,7 +204,7 @@ trainer:
   # Fully async generation
   fully_async:
     max_staleness_steps: 8
-    num_parallel_generation_workers: 128
+    num_parallel_generation_workers: 768
 
 # Generator configuration
 generator:

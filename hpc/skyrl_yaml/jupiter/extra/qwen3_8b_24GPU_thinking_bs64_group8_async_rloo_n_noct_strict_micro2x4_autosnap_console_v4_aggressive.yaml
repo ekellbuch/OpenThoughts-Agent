@@ -4,7 +4,7 @@
 # THROUGHPUT OPTIMIZATION v4: Aggressive Scaling (Push Limits)
 # Key changes:
 #   - num_inference_engines: 8 -> 16 (2x engines)
-#   - num_parallel_generation_workers: 128 -> 384 (3x workers)
+#   - num_parallel_generation_workers: 768 -> 384 (3x workers)
 #   - n_concurrent_trials: 256 -> 512 (2x concurrent trials)
 #   - max_num_seqs: 32 -> 64 (2x sequences per engine)
 #   - max_staleness_steps: 8 -> 16 (2x staleness tolerance)
@@ -154,7 +154,7 @@ trainer:
     # AGGRESSIVE: 8 -> 16 staleness tolerance
     max_staleness_steps: 16
     # AGGRESSIVE: 128 -> 384 generation workers (3x)
-    num_parallel_generation_workers: 384
+    num_parallel_generation_workers: 768
 
 generator:
   backend: vllm

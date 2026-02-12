@@ -4,7 +4,7 @@
 # THROUGHPUT OPTIMIZATION v3: Balanced Scaling
 # Key changes:
 #   - num_inference_engines: 8 (unchanged, for 16 total GPUs: 8 engines + 8 policy/ref)
-#   - num_parallel_generation_workers: 128 -> 192 (+50%)
+#   - num_parallel_generation_workers: 768 -> 192 (+50%)
 #   - n_concurrent_trials: 256 -> 320 (+25%)
 #   - max_num_seqs: 32 -> 40 (+25%)
 #   - max_num_batched_tokens: 32768 -> 40960 (+25%)

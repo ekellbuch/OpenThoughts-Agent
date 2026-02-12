@@ -4,7 +4,7 @@
 # THROUGHPUT OPTIMIZATION v1: High Generator Count
 # Key changes:
 #   - num_inference_engines: 8 -> 12 (50% more engines)
-#   - num_parallel_generation_workers: 128 -> 256 (2x workers)
+#   - num_parallel_generation_workers: 768 -> 256 (2x workers)
 #   - n_concurrent_trials: 256 -> 384 (50% more concurrent trials)
 #   - max_num_seqs: 32 -> 48 (more sequences per engine)
 #
