@@ -117,6 +117,84 @@ def reformat_assistant_content(content: str) -> Tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Parquet-level processing (memory-efficient, uses pyarrow directly)
+# ---------------------------------------------------------------------------
+
+
+def _process_conversations_list(
+    conversations_list: list,
+    role_tag: str,
+    content_tag: str,
+    stats: Dict[str, int],
+) -> list:
+    """Process a batch of conversations (list of list-of-dicts) in place."""
+    processed = []
+    for convs in conversations_list:
+        new_convs = []
+        for msg in convs:
+            if isinstance(msg, dict) and msg.get(role_tag) == "assistant":
+                reformatted, fmt = reformat_assistant_content(msg[content_tag])
+                stats[fmt] = stats.get(fmt, 0) + 1
+                new_convs.append({**msg, content_tag: reformatted})
+            else:
+                new_convs.append(msg)
+        processed.append(new_convs)
+    return processed
+
+
+def _process_parquet_file(
+    input_path: str,
+    output_path: str,
+    conversations_col: str,
+    role_tag: str,
+    content_tag: str,
+    stats: Dict[str, int],
+) -> int:
+    """Process a single parquet file, one row-group at a time.
+
+    Returns the number of rows processed.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    pf = pq.ParquetFile(input_path)
+    writer = None
+    total_rows = 0
+
+    try:
+        for rg_idx in range(pf.metadata.num_row_groups):
+            table = pf.read_row_group(rg_idx)
+            total_rows += table.num_rows
+
+            if conversations_col not in table.column_names:
+                # No conversations column — copy through unchanged
+                if writer is None:
+                    writer = pq.ParquetWriter(output_path, table.schema)
+                writer.write_table(table)
+                continue
+
+            # Convert conversations column to Python, process, convert back
+            convs_list = table.column(conversations_col).to_pylist()
+            processed = _process_conversations_list(
+                convs_list, role_tag, content_tag, stats,
+            )
+
+            col_idx = table.column_names.index(conversations_col)
+            table = table.set_column(
+                col_idx, conversations_col, pa.array(processed),
+            )
+
+            if writer is None:
+                writer = pq.ParquetWriter(output_path, table.schema)
+            writer.write_table(table)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    return total_rows
+
+
+# ---------------------------------------------------------------------------
 # Dataset-level processing (requires `datasets` library)
 # ---------------------------------------------------------------------------
 
@@ -128,6 +206,10 @@ def preprocess_dataset_for_thinking(
     content_tag: str = "content",
 ) -> tuple:
     """Process a HF Dataset split, reformatting assistant messages for Qwen3.
+
+    This in-memory version is used by the CLI push-to-hub workflow.  For the
+    HPC launch path, use :func:`preprocess_local_dataset` instead (processes
+    parquet files one at a time without loading the full dataset into memory).
 
     Args:
         dataset: A ``datasets.Dataset`` object.
@@ -169,10 +251,12 @@ def preprocess_local_dataset(
     content_tag: str = "content",
     output_dir: str | None = None,
 ) -> str:
-    """Load a local dataset, preprocess for Qwen3, and save back.
+    """Preprocess a local dataset for Qwen3, processing parquet files one at a time.
 
     This is the main entry point used by ``hpc/launch.py`` to preprocess
     datasets after they are downloaded but before LlamaFactory sees them.
+    It never loads the full dataset into memory — each parquet shard is read,
+    processed, and written independently.
 
     Args:
         dataset_path: Path to a local HF-format dataset (snapshot directory).
@@ -185,8 +269,6 @@ def preprocess_local_dataset(
     Returns:
         Path to the saved processed dataset directory.
     """
-    from datasets import Dataset, DatasetDict, load_dataset
-
     if output_dir is None:
         output_dir = dataset_path.rstrip("/") + "_thinking_preprocessed"
 
@@ -196,41 +278,59 @@ def preprocess_local_dataset(
         print(f"[prep_for_thinking] Already preprocessed: {output_dir}")
         return output_dir
 
-    print(f"[prep_for_thinking] Loading dataset from {dataset_path}")
-    ds = load_dataset(dataset_path)
-    if isinstance(ds, Dataset):
-        ds = DatasetDict({"train": ds})
+    # Discover parquet files (preserving subdirectory structure)
+    parquet_files: List[Tuple[str, str]] = []  # (relative_dir, filename)
+    for root, _dirs, files in os.walk(dataset_path):
+        for fname in sorted(files):
+            if fname.endswith(".parquet"):
+                rel_dir = os.path.relpath(root, dataset_path)
+                parquet_files.append((rel_dir, fname))
+
+    if not parquet_files:
+        print(f"[prep_for_thinking] WARNING: No parquet files found in {dataset_path}")
+        return dataset_path
+
+    print(
+        f"[prep_for_thinking] Processing {len(parquet_files)} parquet file(s) "
+        f"from {dataset_path}"
+    )
 
     all_stats: Dict[str, int] = {}
-    processed_splits: dict[str, Dataset] = {}
+    total_rows = 0
 
-    for split_name, split_ds in ds.items():
-        print(f"[prep_for_thinking] Processing split '{split_name}' ({len(split_ds)} rows)...")
-        processed, stats = preprocess_dataset_for_thinking(
-            split_ds,
-            conversations_col=conversations_col,
-            role_tag=role_tag,
-            content_tag=content_tag,
+    for rel_dir, fname in parquet_files:
+        input_path = os.path.join(dataset_path, rel_dir, fname)
+        out_dir = os.path.join(output_dir, rel_dir)
+        os.makedirs(out_dir, exist_ok=True)
+        output_path = os.path.join(out_dir, fname)
+
+        rows = _process_parquet_file(
+            input_path, output_path,
+            conversations_col, role_tag, content_tag,
+            all_stats,
         )
-        processed_splits[split_name] = processed
-        for k, v in stats.items():
-            all_stats[k] = all_stats.get(k, 0) + v
+        total_rows += rows
+        print(f"  {os.path.join(rel_dir, fname)}: {rows} rows")
 
-    total = sum(all_stats.values())
-    print(f"[prep_for_thinking] Format stats ({total} assistant messages):")
+    # Copy non-parquet files (README, .gitattributes, etc.) so the directory
+    # looks like a valid HF dataset repo.
+    for root, _dirs, files in os.walk(dataset_path):
+        for fname in files:
+            if fname.endswith(".parquet"):
+                continue
+            rel = os.path.relpath(os.path.join(root, fname), dataset_path)
+            dest = os.path.join(output_dir, rel)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            if not os.path.exists(dest):
+                import shutil
+                shutil.copy2(os.path.join(root, fname), dest)
+
+    # Print stats
+    total_msgs = sum(all_stats.values())
+    print(f"[prep_for_thinking] Done: {total_rows} rows, {total_msgs} assistant messages")
     for fmt, count in sorted(all_stats.items(), key=lambda x: -x[1]):
-        pct = 100 * count / total if total else 0
+        pct = 100 * count / total_msgs if total_msgs else 0
         print(f"  {fmt:40s} {count:6d}  ({pct:.1f}%)")
-
-    # Save as parquet in HF-repo-compatible structure so LlamaFactory
-    # (and load_dataset) can discover the files automatically.
-    os.makedirs(output_dir, exist_ok=True)
-    data_dir = os.path.join(output_dir, "data")
-    os.makedirs(data_dir, exist_ok=True)
-    for split_name, split_ds in processed_splits.items():
-        outfile = os.path.join(data_dir, f"{split_name}-00000-of-00001.parquet")
-        split_ds.to_parquet(outfile)
-        print(f"[prep_for_thinking] Wrote {outfile}")
 
     # Write marker so we don't re-process on retry
     with open(marker, "w") as f:
