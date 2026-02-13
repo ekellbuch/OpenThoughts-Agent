@@ -730,7 +730,7 @@ jupiter = HPC(
     account="jureap59",
     partition="booster",
     gpus_per_node=4,  # 4x GH200 superchips per node
-    cpus_per_node=72,  # 288 ARM cores total, but request subset; 72 per Grace CPU
+    cpus_per_node=288,  # 4 Grace CPUs × 72 cores = 288 ARM cores per node
     internet_node=False,  # Compute nodes have no internet (like other JSC clusters)
     gpus_type="GH200 96GB (H100 + Grace)",
     total_partition_nodes=6000,  # ~6000 booster nodes
