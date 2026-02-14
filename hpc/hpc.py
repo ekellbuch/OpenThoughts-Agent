@@ -744,6 +744,11 @@ jupiter = HPC(
         # which resolves to IPv6. Let Gloo auto-detect the interface.
         # GH200 NUMA affinity: bind each GPU worker to its local CPU NUMA node
         "SKYRL_ENABLE_NUMA_AFFINITY": "1",
+        # Use httpx instead of aiohttp for LiteLLM HTTP transport.
+        # aiohttp + uvloop has a known issue: when agent timeouts cancel in-flight
+        # acompletion() calls, the abandoned coroutine's aiohttp session gets GC'd,
+        # closing the socket fd while uvloop's epoll still references it → EBADF → SIGABRT.
+        "DISABLE_AIOHTTP_TRANSPORT": "True",
     },
     # NOTE: Do NOT use master_addr_suffix="i" - the "i" suffixed hostname is not DNS-resolvable
     # InfiniBand routing is handled by NCCL_SOCKET_IFNAME=ib0 instead
