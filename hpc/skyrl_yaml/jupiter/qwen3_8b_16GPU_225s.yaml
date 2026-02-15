@@ -34,7 +34,7 @@ terminal_bench:
       chat_template_kwargs:
         enable_thinking: true
       response_prefix: "<think>\n\n</think>\n\n{\n  \"analysis\": \""
-    override_timeout_sec: 450
+    override_timeout_sec: 225
     override_cpus: 1
     override_memory_mb: 2048
     override_storage_mb: 2048
@@ -62,6 +62,7 @@ terminal_bench:
       - ConnectionError
       - RewardFileNotFoundError
       - RewardFileEmptyError
+      - AgentEnvironmentTimeoutError
     zero_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError

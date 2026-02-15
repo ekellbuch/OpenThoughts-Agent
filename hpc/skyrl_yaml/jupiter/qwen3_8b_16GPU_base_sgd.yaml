@@ -60,6 +60,7 @@ terminal_bench:
       - ConnectionError
       - RewardFileNotFoundError
       - RewardFileEmptyError
+      - AgentEnvironmentTimeoutError
     zero_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError
