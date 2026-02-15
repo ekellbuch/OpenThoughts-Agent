@@ -23,6 +23,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import pandas as pd
 
 
@@ -57,8 +60,8 @@ def extract_metrics_blocks(log_content: str) -> list[dict[str, Any]]:
     content = '\n'.join(cleaned_lines)
 
     # Find all metric blocks
-    # They start with {'async/staleness_max': and end with 'trainer/global_step': N}
-    pattern = r"\{'async/staleness_max':[^}]+?'trainer/global_step':\s*\d+\}"
+    # They start with {'async/... and end with 'trainer/global_step': N}
+    pattern = r"\{'async/[^}]+?'trainer/global_step':\s*\d+\}"
 
     metrics_list = []
 
@@ -256,21 +259,22 @@ def process_log_file(log_path: Path) -> tuple[str, list[dict[str, Any]], list[di
     vllm_metrics = extract_vllm_metrics(content)
 
     # Extract a short name from the filename
-    # e.g., "rl_rl-conf_qwen_8b_16GP_thin_bs64_grou_asyn_rloo_n_noct_stri_micr_auto_cons_v3_bala-yaml_mode-path__216747.out"
-    # -> "v3_bala_216747"
     name = log_path.stem
 
-    # Try to extract version and job ID
-    version_match = re.search(r'_(v\d+_[a-z]+)', name)
-    job_id_match = re.search(r'_(\d{6})\.', str(log_path))
-
-    if version_match and job_id_match:
-        short_name = f"{version_match.group(1)}_{job_id_match.group(1)}"
-    elif job_id_match:
-        short_name = f"job_{job_id_match.group(1)}"
+    # If the stem is already short and descriptive (e.g. "900s_225703"), use it directly.
+    # Otherwise try to extract version + job ID from long launcher-generated names.
+    if len(name) <= 30:
+        short_name = name
     else:
-        # Fallback: use last 30 chars
-        short_name = name[-30:] if len(name) > 30 else name
+        version_match = re.search(r'_(v\d+_[a-z]+)', name)
+        job_id_match = re.search(r'_(\d{6})\.', str(log_path))
+
+        if version_match and job_id_match:
+            short_name = f"{version_match.group(1)}_{job_id_match.group(1)}"
+        elif job_id_match:
+            short_name = f"job_{job_id_match.group(1)}"
+        else:
+            short_name = name[-30:]
 
     return short_name, metrics, vllm_metrics
 
@@ -321,20 +325,22 @@ def generate_markdown_report(
 
         # Overall summary
         f.write("## Overview\n\n")
-        f.write("| Log File | Steps | Final Reward (mean) | Final Reward (max) | Total Time (s) |\n")
-        f.write("|----------|-------|---------------------|-------------------|----------------|\n")
+        f.write("| Log File | Total Steps | Metric Blocks | Final Reward (mean) | Final Reward (max) | Total Time (s) |\n")
+        f.write("|----------|-------------|---------------|---------------------|-------------------|----------------|\n")
 
         for log_name, metrics in all_data.items():
             if not metrics:
                 continue
 
             steps = len(metrics)
+            global_steps = [m.get('trainer/global_step', 0) for m in metrics]
+            total_steps = max(global_steps) if global_steps else 0
             rewards = [m.get('reward/avg_raw_reward', 0) for m in metrics]
             mean_reward = sum(rewards) / len(rewards) if rewards else 0
             max_reward = max(rewards) if rewards else 0
             total_time = sum(m.get('timing/step', 0) for m in metrics)
 
-            f.write(f"| {log_name} | {steps} | {mean_reward:.4f} | {max_reward:.4f} | {total_time:.1f} |\n")
+            f.write(f"| {log_name} | {total_steps} | {steps} | {mean_reward:.4f} | {max_reward:.4f} | {total_time:.1f} |\n")
 
         f.write("\n")
 
@@ -498,6 +504,38 @@ def generate_markdown_report(
                 f.write("\n")
 
 
+def generate_reward_plot(all_data: dict[str, list[dict[str, Any]]], output_path: Path) -> None:
+    """Generate a plot of average reward vs training step for each log."""
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for log_name, metrics in all_data.items():
+        if not metrics:
+            continue
+
+        steps = [m.get('trainer/global_step', i) for i, m in enumerate(metrics)]
+        rewards = [m.get('reward/avg_raw_reward', 0) for m in metrics]
+
+        if not steps:
+            continue
+
+        # Plot raw data as faint line, EMA as bold
+        raw_series = pd.Series(rewards, index=steps)
+        ema_series = raw_series.ewm(span=5).mean()
+
+        color = ax.plot(steps, ema_series.values, label=log_name, linewidth=2)[0].get_color()
+        ax.plot(steps, rewards, color=color, alpha=0.2, linewidth=1)
+
+    ax.set_xlabel('Training Step')
+    ax.set_ylabel('Avg Raw Reward')
+    ax.set_title('Average Reward vs Training Step')
+    ax.legend(loc='best', fontsize='small')
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved reward plot to: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Parse SkyRL training metrics from console logs"
@@ -585,6 +623,9 @@ def main():
         print("Error: No metrics found in any log files")
         sys.exit(1)
 
+    # Timestamp prefix for all output files
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     # Create DataFrame for training metrics
     df = pd.DataFrame(all_rows) if all_rows else pd.DataFrame()
 
@@ -594,7 +635,7 @@ def main():
 
     # Save training metrics CSV
     if not df.empty:
-        csv_path = output_folder / "metrics_table.csv"
+        csv_path = output_folder / f"{ts}_metrics_table.csv"
         df.to_csv(csv_path, index=False)
         print(f"\nSaved training metrics table to: {csv_path}")
 
@@ -602,7 +643,7 @@ def main():
         for log_name, metrics in all_data.items():
             if metrics:
                 log_df = pd.DataFrame(metrics)
-                log_csv_path = output_folder / f"metrics_{log_name}.csv"
+                log_csv_path = output_folder / f"{ts}_metrics_{log_name}.csv"
                 log_df.to_csv(log_csv_path, index=False)
                 print(f"Saved per-log training metrics to: {log_csv_path}")
 
@@ -611,7 +652,7 @@ def main():
 
     # Save vLLM metrics CSV
     if not vllm_df.empty:
-        vllm_csv_path = output_folder / "vllm_metrics_table.csv"
+        vllm_csv_path = output_folder / f"{ts}_vllm_metrics_table.csv"
         vllm_df.to_csv(vllm_csv_path, index=False)
         print(f"\nSaved vLLM metrics table to: {vllm_csv_path}")
 
@@ -620,14 +661,19 @@ def main():
             aggregated = data.get('aggregated', [])
             if aggregated:
                 log_vllm_df = pd.DataFrame(aggregated)
-                log_vllm_csv_path = output_folder / f"vllm_metrics_{log_name}.csv"
+                log_vllm_csv_path = output_folder / f"{ts}_vllm_metrics_{log_name}.csv"
                 log_vllm_df.to_csv(log_vllm_csv_path, index=False)
                 print(f"Saved per-log vLLM metrics to: {log_vllm_csv_path}")
 
     # Generate markdown report
-    md_path = output_folder / "metrics_report.md"
+    md_path = output_folder / f"{ts}_metrics_report.md"
     generate_markdown_report(all_data, md_path, df, vllm_data=all_vllm_data if all_vllm_data else None)
     print(f"Saved markdown report to: {md_path}")
+
+    # Generate reward vs steps plot
+    if all_data:
+        plot_path = output_folder / f"{ts}_reward_vs_steps.png"
+        generate_reward_plot(all_data, plot_path)
 
     # Print quick summary
     print("\n" + "=" * 60)
@@ -639,13 +685,15 @@ def main():
             continue
 
         steps = len(metrics)
+        global_steps = [m.get('trainer/global_step', 0) for m in metrics]
+        total_steps = max(global_steps) if global_steps else 0
         rewards = [m.get('reward/avg_raw_reward', 0) for m in metrics]
         final_reward = rewards[-1] if rewards else 0
         max_reward = max(rewards) if rewards else 0
         avg_step_time = sum(m.get('timing/step', 0) for m in metrics) / steps if steps else 0
 
         print(f"\n{log_name}:")
-        print(f"  Steps: {steps}")
+        print(f"  Total Steps: {total_steps}  ({steps} metric blocks)")
         print(f"  Final Reward: {final_reward:.4f}")
         print(f"  Max Reward: {max_reward:.4f}")
         print(f"  Avg Step Time: {avg_step_time:.1f}s")
