@@ -279,16 +279,22 @@ def extract_terminal_bench_agent_env(parsed: ParsedRLConfig) -> tuple:
     return agent_name, harbor_env
 
 
-def _flatten_dict(d: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
+def _flatten_dict(d: Dict[str, Any], prefix: str = "", leaf_key_suffixes: tuple = ("_kwargs",)) -> Dict[str, Any]:
     """Flatten a nested dictionary to dotted keys.
 
     Example:
         {"trainer": {"policy": {"lr": 1e-6}}}
         -> {"trainer.policy.lr": 1e-6}
 
+    Dicts whose key ends with a suffix in ``leaf_key_suffixes`` (e.g.
+    ``optimizer_kwargs``) are kept as whole dict values rather than
+    recursed into, so that Hydra receives them as a single override.
+
     Args:
         d: Dictionary to flatten.
         prefix: Key prefix for recursion.
+        leaf_key_suffixes: Key suffixes that signal a dict should be
+            treated as a leaf value (not recursed into).
 
     Returns:
         Flattened dictionary with dotted keys.
@@ -296,8 +302,8 @@ def _flatten_dict(d: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
     items = {}
     for k, v in d.items():
         key = f"{prefix}.{k}" if prefix else k
-        if isinstance(v, dict):
-            items.update(_flatten_dict(v, key))
+        if isinstance(v, dict) and not any(k.endswith(s) for s in leaf_key_suffixes):
+            items.update(_flatten_dict(v, key, leaf_key_suffixes))
         elif v is not None:
             items[key] = v
     return items
@@ -364,6 +370,14 @@ def _format_hydra_arg(key: str, value: Any, prefix: str = "") -> str:
     """
     if isinstance(value, bool):
         return f"{prefix}{key}={str(value).lower()}"
+    elif isinstance(value, dict):
+        # Format as Hydra dict literal: {k1: v1, k2: v2}
+        # Used for passthrough kwargs (e.g. optimizer_kwargs: {momentum: 0.9})
+        dict_items = ", ".join(
+            f"{k}: {str(v).lower() if isinstance(v, bool) else v}"
+            for k, v in value.items()
+        )
+        return f"{prefix}{key}={{{dict_items}}}"
     elif isinstance(value, (list, tuple)):
         # Format as YAML list WITHOUT outer quotes so Hydra parses it as a list
         # (with outer quotes like "['a']", Hydra treats it as a string literal)
@@ -506,7 +520,7 @@ def build_skyrl_hydra_args(
     # - engine_init_kwargs: vLLM engine settings vary by config
     # - hf_hub_*: HuggingFace upload settings not in base config
     # - enable_db_registration: database registration setting
-    optional_patterns = {".engine_init_kwargs.", ".hf_hub_", ".enable_db_registration"}
+    optional_patterns = {".engine_init_kwargs.", ".hf_hub_", ".enable_db_registration", ".optimizer_kwargs"}
 
     for section, values in [("trainer", trainer), ("generator", generator), ("data", data)]:
         for key, val in _flatten_dict(values, section).items():
