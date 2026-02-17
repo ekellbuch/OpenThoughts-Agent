@@ -51,7 +51,7 @@ terminal_bench:
       - RewardFileEmptyError
       - VerifierOutputParseError
       - ContextLengthExceededError
-    n_concurrent_trials: 256
+    n_concurrent_trials: 192
     log_level: INFO
     enable_reward_shaping: false
     enable_error_classification: true
@@ -115,7 +115,7 @@ trainer:
       lr: 1e-6
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
-      max_grad_norm: 5.0
+      max_grad_norm: 10.0
     fsdp_config:
       cpu_offload: false
       reshard_after_forward: false
@@ -139,7 +139,7 @@ trainer:
 
 generator:
   backend: vllm
-  timeout_multiplier: 2.0
+  timeout_multiplier: 1.0
   model_dtype: bfloat16
 
   inference_engine_tensor_parallel_size: 1
@@ -149,12 +149,12 @@ generator:
   eval_n_samples_per_prompt: 8
 
   # TEST CHANGE: Even lower GPU memory utilization
-  gpu_memory_utilization: 0.65
+  gpu_memory_utilization: 0.85
 
   max_num_seqs: 32
-  max_num_batched_tokens: 32768
+  max_num_batched_tokens: 65536
 
-  enable_prefix_caching: false
+  enable_prefix_caching: true
   enable_chunked_prefill: true
 
   run_engines_locally: true
