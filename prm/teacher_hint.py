@@ -59,7 +59,7 @@ class TeacherHint(ProcessRewardModel):
         k: int = 6,
         teacher_system_prompt: str | None = None,
         teacher_user_prompt_template: str | None = None,
-        max_hint_tokens: int = 256,
+        max_hint_tokens: int = 2048,
         hint_prefix: str = "\n\n[HINT FROM TEACHER]: ",
         hint_suffix: str = "\n\n",
         **kwargs: Any,

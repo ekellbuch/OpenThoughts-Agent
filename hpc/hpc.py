@@ -876,6 +876,7 @@ capella = HPC(
     nccl_settings={
         "NCCL_DEBUG": "INFO",
         "NCCL_PROTO": "simple",
+        "NCCL_TIMEOUT": "1800",
         "NCCL_IB_TIMEOUT": "23",
         "NCCL_IB_RETRY_CNT": "13",
         "FI_EFA_FORK_SAFE": "1",
@@ -883,6 +884,7 @@ capella = HPC(
         "FI_EFA_USE_DEVICE_RDMA": "1",
         "NCCL_NET_GDR_LEVEL": "SYS",
         "NCCL_NET_GDR_READ": "1",
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
     },
     training_launcher="torchrun",
     # Job scaling (from zih_capella.env)
@@ -913,12 +915,15 @@ alpha = HPC(
     nccl_settings={
         "NCCL_DEBUG": "INFO",
         "NCCL_PROTO": "simple",
+        "NCCL_TIMEOUT": "1800",
         "NCCL_IB_TIMEOUT": "23",
+        "NCCL_IB_RETRY_CNT": "13",
         "FI_EFA_FORK_SAFE": "1",
         "FI_LOG_LEVEL": "1",
         "FI_EFA_USE_DEVICE_RDMA": "1",
         "NCCL_NET_GDR_LEVEL": "SYS",
         "NCCL_NET_GDR_READ": "1",
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
     },
     training_launcher="torchrun",
     # Job scaling (same as Capella, ZIH cluster)

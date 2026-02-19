@@ -71,7 +71,7 @@ terminal_bench:
     engine_type: openai
     engine_kwargs:
       model: gpt-5-mini-2025-08-07
-      max_tokens: 256
+      max_tokens: 2048
     check_interval: 8
     min_turns: 8
     k: 8
