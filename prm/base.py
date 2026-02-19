@@ -76,8 +76,37 @@ class ProcessRewardModel(ABC):
         """
         return PRMJudgment(adjusted_reward=reward)
 
+    def get_hint(
+        self,
+        turn: int,
+        trajectory_steps: list,
+        messages: list,
+    ) -> str | None:
+        """Mid-trial hint generation: return a hint string or None.
+
+        Optional — default returns None (no hint). Override in subclasses
+        that provide constructive feedback instead of (or in addition to)
+        early termination.
+
+        Args:
+            turn: Current turn number (0-indexed).
+            trajectory_steps: List of Step objects (terminus-2 internal).
+            messages: Full chat message history.
+
+        Returns:
+            A hint string to inject into the student's next prompt,
+            or None to do nothing.
+        """
+        return None
+
     def as_turn_callback(self) -> Callable:
-        """Return a callable suitable for terminus-2's turn_callback kwarg."""
+        """Return a callable suitable for terminus-2's turn_callback kwarg.
+
+        The callback may return:
+        - ``True`` to terminate the trial early.
+        - A non-empty ``str`` to inject a hint into the student's next prompt.
+        - ``False`` / ``None`` / empty string to continue normally.
+        """
         return self.should_terminate
 
 
