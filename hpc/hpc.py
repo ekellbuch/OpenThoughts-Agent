@@ -892,8 +892,8 @@ capella = HPC(
     num_nodes_slow=1,
     num_nodes_default=1,
     num_nodes_fast=4,
-    # Exclude flaky nodes: c69,c76,c144 have hanging SLURM prologs; c63,c108 have IB transport errors
-    node_exclusion_list="c63,c69,c76,c108,c144",
+    # Exclude flaky nodes: c69,c76,c144 have hanging SLURM prologs; c63,c108 have IB transport errors; c77 has rendezvous errors
+    node_exclusion_list="c63,c69,c76,c77,c108,c144",
     # ZIH license requirements
     extra_sbatch_directives=["#SBATCH --licenses=walrus:1,octopus:1,narwhal:1,cat:1"],
 )
