@@ -154,13 +154,13 @@ trainer:
       max_grad_norm: null
     fsdp_config:
       cpu_offload: false
-      reshard_after_forward: false
+      reshard_after_forward: true
       fsdp_size: 4
   # Reference model
   ref:
     fsdp_config:
       cpu_offload: false
-      reshard_after_forward: false
+      reshard_after_forward: true
       fsdp_size: 4
 
   # Model placement (async training) - 8 shared GPUs for policy/ref
