@@ -66,7 +66,7 @@ terminal_bench:
       - VerifierOutputParseError
       - ContextLengthExceededError
 
-    n_concurrent_trials: 432
+    n_concurrent_trials: 320
 
     # Logging settings
     log_level: INFO
@@ -121,7 +121,7 @@ trainer:
     loss_reduction: token_mean
 
   # Training loop settings
-  epochs: 10
+  epochs: 2
   update_epochs_per_batch: 1
 
   # Batch sizes
