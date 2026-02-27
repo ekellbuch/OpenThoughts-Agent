@@ -127,7 +127,7 @@ def _precompute_rows(dataset, encoder, max_text_chars: int = 500_000) -> List[Di
     import concurrent.futures
 
     BATCH_CHUNK = 256
-    CHUNK_TIMEOUT = 30  # seconds per chunk
+    CHUNK_TIMEOUT = 120  # seconds per chunk
     token_counts: List[int] = [0] * n
     n_timed_out = 0
     try:
