@@ -333,6 +333,8 @@ def maybe_preprocess_thinking(
         f"({n_think}/{n_total} sampled assistant messages have real <think> content)"
     )
 
+    # Decide template based on thinking rate, but always preprocess below.
+    use_nothink = False
     if thinking_rate < _THINKING_RATE_THRESHOLD:
         nothink_template = _NOTHINK_TEMPLATE_MAP.get(template)
         if nothink_template:
@@ -342,24 +344,16 @@ def maybe_preprocess_thinking(
                 f"Switching template: {template} -> {nothink_template}"
             )
             base_config["template"] = nothink_template
-            # No preprocessing needed for nothink templates — the data is
-            # used as-is and <think> tags (if any) are treated as plain text.
-            # Update dataset paths to local copies (already downloaded above).
-            base_config["dataset"] = ",".join(local_paths)
-            base_config["dataset_dir"] = "ONLINE"
-            return type(artifacts)(
-                dataset_paths=local_paths,
-                dataset_path=local_paths[0] if local_paths else artifacts.dataset_path,
-                model_path=artifacts.model_path,
-            )
+            use_nothink = True
         else:
             print(
                 f"[prep_for_thinking] WARNING: No nothink variant for template "
                 f"'{template}'. Proceeding with thinking preprocessing."
             )
 
-    # Majority of data has real thinking — preprocess to canonical format
-    print(f"[prep_for_thinking] Preprocessing data for ReasoningTemplate ({template})")
+    # Always preprocess: normalises format, captures free-text reasoning,
+    # and prints per-dataset stats regardless of template choice.
+    print(f"[prep_for_thinking] Preprocessing data for template '{base_config['template']}'")
     from scripts.datagen.prep_for_thinking import preprocess_local_dataset
 
     new_paths: list[str] = []
