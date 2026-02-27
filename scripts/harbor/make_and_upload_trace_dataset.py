@@ -431,8 +431,20 @@ def main() -> None:
             f"are installed. Import error: {exc}"
         )
 
+    max_shard_size = "100MB"
+    num_shards = None
+    print(
+        f"[trace-export] Using chunked upload: max_shard_size={max_shard_size}."
+    )
+
     # upload_traces_to_hf handles cleaning empty struct columns and push_to_hub
-    upload_traces_to_hf(ds, args.repo_id, args.dataset_type)
+    upload_traces_to_hf(
+        ds,
+        args.repo_id,
+        args.dataset_type,
+        max_shard_size=max_shard_size,
+        num_shards=num_shards,
+    )
     print(f"[trace-export] Upload complete: https://huggingface.co/datasets/{args.repo_id}")
 
     if args.skip_register:
