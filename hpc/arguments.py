@@ -732,6 +732,22 @@ class RLArgs:
             "store_true": True,
         }
     )
+    trace_upload_enabled: Optional[bool] = field(
+        default=None,
+        metadata={"help": "Enable post-training trace upload to HuggingFace (overrides YAML config)"}
+    )
+    trace_upload_repo_org: Optional[str] = field(
+        default=None,
+        metadata={"help": "HuggingFace org for trace upload repo (default: DCAgent)"}
+    )
+    trace_upload_episodes: Optional[str] = field(
+        default=None,
+        metadata={"help": "Which episodes to upload: 'last' or 'all' (default: last)"}
+    )
+    trace_upload_dataset_type: Optional[str] = field(
+        default=None,
+        metadata={"help": "Dataset type for trace upload registration: 'SFT' or 'RL' (default: SFT)"}
+    )
 
 
 def _option_strings(field_name: str) -> list[str]:

@@ -456,6 +456,12 @@ class RLJobConfig:
 
     proxychains_binary: Optional[str] = None
 
+    # Post-training trace upload settings
+    trace_upload_enabled: bool = False
+    trace_upload_repo_org: str = "DCAgent"
+    trace_upload_episodes: str = "last"
+    trace_upload_dataset_type: str = "SFT"
+
 def build_skyrl_command_string(config: RLJobConfig) -> str:
     """Build the full SkyRL command string for the sbatch template.
 
@@ -611,6 +617,14 @@ def construct_rl_sbatch_script(exp_args: dict, hpc) -> str:
         agent_name=agent_name,
         harbor_env=harbor_env,
     )
+
+    # Populate trace upload settings from parsed terminal_bench config
+    if parsed.terminal_bench:
+        tu = parsed.terminal_bench.get("trace_upload", {})
+        job_config.trace_upload_enabled = bool(tu.get("enabled", False))
+        job_config.trace_upload_repo_org = tu.get("repo_org", "DCAgent")
+        job_config.trace_upload_episodes = tu.get("episodes", "last")
+        job_config.trace_upload_dataset_type = tu.get("dataset_type", "SFT")
 
     # Write config JSON
     config_dir = exp_paths.configs
@@ -814,19 +828,88 @@ class RLJobRunner:
     def run(self) -> int:
         """Execute the RL training job.
 
+        After training (success or failure), launches trace upload as a subprocess
+        and waits for it to complete before returning. This ensures the upload
+        finishes before SLURM kills the job allocation.
+
         Returns:
             Exit code (0 for success, non-zero for failure).
         """
         print(f"=== RLJobRunner: {self.config.job_name} ===", flush=True)
 
+        training_exit_code = 1
         try:
             self._setup_environment()
-            return self._run_with_ray()
+            training_exit_code = self._run_with_ray()
         except Exception as e:
             print(f"RL job failed: {e}", file=sys.stderr, flush=True)
             import traceback
             traceback.print_exc()
-            return 1
+
+        # Upload traces after training (success or failure — partial traces are valuable)
+        upload_proc = self._launch_trace_upload(training_exit_code)
+        if upload_proc is not None:
+            print(f"[RLJobRunner] Waiting for trace upload to complete...", flush=True)
+            upload_exit_code = upload_proc.wait()
+            if upload_exit_code == 0:
+                print(f"[RLJobRunner] Trace upload completed successfully.", flush=True)
+            else:
+                print(f"[RLJobRunner] Trace upload failed with exit code {upload_exit_code}.", flush=True)
+
+        return training_exit_code
+
+    def _launch_trace_upload(self, training_exit_code: int) -> Optional[subprocess.Popen]:
+        """Launch post-training trace upload as a subprocess.
+
+        Args:
+            training_exit_code: Exit code from training (logged but doesn't gate upload).
+
+        Returns:
+            Popen handle if upload was launched, None if skipped.
+        """
+        if not self.config.trace_upload_enabled:
+            print(f"[RLJobRunner] Trace upload disabled, skipping.", flush=True)
+            return None
+
+        # The trace jobs directory is where Harbor stores trial artifacts
+        job_dir = Path(self.config.experiments_dir) / self.config.job_name
+        trace_jobs_dir = job_dir / "trace_jobs"
+        if not trace_jobs_dir.exists():
+            print(f"[RLJobRunner] No trace_jobs directory found at {trace_jobs_dir}, skipping upload.", flush=True)
+            return None
+
+        repo_id = f"{self.config.trace_upload_repo_org}/{self.config.job_name}"
+
+        # Log file for upload output
+        log_dir = Path(self.config.experiments_dir) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"{self.config.job_name}_trace_upload.log"
+
+        cmd = [
+            sys.executable, "-m", "scripts.harbor.make_and_upload_trace_dataset",
+            "--job_dir", str(job_dir),
+            "--repo_id", repo_id,
+            "--episodes", self.config.trace_upload_episodes,
+            "--dataset_type", self.config.trace_upload_dataset_type,
+        ]
+
+        print(f"[RLJobRunner] Launching trace upload (training exit code: {training_exit_code}):", flush=True)
+        print(f"  repo_id: {repo_id}", flush=True)
+        print(f"  job_dir: {job_dir}", flush=True)
+        print(f"  episodes: {self.config.trace_upload_episodes}", flush=True)
+        print(f"  log: {log_path}", flush=True)
+
+        try:
+            log_fh = open(log_path, "w")
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+            )
+            return proc
+        except Exception as e:
+            print(f"[RLJobRunner] Failed to launch trace upload: {e}", flush=True)
+            return None
 
     def _setup_environment(self) -> None:
         """Configure environment variables for RL training."""

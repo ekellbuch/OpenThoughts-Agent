@@ -514,6 +514,18 @@ def build_skyrl_hydra_args(
     if hf_hub_private:
         trainer["hf_hub_private"] = True
 
+    # Trace upload CLI overrides (apply to terminal_bench.trace_upload)
+    if parsed.terminal_bench is not None:
+        trace_upload = parsed.terminal_bench.setdefault("trace_upload", {})
+        if exp_args.get("trace_upload_enabled") is not None:
+            trace_upload["enabled"] = exp_args["trace_upload_enabled"]
+        if exp_args.get("trace_upload_repo_org"):
+            trace_upload["repo_org"] = exp_args["trace_upload_repo_org"]
+        if exp_args.get("trace_upload_episodes"):
+            trace_upload["episodes"] = exp_args["trace_upload_episodes"]
+        if exp_args.get("trace_upload_dataset_type"):
+            trace_upload["dataset_type"] = exp_args["trace_upload_dataset_type"]
+
     # Build args for each section
     # Keys under engine_init_kwargs need ++ prefix (add or override) since some keys
     # Patterns for keys that may not exist in SkyRL's base config

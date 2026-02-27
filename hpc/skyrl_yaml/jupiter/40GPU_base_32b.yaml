@@ -104,6 +104,13 @@ terminal_bench:
     # Enable trial archiving callback
     enabled: false
 
+  # Post-training trace upload to HuggingFace
+  trace_upload:
+    enabled: true
+    repo_org: DCAgent
+    episodes: last
+    dataset_type: SFT
+
 # Trainer configuration
 trainer:
   strategy: fsdp2
@@ -117,6 +124,7 @@ trainer:
 
   # Training loop settings
   epochs: 2
+  max_steps: 100
   update_epochs_per_batch: 1
 
   # Batch sizes

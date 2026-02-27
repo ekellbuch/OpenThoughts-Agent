@@ -149,4 +149,9 @@ JOB_NAME_IGNORE_KEYS: list[str] = [
     # RL environment toggles
     "rl_use_conda",
     "rl_conda_env",
+    # Trace upload toggles
+    "trace_upload_enabled",
+    "trace_upload_repo_org",
+    "trace_upload_episodes",
+    "trace_upload_dataset_type",
 ]
