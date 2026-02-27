@@ -441,10 +441,10 @@ def main():
         exp_args["job_name"] = get_job_name(cli_args)
     print(f"Job name: {exp_args['job_name']}")
 
-    # Experiments directory - set default if not specified
-    # This must be set early as many functions depend on it
-    if not exp_args.get("experiments_dir"):
-        exp_args["experiments_dir"] = os.path.join("experiments", exp_args["job_name"])
+    # Experiments directory - always append job_name as a subdirectory.
+    # --experiments_dir sets the base; defaults to "experiments" when not specified.
+    experiments_base = exp_args.get("experiments_dir") or "experiments"
+    exp_args["experiments_dir"] = os.path.join(experiments_base, exp_args["job_name"])
 
     if job_type == JobType.CONSOLIDATE.value:
         launch_consolidate_job(
