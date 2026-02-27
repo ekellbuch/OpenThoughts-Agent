@@ -727,7 +727,7 @@ jupiter = HPC(
     # Matches login nodes like jpbl-s01-01 (jupiter booster login) and compute nodes
     hostname_pattern=r"jp(bl|cn|c)-.*",
     dotenv_filename="jupiter.env",
-    account="jureap59",
+    account="reformo",
     partition="booster",
     gpus_per_node=4,  # 4x GH200 superchips per node
     cpus_per_node=288,  # 4 Grace CPUs × 72 cores = 288 ARM cores per node
