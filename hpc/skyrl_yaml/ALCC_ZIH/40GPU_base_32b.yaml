@@ -236,6 +236,8 @@ generator:
 
   engine_init_kwargs:
     max_model_len: 32768
+    # Disable SymmMemCommunicator — fails on ZIH H100 P2P topology with TP=2
+    disable_custom_all_reduce: true
     # Interleaved thinking chat template: preserves <think> blocks on ALL
     # historical assistant turns (stock Qwen3 template strips them).
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
