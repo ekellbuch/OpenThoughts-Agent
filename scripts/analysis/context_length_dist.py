@@ -62,17 +62,12 @@ DATASETS = [
 
 
 def get_text(example):
-    """Extract full text from a dataset row."""
-    if "conversations" in example and example["conversations"]:
-        return "\n".join(
-            turn.get("content", turn.get("value", ""))
-            for turn in example["conversations"]
-        )
-    elif "messages" in example and example["messages"]:
-        return "\n".join(msg.get("content", "") for msg in example["messages"])
-    elif "text" in example:
-        return example["text"]
-    return ""
+    """Extract full text from a dataset row.
+
+    Delegates to :func:`scripts.analysis.utils.extract_conversation_text`.
+    """
+    from scripts.analysis.utils import extract_conversation_text
+    return extract_conversation_text(example)
 
 
 def process_dataset(ds_name, tokenizer):
