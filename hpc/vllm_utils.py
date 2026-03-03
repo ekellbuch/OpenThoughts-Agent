@@ -254,8 +254,6 @@ class VLLMServer:
             str(self.config.pipeline_parallel_size),
             "--data-parallel-size",
             str(self.config.data_parallel_size),
-            "--nnodes",
-            str(self.ray_cluster.config.num_nodes),
         ]
 
         if self.config.endpoint_json_path:
