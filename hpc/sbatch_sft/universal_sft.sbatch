@@ -18,7 +18,7 @@
 # Usage: The launcher writes a JSON config file and substitutes {config_path}
 # ==============================================================================
 
-set -euo pipefail
+set -eo pipefail
 ml purge
 ulimit -c 0  # Disable core dumps to avoid filling disk space
 
