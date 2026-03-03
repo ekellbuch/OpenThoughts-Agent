@@ -18,6 +18,7 @@ from hpc.launch_utils import (
     resolve_workspace_path,
     resolve_config_path,
     default_vllm_endpoint_path,
+    get_daytona_api_key_override,
     launch_sbatch,
     _parse_optional_int,
     cleanup_endpoint_file,
@@ -691,6 +692,7 @@ def launch_eval_job_v2(exp_args: dict, hpc) -> None:
         "email_address": os.environ.get("EMAIL_ADDRESS", ""),
         "harbor_env": exp_args.get("_eval_env", "daytona"),
         "ray_env_exports": hpc.get_ray_env_exports(experiments_subdir),
+        "daytona_api_key_override": get_daytona_api_key_override(exp_args),
     }
 
     sbatch_text = substitute_template(template_text, substitutions)

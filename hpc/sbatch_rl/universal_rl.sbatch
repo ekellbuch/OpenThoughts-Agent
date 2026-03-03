@@ -77,6 +77,12 @@ if [ -n "${DC_AGENT_SECRET_ENV:-}" ] && [ -f "$DC_AGENT_SECRET_ENV" ]; then
   set +a
 fi
 
+# --- Daytona API key override (from --daytona_api_key CLI argument) ---
+DAYTONA_API_KEY_OVERRIDE="{daytona_api_key_override}"
+if [ -n "$DAYTONA_API_KEY_OVERRIDE" ]; then
+  export DAYTONA_API_KEY="$DAYTONA_API_KEY_OVERRIDE"
+fi
+
 # --- RL Environment Activation ---
 # The RL environment is separate from datagen due to dependency conflicts.
 # Options:

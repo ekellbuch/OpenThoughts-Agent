@@ -396,6 +396,19 @@ def normalize_cli_args(args_spec: Any) -> list[str]:
 
 
 # =============================================================================
+# Environment Override Utilities
+# =============================================================================
+
+def get_daytona_api_key_override(exp_args: Dict[str, Any]) -> str:
+    """Return the Daytona API key override for sbatch template substitution.
+
+    Priority: --daytona_api_key CLI arg > DAYTONA_API_KEY env var at launch time.
+    Returns empty string when no override is specified (secrets.env wins).
+    """
+    return exp_args.get("daytona_api_key") or os.environ.get("DAYTONA_API_KEY", "")
+
+
+# =============================================================================
 # Dict Utilities
 # =============================================================================
 

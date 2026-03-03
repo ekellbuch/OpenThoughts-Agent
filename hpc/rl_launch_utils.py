@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from hpc.hf_utils import is_hf_dataset_path
+from hpc.launch_utils import get_daytona_api_key_override
 
 
 def resolve_rl_train_data(
@@ -685,6 +686,7 @@ fi"""
         "skyrl_command": skyrl_command,
         "email_address": os.environ.get("EMAIL_ADDRESS", ""),
         "harbor_env": job_config.harbor_env,
+        "daytona_api_key_override": get_daytona_api_key_override(exp_args),
     }
 
     sbatch_text = substitute_template(template_text, substitutions)

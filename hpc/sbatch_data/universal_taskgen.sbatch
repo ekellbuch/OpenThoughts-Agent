@@ -68,6 +68,12 @@ if [ -n "${DCFT_ACTIVATE_ENV:-}" ]; then
   eval "$DCFT_ACTIVATE_ENV"
 fi
 
+# --- Daytona API key override (from --daytona_api_key CLI argument) ---
+DAYTONA_API_KEY_OVERRIDE="{daytona_api_key_override}"
+if [ -n "$DAYTONA_API_KEY_OVERRIDE" ]; then
+  export DAYTONA_API_KEY="$DAYTONA_API_KEY_OVERRIDE"
+fi
+
 # Re-enable strict unbound variable checking after all env setup is complete
 set -u
 

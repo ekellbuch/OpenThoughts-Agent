@@ -20,6 +20,7 @@ from hpc.launch_utils import (
     resolve_config_path,
     build_sbatch_directives,
     generate_served_model_id,
+    get_daytona_api_key_override,
     hosted_vllm_alias,
     strip_hosted_vllm_alias,
     set_or_pop,
@@ -233,6 +234,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             "config_path": str(task_config_path),
             "email_address": os.environ.get("EMAIL_ADDRESS", ""),
             "ray_env_exports": hpc.get_ray_env_exports(experiments_subdir),
+            "daytona_api_key_override": get_daytona_api_key_override(exp_args),
         }
 
         sbatch_text = substitute_template(template_text, substitutions)
@@ -380,6 +382,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             "email_address": os.environ.get("EMAIL_ADDRESS", ""),
             "harbor_env": harbor_env,
             "ray_env_exports": hpc.get_ray_env_exports(experiments_subdir),
+            "daytona_api_key_override": get_daytona_api_key_override(exp_args),
         }
 
         sbatch_text = substitute_template(template_text, substitutions)

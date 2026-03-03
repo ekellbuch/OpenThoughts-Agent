@@ -437,6 +437,12 @@ class LaunchArgs:
         },
     )
 
+    # Daytona API key override (takes precedence over secrets.env)
+    daytona_api_key: Optional[str] = field(
+        default=None,
+        metadata={"help": "Override DAYTONA_API_KEY (takes precedence over secrets.env)"}
+    )
+
 
 @dataclass
 class DataGenArgs:

@@ -101,6 +101,7 @@ JOB_NAME_IGNORE_KEYS: list[str] = [
     "vllm_enable_auto_tool_choice",
     "vllm_tool_call_parser",
     "vllm_reasoning_parser",
+    "daytona_api_key",
     "sandbox_cpu",
     "sandbox_memory_gb",
     "sandbox_disk_gb",
