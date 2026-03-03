@@ -3,7 +3,7 @@
 #
 # 131K context variant
 #
-# Hardware: 8 nodes × 4x GH200 96GB (shared memory) = 32 GPUs (~3TB total)
+# Hardware: 4 nodes × 4x GH200 96GB (shared memory) = 16 GPUs (~1.5TB total)
 #   - FP8 weights → very memory efficient, ample room for KV cache
 #   - TP=4 within node (shared memory), PP=2 across nodes, DP=2 replicas
 #
