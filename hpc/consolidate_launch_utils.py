@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Optional, Callable
 
+from hpc.hf_utils import sanitize_hf_repo_id
 from hpc.launch_utils import (
     sanitize_repo_for_job,
     resolve_job_and_paths,
@@ -79,7 +80,10 @@ def launch_consolidate_job(
             raise ValueError(
                 "When --consolidate_input and --consolidate_output_repo both reference Hugging Face repos, they must differ."
             )
-    effective_output_repo = output_repo
+    # Sanitize and truncate output_repo to comply with HuggingFace's 96-char limit
+    effective_output_repo = sanitize_hf_repo_id(output_repo) if output_repo else output_repo
+    if effective_output_repo != output_repo:
+        print(f"Truncated output repo for HF compliance: {output_repo} -> {effective_output_repo}")
     input_kind = "local" if input_is_local else "repo"
 
     # Define local derive function that captures input_value

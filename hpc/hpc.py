@@ -167,12 +167,11 @@ class HPC(BaseModel):
         """
         if not self.modules and not self.env_unsets:
             return ""
-        lines = ["set +u"]
+        lines = []
         lines.extend(f"module load {m}" for m in self.modules)
         # Unset env vars that modules set but conflict with Ray/vLLM
         for var in self.env_unsets:
             lines.append(f"unset {var}")
-        lines.append("set -u")
         return "\n".join(lines)
 
     def get_env_exports(self) -> str:
@@ -735,6 +734,8 @@ jupiter = HPC(
     gpus_type="GH200 96GB (H100 + Grace)",
     total_partition_nodes=6000,  # ~6000 booster nodes
     gpu_directive_format="--gres=gpu:{n}",
+    # CUDA module required for DeepSpeed (sets CUDA_HOME=/e/software/.../CUDA/13)
+    modules=["nvidia-compilers/25.9-CUDA-13"],
     env_vars={
         "WANDB_MODE": "offline",  # Compute nodes have no internet
         # Force GLOO and NCCL to use IPv4 (IPv6 doesn't work on Jupiter compute nodes)

@@ -334,6 +334,9 @@ def construct_config_yaml(exp_args):
         hub_model_id = hub_model_id.replace(".", "_")
     else:
         hub_model_id = f"mlfoundations-dev/{exp_args['job_name']}"
+    # Ensure hub_model_id complies with HuggingFace's 96-char repo ID limit
+    from hpc.hf_utils import sanitize_hf_repo_id
+    hub_model_id = sanitize_hf_repo_id(hub_model_id)
     base_config["hub_model_id"] = hub_model_id
 
     if exp_args.get("job_type") == JobType.DATAGEN.value and base_config.get("datagen_mode") == "trace":

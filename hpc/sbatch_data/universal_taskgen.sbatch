@@ -27,16 +27,9 @@ if [ -z "${BASH_COMPLETION_DEBUG+x}" ]; then
 fi
 
 # --- Module and Conda Setup ---
-# Disable unbound variable check for module loading and conda activation.
-# Module reloads can trigger conda deactivation scripts that reference unset variables.
-set +u
 
 # --- Module loading (cluster-specific, substituted by launcher) ---
 {module_commands}
-
-# Some module command templates toggle set -u; ensure we stay in +u mode
-# through conda activation and env sourcing to avoid unbound variable errors.
-set +u
 
 # --- Environment setup ---
 if [ -n "${DCFT_PRIVATE:-}" ]; then
@@ -56,8 +49,6 @@ fi
 {conda_activate}
 
 # --- Source environment files ---
-# Keep set +u active - dotenv files and DCFT_ACTIVATE_ENV may trigger module reloads
-# which can trigger conda deactivation scripts with unset variables
 if [ -n "${DCFT:-}" ] && [ -f "$DCFT/hpc/dotenv/{cluster_env_file}" ]; then
   source "$DCFT/hpc/dotenv/{cluster_env_file}"
 fi
@@ -73,9 +64,6 @@ DAYTONA_API_KEY_OVERRIDE="{daytona_api_key_override}"
 if [ -n "$DAYTONA_API_KEY_OVERRIDE" ]; then
   export DAYTONA_API_KEY="$DAYTONA_API_KEY_OVERRIDE"
 fi
-
-# Re-enable strict unbound variable checking after all env setup is complete
-set -u
 
 # --- Standard environment variables ---
 export HF_HOME="/tmp/hf_home"
