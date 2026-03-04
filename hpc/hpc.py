@@ -111,6 +111,12 @@ class HPC(BaseModel):
     # When True, logs numastat and nvidia-smi output every 5 minutes during Ray jobs
     enable_numa_monitoring: bool = False
 
+    # GH200 unified memory: GPU HBM is visible as system RAM to the OS, so Ray's
+    # memory monitor counts GPU allocations toward the system-memory OOM threshold.
+    # This causes spurious worker kills during model loading.  When True, we disable
+    # Ray's memory monitor (RAY_memory_monitor_refresh_ms=0) for all job types.
+    unified_gpu_memory: bool = False
+
     # Environment variables to unset after module loading (e.g., ROCR_VISIBLE_DEVICES on Frontier)
     # Modules may set these but they conflict with Ray/vLLM
     env_unsets: List[str] = []
@@ -319,6 +325,17 @@ class HPC(BaseModel):
         lines = [
             "# --- Ray defaults ---",
             'export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"',
+        ]
+
+        if self.unified_gpu_memory:
+            lines += [
+                "# GH200 unified memory: GPU HBM is part of system RAM, so Ray's",
+                "# memory monitor double-counts GPU allocations and kills workers",
+                "# during model loading.  Disable the monitor entirely.",
+                'export RAY_memory_monitor_refresh_ms=0',
+            ]
+
+        lines += [
             'if [ -z "${RAY_TMPDIR:-}" ]; then',
             tmpdir_base_line,
             '  RAY_TMPDIR="${RAY_TMPDIR_BASE}/ray_${SLURM_JOB_ID:-$$}"',
@@ -734,6 +751,7 @@ jupiter = HPC(
     cpus_per_node=288,  # 4 Grace CPUs × 72 cores = 288 ARM cores per node
     internet_node=False,  # Compute nodes have no internet (like other JSC clusters)
     gpus_type="GH200 96GB (H100 + Grace)",
+    unified_gpu_memory=True,
     total_partition_nodes=6000,  # ~6000 booster nodes
     gpu_directive_format="--gres=gpu:{n}",
     # CUDA module required for DeepSpeed (sets CUDA_HOME=/e/software/.../CUDA/13)
@@ -980,6 +998,7 @@ vista = HPC(
     cpus_per_node=72,
     internet_node=True,
     gpus_type="GH200 96GB",
+    unified_gpu_memory=True,
     total_partition_nodes=552,
     pretok_time_limit="4:00:00",
     pretok_partition="gh",
