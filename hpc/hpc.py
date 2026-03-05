@@ -111,10 +111,10 @@ class HPC(BaseModel):
     # When True, logs numastat and nvidia-smi output every 5 minutes during Ray jobs
     enable_numa_monitoring: bool = False
 
-    # GH200 unified memory: GPU HBM is visible as system RAM to the OS, so Ray's
-    # memory monitor counts GPU allocations toward the system-memory OOM threshold.
-    # This causes spurious worker kills during model loading.  When True, we disable
-    # Ray's memory monitor (RAY_memory_monitor_refresh_ms=0) for all job types.
+    # Disable Ray's memory monitor (RAY_memory_monitor_refresh_ms=0) for all job types.
+    # Needed when either: (1) GH200 unified memory makes GPU HBM visible as system RAM,
+    # causing Ray to double-count GPU allocations toward the OOM threshold, or
+    # (2) cgroup memory reporting is broken (returns -1), causing spurious kills.
     unified_gpu_memory: bool = False
 
     # Environment variables to unset after module loading (e.g., ROCR_VISIBLE_DEVICES on Frontier)
@@ -1128,6 +1128,9 @@ nyutorch = HPC(
     library_paths={
         "TRITON_CC": "/usr/bin/gcc",
     },
+    # Ray memory monitor is broken on Torch — cgroup returns -1, triggering
+    # spurious OOM kills during model weight loading.
+    unified_gpu_memory=True,
     # Job scaling (from nyutorch.env)
     default_time_limit="24:00:00",
     max_time_limit="47:59:00",
