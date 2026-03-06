@@ -54,11 +54,13 @@ fi
 {proxy_setup}
 
 # --- Proxy status and PROXY_CMD setup ---
-# Jupiter/Leonardo: PROXYCHAINS_BINARY wraps commands (LD_PRELOAD unreliable on ARM)
+# Jupiter/Leonardo: PROXYCHAINS_BIN wraps commands (set by ssh_tunnel_setup, LD_PRELOAD unreliable on ARM)
+# PROXYCHAINS_BINARY is the equivalent from get_proxy_setup() (shared SOCKS5 proxy)
 # Jureca/Juwels: LD_PRELOAD inherited by child processes automatically
 PROXY_CMD=""
-if [ -n "${{PROXYCHAINS_BINARY:-}}" ] && [ -n "${{PROXYCHAINS_CONF_FILE:-}}" ]; then
-    PROXY_CMD="${{PROXYCHAINS_BINARY}} -f ${{PROXYCHAINS_CONF_FILE}}"
+_PC_BIN="${{PROXYCHAINS_BINARY:-${{PROXYCHAINS_BIN:-}}}}"
+if [ -n "$_PC_BIN" ] && [ -n "${{PROXYCHAINS_CONF_FILE:-}}" ]; then
+    PROXY_CMD="$_PC_BIN -f ${{PROXYCHAINS_CONF_FILE}}"
     echo "Proxy: ENABLED via wrapped binary"
     echo "  PROXY_CMD: $PROXY_CMD"
 elif [ -n "${{LD_PRELOAD:-}}" ]; then
