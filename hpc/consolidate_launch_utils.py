@@ -153,6 +153,8 @@ def launch_consolidate_job(
     if not os.path.exists(python_script_path):
         raise FileNotFoundError(f"Consolidate helper script not found at {python_script_path}")
 
+    cluster_env_file = getattr(hpc, "dotenv_filename", "") or ""
+
     substitutions = {
         "partition_directive": f"#SBATCH -p {partition}" if partition else "",
         "account_directive": f"#SBATCH --account {account}" if account else "",
@@ -164,6 +166,7 @@ def launch_consolidate_job(
         "output_path": output_path,
         "experiments_dir": experiments_dir,
         "environment_preamble": environment_preamble,
+        "cluster_env_file": cluster_env_file,
         "consolidate_input": input_value,
         "consolidate_input_kind": input_kind,
         "consolidate_base_repo": base_repo or "",
