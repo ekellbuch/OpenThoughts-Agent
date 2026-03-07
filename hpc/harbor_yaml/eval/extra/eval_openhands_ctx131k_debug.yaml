@@ -3,7 +3,7 @@
 job_name: debug-openhands-eval-job
 jobs_dir: trace_jobs
 n_attempts: 1
-timeout_multiplier: 1.0
+timeout_multiplier: 8.0
 debug: true
 
 orchestrator:
