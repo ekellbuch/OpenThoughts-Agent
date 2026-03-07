@@ -41,6 +41,37 @@ from hpc.cli_utils import parse_comma_separated
 from hpc.hf_utils import is_hf_dataset_path
 
 DEFAULT_LOG_SYNC_INTERVAL = 120  # 2 minutes
+
+
+def _ensure_sky_api_server(timeout: int = 30) -> None:
+    """Ensure the SkyPilot API server is running, starting it if needed."""
+    import urllib.request
+
+    try:
+        urllib.request.urlopen("http://127.0.0.1:46580/api/health", timeout=3)
+        return
+    except Exception:
+        pass
+
+    print("[cloud] SkyPilot API server not running — starting it via 'sky api start'...")
+    result = subprocess.run(
+        [sys.executable, "-m", "sky", "api", "start"],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Failed to start SkyPilot API server:\n{result.stderr or result.stdout}"
+        )
+
+    # Verify it's actually reachable
+    try:
+        urllib.request.urlopen("http://127.0.0.1:46580/api/health", timeout=5)
+        print("[cloud] SkyPilot API server is ready.")
+    except Exception as exc:
+        raise RuntimeError(
+            f"SkyPilot API server started but health check failed: {exc}\n"
+            "Check ~/.sky/api_server/server.log for details."
+        ) from exc
 DEFAULT_CLOUD_OUTPUT_PREFIX = "trace_runs"  # Default output subdir prefix for cloud jobs
 
 # Harbor git URL for cloud reinstalls (always fetch latest from branch)
@@ -1016,6 +1047,8 @@ class CloudLauncher:
         """Launch SkyPilot task and return (job_id, cluster_name)."""
         import sky
         from typing import Sequence
+
+        _ensure_sky_api_server()
 
         launch_kwargs = {"cluster_name": args.cluster_name}
         if args.autostop > 0:

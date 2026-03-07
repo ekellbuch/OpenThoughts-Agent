@@ -71,7 +71,7 @@ agents:
     metrics_endpoint: https://replace-with-api-host/metrics
     metrics_timeout_sec: 10
     model_info:
-      max_input_tokens: 131000
+      max_input_tokens: 115000
       max_output_tokens: 16000
       input_cost_per_token: 0
       output_cost_per_token: 0

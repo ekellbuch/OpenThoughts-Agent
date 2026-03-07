@@ -63,7 +63,7 @@ agents:
   max_timeout_sec:
   kwargs:
     model_info:
-      max_input_tokens: 32768
+      max_input_tokens: 24576
       max_output_tokens: 8192
       input_cost_per_token: 0
       output_cost_per_token: 0
