@@ -679,19 +679,19 @@ def build_harbor_command(
     ]
 
     # Add dataset (slug or path).
-    # For dataset_path: update the config's datasets[].path directly instead of
-    # passing -p on the CLI.  Harbor's -p flag replaces the entire datasets list
-    # with a fresh LocalDatasetConfig, discarding YAML settings like n_tasks.
+    # CLI dataset flags take top priority — clear the YAML datasets so there is
+    # no ambiguity between YAML placeholder paths and the actual dataset.
     if dataset_slug:
+        # Clear YAML datasets so Harbor only sees the CLI --dataset flag.
+        modified_config.pop("datasets", None)
+        modified_config.pop("tasks", None)
+        with open(merged_config_path, "w") as f:
+            yaml.safe_dump(modified_config, f)
         cmd.extend(["--dataset", dataset_slug])
     elif dataset_path:
-        datasets = modified_config.get("datasets", [])
-        if datasets:
-            # Preserve existing dataset settings (n_tasks, task_names, etc.)
-            datasets[0]["path"] = dataset_path
-        else:
-            modified_config["datasets"] = [{"path": dataset_path}]
-        # Re-write the merged config with the updated dataset path
+        # Replace YAML datasets entirely with the provided path.
+        modified_config["datasets"] = [{"path": dataset_path}]
+        modified_config.pop("tasks", None)
         with open(merged_config_path, "w") as f:
             yaml.safe_dump(modified_config, f)
 
