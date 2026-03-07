@@ -1,4 +1,4 @@
-# Harbor eval configuration (16 concurrency, generic agent, 131k context, max 100 tasks).
+# Harbor eval configuration (16 concurrency, terminus-kira agent, 131k context).
 
 job_name: default-eval-job
 jobs_dir: trace_jobs
@@ -51,12 +51,14 @@ verifier:
 metrics: []
 
 agents:
-- name: terminus-2
+- name: terminus-kira
   import_path:
   model_name: placeholder/override-at-runtime
   max_timeout_sec:
   kwargs:
     record_terminal_session: false
+    enable_episode_logging: false
+    enable_pane_logging: false
     collect_rollout_details: false
     collect_engine_metrics: false
     metrics_endpoint: https://replace-with-vllm-host/metrics
@@ -81,6 +83,5 @@ agents:
         enable_thinking: true
 datasets:
 - path: /replace/with/tasks/path
-  n_tasks: 100
 
 tasks: []

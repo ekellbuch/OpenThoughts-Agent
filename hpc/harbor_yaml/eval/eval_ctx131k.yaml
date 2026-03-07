@@ -1,4 +1,4 @@
-# Harbor eval configuration with Modal backend (32 concurrency, 131k context).
+# Harbor eval configuration (16 concurrency, generic agent, 131k context).
 
 job_name: default-eval-job
 jobs_dir: trace_jobs
@@ -8,7 +8,7 @@ debug: false
 
 orchestrator:
   type: local
-  n_concurrent_trials: 32
+  n_concurrent_trials: 16
   quiet: false
   plain_output: true
   adaptive_concurrency:
@@ -35,16 +35,13 @@ orchestrator:
   kwargs: {}
 
 environment:
-  type: modal
+  type: daytona
   force_build: true
   delete: true
   override_cpus: 1
   override_memory_mb: 2048
   override_storage_mb: 2048
-  kwargs:
-    # Modal-specific options
-    secrets: []  # List of Modal secret names to attach (e.g., ["my-secret"])
-    volumes: {}  # Dict of mount_path -> volume_name (e.g., {"/data": "my-volume"})
+  kwargs: {}
 
 verifier:
   override_timeout_sec:
@@ -60,6 +57,8 @@ agents:
   max_timeout_sec:
   kwargs:
     record_terminal_session: false
+    enable_episode_logging: false
+    enable_pane_logging: false
     collect_rollout_details: false
     collect_engine_metrics: false
     metrics_endpoint: https://replace-with-vllm-host/metrics

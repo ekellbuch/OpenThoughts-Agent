@@ -1,4 +1,6 @@
-# Harbor eval configuration (16 concurrency, terminus-kira agent, 131k context).
+# Harbor eval configuration (16 concurrency, generic agent, 131k context).
+# NO CHAT TEMPLATE KWARGS - Use this for Mistral/Devstral models that don't
+# support the chat_template parameter in vLLM (they use --tokenizer_mode mistral).
 
 job_name: default-eval-job
 jobs_dir: trace_jobs
@@ -51,12 +53,14 @@ verifier:
 metrics: []
 
 agents:
-- name: terminus-kira
+- name: terminus-2
   import_path:
   model_name: placeholder/override-at-runtime
   max_timeout_sec:
   kwargs:
     record_terminal_session: false
+    enable_episode_logging: false
+    enable_pane_logging: false
     collect_rollout_details: false
     collect_engine_metrics: false
     metrics_endpoint: https://replace-with-vllm-host/metrics
@@ -72,13 +76,10 @@ agents:
       linear_history: true
     enable_summarize: true
     proactive_summarization_threshold: 8192
-    interleaved_thinking: true
+    interleaved_thinking: false
     parser_name: json
     tmux_pane_width: 160
     tmux_pane_height: 40
-    extra_body:
-      chat_template_kwargs:
-        enable_thinking: true
 datasets:
 - path: /replace/with/tasks/path
 
