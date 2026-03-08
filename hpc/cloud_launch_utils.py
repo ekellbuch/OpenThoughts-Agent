@@ -38,7 +38,7 @@ from hpc.launch_utils import PROJECT_ROOT, repo_relative
 from hpc.cli_utils import parse_comma_separated
 
 # Re-export HuggingFace utilities for backwards compatibility
-from hpc.hf_utils import is_hf_dataset_path
+from hpc.hf_utils import is_hf_dataset_path, is_raw_tasks_directory
 
 DEFAULT_LOG_SYNC_INTERVAL = 120  # 2 minutes
 
@@ -577,13 +577,12 @@ def prepare_hf_dataset_for_sync(
         print(f"[hf-prep] Downloaded to: {snapshot_dir}")
 
     # Check format: raw files vs parquet
-    task_dirs = list(snapshot_dir.glob("task-*"))
     parquet_files = list(snapshot_dir.rglob("*.parquet"))
 
-    if task_dirs:
-        # Raw files format - use directly
+    if is_raw_tasks_directory(snapshot_dir):
+        # Raw files format - use directly (task-* or other dirs with instruction.md)
         if verbose:
-            print(f"[hf-prep] Found {len(task_dirs)} task directories (raw format)")
+            print(f"[hf-prep] Detected raw task directories (format has instruction.md files)")
         return snapshot_dir
 
     elif parquet_files:
