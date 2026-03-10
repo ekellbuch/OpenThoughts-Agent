@@ -2,6 +2,8 @@
 # List one Hugging Face repo per line.
 # Lines starting with '#' are ignored.
 
+laion/rl_rl-conf_24GP_base-yaml_mode-path_exp_tas_opti_comb_trac_trai-data_exp_rpt_unit-pyth-v3
+laion/rl_rl-conf_24GP_base-yaml_mode-path_r2eg-nl2b-stac-bugs-fixt_trai-data_exp_rpt_stac-dock-v2
 laion/sft_GLM-4-7-swesmith-sandboxes-with_tests-oracle_verified_120s-maxeps-131k_Qwen3-32B
 laion/sft_r2egym-nl2bash-stackoverflow-inferredbugs-32B_Qwen3-32B
 laion/r2egym-nl2bash-bugsseq                                                                                            
