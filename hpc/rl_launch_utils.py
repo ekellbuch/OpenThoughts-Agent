@@ -920,9 +920,22 @@ def launch_rl_job(exp_args: dict, hpc) -> Optional[str]:
 
         return None
 
-    # Submit the job with optional dependency
-    job_id = launch_sbatch(sbatch_path, dependency=dependency)
+    # Chain max_restarts jobs with afterany dependencies so the RL job
+    # auto-resumes from its latest checkpoint on preemption or failure.
+    current_dependency = dependency
+    max_restarts = int(exp_args.get("max_restarts") or 0)
+    for i in range(max_restarts):
+        job_id = launch_sbatch(sbatch_path, dependency=current_dependency)
+        job_id = job_id.strip().split()[-1]
+        current_dependency = f"afterany:{job_id}"
+        print(f"  Restart {i + 1}/{max_restarts} queued: {job_id}")
+
+    # Submit the final (or only) job
+    job_id = launch_sbatch(sbatch_path, dependency=current_dependency)
+    job_id = job_id.strip().split()[-1]
     print(f"\nRL job submitted: {job_id}")
+    if max_restarts > 0:
+        print(f"  ({max_restarts} auto-restart(s) chained with afterany dependencies)")
 
     return job_id
 

@@ -736,6 +736,18 @@ def build_harbor_command(
     def _flag_present(flag: str) -> bool:
         return any(arg == flag or arg.startswith(f"{flag}=") for arg in extra_args)
 
+    # Auto-resume on transient Daytona infrastructure errors so that flaky
+    # sandbox creation / rate limits don't permanently fail tasks.
+    if not _flag_present("--auto-resume"):
+        extra_args.append("--auto-resume")
+    if not _flag_present("--auto-resume-filter-error-type"):
+        for err_type in (
+            "DaytonaRateLimitError",
+            "EnvironmentStartTimeoutError",
+            "DaytonaError",
+        ):
+            extra_args.extend(["--auto-resume-filter-error-type", err_type])
+
     if not (_flag_present("--export-traces") or _flag_present("--no-export-traces")):
         extra_args.append("--export-traces")
     if not (_flag_present("--export-verifier-metadata") or _flag_present("--no-export-verifier-metadata")):
