@@ -146,7 +146,7 @@ trainer:
     loss_reduction: token_mean
 
   # Training loop settings
-  epochs: 2
+  epochs: 10
   update_epochs_per_batch: 1
 
   # Batch sizes optimized for sync RL

@@ -131,7 +131,7 @@ trainer:
     eps_clip_high: 0.2
 
   # Training loop settings
-  epochs: 2
+  epochs: 10
   update_epochs_per_batch: 1
 
   # Batch sizes optimized for sync RL
