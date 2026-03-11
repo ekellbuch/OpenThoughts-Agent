@@ -28,7 +28,7 @@ from hpc.launch_utils import get_daytona_api_key_override
 
 def prebuild_daytona_snapshots(
     resolved_train_data: List[str],
-    max_new_snapshots: int = 5,
+    max_new_snapshots: int = 10,
     max_org_snapshots: int = 40,
     build_region: str = "us",
     target_region: str = "RL",
