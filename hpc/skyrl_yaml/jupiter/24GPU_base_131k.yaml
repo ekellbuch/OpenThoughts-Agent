@@ -109,6 +109,7 @@ terminal_bench:
     repo_org: DCAgent
     episodes: last
     dataset_type: SFT
+    cleanup: true
 
 # Trainer configuration
 trainer:

@@ -591,6 +591,7 @@ class RLJobConfig:
     trace_upload_repo_org: str = "DCAgent"
     trace_upload_episodes: str = "last"
     trace_upload_dataset_type: str = "SFT"
+    trace_upload_cleanup: bool = True
 
 def build_skyrl_command_string(config: RLJobConfig) -> str:
     """Build the full SkyRL command string for the sbatch template.
@@ -762,6 +763,7 @@ def construct_rl_sbatch_script(exp_args: dict, hpc) -> str:
         job_config.trace_upload_repo_org = tu.get("repo_org", "DCAgent")
         job_config.trace_upload_episodes = tu.get("episodes", "last")
         job_config.trace_upload_dataset_type = tu.get("dataset_type", "SFT")
+        job_config.trace_upload_cleanup = bool(tu.get("cleanup", True))
 
     # Write config JSON
     config_dir = exp_paths.configs
@@ -1004,6 +1006,13 @@ class RLJobRunner:
             upload_exit_code = upload_proc.wait()
             if upload_exit_code == 0:
                 print(f"[RLJobRunner] Trace upload completed successfully.", flush=True)
+                if self.config.trace_upload_cleanup:
+                    trace_jobs_dir = Path(self.config.experiments_dir) / self.config.job_name / "trace_jobs"
+                    if trace_jobs_dir.exists():
+                        import shutil
+                        print(f"[RLJobRunner] Cleaning up traces directory: {trace_jobs_dir}", flush=True)
+                        shutil.rmtree(trace_jobs_dir, ignore_errors=True)
+                        print(f"[RLJobRunner] Traces directory removed.", flush=True)
             else:
                 print(f"[RLJobRunner] Trace upload failed with exit code {upload_exit_code}.", flush=True)
 
