@@ -1188,6 +1188,99 @@ done
 4. **Check Daytona**: `grep "DaytonaError\|ThrottlerException" logfile | wc -l`
 5. **Check proxy**: Look for `Proxy: ENABLED via LD_PRELOAD` near start of log
 
+### Monkey-Patching Harbor Bugs (Without Write Access)
+
+When a bug exists in feuer1's harbor repo and you can't edit it directly, use a `sitecustomize.py` monkey-patch:
+
+1. **Create the patch directory and script**:
+```bash
+mkdir -p /e/scratch/jureap59/etash/harbor_patch
+cat > /e/scratch/jureap59/etash/harbor_patch/sitecustomize.py << 'PATCH'
+"""
+Monkey-patch for harbor bugs. Python auto-imports sitecustomize.py at startup.
+This patches DaytonaEnvironment after it's imported via an import hook.
+"""
+def _apply_harbor_patch():
+    try:
+        _patched = False
+        import builtins
+        _original_import = builtins.__import__
+
+        def _patching_import(name, *args, **kwargs):
+            nonlocal _patched
+            result = _original_import(name, *args, **kwargs)
+            if not _patched and name == 'harbor.environments.daytona':
+                _patched = True
+                try:
+                    cls = result.DaytonaEnvironment
+                    if not hasattr(cls, '_environment_definition_path'):
+                        cls._environment_definition_path = property(
+                            lambda self: self._dockerfile_path
+                        )
+                        print("[PATCH] Applied _environment_definition_path → _dockerfile_path alias")
+                except Exception as e:
+                    print(f"[PATCH] Failed: {e}")
+            return result
+
+        builtins.__import__ = _patching_import
+    except Exception:
+        pass
+
+_apply_harbor_patch()
+PATCH
+```
+
+2. **Inject into sbatch files** — prepend the patch dir to PYTHONPATH:
+```bash
+# Patch all sbatch files at once
+BASE="/e/data1/datasets/playground/mmlaion/shared/guha1_glm47_traces"
+PATCH_DIR="/e/scratch/jureap59/etash/harbor_patch"
+for sbatch_file in ${BASE}/rl_v*/*/sbatch/*.sbatch; do
+  if ! grep -q "harbor_patch" "$sbatch_file"; then
+    sed -i "s|export PYTHONPATH=\"\$WORKDIR:\${PYTHONPATH:-}\"|export PYTHONPATH=\"${PATCH_DIR}:\$WORKDIR:\${PYTHONPATH:-}\"|" "$sbatch_file"
+  fi
+done
+```
+
+3. **Verify** — in job logs, look for: `[PATCH] Applied _environment_definition_path → _dockerfile_path alias`
+
+### Rolling Back Poisoned Checkpoints
+
+When a buggy run writes checkpoints with 0.0 reward on top of healthy ones, you need to delete the bad checkpoints and reset `latest_ckpt_global_step.txt` so `resume_mode: latest` picks up the last healthy checkpoint.
+
+**How to identify poisoned checkpoints**:
+- Check checkpoint dates: `ls -la {ckpt_dir}/global_step_*` — healthy runs are before the bug, poisoned ones are after
+- Cross-reference with log files: find which Slurm ID produced 0.0 rewards, check its date range
+
+**How to roll back**:
+```bash
+BASE="/e/data1/datasets/playground/mmlaion/shared/guha1_glm47_traces"
+JOB="rl_v1_tp4s64_8x_nemotron-cpp"
+CKPT="${BASE}/${JOB}/${JOB}/${JOB}/checkpoints"
+
+# 1. List checkpoints with dates to identify the cutoff
+ls -la ${CKPT}/global_step_*
+
+# 2. Delete poisoned checkpoints (example: steps 39,42,45 from bugged batch)
+rm -rf ${CKPT}/global_step_39 ${CKPT}/global_step_42 ${CKPT}/global_step_45
+
+# 3. Reset the latest pointer to the last healthy step
+echo "36" > ${CKPT}/latest_ckpt_global_step.txt
+
+# 4. Verify
+cat ${CKPT}/latest_ckpt_global_step.txt  # Should show the healthy step
+ls ${CKPT}/  # Should only show healthy checkpoints
+```
+
+**Example from 2026-03-11**: The `_environment_definition_path` bug caused batch 4 (Slurm 270441-270446) to produce 0.0 rewards but still write checkpoints. Rollback was:
+
+| Job | Healthy last step | Deleted steps | Reset to |
+|-----|------------------|---------------|----------|
+| v1_nemotron-cpp | 36 (Mar 9) | 39, 42, 45 (Mar 10-11) | 36 |
+| v1_stack-csharp | 18 (Mar 9) | 21, 24, 27 (Mar 10-11) | 18 |
+| v1_stack-jest-v2 | 18 (Mar 9) | 21, 24 (Mar 10-11) | 18 |
+| v1_stack-selfdoc-v2 | 12 (Mar 9) | 15, 18 (Mar 10-11) | 12 |
+
 ---
 
 ## 13. Quick Reference
