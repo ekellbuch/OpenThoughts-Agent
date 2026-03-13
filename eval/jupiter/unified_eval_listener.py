@@ -602,9 +602,11 @@ def submit_eval(
 
     # Wrap in SSH if submitting to a remote cluster
     if remote_host:
-        shell_cmd = " ".join(cmd)
+        # Quote each arg for the remote shell, then join into a single command string
+        import shlex
+        shell_cmd = " ".join(shlex.quote(c) for c in cmd)
         if remote_workdir:
-            shell_cmd = f"cd {remote_workdir} && {shell_cmd}"
+            shell_cmd = f"cd {shlex.quote(remote_workdir)} && {shell_cmd}"
         cmd = ["ssh", remote_host, shell_cmd]
 
     if dry_run:
