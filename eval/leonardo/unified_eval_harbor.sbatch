@@ -117,6 +117,8 @@ export UV_CACHE_DIR="${SCRATCH_FAST}/uv_cache_dir"
 export TORCH_EXTENSIONS_DIR="${WORK}/torch_extensions"
 export TORCH_HOME="${WORK}/torch_home"
 export XDG_CACHE_HOME="${WORK}/.cache"
+export TORCHINDUCTOR_CACHE_DIR="${WORK}/.cache/torchinductor"
+export HOME="${WORK}"
 export HYDRA_FULL_ERROR=1
 export HF_HUB_OFFLINE=0  # Login nodes pre-downloaded; set to 1 after download
 
