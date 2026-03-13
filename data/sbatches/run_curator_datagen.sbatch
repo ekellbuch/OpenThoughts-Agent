@@ -7,7 +7,9 @@
 #SBATCH --output=data/sbatches/logs/curator_datagen_%j.out
 #SBATCH --job-name=curator_datagen
 
-set -eo pipefail
+# NOTE: set -eo pipefail is deferred until after environment setup
+# because conda/module commands can trigger benign errors
+# (e.g., mkdir /var/spool/data on Jupiter compute nodes)
 
 # ============================================
 # Curator Non-Agentic Datagen
@@ -87,6 +89,9 @@ cd "$REPO_DIR"
 echo "HF_HUB_CACHE: $HF_HUB_CACHE"
 echo "Python: $(python3 --version 2>&1)"
 echo "Conda env: $CONDA_DEFAULT_ENV"
+
+# Now enable strict error handling
+set -eo pipefail
 
 # -----------------------------------------------
 # Step 2: Start vLLM server
