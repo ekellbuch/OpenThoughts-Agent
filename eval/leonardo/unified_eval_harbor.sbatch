@@ -110,7 +110,8 @@ else
 fi
 
 # --- vLLM / Triton / torch cache dirs (home quota is small; use WORK) ---
-export VLLM_CONFIG_ROOT="${VLLM_CACHE_ROOT:-${SCRATCH_FAST}/vllm_cache}"
+export VLLM_CACHE_ROOT="${WORK}/vllm_cache"
+export VLLM_CONFIG_ROOT="${WORK}/vllm_cache"
 export TRITON_CACHE_DIR="/tmp/triton_cache_${USER}_${SLURM_JOB_ID}"
 export FLASHINFER_WORKSPACE_BASE="/tmp/flashinfer_cache_${USER}_${SLURM_JOB_ID}"
 export UV_CACHE_DIR="${SCRATCH_FAST}/uv_cache_dir"
