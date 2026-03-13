@@ -554,11 +554,15 @@ def submit_eval(
     dry_run: bool = False,
     reservation: Optional[str] = None,
     dependency: Optional[str] = None,
+    remote_host: Optional[str] = None,
+    remote_workdir: Optional[str] = None,
 ) -> Optional[str]:
     """
     Submit a batch job (SLURM sbatch or PBS qsub). Returns job_id if successful.
 
     Detects scheduler from script extension: .pbs -> qsub, else -> sbatch.
+    If remote_host is set, submits via SSH (e.g., for Polaris where Supabase is
+    blocked but the listener runs locally with DB access).
 
     SLURM: positional args $1=model, $2=dataset, $3=benchmark_id
     PBS: env vars EVAL_MODEL, EVAL_REPO_ID, EVAL_BENCHMARK_ID via qsub -v
@@ -596,6 +600,13 @@ def submit_eval(
             cmd.append(str(benchmark_id))
         job_id_pattern = r"Submitted batch job (\d+)"
 
+    # Wrap in SSH if submitting to a remote cluster
+    if remote_host:
+        shell_cmd = " ".join(cmd)
+        if remote_workdir:
+            shell_cmd = f"cd {remote_workdir} && {shell_cmd}"
+        cmd = ["ssh", remote_host, shell_cmd]
+
     if dry_run:
         log(f"[DRY RUN] Would run: {' '.join(cmd)}")
         if sbatch_env:
@@ -603,7 +614,7 @@ def submit_eval(
                 log(f"  env: {k}={v}", verbose_only=True)
         return "DRY_RUN"
 
-    code, out = _run(cmd, env=sbatch_env)
+    code, out = _run(cmd, env=sbatch_env if not remote_host else None)
     scheduler = "qsub" if use_pbs else "sbatch"
     log(f"{scheduler}: {' '.join(cmd)}\n{out}")
 
@@ -673,6 +684,11 @@ Examples:
                         "so at most batch-size jobs run at once. As one finishes, "
                         "the next starts immediately.")
     p.add_argument("--dependency", default=None, help="SLURM dependency string (e.g., 'afterany:123:456')")
+    p.add_argument("--remote-host", default=None,
+                   help="SSH host for remote job submission (e.g., ALCFPolaris). "
+                        "Listener runs locally (with DB access) and submits jobs via SSH.")
+    p.add_argument("--remote-workdir", default=None,
+                   help="Working directory on remote host (cd before qsub/sbatch)")
 
     # Modes
     p.add_argument("--dry-run", action="store_true")
@@ -848,6 +864,8 @@ def main() -> None:
                         dry_run=args.dry_run,
                         reservation=args.reservation,
                         dependency=job_dependency,
+                        remote_host=args.remote_host,
+                        remote_workdir=args.remote_workdir,
                     )
 
                     if slurm_id and slurm_id != "DRY_RUN":
