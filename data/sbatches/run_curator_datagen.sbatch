@@ -85,6 +85,10 @@ fi
 # Ensure HF_HUB_CACHE is set even if dotenv didn't resolve
 export HF_HUB_CACHE="${HF_HUB_CACHE:-/e/data1/datasets/playground/ot/hf_hub}"
 
+# No internet on compute nodes — force offline mode for HF
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
 # Load modules (Jupiter GH200 uses CUDA 13.0 only)
 module purge 2>/dev/null || true
 module load nvidia-compilers/25.9-CUDA-13 2>&1 || true
