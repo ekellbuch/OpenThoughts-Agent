@@ -37,7 +37,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Path setup: project root (for database.unified_db and eval.tacc imports)
@@ -121,6 +121,47 @@ PRESETS: Dict[str, Dict] = {
 # Constants
 # ---------------------------------------------------------------------------
 PRINT_PREFIX = "[eval-listener]"
+
+
+# ---------------------------------------------------------------------------
+# Harbor config parsing — extract timeout/memory for benchmark suffix
+# ---------------------------------------------------------------------------
+def parse_harbor_config(path: Optional[str]) -> Dict[str, Any]:
+    """Parse timeout_multiplier and override_memory_mb from a Harbor YAML config."""
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        import yaml
+        with open(path) as f:
+            cfg = yaml.safe_load(f) or {}
+    except Exception as e:
+        log(f"WARNING: failed to parse harbor config {path}: {e}")
+        return {}
+    result: Dict[str, Any] = {}
+    if cfg.get("timeout_multiplier") is not None:
+        result["timeout_multiplier"] = float(cfg["timeout_multiplier"])
+    env_cfg = cfg.get("environment") or {}
+    if env_cfg.get("override_memory_mb") is not None:
+        result["override_memory_mb"] = int(env_cfg["override_memory_mb"])
+    return result
+
+
+def compute_benchmark_suffix(timeout_multiplier: Optional[float] = None,
+                             override_memory_mb: Optional[int] = None) -> str:
+    """Compute benchmark name suffix matching sbatch logic.
+
+    Order: memory first, then timeout (e.g. '_4gb_8.0x').
+    Defaults (1024 MB, 1.0x) produce no suffix.
+    """
+    suffix = ""
+    if override_memory_mb is not None and override_memory_mb != 1024:
+        mem_gb = override_memory_mb // 1024
+        suffix += f"_{mem_gb}gb"
+    if timeout_multiplier is not None and timeout_multiplier not in (1, 1.0):
+        suffix += f"_{timeout_multiplier}x"
+    return suffix
+
+
 JOB_STATUS_PENDING = "Pending"
 JOB_STATUS_STARTED = "Started"
 JOB_STATUS_FINISHED = "Finished"
@@ -224,6 +265,50 @@ def load_priority_models(path: Optional[str]) -> Optional[List[str]]:
                 models.append(line)
     log(f"Loaded {len(models)} model(s) from priority file {path}", verbose_only=True)
     return models if models else None
+
+
+# ---------------------------------------------------------------------------
+# Benchmark resolution helpers (config-suffixed benchmarks)
+# ---------------------------------------------------------------------------
+def _resolve_benchmark_by_name(name: str) -> Optional[str]:
+    """Look up a benchmark by exact name. Returns benchmark UUID or None."""
+    try:
+        client = get_supabase_client()
+        data = (
+            client.table("benchmarks")
+            .select("id")
+            .eq("name", name)
+            .limit(1)
+            .execute()
+            .data
+        ) or []
+        if data:
+            return str(data[0]["id"])
+    except Exception as e:
+        log(f"WARNING: benchmark lookup for '{name}' failed: {e}")
+    return None
+
+
+def _auto_register_benchmark(name: str, dataset_hf: str) -> Optional[str]:
+    """Register a new benchmark entry for a config-suffixed name. Returns new UUID or None."""
+    # Find the base benchmark to use as duplicate_of
+    base_id = resolve_benchmark_id_for_dataset(dataset_hf)
+    try:
+        client = get_supabase_client()
+        row = {
+            "name": name,
+            "dataset_repo": dataset_hf,
+        }
+        if base_id:
+            row["duplicate_of"] = base_id
+        result = client.table("benchmarks").insert(row).execute()
+        if result.data:
+            new_id = str(result.data[0]["id"])
+            log(f"Auto-registered benchmark '{name}' -> {new_id} (duplicate_of={base_id})")
+            return new_id
+    except Exception as e:
+        log(f"WARNING: failed to auto-register benchmark '{name}': {e}")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +648,16 @@ def main() -> None:
     harbor_config = args.harbor_config or preset_config.get("harbor_config")
     if harbor_config:
         sbatch_env["EVAL_HARBOR_CONFIG"] = harbor_config
+
+    # Parse timeout/memory from harbor config for benchmark suffix + sbatch env
+    harbor_cfg = parse_harbor_config(harbor_config)
+    timeout_multiplier = harbor_cfg.get("timeout_multiplier")
+    override_memory_mb = harbor_cfg.get("override_memory_mb")
+    if timeout_multiplier is not None:
+        sbatch_env["EVAL_TIMEOUT_MULTIPLIER"] = str(timeout_multiplier)
+    if override_memory_mb is not None:
+        sbatch_env["EVAL_OVERRIDE_MEMORY_MB"] = str(override_memory_mb)
+    benchmark_suffix = compute_benchmark_suffix(timeout_multiplier, override_memory_mb)
     # Preset-specific env vars (snapshot, daytona key)
     if preset_config.get("snapshot_name"):
         sbatch_env["EVAL_SNAPSHOT_NAME"] = preset_config["snapshot_name"]
@@ -571,6 +666,9 @@ def main() -> None:
 
     check_interval_seconds = int(args.check_hours * 3600)
 
+    if benchmark_suffix:
+        log(f"Harbor config: timeout_multiplier={timeout_multiplier}, "
+            f"override_memory_mb={override_memory_mb} -> benchmark suffix '{benchmark_suffix}'")
     log(
         f"Starting listener: datasets={datasets}, lookback={args.lookback_days}d, "
         f"interval={args.check_hours}h, sbatch={args.sbatch_script}, "
@@ -587,9 +685,22 @@ def main() -> None:
             models = fetch_recent_models(args.lookback_days)
             log(f"Found {len(models)} model(s) in window.")
 
-            dataset_to_bench: Dict[str, Optional[str]] = {
-                ds: resolve_benchmark_id_for_dataset(ds) for ds in datasets
-            }
+            dataset_to_bench: Dict[str, Optional[str]] = {}
+            for ds in datasets:
+                if benchmark_suffix:
+                    # Resolve the config-suffixed benchmark (e.g. terminal_bench_2_4gb_8.0x)
+                    suffixed_name = _dataset_repo_name(ds) + benchmark_suffix
+                    bench_id = _resolve_benchmark_by_name(suffixed_name)
+                    if bench_id:
+                        log(f"Resolved suffixed benchmark '{suffixed_name}' -> {bench_id}", verbose_only=True)
+                        dataset_to_bench[ds] = bench_id
+                    else:
+                        # Auto-register the suffixed benchmark
+                        log(f"Suffixed benchmark '{suffixed_name}' not found, auto-registering...")
+                        bench_id = _auto_register_benchmark(suffixed_name, ds)
+                        dataset_to_bench[ds] = bench_id
+                else:
+                    dataset_to_bench[ds] = resolve_benchmark_id_for_dataset(ds)
 
             submissions: List[Tuple[str, str, str, Optional[str], str]] = []
 
