@@ -85,9 +85,10 @@ fi
 # Ensure HF_HUB_CACHE is set even if dotenv didn't resolve
 export HF_HUB_CACHE="${HF_HUB_CACHE:-/e/data1/datasets/playground/ot/hf_hub}"
 
-# Load modules (Jupiter needs CUDA for vLLM)
+# Load modules (Jupiter GH200 uses CUDA 13.0 only)
 module purge 2>/dev/null || true
-module load nvidia-compilers/25.9-CUDA-13 2>/dev/null || true
+module load nvidia-compilers/25.9-CUDA-13 2>&1 || true
+echo "CUDA_HOME: ${CUDA_HOME:-not set}"
 
 export VLLM_USE_V1=1
 
