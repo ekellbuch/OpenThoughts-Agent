@@ -5,7 +5,7 @@
 #SBATCH --ntasks-per-node 1
 #SBATCH --cpus-per-task=72
 #SBATCH --gres=gpu:4
-#SBATCH --account jureap59
+#SBATCH --account reformo
 #SBATCH --output=eval/jupiter/logs/%x_%j.out
 #SBATCH --job-name=eval
 
