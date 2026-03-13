@@ -556,28 +556,45 @@ def submit_eval(
     dependency: Optional[str] = None,
 ) -> Optional[str]:
     """
-    Submit sbatch job. Returns slurm_job_id if successful, None otherwise.
+    Submit a batch job (SLURM sbatch or PBS qsub). Returns job_id if successful.
 
-    Positional args to sbatch:
-      $1 = model HF name
-      $2 = dataset HF repo (org/repo)
-      $3 = benchmark_id (uuid, optional)
+    Detects scheduler from script extension: .pbs -> qsub, else -> sbatch.
+
+    SLURM: positional args $1=model, $2=dataset, $3=benchmark_id
+    PBS: env vars EVAL_MODEL, EVAL_REPO_ID, EVAL_BENCHMARK_ID via qsub -v
     """
-    # Build --export flag to ensure env vars propagate to compute nodes
-    export_parts = ["ALL"]
-    if sbatch_env:
-        for k, v in sbatch_env.items():
-            export_parts.append(f"{k}={v}")
-    export_flag = ",".join(export_parts)
+    use_pbs = sbatch_script.endswith(".pbs")
 
-    cmd = ["sbatch", f"--export={export_flag}"]
-    if reservation:
-        cmd.append(f"--reservation={reservation}")
-    if dependency:
-        cmd.append(f"--dependency={dependency}")
-    cmd.extend([sbatch_script, hf_model_name, dataset_hf])
-    if benchmark_id:
-        cmd.append(str(benchmark_id))
+    if use_pbs:
+        # PBS Pro: pass all params as env vars via qsub -v
+        all_vars = dict(sbatch_env or {})
+        all_vars["EVAL_MODEL"] = hf_model_name
+        all_vars["EVAL_REPO_ID"] = dataset_hf
+        if benchmark_id:
+            all_vars["EVAL_BENCHMARK_ID"] = str(benchmark_id)
+        v_flag = ",".join(f"{k}={v}" for k, v in all_vars.items())
+        cmd = ["qsub", "-v", v_flag]
+        if dependency:
+            # PBS dependency syntax: -W depend=afterany:jobid
+            cmd.extend(["-W", f"depend={dependency}"])
+        cmd.append(sbatch_script)
+        job_id_pattern = r"(\d+\.\w+)"  # PBS job IDs: 12345.polaris-pbs-01
+    else:
+        # SLURM: --export for env vars, positional args for model/dataset
+        export_parts = ["ALL"]
+        if sbatch_env:
+            for k, v in sbatch_env.items():
+                export_parts.append(f"{k}={v}")
+        export_flag = ",".join(export_parts)
+        cmd = ["sbatch", f"--export={export_flag}"]
+        if reservation:
+            cmd.append(f"--reservation={reservation}")
+        if dependency:
+            cmd.append(f"--dependency={dependency}")
+        cmd.extend([sbatch_script, hf_model_name, dataset_hf])
+        if benchmark_id:
+            cmd.append(str(benchmark_id))
+        job_id_pattern = r"Submitted batch job (\d+)"
 
     if dry_run:
         log(f"[DRY RUN] Would run: {' '.join(cmd)}")
@@ -587,12 +604,13 @@ def submit_eval(
         return "DRY_RUN"
 
     code, out = _run(cmd, env=sbatch_env)
-    log(f"sbatch: {' '.join(cmd)}\n{out}")
+    scheduler = "qsub" if use_pbs else "sbatch"
+    log(f"{scheduler}: {' '.join(cmd)}\n{out}")
 
     if code != 0:
         return None
 
-    m = re.search(r"Submitted batch job (\d+)", out)
+    m = re.search(job_id_pattern, out)
     return m.group(1) if m else None
 
 

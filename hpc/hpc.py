@@ -1258,7 +1258,35 @@ frontier = HPC(
     disable_cpu_bind=True,
 )
 
-clusters = [jureca, jupiter, juwels, leonardo, capella, alpha, dip, lrz, vista, lonestar, claix, nyugreene, nyutorch, oumi, perlmutter, frontier]
+polaris = HPC(
+    name="polaris",
+    # ALCF Polaris login nodes: polaris-login-01 through polaris-login-04
+    hostname_pattern=r"polaris-login-\d+",
+    dotenv_filename="polaris.env",
+    account="CausalAlign",
+    partition="",  # PBS uses queues, not partitions; prod queue auto-routes by node count
+    gpus_per_node=4,
+    cpus_per_node=64,  # 32 cores x 2 threads
+    mem_per_node="512GB",
+    internet_node=True,  # Via proxy (proxy.alcf.anl.gov:3128)
+    gpus_type="A100 40GB",
+    total_partition_nodes=560,
+    gpu_directive_format="",  # PBS uses ngpus= in select chunks, not SLURM directives
+    env_vars={
+        # Disable addr2line for vLLM model inspection subprocess (prevents SIGSEGV hangs)
+        "TORCH_DISABLE_ADDR2LINE": "1",
+    },
+    # Note: Polaris uses PBS Pro, not SLURM. The HPC model is used for env config,
+    # eval listener, and datagen — not for sbatch submission. PBS job scripts are
+    # separate (eval/polaris/*.pbs).
+    default_time_limit="24:00:00",
+    max_time_limit="24:00:00",
+    num_nodes_slow=10,
+    num_nodes_default=24,
+    num_nodes_fast=56,
+)
+
+clusters = [jureca, jupiter, juwels, leonardo, capella, alpha, dip, lrz, vista, lonestar, claix, nyugreene, nyutorch, oumi, perlmutter, frontier, polaris]
 
 
 def detect_hpc() -> HPC:
