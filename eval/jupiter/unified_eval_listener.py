@@ -104,7 +104,7 @@ PRESETS: Dict[str, Dict] = {
         "gpu_memory_util": 0.95,
     },
     "tb2": {
-        "datasets": ["DCAgent/terminal_bench_v2"],
+        "datasets": ["DCAgent2/terminal_bench_2"],
         "description": "Terminal Bench v2 eval",
         "n_concurrent": 64,
         "gpu_memory_util": 0.95,
