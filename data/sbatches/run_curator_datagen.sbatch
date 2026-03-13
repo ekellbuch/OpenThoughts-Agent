@@ -58,8 +58,9 @@ echo "============================================"
 echo ""
 echo "=== Step 1: Environment Setup ==="
 
-# Activate the dedicated curator conda env
-source ~/.bashrc
+# Activate the dedicated curator conda env (source conda.sh directly
+# instead of ~/.bashrc — compute nodes may have issues with /etc/bashrc)
+source /e/scratch/jureap59/feuer1/miniforge3/etc/profile.d/conda.sh
 conda activate curator
 
 # Source secrets (HF_TOKEN, etc.)
