@@ -157,6 +157,66 @@ JOB_STATUS_FINISHED = "Finished"
 
 
 # ---------------------------------------------------------------------------
+# Baseline model config mapping — per-model vLLM overrides
+# ---------------------------------------------------------------------------
+_BASELINE_MODEL_CONFIGS: Optional[Dict[str, Dict[str, Any]]] = None
+
+
+def load_baseline_model_configs(path: Optional[str]) -> Dict[str, Dict[str, Any]]:
+    """Load baseline model -> vLLM config mapping from YAML file.
+
+    Returns dict mapping HF model name to vLLM serving params.
+    """
+    global _BASELINE_MODEL_CONFIGS
+    if _BASELINE_MODEL_CONFIGS is not None:
+        return _BASELINE_MODEL_CONFIGS
+
+    if not path or not os.path.isfile(path):
+        _BASELINE_MODEL_CONFIGS = {}
+        return _BASELINE_MODEL_CONFIGS
+
+    try:
+        import yaml
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+        _BASELINE_MODEL_CONFIGS = data.get("models", {})
+        log(f"Loaded {len(_BASELINE_MODEL_CONFIGS)} baseline model config(s) from {path}")
+    except Exception as e:
+        log(f"WARNING: failed to load baseline model configs from {path}: {e}")
+        _BASELINE_MODEL_CONFIGS = {}
+
+    return _BASELINE_MODEL_CONFIGS
+
+
+def get_vllm_env_overrides(hf_model: str, configs: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+    """Get vLLM env var overrides for a model from the baseline config mapping.
+
+    Returns dict of EVAL_VLLM_* env vars to pass to the eval script.
+    """
+    cfg = configs.get(hf_model)
+    if not cfg:
+        return {}
+
+    env = {}
+    if cfg.get("tensor_parallel_size") is not None:
+        env["EVAL_VLLM_TENSOR_PARALLEL_SIZE"] = str(cfg["tensor_parallel_size"])
+    if cfg.get("max_model_len") is not None:
+        env["EVAL_VLLM_MAX_MODEL_LEN"] = str(cfg["max_model_len"])
+    if cfg.get("swap_space") is not None:
+        env["EVAL_VLLM_SWAP_SPACE"] = str(cfg["swap_space"])
+    if cfg.get("trust_remote_code"):
+        env["EVAL_VLLM_TRUST_REMOTE_CODE"] = "1"
+    if cfg.get("tool_call_parser"):
+        env["EVAL_VLLM_TOOL_CALL_PARSER"] = cfg["tool_call_parser"]
+    if cfg.get("reasoning_parser"):
+        env["EVAL_VLLM_REASONING_PARSER"] = cfg["reasoning_parser"]
+    if cfg.get("extra_args"):
+        env["EVAL_VLLM_EXTRA_ARGS"] = cfg["extra_args"]
+
+    return env
+
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 _LOG_FILE: Optional[Path] = None
@@ -692,11 +752,19 @@ Examples:
     p.add_argument("--remote-workdir", default=None,
                    help="Working directory on remote host (cd before qsub/sbatch)")
 
+    # Baseline model configs
+    p.add_argument("--baseline-model-configs", default=None,
+                   help="Path to YAML mapping baseline models to vLLM serving params "
+                        "(e.g., eval/baseline_model_configs.yaml)")
+
     # Modes
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--once", action="store_true")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--check-hf", action="store_true")
+    p.add_argument("--pre-download", action="store_true",
+                   help="Pre-download all model weights on login node before submitting jobs. "
+                        "Essential for no-internet compute nodes (Leonardo, Jupiter).")
     p.add_argument("--log-dir", default=os.getenv("EVAL_LISTENER_LOG_DIR", "eval/jupiter/logs"))
 
     return p
@@ -757,6 +825,9 @@ def main() -> None:
         sbatch_env["EVAL_SNAPSHOT_NAME"] = preset_config["snapshot_name"]
     if preset_config.get("daytona_api_key"):
         sbatch_env["DAYTONA_API_KEY"] = preset_config["daytona_api_key"]
+
+    # Load baseline model configs for per-model vLLM overrides
+    baseline_configs = load_baseline_model_configs(args.baseline_model_configs)
 
     check_interval_seconds = int(args.check_hours * 3600)
 
@@ -828,6 +899,20 @@ def main() -> None:
 
                 log(f"Submitting {len(submissions)} eval(s)...")
 
+                # Pre-download models on login node (for no-internet compute nodes)
+                if args.pre_download:
+                    unique_models = sorted(set(hf_model for _, hf_model, _, _, _ in submissions))
+                    log(f"Pre-downloading {len(unique_models)} unique model(s) on login node...")
+                    from huggingface_hub import snapshot_download
+                    for i, model_name in enumerate(unique_models):
+                        log(f"  [{i+1}/{len(unique_models)}] Downloading {model_name}...")
+                        try:
+                            path = snapshot_download(repo_id=model_name, repo_type="model")
+                            log(f"  [{i+1}/{len(unique_models)}] Cached at {path}")
+                        except Exception as e:
+                            log(f"  [{i+1}/{len(unique_models)}] WARNING: Failed to download {model_name}: {e}")
+                    log("Pre-download complete.")
+
                 # Sliding-window dependency: job N depends on job N-batch_size
                 # so at most batch_size jobs run concurrently. As one finishes,
                 # the next starts immediately (no waiting for entire wave).
@@ -847,6 +932,12 @@ def main() -> None:
                     job_env = dict(sbatch_env)
                     if db_job_id:
                         job_env["EVAL_DB_JOB_ID"] = db_job_id
+
+                    # Apply per-model vLLM overrides from baseline config mapping
+                    vllm_overrides = get_vllm_env_overrides(hf_model, baseline_configs)
+                    if vllm_overrides:
+                        log(f"  Applying baseline model vLLM overrides: {list(vllm_overrides.keys())}", verbose_only=True)
+                        job_env.update(vllm_overrides)
 
                     # Build dependency: job N depends on job N-batch_size
                     job_dependency = args.dependency

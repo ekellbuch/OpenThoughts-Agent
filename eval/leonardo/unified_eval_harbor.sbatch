@@ -73,8 +73,10 @@ echo "=============================================="
 # Leonardo Environment Setup
 # ==============================================================================
 
-WORK="${WORK:-/leonardo_work/EUHPC_E03_068/bfeuer00}"
-DCFT="${DCFT:-${WORK}/code/OpenThoughts-Agent}"
+# Hardcode WORK — Leonardo sets WORK=/leonardo_work/AIFAC_5C0_290 system-wide
+# which is the project dir, not the user dir. Override unconditionally.
+WORK="/leonardo_work/EUHPC_E03_068/bfeuer00"
+DCFT="${WORK}/code/OpenThoughts-Agent"
 
 # Reset PYTHONPATH
 unset PYTHONPATH
@@ -120,75 +122,59 @@ echo "Python: $($PYTHON_BIN --version)"
 echo "PYTHONPATH: $PYTHONPATH"
 
 # ==============================================================================
-# SSH Tunnel + Proxychains Setup (no internet on compute nodes)
+# Proxychains Setup (no internet on compute nodes)
+# Leonardo blocks SSH tunnel auth (pubkey disabled for intra-cluster).
+# Instead, a standalone SOCKS5 proxy runs on the login node (in tmux).
+# Start it before submitting jobs:
+#   python3 eval/leonardo/socks5_proxy.py --port 17003
 # ==============================================================================
 
-NODE_HOST=$(hostname -s)
-TUNNEL_PORT=7003
-LOGIN_NODE="login05.leonardo.local"
+# Resolve login node IP at submission time (proxychains needs numeric IP)
+PROXY_IP="${PROXY_IP:-10.99.0.5}"
+PROXY_PORT="${PROXY_PORT:-17003}"
 PROXYCHAINS_BIN="$(which proxychains4 2>/dev/null || echo "${WORK}/miniforge3/envs/otagent/bin/proxychains4")"
-TUNNEL_PID=""
 
 setup_proxy() {
-    echo "[proxy] Setting up SSH tunnel to $LOGIN_NODE..."
+    echo "[proxy] Configuring proxychains to use SOCKS5 proxy at ${PROXY_IP}:${PROXY_PORT}..."
 
-    SSH_KEY="${SSH_KEY:-$HOME/.ssh/authorized_keys/cineca_keyfile}"
-    if [ ! -f "$SSH_KEY" ]; then
-        echo "[proxy] WARNING: SSH_KEY not found at $SSH_KEY"
-        echo "[proxy] External connectivity (Daytona, HF) will fail"
-        return 1
-    fi
-
-    # Get node IP
-    NODE_IP=$(hostname -i 2>/dev/null | awk '{print $1}')
-    NODE_IP="${NODE_IP:-127.0.0.1}"
-
-    # Create SSH tunnel with SOCKS5 proxy
-    ssh -g -f -N -D ${TUNNEL_PORT} \
-        -o StrictHostKeyChecking=no \
-        -o ConnectTimeout=30 \
-        -o ServerAliveInterval=10 \
-        -o ServerAliveCountMax=30 \
-        -o TCPKeepAlive=yes \
-        -o ExitOnForwardFailure=yes \
-        -o BatchMode=yes \
-        -i "${SSH_KEY}" \
-        "${USER}@${LOGIN_NODE}"
-
-    sleep 5
-
-    # Verify tunnel
-    if pgrep -f "ssh.*-D.*${TUNNEL_PORT}" > /dev/null; then
-        echo "[proxy] SSH tunnel started successfully"
-        TUNNEL_PID=$(pgrep -f "ssh.*-D.*${TUNNEL_PORT}" | head -1)
+    # Verify connectivity to the proxy
+    if python3 -c "
+import socket, sys
+try:
+    s = socket.create_connection(('${PROXY_IP}', ${PROXY_PORT}), timeout=10)
+    s.close()
+    print('[proxy] Login node proxy is reachable')
+except Exception as e:
+    print(f'[proxy] ERROR: Cannot reach proxy at ${PROXY_IP}:${PROXY_PORT}: {e}')
+    sys.exit(1)
+"; then
+        echo "[proxy] Proxy connectivity confirmed"
     else
-        echo "[proxy] ERROR: SSH tunnel failed to start"
+        echo "[proxy] WARNING: Proxy not reachable. External connectivity will fail."
+        echo "[proxy] Ensure socks5_proxy.py is running on login node port ${PROXY_PORT}"
         return 1
     fi
 
-    # Generate proxychains config
+    # Generate proxychains config (proxy_dns required for domain resolution via proxy)
     CFG_PATH="$HOME/.proxychains/proxychains_${SLURM_JOB_ID}.conf"
     mkdir -p "$HOME/.proxychains"
 
     cat > "$CFG_PATH" <<PCEOF
 strict_chain
+proxy_dns
 quiet_mode
 tcp_read_time_out 30000
 tcp_connect_time_out 15000
 localnet 127.0.0.0/255.0.0.0
-localnet 10.0.0.0/255.0.0.0
-localnet 172.16.0.0/255.240.0.0
-localnet 192.168.0.0/255.255.0.0
-localnet 169.254.0.0/255.255.0.0
 [ProxyList]
-socks5 ${NODE_IP} ${TUNNEL_PORT}
+socks5 ${PROXY_IP} ${PROXY_PORT}
 PCEOF
 
     export PROXYCHAINS_CONF_FILE="$CFG_PATH"
-    export PROXYCHAINS_SOCKS5_HOST="${NODE_IP}"
-    export PROXYCHAINS_SOCKS5_PORT="${TUNNEL_PORT}"
+    export PROXYCHAINS_SOCKS5_HOST="${PROXY_IP}"
+    export PROXYCHAINS_SOCKS5_PORT="${PROXY_PORT}"
 
-    echo "[proxy] Config at $CFG_PATH (socks5://${NODE_IP}:${TUNNEL_PORT})"
+    echo "[proxy] Config at $CFG_PATH (socks5://${PROXY_IP}:${PROXY_PORT})"
 
     # Daytona timeout/retry settings
     export DAYTONA_MAX_RETRIES=5
@@ -239,9 +225,6 @@ cleanup() {
     echo "Cleaning up..."
     if [ -n "${VLLM_PID:-}" ]; then
         kill "$VLLM_PID" 2>/dev/null || true
-    fi
-    if [ -n "${TUNNEL_PID:-}" ]; then
-        kill "$TUNNEL_PID" 2>/dev/null || true
     fi
     rm -f "${PROXYCHAINS_CONF_FILE:-}" 2>/dev/null || true
     echo "Cleanup done."

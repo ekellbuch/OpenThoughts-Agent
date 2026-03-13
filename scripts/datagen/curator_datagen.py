@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""
+Non-agentic data generation using Bespoke Curator.
+
+Reads a HuggingFace dataset of prompts (conversations format), sends each prompt
+to a vLLM-served model via Curator's batch inference, and writes the completions
+back as a new dataset.
+
+Supports two modes:
+  1. hosted_vllm: Point at a running vLLM server (local or remote)
+  2. vllm: Let Curator load the model directly via vLLM backend
+
+Usage (with a running vLLM server):
+    # Start vLLM:
+    vllm serve Qwen/Qwen3-32B --port 8000 --api-key token-abc123 --tensor-parallel-size 4
+
+    # Run datagen:
+    python scripts/datagen/curator_datagen.py \
+        --input-dataset open-thoughts/OpenThoughts3-1.2M \
+        --model Qwen/Qwen3-32B \
+        --base-url http://localhost:8000/v1 \
+        --api-key token-abc123 \
+        --limit 100 \
+        --output-repo my-org/my-completions
+
+Usage (direct vLLM backend, loads model locally):
+    python scripts/datagen/curator_datagen.py \
+        --input-dataset open-thoughts/OpenThoughts3-1.2M \
+        --model Qwen/Qwen3-32B \
+        --backend vllm \
+        --tensor-parallel-size 4 \
+        --limit 100
+
+Env vars:
+    HOSTED_VLLM_API_KEY  - API key for vLLM server (alternative to --api-key)
+    HF_TOKEN             - HuggingFace token for pushing results
+"""
+
+import argparse
+import json
+import logging
+import os
+import sys
+import time
+from typing import Any, Dict, List, Optional, Union
+
+from bespokelabs import curator
+from datasets import Dataset, load_dataset
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[curator-datagen] %(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Prompt extraction
+# ---------------------------------------------------------------------------
+
+def extract_prompt(conversations: List[Dict[str, str]]) -> str:
+    """Extract the user prompt from a conversations list.
+
+    Supports two common formats:
+      - ShareGPT: [{"from": "human", "value": "..."}, ...]
+      - OpenAI:   [{"role": "user", "content": "..."}, ...]
+    """
+    for msg in conversations:
+        role = msg.get("from") or msg.get("role", "")
+        content = msg.get("value") or msg.get("content", "")
+        if role in ("human", "user"):
+            return content
+    # Fallback: return last message content
+    if conversations:
+        msg = conversations[-1]
+        return msg.get("value") or msg.get("content", "")
+    return ""
+
+
+def build_system_prompt(conversations: List[Dict[str, str]]) -> Optional[str]:
+    """Extract system prompt if present."""
+    for msg in conversations:
+        role = msg.get("from") or msg.get("role", "")
+        content = msg.get("value") or msg.get("content", "")
+        if role == "system":
+            return content
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Curator LLM subclass
+# ---------------------------------------------------------------------------
+
+class CompletionGenerator(curator.LLM):
+    """Generate completions for prompts from a dataset."""
+
+    def prompt(self, input: dict) -> Union[str, list]:
+        """Build the prompt messages for the LLM."""
+        messages = []
+        system = input.get("_system_prompt")
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": input["_user_prompt"]})
+        return messages
+
+    def parse(self, input: dict, response: str) -> dict:
+        """Combine input with the model's response."""
+        return {
+            "source": input.get("source", ""),
+            "domain": input.get("domain", ""),
+            "difficulty": input.get("difficulty", None),
+            "original_id": input.get("_original_id", ""),
+            "prompt": input["_user_prompt"],
+            "system_prompt": input.get("_system_prompt", ""),
+            "completion": response,
+            "model": input.get("_model_name", ""),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Non-agentic datagen with Bespoke Curator",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # Input
+    parser.add_argument("--input-dataset", required=True,
+                        help="HuggingFace dataset repo (e.g., open-thoughts/OpenThoughts3-1.2M)")
+    parser.add_argument("--split", default="train")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Max number of prompts to process")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for sampling when --limit is set")
+    parser.add_argument("--prompt-column", default="conversations",
+                        help="Column containing conversations/prompts")
+
+    # Model / serving
+    parser.add_argument("--model", required=True,
+                        help="Model name (e.g., Qwen/Qwen3-32B)")
+    parser.add_argument("--backend", default="litellm", choices=["litellm", "vllm"],
+                        help="Curator backend: litellm (for hosted vLLM) or vllm (direct)")
+    parser.add_argument("--base-url", default=None,
+                        help="vLLM server base URL (e.g., http://localhost:8000/v1)")
+    parser.add_argument("--api-key", default=None,
+                        help="API key for vLLM server")
+
+    # Generation params
+    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--top-k", type=int, default=20)
+
+    # vLLM direct backend params
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)
+    parser.add_argument("--max-model-length", type=int, default=32768)
+
+    # Output
+    parser.add_argument("--output-repo", default=None,
+                        help="HuggingFace repo to push results (e.g., org/dataset-name)")
+    parser.add_argument("--output-dir", default=None,
+                        help="Local directory to save results (default: ./curator_output/<timestamp>)")
+
+    args = parser.parse_args()
+
+    # -----------------------------------------------------------------------
+    # Load input dataset
+    # -----------------------------------------------------------------------
+    log.info(f"Loading dataset: {args.input_dataset} (split={args.split})")
+
+    if args.limit:
+        # Use streaming to avoid downloading the full dataset when sampling
+        log.info(f"Streaming mode: sampling {args.limit} rows...")
+        stream = load_dataset(args.input_dataset, split=args.split, streaming=True)
+        stream = stream.shuffle(seed=args.seed, buffer_size=min(args.limit * 10, 10000))
+        rows = []
+        for row in stream:
+            rows.append(row)
+            if len(rows) >= args.limit:
+                break
+        ds = Dataset.from_list(rows)
+        log.info(f"Sampled {len(ds)} rows (seed={args.seed})")
+    else:
+        ds = load_dataset(args.input_dataset, split=args.split)
+        log.info(f"Loaded {len(ds)} rows")
+
+    # -----------------------------------------------------------------------
+    # Prepare input rows for Curator
+    # -----------------------------------------------------------------------
+    log.info("Extracting prompts...")
+    input_rows = []
+    for idx, row in enumerate(ds):
+        convs = row.get(args.prompt_column, [])
+        user_prompt = extract_prompt(convs)
+        if not user_prompt:
+            continue
+        input_rows.append({
+            "source": row.get("source", ""),
+            "domain": row.get("domain", ""),
+            "difficulty": row.get("difficulty", None),
+            "_original_id": str(idx),
+            "_user_prompt": user_prompt,
+            "_system_prompt": build_system_prompt(convs),
+            "_model_name": args.model,
+        })
+
+    log.info(f"Extracted {len(input_rows)} prompts")
+    if not input_rows:
+        log.error("No prompts extracted. Check --prompt-column and dataset format.")
+        sys.exit(1)
+
+    # -----------------------------------------------------------------------
+    # Configure Curator
+    # -----------------------------------------------------------------------
+    backend_params = {}
+    generation_params = {
+        "max_tokens": args.max_tokens,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+    }
+
+    if args.backend == "litellm":
+        if args.base_url:
+            # Hosted vLLM via litellm — prefix model name for litellm routing
+            model_name = f"hosted_vllm/{args.model}"
+            if args.api_key:
+                os.environ["HOSTED_VLLM_API_KEY"] = args.api_key
+            backend_params["base_url"] = args.base_url
+            backend_params["request_timeout"] = 300
+        else:
+            # OpenAI / other litellm-supported provider (no base_url override)
+            model_name = args.model
+            backend_params["request_timeout"] = 300
+        # Keep truncated responses instead of crashing the entire run
+        backend_params["require_all_responses"] = False
+    else:
+        # Direct vLLM backend
+        model_name = args.model
+        backend_params["tensor_parallel_size"] = args.tensor_parallel_size
+        backend_params["gpu_memory_utilization"] = args.gpu_memory_utilization
+        backend_params["max_model_length"] = args.max_model_length
+
+    log.info(f"Model: {model_name}")
+    log.info(f"Backend: {args.backend}")
+    log.info(f"Backend params: {backend_params}")
+    log.info(f"Generation params: {generation_params}")
+
+    generator = CompletionGenerator(
+        model_name=model_name,
+        backend=args.backend,
+        backend_params=backend_params,
+        generation_params=generation_params,
+    )
+
+    # -----------------------------------------------------------------------
+    # Run generation
+    # -----------------------------------------------------------------------
+    log.info(f"Starting generation for {len(input_rows)} prompts...")
+    t0 = time.time()
+    result = generator(input_rows)
+    elapsed = time.time() - t0
+
+    output_ds = result.dataset
+    log.info(f"Generation complete: {len(output_ds)} completions in {elapsed:.1f}s "
+             f"({len(output_ds) / elapsed:.1f} prompts/sec)")
+
+    # -----------------------------------------------------------------------
+    # Save output
+    # -----------------------------------------------------------------------
+    if args.output_dir:
+        out_path = args.output_dir
+    else:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        out_path = f"./curator_output/{timestamp}"
+
+    os.makedirs(out_path, exist_ok=True)
+    output_ds.save_to_disk(out_path)
+    log.info(f"Saved to {out_path}")
+
+    # Also save as parquet for convenience
+    parquet_path = os.path.join(out_path, "data.parquet")
+    output_ds.to_parquet(parquet_path)
+    log.info(f"Parquet: {parquet_path}")
+
+    if args.output_repo:
+        log.info(f"Pushing to HuggingFace: {args.output_repo}")
+        output_ds.push_to_hub(args.output_repo, private=False)
+        log.info(f"Uploaded to https://huggingface.co/datasets/{args.output_repo}")
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print(f"Curator Datagen Summary")
+    print(f"=" * 60)
+    print(f"Input:       {args.input_dataset} ({len(input_rows)} prompts)")
+    print(f"Model:       {args.model}")
+    print(f"Output:      {len(output_ds)} completions")
+    print(f"Time:        {elapsed:.1f}s ({len(output_ds) / max(elapsed, 0.1):.1f} prompts/sec)")
+    print(f"Local path:  {out_path}")
+    if args.output_repo:
+        print(f"HF repo:     {args.output_repo}")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()

@@ -52,6 +52,15 @@ DAYTONA_ERROR_THRESHOLD="${EVAL_DAYTONA_THRESHOLD:-999999}"
 HARBOR_CONFIG="${EVAL_HARBOR_CONFIG:-$DCFT/eval/polaris/dcagent_eval_config.yaml}"
 DB_JOB_ID="${EVAL_DB_JOB_ID:-}"
 
+# --- vLLM serving overrides (from baseline model configs) ---
+VLLM_TP="${EVAL_VLLM_TENSOR_PARALLEL_SIZE:-4}"
+VLLM_MAX_MODEL_LEN="${EVAL_VLLM_MAX_MODEL_LEN:-}"
+VLLM_SWAP_SPACE="${EVAL_VLLM_SWAP_SPACE:-4}"
+VLLM_TRUST_REMOTE_CODE="${EVAL_VLLM_TRUST_REMOTE_CODE:-}"
+VLLM_TOOL_CALL_PARSER="${EVAL_VLLM_TOOL_CALL_PARSER:-}"
+VLLM_REASONING_PARSER="${EVAL_VLLM_REASONING_PARSER:-}"
+VLLM_EXTRA_ARGS="${EVAL_VLLM_EXTRA_ARGS:-}"
+
 # Strip slashes and special chars for file-safe names
 SAFE_MODEL=$(echo "$MODEL" | tr '/:' '_')
 if [[ "$REPO_ID" == /* ]]; then
@@ -72,6 +81,12 @@ echo "Harbor config: $HARBOR_CONFIG"
 echo "Daytona threshold: $DAYTONA_ERROR_THRESHOLD"
 echo "DB Job ID (pending): ${DB_JOB_ID:-<none>}"
 echo "PBS Job ID: $JOB_ID"
+echo "vLLM TP: $VLLM_TP"
+echo "vLLM swap: $VLLM_SWAP_SPACE"
+echo "vLLM max_model_len: ${VLLM_MAX_MODEL_LEN:-<auto>}"
+echo "vLLM tool_call_parser: ${VLLM_TOOL_CALL_PARSER:-<none>}"
+echo "vLLM reasoning_parser: ${VLLM_REASONING_PARSER:-<none>}"
+echo "vLLM extra_args: ${VLLM_EXTRA_ARGS:-<none>}"
 echo "=============================================="
 
 # ==============================================================================
@@ -152,6 +167,46 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "Starting vLLM server for model: $MODEL"
+echo "  TP=$VLLM_TP, swap=$VLLM_SWAP_SPACE, max_model_len=${VLLM_MAX_MODEL_LEN:-auto}"
+echo "  tool_call_parser=${VLLM_TOOL_CALL_PARSER:-none}, reasoning_parser=${VLLM_REASONING_PARSER:-none}"
+echo "  extra_args=${VLLM_EXTRA_ARGS:-none}"
+
+# Build vLLM command dynamically based on env var overrides
+VLLM_CMD=(
+    "$PYTHON_BIN" -m vllm.entrypoints.openai.api_server
+    --model "$MODEL"
+    --host 0.0.0.0 --port 8000
+    --served-model-name "$MODEL"
+    --tensor-parallel-size "$VLLM_TP"
+    --gpu-memory-utilization "$GPU_MEMORY_UTIL"
+    --swap-space "$VLLM_SWAP_SPACE"
+    --disable-custom-all-reduce
+)
+
+if [ -n "$VLLM_MAX_MODEL_LEN" ]; then
+    VLLM_CMD+=(--max-model-len "$VLLM_MAX_MODEL_LEN")
+fi
+
+if [ "$VLLM_TRUST_REMOTE_CODE" = "1" ]; then
+    VLLM_CMD+=(--trust-remote-code)
+fi
+
+if [ -n "$VLLM_TOOL_CALL_PARSER" ]; then
+    VLLM_CMD+=(--enable-auto-tool-choice --tool-call-parser "$VLLM_TOOL_CALL_PARSER")
+fi
+
+if [ -n "$VLLM_REASONING_PARSER" ]; then
+    VLLM_CMD+=(--reasoning-parser "$VLLM_REASONING_PARSER")
+fi
+
+# Append extra args (space-separated string)
+if [ -n "$VLLM_EXTRA_ARGS" ]; then
+    # shellcheck disable=SC2206
+    VLLM_CMD+=($VLLM_EXTRA_ARGS)
+fi
+
+echo "Full vLLM command: ${VLLM_CMD[*]}"
+
 env TORCHDYNAMO_DISABLE=1 \
     TMPDIR="/tmp" \
     TRITON_CACHE_DIR="/tmp/triton_cache_${USER}" \
@@ -159,18 +214,7 @@ env TORCHDYNAMO_DISABLE=1 \
     TORCHINDUCTOR_CACHE_DIR="/tmp/torchinductor_${USER}" \
     HF_HOME="$HF_HOME" \
     HF_HUB_CACHE="$HF_HUB_CACHE" \
-$PYTHON_BIN -m vllm.entrypoints.openai.api_server \
-    --model "$MODEL" \
-    --host 0.0.0.0 --port 8000 \
-    --served-model-name "$MODEL" \
-    --tensor-parallel-size 4 \
-    --gpu-memory-utilization "$GPU_MEMORY_UTIL" \
-    --dtype auto \
-    --kv-cache-dtype auto \
-    --swap-space 4 \
-    --enable-prefix-caching \
-    --disable-custom-all-reduce \
-    --trust-remote-code \
+"${VLLM_CMD[@]}" \
     > "eval/polaris/logs/vllm_${JOB_ID}.log" 2>&1 &
 VLLM_PID=$!
 

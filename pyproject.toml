@@ -122,6 +122,9 @@ rl-rocm = [
 # The RL launcher will automatically use the separate environment.
 # See hpc/rl_launch_utils.py for details.
 # Harbor environment backends
+curator = [
+    "bespokelabs-curator>=0.1.0",
+]
 harbor-docker = [
     "docker>=7.0.0",
 ]
