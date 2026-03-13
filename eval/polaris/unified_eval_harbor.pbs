@@ -81,6 +81,9 @@ echo "=============================================="
 EAGLE="/lus/eagle/projects/CausalAlign/penfever42"
 DCFT="${DCFT:-${EAGLE}/code/OpenThoughts-Agent}"
 
+# PBS runs from $HOME by default; cd to repo root
+cd "$DCFT" || exit 1
+
 # Reset PYTHONPATH to avoid inheriting submitter's environment
 unset PYTHONPATH
 
