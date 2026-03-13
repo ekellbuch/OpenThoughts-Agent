@@ -16,6 +16,15 @@ set -eo pipefail
 # curator_datagen.py to generate completions
 # from a HuggingFace dataset of prompts.
 #
+# Uses a dedicated 'curator' conda env to avoid
+# dependency conflicts with other environments.
+#
+# Pre-requisites (run on login node before submitting):
+#   conda create -n curator python=3.12 -y
+#   conda activate curator
+#   pip install 'bespokelabs-curator>=0.1.0' 'vllm>=0.11.2' \
+#       'datasets>=2.0.0' 'huggingface_hub>=0.20.0'
+#
 # Usage:
 #   sbatch run_curator_datagen.sbatch \
 #     <model> <input_dataset> <output_repo> [limit]
@@ -49,12 +58,20 @@ echo "============================================"
 echo ""
 echo "=== Step 1: Environment Setup ==="
 
-# Source cluster dotenv and secrets
-if [ -f "$DCFT/hpc/dotenv/jupiter.env" ]; then
-    source "$DCFT/hpc/dotenv/jupiter.env"
-fi
+# Activate the dedicated curator conda env
+source ~/.bashrc
+conda activate curator
+
+# Source secrets (HF_TOKEN, etc.)
 if [ -f ~/secrets.env ]; then
     source ~/secrets.env
+fi
+
+# Source cluster dotenv for HF_HUB_CACHE, etc.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+if [ -f "$REPO_DIR/hpc/dotenv/jupiter.env" ]; then
+    source "$REPO_DIR/hpc/dotenv/jupiter.env"
 fi
 
 # Load modules (Jupiter needs CUDA for vLLM)
@@ -63,10 +80,12 @@ module load nvidia-compilers/25.9-CUDA-13 2>/dev/null || true
 
 export VLLM_USE_V1=1
 
-mkdir -p data/sbatches/logs
+mkdir -p "$REPO_DIR/data/sbatches/logs"
+cd "$REPO_DIR"
 
 echo "HF_HUB_CACHE: $HF_HUB_CACHE"
 echo "Python: $(python3 --version 2>&1)"
+echo "Conda env: $CONDA_DEFAULT_ENV"
 
 # -----------------------------------------------
 # Step 2: Start vLLM server
@@ -76,7 +95,7 @@ echo "=== Step 2: Starting vLLM Server ==="
 
 VLLM_PORT=8000
 VLLM_API_KEY="token-curator-${SLURM_JOB_ID}"
-VLLM_LOG="data/sbatches/logs/vllm_${SLURM_JOB_ID}.log"
+VLLM_LOG="$REPO_DIR/data/sbatches/logs/vllm_${SLURM_JOB_ID}.log"
 
 python3 -m vllm.entrypoints.openai.api_server \
     --model "$MODEL" \
@@ -122,7 +141,7 @@ echo ""
 echo "=== Step 3: Running Curator Datagen ==="
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR="data/sbatches/logs/curator_output_${SLURM_JOB_ID}_${TIMESTAMP}"
+OUTPUT_DIR="$REPO_DIR/data/sbatches/logs/curator_output_${SLURM_JOB_ID}_${TIMESTAMP}"
 
 CURATOR_ARGS=(
     --input-dataset "$INPUT_DATASET"
