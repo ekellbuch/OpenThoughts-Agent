@@ -114,9 +114,8 @@ export HF_HUB_CACHE="/e/data1/datasets/playground/ot/hf_hub"
 export HF_HOME="/e/data1/datasets/playground/ot/hf_hub"
 export HF_CACHE_DIR="$HF_HUB_CACHE"
 
-# Harbor is editable-installed to feuer1's home (inaccessible); use etash's clone
-# DB operations use database/unified_db from the project root ($DCFT)
-export PYTHONPATH="/e/scratch/jureap59/guha1/pip_packages:/e/scratch/jureap59/etash/harbor/src:/e/scratch/jureap59/etash/pip_extras:${DCFT}:${PYTHONPATH:-}"
+# Harbor and DB operations
+export PYTHONPATH="/e/scratch/jureap59/feuer1/harbor/src:${DCFT}:${PYTHONPATH:-}"
 
 # ==============================================================================
 # LD_LOADER Wrappers (Jupiter ARM GH200 — no execute perms on shared conda)
