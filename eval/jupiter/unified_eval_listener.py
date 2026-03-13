@@ -124,10 +124,14 @@ PRINT_PREFIX = "[eval-listener]"
 
 
 # ---------------------------------------------------------------------------
-# Harbor config parsing — extract timeout/memory for benchmark suffix
+# Harbor config parsing — extract eval config fields for dedup
 # ---------------------------------------------------------------------------
-def parse_harbor_config(path: Optional[str]) -> Dict[str, Any]:
-    """Parse timeout_multiplier and override_memory_mb from a Harbor YAML config."""
+def parse_harbor_eval_config(path: Optional[str]) -> Dict[str, Any]:
+    """Parse eval-relevant config fields from a Harbor YAML config.
+
+    Returns dict with keys: timeout_multiplier, override_cpus,
+    override_memory_mb, override_storage_mb (only if set).
+    """
     if not path or not os.path.isfile(path):
         return {}
     try:
@@ -141,25 +145,10 @@ def parse_harbor_config(path: Optional[str]) -> Dict[str, Any]:
     if cfg.get("timeout_multiplier") is not None:
         result["timeout_multiplier"] = float(cfg["timeout_multiplier"])
     env_cfg = cfg.get("environment") or {}
-    if env_cfg.get("override_memory_mb") is not None:
-        result["override_memory_mb"] = int(env_cfg["override_memory_mb"])
+    for key in ("override_cpus", "override_memory_mb", "override_storage_mb"):
+        if env_cfg.get(key) is not None:
+            result[key] = int(env_cfg[key])
     return result
-
-
-def compute_benchmark_suffix(timeout_multiplier: Optional[float] = None,
-                             override_memory_mb: Optional[int] = None) -> str:
-    """Compute benchmark name suffix matching sbatch logic.
-
-    Order: memory first, then timeout (e.g. '_4gb_8.0x').
-    Defaults (1024 MB, 1.0x) produce no suffix.
-    """
-    suffix = ""
-    if override_memory_mb is not None and override_memory_mb != 1024:
-        mem_gb = override_memory_mb // 1024
-        suffix += f"_{mem_gb}gb"
-    if timeout_multiplier is not None and timeout_multiplier not in (1, 1.0):
-        suffix += f"_{timeout_multiplier}x"
-    return suffix
 
 
 JOB_STATUS_PENDING = "Pending"
@@ -267,49 +256,6 @@ def load_priority_models(path: Optional[str]) -> Optional[List[str]]:
     return models if models else None
 
 
-# ---------------------------------------------------------------------------
-# Benchmark resolution helpers (config-suffixed benchmarks)
-# ---------------------------------------------------------------------------
-def _resolve_benchmark_by_name(name: str) -> Optional[str]:
-    """Look up a benchmark by exact name. Returns benchmark UUID or None."""
-    try:
-        client = get_supabase_client()
-        data = (
-            client.table("benchmarks")
-            .select("id")
-            .eq("name", name)
-            .limit(1)
-            .execute()
-            .data
-        ) or []
-        if data:
-            return str(data[0]["id"])
-    except Exception as e:
-        log(f"WARNING: benchmark lookup for '{name}' failed: {e}")
-    return None
-
-
-def _auto_register_benchmark(name: str, dataset_hf: str) -> Optional[str]:
-    """Register a new benchmark entry for a config-suffixed name. Returns new UUID or None."""
-    # Find the base benchmark to use as duplicate_of
-    base_id = resolve_benchmark_id_for_dataset(dataset_hf)
-    try:
-        client = get_supabase_client()
-        row = {
-            "name": name,
-            "dataset_repo": dataset_hf,
-        }
-        if base_id:
-            row["duplicate_of"] = base_id
-        result = client.table("benchmarks").insert(row).execute()
-        if result.data:
-            new_id = str(result.data[0]["id"])
-            log(f"Auto-registered benchmark '{name}' -> {new_id} (duplicate_of={base_id})")
-            return new_id
-    except Exception as e:
-        log(f"WARNING: failed to auto-register benchmark '{name}': {e}")
-    return None
-
 
 # ---------------------------------------------------------------------------
 # Pending job tracking (extends TACC logic with Pending status + stale detection)
@@ -340,43 +286,125 @@ def scancel_job(slurm_job_id: str) -> bool:
         return False
 
 
+def _config_matches_eval(job_config: Optional[Dict], eval_config: Dict[str, Any]) -> bool:
+    """Check if a DB job's config JSONB matches the current eval config fields.
+
+    Compares: timeout_multiplier, override_cpus, override_memory_mb, override_storage_mb.
+    A job with no config is treated as defaults (timeout=1.0, no overrides).
+    If eval_config is empty (no harbor config), any job config matches (backwards compat).
+    """
+    if not eval_config:
+        return True  # no config constraints — any existing job counts
+
+    job_cfg = job_config or {}
+    job_env = job_cfg.get("environment") or {}
+
+    # timeout_multiplier: top-level in config JSONB
+    if "timeout_multiplier" in eval_config:
+        job_tm = job_cfg.get("timeout_multiplier")
+        # Treat None/missing as 1.0
+        job_tm = float(job_tm) if job_tm is not None else 1.0
+        if float(eval_config["timeout_multiplier"]) != job_tm:
+            return False
+
+    # Environment overrides: nested under config.environment
+    for key in ("override_cpus", "override_memory_mb", "override_storage_mb"):
+        if key in eval_config:
+            job_val = job_env.get(key)
+            # Treat None/missing as the default (None means no override)
+            job_val = int(job_val) if job_val is not None else None
+            eval_val = int(eval_config[key])
+            if job_val != eval_val:
+                return False
+
+    return True
+
+
 def should_start_job(
     model_id: str,
     benchmark_id: Optional[str],
+    eval_config: Optional[Dict[str, Any]] = None,
     stale_started_hours: float = 24.0,
     stale_pending_hours: float = 6.0,
 ) -> Tuple[bool, str]:
     """
     Determine if a job should be started based on DB status.
-    Extends TACC's check_job_status with Pending handling and auto-scancel.
+    Extends TACC's check_job_status with Pending handling, auto-scancel,
+    and config-aware deduplication (timeout, resource overrides).
     """
+    # First, quick check: does any job exist at all for this model+benchmark?
     job_exists, job_status, started_at = check_job_status(model_id, benchmark_id)
 
     if not job_exists:
         return (True, "no existing job")
 
+    # If we have eval config constraints, do a config-aware check against
+    # all recent jobs for this model+benchmark (not just the latest one).
+    ec = eval_config or {}
+
     if job_status == JOB_STATUS_FINISHED:
-        # Check if this Finished job has metrics — if not, it was cleaned
-        # (invalid errors) and should be re-run.
-        try:
-            client = get_supabase_client()
-            q = (
-                client.table("sandbox_jobs")
-                .select("metrics")
-                .eq("model_id", model_id)
-                .eq("benchmark_id", benchmark_id)
-                .eq("job_status", "Finished")
-                .order("created_at", desc=True)
-                .limit(1)
-            )
-            data = (q.execute().data) or []
-            if data and not data[0].get("metrics"):
-                return (True, "finished but metrics cleared (invalid errors)")
-        except Exception:
-            pass
+        if ec:
+            # Check if any Finished job matches our eval config
+            try:
+                client = get_supabase_client()
+                q = (
+                    client.table("sandbox_jobs")
+                    .select("config, metrics")
+                    .eq("model_id", model_id)
+                    .eq("benchmark_id", benchmark_id)
+                    .eq("job_status", "Finished")
+                    .order("created_at", desc=True)
+                    .limit(10)
+                )
+                rows = (q.execute().data) or []
+                matching = [r for r in rows if _config_matches_eval(r.get("config"), ec)]
+                if not matching:
+                    return (True, "no finished job with matching config")
+                # Check if the matching finished job has metrics
+                if matching[0] and not matching[0].get("metrics"):
+                    return (True, "finished with matching config but metrics cleared")
+            except Exception as e:
+                log(f"WARNING: config-aware check failed: {e}")
+        else:
+            # No eval config — original behavior: check latest finished job for metrics
+            try:
+                client = get_supabase_client()
+                q = (
+                    client.table("sandbox_jobs")
+                    .select("metrics")
+                    .eq("model_id", model_id)
+                    .eq("benchmark_id", benchmark_id)
+                    .eq("job_status", "Finished")
+                    .order("created_at", desc=True)
+                    .limit(1)
+                )
+                data = (q.execute().data) or []
+                if data and not data[0].get("metrics"):
+                    return (True, "finished but metrics cleared (invalid errors)")
+            except Exception:
+                pass
         return (False, "job finished")
 
     if job_status == JOB_STATUS_STARTED:
+        if ec:
+            # Check if the in-progress job matches our config
+            try:
+                client = get_supabase_client()
+                q = (
+                    client.table("sandbox_jobs")
+                    .select("config, started_at")
+                    .eq("model_id", model_id)
+                    .eq("benchmark_id", benchmark_id)
+                    .eq("job_status", "Started")
+                    .order("created_at", desc=True)
+                    .limit(5)
+                )
+                rows = (q.execute().data) or []
+                matching = [r for r in rows if _config_matches_eval(r.get("config"), ec)]
+                if not matching:
+                    return (True, "no in-progress job with matching config")
+            except Exception as e:
+                log(f"WARNING: config-aware check failed: {e}")
         if is_job_stale(started_at, int(stale_started_hours)):
             ts_str = started_at.isoformat() if started_at else "null"
             return (True, f"stale started job (started_at={ts_str})")
@@ -385,6 +413,25 @@ def should_start_job(
             return (False, f"job in progress (started_at={ts_str})")
 
     if job_status == JOB_STATUS_PENDING:
+        if ec:
+            # Check if the pending job matches our config
+            try:
+                client = get_supabase_client()
+                q = (
+                    client.table("sandbox_jobs")
+                    .select("config, slurm_job_id, created_at")
+                    .eq("model_id", model_id)
+                    .eq("benchmark_id", benchmark_id)
+                    .eq("job_status", "Pending")
+                    .order("created_at", desc=True)
+                    .limit(5)
+                )
+                rows = (q.execute().data) or []
+                matching = [r for r in rows if _config_matches_eval(r.get("config"), ec)]
+                if not matching:
+                    return (True, "no pending job with matching config")
+            except Exception as e:
+                log(f"WARNING: config-aware check failed: {e}")
         if is_job_stale(started_at, int(stale_pending_hours)):
             ts_str = started_at.isoformat() if started_at else "null"
             # Try to get slurm_job_id for auto-scancel
@@ -423,12 +470,25 @@ def create_pending_job(
     benchmark_id: Optional[str],
     model_id: str,
     slurm_job_id: str = "pending",
+    eval_config: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """
     Create a Pending job entry in sandbox_jobs before sbatch submission.
     Uses database/unified_db's create_job_entry_pending().
     Returns the DB job row id, or None on failure.
     """
+    # Build config JSONB matching the schema the sbatch will also write
+    job_config: Optional[Dict[str, Any]] = None
+    if eval_config:
+        job_config = {}
+        if "timeout_multiplier" in eval_config:
+            job_config["timeout_multiplier"] = eval_config["timeout_multiplier"]
+        env_overrides = {}
+        for key in ("override_cpus", "override_memory_mb", "override_storage_mb"):
+            if key in eval_config:
+                env_overrides[key] = eval_config[key]
+        if env_overrides:
+            job_config["environment"] = env_overrides
     try:
         result = create_job_entry_pending(
             job_name=f"pending_{model_hf.replace('/', '_')}_{_dataset_repo_name(dataset_hf)}",
@@ -437,6 +497,7 @@ def create_pending_job(
             agent_name="terminus-2",
             slurm_job_id=slurm_job_id,
             username=os.environ.get("USER", "jupiter"),
+            config=job_config,
         )
         if result.get("success") and result.get("job"):
             db_id = result["job"].get("id")
@@ -649,15 +710,12 @@ def main() -> None:
     if harbor_config:
         sbatch_env["EVAL_HARBOR_CONFIG"] = harbor_config
 
-    # Parse timeout/memory from harbor config for benchmark suffix + sbatch env
-    harbor_cfg = parse_harbor_config(harbor_config)
-    timeout_multiplier = harbor_cfg.get("timeout_multiplier")
-    override_memory_mb = harbor_cfg.get("override_memory_mb")
-    if timeout_multiplier is not None:
-        sbatch_env["EVAL_TIMEOUT_MULTIPLIER"] = str(timeout_multiplier)
-    if override_memory_mb is not None:
-        sbatch_env["EVAL_OVERRIDE_MEMORY_MB"] = str(override_memory_mb)
-    benchmark_suffix = compute_benchmark_suffix(timeout_multiplier, override_memory_mb)
+    # Parse eval-relevant config from harbor YAML for dedup + sbatch env vars
+    eval_config = parse_harbor_eval_config(harbor_config)
+    if eval_config.get("timeout_multiplier") is not None:
+        sbatch_env["EVAL_TIMEOUT_MULTIPLIER"] = str(eval_config["timeout_multiplier"])
+    if eval_config.get("override_memory_mb") is not None:
+        sbatch_env["EVAL_OVERRIDE_MEMORY_MB"] = str(eval_config["override_memory_mb"])
     # Preset-specific env vars (snapshot, daytona key)
     if preset_config.get("snapshot_name"):
         sbatch_env["EVAL_SNAPSHOT_NAME"] = preset_config["snapshot_name"]
@@ -666,9 +724,8 @@ def main() -> None:
 
     check_interval_seconds = int(args.check_hours * 3600)
 
-    if benchmark_suffix:
-        log(f"Harbor config: timeout_multiplier={timeout_multiplier}, "
-            f"override_memory_mb={override_memory_mb} -> benchmark suffix '{benchmark_suffix}'")
+    if eval_config:
+        log(f"Eval config for dedup: {eval_config}")
     log(
         f"Starting listener: datasets={datasets}, lookback={args.lookback_days}d, "
         f"interval={args.check_hours}h, sbatch={args.sbatch_script}, "
@@ -685,22 +742,9 @@ def main() -> None:
             models = fetch_recent_models(args.lookback_days)
             log(f"Found {len(models)} model(s) in window.")
 
-            dataset_to_bench: Dict[str, Optional[str]] = {}
-            for ds in datasets:
-                if benchmark_suffix:
-                    # Resolve the config-suffixed benchmark (e.g. terminal_bench_2_4gb_8.0x)
-                    suffixed_name = _dataset_repo_name(ds) + benchmark_suffix
-                    bench_id = _resolve_benchmark_by_name(suffixed_name)
-                    if bench_id:
-                        log(f"Resolved suffixed benchmark '{suffixed_name}' -> {bench_id}", verbose_only=True)
-                        dataset_to_bench[ds] = bench_id
-                    else:
-                        # Auto-register the suffixed benchmark
-                        log(f"Suffixed benchmark '{suffixed_name}' not found, auto-registering...")
-                        bench_id = _auto_register_benchmark(suffixed_name, ds)
-                        dataset_to_bench[ds] = bench_id
-                else:
-                    dataset_to_bench[ds] = resolve_benchmark_id_for_dataset(ds)
+            dataset_to_bench: Dict[str, Optional[str]] = {
+                ds: resolve_benchmark_id_for_dataset(ds) for ds in datasets
+            }
 
             submissions: List[Tuple[str, str, str, Optional[str], str]] = []
 
@@ -726,6 +770,7 @@ def main() -> None:
                     bench_id = dataset_to_bench.get(dataset_hf)
                     start, reason = should_start_job(
                         model_id, bench_id,
+                        eval_config=eval_config,
                         stale_started_hours=args.stale_started_hours,
                         stale_pending_hours=args.stale_pending_hours,
                     )
@@ -760,7 +805,8 @@ def main() -> None:
                 for idx, (mid, hf_model, dataset_hf, bench_id, reason) in enumerate(submissions):
                     log(f"Submitting [{idx+1}/{len(submissions)}]: model={hf_model}, dataset={dataset_hf}, reason={reason}")
 
-                    db_job_id = create_pending_job(hf_model, dataset_hf, bench_id, mid)
+                    db_job_id = create_pending_job(hf_model, dataset_hf, bench_id, mid,
+                                                    eval_config=eval_config)
 
                     job_env = dict(sbatch_env)
                     if db_job_id:
