@@ -109,11 +109,14 @@ else
     echo "Selected Daytona org: org2 (${DAYTONA_API_KEY:0:12}...)"
 fi
 
-# --- vLLM / Triton env vars ---
+# --- vLLM / Triton / torch cache dirs (home quota is small; use WORK) ---
 export VLLM_CONFIG_ROOT="${VLLM_CACHE_ROOT:-${SCRATCH_FAST}/vllm_cache}"
 export TRITON_CACHE_DIR="/tmp/triton_cache_${USER}_${SLURM_JOB_ID}"
 export FLASHINFER_WORKSPACE_BASE="/tmp/flashinfer_cache_${USER}_${SLURM_JOB_ID}"
 export UV_CACHE_DIR="${SCRATCH_FAST}/uv_cache_dir"
+export TORCH_EXTENSIONS_DIR="${WORK}/torch_extensions"
+export TORCH_HOME="${WORK}/torch_home"
+export XDG_CACHE_HOME="${WORK}/.cache"
 export HYDRA_FULL_ERROR=1
 export HF_HUB_OFFLINE=0  # Login nodes pre-downloaded; set to 1 after download
 
