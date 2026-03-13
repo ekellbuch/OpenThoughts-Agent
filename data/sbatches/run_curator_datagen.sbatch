@@ -70,12 +70,20 @@ if [ -f ~/secrets.env ]; then
     source ~/secrets.env
 fi
 
+# Set REPO_DIR explicitly (SLURM working dir may not be the repo)
+REPO_DIR="${DCFT:-/e/scratch/jureap59/feuer1/OpenThoughts-Agent}"
+if [ ! -d "$REPO_DIR/scripts/datagen" ]; then
+    # Fallback: try to find it from the sbatch path
+    REPO_DIR="$(cd "$(dirname "$(scontrol show job $SLURM_JOB_ID | grep Command | awk -F= '{print $2}')")/../.." 2>/dev/null && pwd)" || true
+fi
+
 # Source cluster dotenv for HF_HUB_CACHE, etc.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 if [ -f "$REPO_DIR/hpc/dotenv/jupiter.env" ]; then
     source "$REPO_DIR/hpc/dotenv/jupiter.env"
 fi
+
+# Ensure HF_HUB_CACHE is set even if dotenv didn't resolve
+export HF_HUB_CACHE="${HF_HUB_CACHE:-/e/data1/datasets/playground/ot/hf_hub}"
 
 # Load modules (Jupiter needs CUDA for vLLM)
 module purge 2>/dev/null || true
@@ -83,8 +91,8 @@ module load nvidia-compilers/25.9-CUDA-13 2>/dev/null || true
 
 export VLLM_USE_V1=1
 
-mkdir -p "$REPO_DIR/data/sbatches/logs"
-cd "$REPO_DIR"
+cd "$REPO_DIR" || { echo "ERROR: Cannot cd to $REPO_DIR"; exit 1; }
+mkdir -p data/sbatches/logs
 
 echo "HF_HUB_CACHE: $HF_HUB_CACHE"
 echo "Python: $(python3 --version 2>&1)"
@@ -101,7 +109,7 @@ echo "=== Step 2: Starting vLLM Server ==="
 
 VLLM_PORT=8000
 VLLM_API_KEY="token-curator-${SLURM_JOB_ID}"
-VLLM_LOG="$REPO_DIR/data/sbatches/logs/vllm_${SLURM_JOB_ID}.log"
+VLLM_LOG="data/sbatches/logs/vllm_${SLURM_JOB_ID}.log"
 
 python3 -m vllm.entrypoints.openai.api_server \
     --model "$MODEL" \
@@ -147,7 +155,7 @@ echo ""
 echo "=== Step 3: Running Curator Datagen ==="
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR="$REPO_DIR/data/sbatches/logs/curator_output_${SLURM_JOB_ID}_${TIMESTAMP}"
+OUTPUT_DIR="data/sbatches/logs/curator_output_${SLURM_JOB_ID}_${TIMESTAMP}"
 
 CURATOR_ARGS=(
     --input-dataset "$INPUT_DATASET"
