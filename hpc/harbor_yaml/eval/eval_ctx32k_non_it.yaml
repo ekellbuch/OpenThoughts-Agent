@@ -1,4 +1,4 @@
-# Harbor eval configuration (16 concurrency, terminus-kira agent, 32k context).
+# Harbor eval configuration (16 concurrency, generic agent, 32k context).
 
 job_name: default-eval-job
 jobs_dir: trace_jobs
@@ -61,7 +61,7 @@ metrics:
     kwargs: {}
 
 agents:
-- name: terminus-kira
+- name: terminus-2
   import_path:
   model_name: placeholder/override-at-runtime
   max_timeout_sec:
@@ -84,7 +84,7 @@ agents:
       linear_history: true
     enable_summarize: true
     proactive_summarization_threshold: 8192
-    interleaved_thinking: true
+    interleaved_thinking: false
     parser_name: json
     tmux_pane_width: 160
     tmux_pane_height: 40

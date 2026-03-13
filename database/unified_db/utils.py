@@ -3915,6 +3915,7 @@ def upload_traces_to_hf(
     success_filter: Optional[str] = None,
     verbose: bool = False,
     include_verifier_output: bool = True,
+    export_subagents: bool = False,
 ) -> str:
     """
     Upload job trial execution traces to HuggingFace Hub as a conversation dataset.
@@ -4178,6 +4179,7 @@ def upload_eval_results(
     hf_episodes: str = "last",
     hf_success_filter: Optional[str] = None,
     hf_verbose: bool = False,
+    hf_export_subagents: bool = False,
     forced_update: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -4265,6 +4267,7 @@ def upload_eval_results(
                 episodes=hf_episodes,
                 success_filter=hf_success_filter,
                 verbose=hf_verbose,
+                export_subagents=hf_export_subagents,
             )
             logger.info(f"HuggingFace upload successful: {hf_dataset_url}")
 
@@ -4435,4 +4438,295 @@ def register_base_model(
 
     except Exception as e:
         logger.error(f"Failed to register base model {base_model_name}: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# ==================== PENDING JOB STATUS UTILITIES ====================
+
+JOB_STATUS_PENDING = "Pending"
+JOB_STATUS_STARTED = "Started"
+JOB_STATUS_FINISHED = "Finished"
+
+
+def get_job_by_model_benchmark(model_id: str, benchmark_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Get the most recent job for a given model and benchmark.
+
+    Args:
+        model_id: UUID of the model
+        benchmark_id: UUID of the benchmark
+
+    Returns:
+        Job dict if found, None otherwise
+    """
+    try:
+        client = get_supabase_client()
+        response = (
+            client.table('sandbox_jobs')
+            .select('*')
+            .eq('model_id', model_id)
+            .eq('benchmark_id', benchmark_id)
+            .order('created_at', desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        if not response.data:
+            return None
+
+        return clean_sandbox_job_metadata(response.data[0])
+    except Exception as e:
+        logger.error(f"Error getting job for model={model_id}, benchmark={benchmark_id}: {e}")
+        return None
+
+
+def create_job_entry_pending(
+    job_name: str,
+    model_hf: str,
+    benchmark_hf: str,
+    agent_name: str,
+    slurm_job_id: str,
+    username: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Create a job entry with status="Pending" at SLURM submit time.
+
+    This is called by the listener immediately after sbatch returns successfully.
+    It creates a minimal job entry to prevent duplicate submissions while the job
+    waits in the SLURM queue.
+
+    Args:
+        job_name: Unique job name (RUN_TAG)
+        model_hf: HuggingFace model name
+        benchmark_hf: HuggingFace dataset/benchmark repo
+        agent_name: Name of the agent (e.g., "terminus-2")
+        slurm_job_id: SLURM job ID from sbatch output
+        username: Username for the job
+        config: Optional config dict
+
+    Returns:
+        {"success": bool, "job": dict, "error": str}
+    """
+    try:
+        logger.info(f"Creating pending job entry: {job_name}")
+
+        # Resolve model
+        model = get_model_by_name(model_hf)
+        if not model:
+            return {"success": False, "error": f"Model not found: {model_hf}"}
+        model_id = model['id']
+
+        # Resolve benchmark (extract repo name from HF format)
+        benchmark_name = benchmark_hf.split("/")[-1] if "/" in benchmark_hf else benchmark_hf
+        benchmark = get_benchmark_by_name(benchmark_name)
+        if not benchmark:
+            return {"success": False, "error": f"Benchmark not found: {benchmark_name}"}
+        benchmark_id = benchmark['id']
+
+        # Check for existing job (any status) - prevent duplicates
+        existing = get_job_by_model_benchmark(model_id, benchmark_id)
+        if existing:
+            status = existing.get('job_status')
+            if status == JOB_STATUS_FINISHED:
+                return {"success": False, "error": f"Job already finished", "job": existing}
+            if status in (JOB_STATUS_PENDING, JOB_STATUS_STARTED):
+                return {"success": True, "job": existing, "exists": True}
+
+        # Resolve or create agent
+        agent_res = register_agent(name=agent_name)
+        if not agent_res.get('success'):
+            return {"success": False, "error": f"Failed to register agent: {agent_res.get('error')}"}
+        agent_id = agent_res['agent']['id']
+
+        # Build minimal job entry for Pending status
+        now = datetime.now(timezone.utc)
+        job_data = {
+            "job_name": job_name,
+            "username": username or "listener",
+            "agent_id": agent_id,
+            "model_id": model_id,
+            "benchmark_id": benchmark_id,
+            "job_status": JOB_STATUS_PENDING,
+            "submitted_at": now.isoformat(),
+            "slurm_job_id": slurm_job_id,
+            "created_at": now.isoformat(),
+            # These are set to None/minimal for Pending, updated when job starts
+            "config": config or {},
+            "n_trials": 0,
+            "n_rep_eval": 0,
+        }
+
+        # Create the job
+        result = create_sandbox_job(job_data)
+        logger.info(f"Created pending job entry: {job_name} (id={result.get('id')})")
+        return {"success": True, "job": result}
+
+    except Exception as e:
+        logger.error(f"Failed to create pending job entry {job_name}: {e}")
+        return {"success": False, "error": str(e)}
+
+
+def update_job_status_to_started(
+    job_name: str,
+    n_trials: int,
+    n_rep_eval: int,
+    config: Dict[str, Any],
+    harbor_package_version: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Update a Pending job to Started status when sbatch actually runs.
+
+    This is called by the sbatch script when it starts executing.
+    It updates the job entry with full details now that we know them.
+
+    Args:
+        job_name: Job name (RUN_TAG) to find the job
+        n_trials: Number of concurrent trials (n_concurrent)
+        n_rep_eval: Number of attempts per task (n_attempts)
+        config: Full config dict
+        harbor_package_version: Harbor package version
+
+    Returns:
+        {"success": bool, "job": dict, "error": str}
+    """
+    try:
+        logger.info(f"Updating job to Started: {job_name}")
+
+        # Look up job by name
+        existing = get_sandbox_job_by_name(job_name)
+        if not existing:
+            return {"success": False, "error": f"Job not found: {job_name}"}
+
+        job_id = existing['id']
+        current_status = existing.get('job_status')
+
+        # Validate state transition
+        if current_status == JOB_STATUS_FINISHED:
+            return {"success": False, "error": f"Job already finished, cannot restart"}
+        if current_status == JOB_STATUS_STARTED:
+            # Already started, just return success (idempotent)
+            logger.info(f"Job {job_name} already in Started status")
+            return {"success": True, "job": existing, "already_started": True}
+
+        # Update to Started
+        now = datetime.now(timezone.utc)
+        update_data = {
+            "job_status": JOB_STATUS_STARTED,
+            "started_at": now.isoformat(),
+            "n_trials": n_trials,
+            "n_rep_eval": n_rep_eval,
+            "config": config,
+            "package_version": harbor_package_version,
+        }
+
+        result = update_sandbox_job(job_id, update_data)
+        logger.info(f"Updated job to Started: {job_name}")
+        return {"success": True, "job": result}
+
+    except Exception as e:
+        logger.error(f"Failed to update job to Started {job_name}: {e}")
+        return {"success": False, "error": str(e)}
+
+
+def create_job_entry_started(
+    model_hf_name: str,
+    benchmark_hf_name: str,
+    job_name: str,
+    username: str,
+    slurm_job_id: str,
+    harbor_package_version: Optional[str],
+    agent_name: str,
+    config: Dict[str, Any],
+    n_trials: int,
+    n_rep_eval: int
+) -> Dict[str, Any]:
+    """
+    Create a job entry with status="Started" directly.
+
+    This is the original behavior - creates a fully populated job entry
+    when the sbatch script starts running. Use this for backward compatibility
+    or when the listener doesn't create a Pending entry first.
+
+    Args:
+        model_hf_name: HuggingFace model name
+        benchmark_hf_name: HuggingFace dataset/benchmark repo
+        job_name: Unique job name (RUN_TAG)
+        username: Username for the job
+        slurm_job_id: SLURM job ID
+        harbor_package_version: Harbor package version
+        agent_name: Name of the agent
+        config: Config dict
+        n_trials: Number of concurrent trials
+        n_rep_eval: Number of attempts per task
+
+    Returns:
+        {"success": bool, "job": dict, "error": str}
+    """
+    try:
+        logger.info(f"Creating started job entry: {job_name}")
+
+        # First, check if a Pending entry exists and upgrade it
+        existing = get_sandbox_job_by_name(job_name)
+        if existing:
+            status = existing.get('job_status')
+            if status == JOB_STATUS_PENDING:
+                # Upgrade Pending -> Started
+                return update_job_status_to_started(
+                    job_name=job_name,
+                    n_trials=n_trials,
+                    n_rep_eval=n_rep_eval,
+                    config=config,
+                    harbor_package_version=harbor_package_version
+                )
+            elif status == JOB_STATUS_STARTED:
+                logger.info(f"Job {job_name} already Started")
+                return {"success": True, "job": existing, "exists": True}
+            elif status == JOB_STATUS_FINISHED:
+                return {"success": False, "error": "Job already finished"}
+
+        # Resolve model
+        model = get_model_by_name(model_hf_name)
+        if not model:
+            return {"success": False, "error": f"Model not found: {model_hf_name}"}
+        model_id = model['id']
+
+        # Resolve benchmark
+        benchmark_name = benchmark_hf_name.split("/")[-1] if "/" in benchmark_hf_name else benchmark_hf_name
+        benchmark = get_benchmark_by_name(benchmark_name)
+        if not benchmark:
+            return {"success": False, "error": f"Benchmark not found: {benchmark_name}"}
+        benchmark_id = benchmark['id']
+
+        # Resolve or create agent
+        agent_res = register_agent(name=agent_name)
+        if not agent_res.get('success'):
+            return {"success": False, "error": f"Failed to register agent: {agent_res.get('error')}"}
+        agent_id = agent_res['agent']['id']
+
+        # Build full job entry
+        now = datetime.now(timezone.utc)
+        job_data = {
+            "job_name": job_name,
+            "username": username,
+            "agent_id": agent_id,
+            "model_id": model_id,
+            "benchmark_id": benchmark_id,
+            "job_status": JOB_STATUS_STARTED,
+            "started_at": now.isoformat(),
+            "submitted_at": now.isoformat(),
+            "slurm_job_id": slurm_job_id,
+            "created_at": now.isoformat(),
+            "config": config,
+            "n_trials": n_trials,
+            "n_rep_eval": n_rep_eval,
+            "package_version": harbor_package_version,
+        }
+
+        result = create_sandbox_job(job_data)
+        logger.info(f"Created started job entry: {job_name} (id={result.get('id')})")
+        return {"success": True, "job": result}
+
+    except Exception as e:
+        logger.error(f"Failed to create started job entry {job_name}: {e}")
         return {"success": False, "error": str(e)}
