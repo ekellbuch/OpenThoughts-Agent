@@ -85,6 +85,10 @@ unset PYTHONPATH
 source "${WORK}/miniforge3/etc/profile.d/conda.sh"
 conda activate otagent
 
+# Ensure conda's libstdc++ takes precedence over any module-loaded gcc
+# (gcc/12.2.0 ships CXXABI < 1.3.15, breaking libicui18n.so.78 from conda)
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
 # Source Leonardo environment
 source "$DCFT/hpc/dotenv/leonardo.env"
 
@@ -253,17 +257,10 @@ fi
 export HF_HUB_OFFLINE=1  # Prevent further network access during vLLM startup
 
 echo "Starting vLLM server for model: $MODEL"
-# Note: vLLM 0.11.x — some newer flags not available
-$PYTHON_BIN -m vllm.entrypoints.openai.api_server \
-    --model "$MODEL" \
-    --host 0.0.0.0 --port 8000 \
-    --served-model-name "$MODEL" \
-    --tensor-parallel-size 4 \
-    --gpu-memory-utilization "$GPU_MEMORY_UTIL" \
-    --dtype auto \
-    --swap-space 4 \
-    --trust-remote-code \
-    --disable-custom-all-reduce \
+source "$DCFT/eval/build_vllm_cmd.sh"
+build_vllm_cmd "$PYTHON_BIN" "$MODEL" "$GPU_MEMORY_UTIL"
+
+"${VLLM_CMD[@]}" \
     > "eval/leonardo/logs/vllm_${SLURM_JOB_ID}.log" 2>&1 &
 VLLM_PID=$!
 

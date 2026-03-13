@@ -94,7 +94,8 @@ module purge 2>/dev/null || true
 module load nvidia-compilers/25.9-CUDA-13 2>&1 || true
 echo "CUDA_HOME: ${CUDA_HOME:-not set}"
 
-export VLLM_USE_V1=1
+# Disable V1 engine — crashes on GH200 with nightly cu130 build
+export VLLM_USE_V1=0
 
 cd "$REPO_DIR" || { echo "ERROR: Cannot cd to $REPO_DIR"; exit 1; }
 mkdir -p data/sbatches/logs

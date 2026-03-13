@@ -161,6 +161,9 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "Starting vLLM server for model: $MODEL"
+source "$DCFT/eval/build_vllm_cmd.sh"
+build_vllm_cmd "$PYTHON_BIN" "$MODEL" "$GPU_MEMORY_UTIL"
+
 env TORCHDYNAMO_DISABLE=1 \
     TMPDIR="/tmp" \
     TRITON_CACHE_DIR="/tmp/triton_cache_${USER}" \
@@ -168,18 +171,7 @@ env TORCHDYNAMO_DISABLE=1 \
     TORCHINDUCTOR_CACHE_DIR="/tmp/torchinductor_${USER}" \
     HF_HOME="$HF_HOME" \
     HF_HUB_CACHE="$HF_HUB_CACHE" \
-$PYTHON_BIN -m vllm.entrypoints.openai.api_server \
-    --model "$MODEL" \
-    --host 0.0.0.0 --port 8000 \
-    --served-model-name "$MODEL" \
-    --tensor-parallel-size 4 \
-    --gpu-memory-utilization "$GPU_MEMORY_UTIL" \
-    --dtype auto \
-    --kv-cache-dtype auto \
-    --swap-space 4 \
-    --enable-prefix-caching \
-    --disable-custom-all-reduce \
-    --trust-remote-code \
+"${VLLM_CMD[@]}" \
     > "eval/perlmutter/logs/vllm_${SLURM_JOB_ID}.log" 2>&1 &
 VLLM_PID=$!
 

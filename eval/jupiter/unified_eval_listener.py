@@ -160,19 +160,22 @@ JOB_STATUS_FINISHED = "Finished"
 # Baseline model config mapping — per-model vLLM overrides
 # ---------------------------------------------------------------------------
 _BASELINE_MODEL_CONFIGS: Optional[Dict[str, Dict[str, Any]]] = None
+_BASELINE_MODEL_PATTERNS: Optional[List[Dict[str, Any]]] = None
 
 
 def load_baseline_model_configs(path: Optional[str]) -> Dict[str, Dict[str, Any]]:
     """Load baseline model -> vLLM config mapping from YAML file.
 
     Returns dict mapping HF model name to vLLM serving params.
+    Also loads pattern-based fallback configs (stored in _BASELINE_MODEL_PATTERNS).
     """
-    global _BASELINE_MODEL_CONFIGS
+    global _BASELINE_MODEL_CONFIGS, _BASELINE_MODEL_PATTERNS
     if _BASELINE_MODEL_CONFIGS is not None:
         return _BASELINE_MODEL_CONFIGS
 
     if not path or not os.path.isfile(path):
         _BASELINE_MODEL_CONFIGS = {}
+        _BASELINE_MODEL_PATTERNS = []
         return _BASELINE_MODEL_CONFIGS
 
     try:
@@ -180,20 +183,44 @@ def load_baseline_model_configs(path: Optional[str]) -> Dict[str, Dict[str, Any]
         with open(path) as f:
             data = yaml.safe_load(f) or {}
         _BASELINE_MODEL_CONFIGS = data.get("models", {})
-        log(f"Loaded {len(_BASELINE_MODEL_CONFIGS)} baseline model config(s) from {path}")
+        _BASELINE_MODEL_PATTERNS = data.get("patterns", [])
+        log(f"Loaded {len(_BASELINE_MODEL_CONFIGS)} baseline model config(s) and "
+            f"{len(_BASELINE_MODEL_PATTERNS)} pattern(s) from {path}")
     except Exception as e:
         log(f"WARNING: failed to load baseline model configs from {path}: {e}")
         _BASELINE_MODEL_CONFIGS = {}
+        _BASELINE_MODEL_PATTERNS = []
 
     return _BASELINE_MODEL_CONFIGS
+
+
+def _match_pattern_config(hf_model: str) -> Optional[Dict[str, Any]]:
+    """Try to match a model name against pattern-based configs.
+
+    Patterns are checked in order; first match wins.
+    Each pattern has a 'match' field (regex or substring) and config fields.
+    """
+    import re
+    if not _BASELINE_MODEL_PATTERNS:
+        return None
+    for pattern_entry in _BASELINE_MODEL_PATTERNS:
+        pattern = pattern_entry.get("match", "")
+        if not pattern:
+            continue
+        if re.search(pattern, hf_model):
+            return {k: v for k, v in pattern_entry.items() if k != "match"}
+    return None
 
 
 def get_vllm_env_overrides(hf_model: str, configs: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
     """Get vLLM env var overrides for a model from the baseline config mapping.
 
+    Tries exact model name match first, then falls back to pattern matching.
     Returns dict of EVAL_VLLM_* env vars to pass to the eval script.
     """
     cfg = configs.get(hf_model)
+    if not cfg:
+        cfg = _match_pattern_config(hf_model)
     if not cfg:
         return {}
 
@@ -899,19 +926,11 @@ def main() -> None:
 
                 log(f"Submitting {len(submissions)} eval(s)...")
 
-                # Pre-download models on login node (for no-internet compute nodes)
-                if args.pre_download:
-                    unique_models = sorted(set(hf_model for _, hf_model, _, _, _ in submissions))
-                    log(f"Pre-downloading {len(unique_models)} unique model(s) on login node...")
+                # Pre-download setup (for no-internet compute nodes)
+                pre_download = args.pre_download
+                if pre_download:
                     from huggingface_hub import snapshot_download
-                    for i, model_name in enumerate(unique_models):
-                        log(f"  [{i+1}/{len(unique_models)}] Downloading {model_name}...")
-                        try:
-                            path = snapshot_download(repo_id=model_name, repo_type="model")
-                            log(f"  [{i+1}/{len(unique_models)}] Cached at {path}")
-                        except Exception as e:
-                            log(f"  [{i+1}/{len(unique_models)}] WARNING: Failed to download {model_name}: {e}")
-                    log("Pre-download complete.")
+                    downloaded_models: set = set()
 
                 # Sliding-window dependency: job N depends on job N-batch_size
                 # so at most batch_size jobs run concurrently. As one finishes,
@@ -924,6 +943,16 @@ def main() -> None:
                         f"first {batch_size} run immediately, rest chain one-by-one")
 
                 for idx, (mid, hf_model, dataset_hf, bench_id, reason) in enumerate(submissions):
+                    # Pre-download this model before submitting (download-then-submit per model)
+                    if pre_download and hf_model not in downloaded_models:
+                        log(f"  Pre-downloading model {hf_model}...")
+                        try:
+                            path = snapshot_download(repo_id=hf_model, repo_type="model")
+                            log(f"  Cached at {path}")
+                        except Exception as e:
+                            log(f"  WARNING: Failed to download {hf_model}: {e}")
+                        downloaded_models.add(hf_model)
+
                     log(f"Submitting [{idx+1}/{len(submissions)}]: model={hf_model}, dataset={dataset_hf}, reason={reason}")
 
                     db_job_id = create_pending_job(hf_model, dataset_hf, bench_id, mid,

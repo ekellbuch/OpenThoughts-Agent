@@ -109,9 +109,9 @@ export TRITON_CACHE_DIR="/tmp/triton_cache_${USER}"
 export FLASHINFER_WORKSPACE_BASE="/tmp/flashinfer_cache_${USER}"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$DCFT_SCRATCH/uv_cache_dir}"
 export HYDRA_FULL_ERROR=1
-# Pre-downloaded model cache — override jupiter.env's default (compute nodes have no internet)
-export HF_HUB_CACHE="/e/data1/datasets/playground/mmlaion/shared/guha1/hub"
-export HF_HOME="/e/data1/datasets/playground/mmlaion/shared/guha1/hub"
+# Pre-downloaded model cache — must match listener's HF_HUB_CACHE (compute nodes have no internet)
+export HF_HUB_CACHE="/e/data1/datasets/playground/ot/hf_hub"
+export HF_HOME="/e/data1/datasets/playground/ot/hf_hub"
 export HF_CACHE_DIR="$HF_HUB_CACHE"
 
 # Harbor is editable-installed to feuer1's home (inaccessible); use etash's clone
@@ -309,6 +309,9 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "Starting vLLM server for model: $MODEL"
+source "$DCFT/eval/build_vllm_cmd.sh"
+build_vllm_cmd "$PYTHON_BIN" "$MODEL" "$GPU_MEMORY_UTIL"
+
 env TORCHDYNAMO_DISABLE=1 \
     TMPDIR="/tmp" \
     TRITON_CACHE_DIR="/tmp/triton_cache_${USER}" \
@@ -318,18 +321,7 @@ env TORCHDYNAMO_DISABLE=1 \
     HF_HUB_CACHE="$HF_HUB_CACHE" \
     HF_HUB_OFFLINE=1 \
     VLLM_ALL2ALL_BACKEND=pplx \
-$PYTHON_BIN -m vllm.entrypoints.openai.api_server \
-    --model "$MODEL" \
-    --host 0.0.0.0 --port 8000 \
-    --served-model-name "$MODEL" \
-    --tensor-parallel-size 4 \
-    --gpu-memory-utilization "$GPU_MEMORY_UTIL" \
-    --dtype auto \
-    --kv-cache-dtype auto \
-    --swap-space 4 \
-    --enable-prefix-caching \
-    --disable-custom-all-reduce \
-    --trust-remote-code \
+"${VLLM_CMD[@]}" \
     > "eval/jupiter/logs/vllm_${SLURM_JOB_ID}.log" 2>&1 &
 VLLM_PID=$!
 
@@ -368,7 +360,7 @@ if [[ "$REPO_ID" == /* ]]; then
     echo "[DEBUG] Found $TASK_COUNT tasks with instruction.md"
 else
     echo "Downloading/locating dataset: $REPO_ID"
-    DATASET_LOCAL_DIR="/e/data1/datasets/playground/mmlaion/shared/guha1/datasets/${SAFE_REPO}"
+    DATASET_LOCAL_DIR="/e/data1/datasets/playground/ot/datasets/${SAFE_REPO}"
     echo "[DEBUG] DATASET_LOCAL_DIR=$DATASET_LOCAL_DIR"
     echo "[DEBUG] Local dir exists: $([ -d "$DATASET_LOCAL_DIR" ] && echo yes || echo no)"
     if [ -d "$DATASET_LOCAL_DIR" ]; then
@@ -400,7 +392,7 @@ if [ -n "$RUN_TAG_ARG" ]; then
 else
     RUN_TAG="${SAFE_REPO}_${SAFE_MODEL}"
 fi
-EVAL_JOBS_DIR="${EVAL_JOBS_DIR:-/e/data1/datasets/playground/mmlaion/shared/guha1/eval_jobs}"
+EVAL_JOBS_DIR="${EVAL_JOBS_DIR:-/e/data1/datasets/playground/ot/eval_jobs}"
 RUN_DIR="${EVAL_JOBS_DIR}/${RUN_TAG}"
 mkdir -p "$RUN_DIR"
 
