@@ -84,10 +84,9 @@ unset PYTHONPATH
 # Conda activation (x86_64 — no LD_LOADER wrapper needed)
 source "${WORK}/miniforge3/etc/profile.d/conda.sh"
 conda activate otagent
-module load cuda/12.6
 
-# Ensure conda's libstdc++ takes precedence over any module-loaded gcc
-# (gcc/12.2.0 ships CXXABI < 1.3.15, breaking libicui18n.so.78 from conda)
+# All build deps (CUDA, libstdc++, etc.) managed via conda — no module loads.
+# Prepend conda's lib to ensure its libstdc++ wins over any system/module versions.
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # Source Leonardo environment
