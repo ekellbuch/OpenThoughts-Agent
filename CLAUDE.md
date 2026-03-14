@@ -378,8 +378,7 @@ cd /e/scratch/jureap59/feuer1/OpenThoughts-Agent/SkyRL && git stash && git pull;
 conda activate otagent; \
 cd /e/scratch/jureap59/feuer1/OpenThoughts-Agent && GIT_TERMINAL_PROMPT=0 git pull && \
 git submodule update --init --remote sft/llamafactory; \
-source hpc/dotenv/jupiter.env; \
-rm -rf trace_jobs/DCAgent*  # clean stale eval trace dirs to avoid config mismatch
+source hpc/dotenv/jupiter.env
 ```
 Note: `GIT_TERMINAL_PROMPT=0` prevents interactive auth prompts from blocking the shell.
 
@@ -535,6 +534,14 @@ To debug DaytonaErrors or other trial failures, read `exception.txt` in the tria
 cat trace_jobs/<run_tag>/<task>__<id>/exception.txt
 ```
 
+**Config mismatch on auto-resume**: If Harbor fails with `FileExistsError: Job directory ... already exists and cannot be resumed with a different config`, the `trace_jobs/<run_tag>/` dir has a `config.json` from a previous run with different settings (e.g. `n_concurrent`, `gpu_memory_util`). To fix, delete only the specific stale run dir **after confirming no useful trials exist**:
+```bash
+# Check if the dir has any completed trials before deleting
+ls trace_jobs/<run_tag>/*/result.json 2>/dev/null | wc -l
+# If zero, safe to delete
+rm -rf trace_jobs/<run_tag>
+```
+
 ## CINECA Leonardo Access
 
 **SSH**: Uses ControlMaster multiplexing + step-ca certificate auth:
@@ -549,8 +556,7 @@ conda activate otagent && \
 cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent && GIT_TERMINAL_PROMPT=0 git pull && \
 cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/harbor && GIT_TERMINAL_PROMPT=0 git pull && \
 source hpc/dotenv/leonardo.env && source ~/secrets.env && \
-cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent && \
-rm -rf trace_jobs/DCAgent*  # clean stale eval trace dirs to avoid config mismatch
+cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent
 ```
 
 **Key paths**:
