@@ -2718,34 +2718,42 @@ def _extract_job_metadata(
         package_version = first_trial_result.get("agent_info", {}).get("version")
     
     # Extract metrics from the nested structure
-    metrics = None
+    metrics_list = []
     if "stats" in result and "evals" in result["stats"]:
         # Get the first (and likely only) evaluation key
         evals = result["stats"]["evals"]
         if evals:
-            # Get the first evaluation entry
             eval_key = list(evals.keys())[0]
             eval_data = evals[eval_key]
-            
-            # Extract metrics array
+
+            # Extract metrics array (list of dicts, each with various metric keys)
             metrics_array = eval_data.get("metrics", [])
-            
-            # If metrics exist, extract the mean value
+
             if metrics_array and len(metrics_array) > 0:
-                # metrics is an array of dicts with 'mean' key
-                metrics = {
-                    "accuracy": metrics_array[0].get("mean"),
-                }
+                # New format (Harbor >= 0.1.40): list of dicts with named keys
+                # e.g. [{"mean_drop_ei_reward": 0.03, ...}, {"accuracy_drop_ei_reward": 0.03, ...}]
+                for metric_dict in metrics_array:
+                    if isinstance(metric_dict, dict):
+                        # Check for new-style named metrics
+                        for key in ("mean_drop_ei_reward", "accuracy_drop_ei_reward"):
+                            if key in metric_dict:
+                                metrics_list.append({"name": key, "value": metric_dict[key]})
+                        # Legacy format: {"mean": X}
+                        if "mean" in metric_dict and not any(m["name"] == "accuracy" for m in metrics_list):
+                            metrics_list.append({"name": "accuracy", "value": metric_dict["mean"]})
+
+                # If we found accuracy_drop_ei_reward, also add it as "accuracy" for backwards compat
+                accuracy_metric = next((m for m in metrics_list if m["name"] == "accuracy_drop_ei_reward"), None)
+                if accuracy_metric and not any(m["name"] == "accuracy" for m in metrics_list):
+                    metrics_list.append({"name": "accuracy", "value": accuracy_metric["value"]})
     
-    metrics_list = []
-    if metrics:
-        for key, value in metrics.items():
-            metrics_list.append({"name": key, "value": value})
-    
+
+    # job_name can be None in Harbor result.json — fall back to config or dir name
+    job_name = config.get("job_name") or result.get("job_name") or job_dir.name
 
     job_metadata = {
         "job_id": result["id"],  # Preserve local job ID from result.json
-        "job_name": config["job_name"],
+        "job_name": job_name,
         "username": username,
         "agent_id": str(agent_id),
         "model_id": str(model_id),
@@ -2837,7 +2845,13 @@ def _extract_trial_metadata(
     # Extract reward - check verifier_result first, then top-level result
     reward = None
     if verifier_result is not None:
-        reward = verifier_result.get("reward")
+        # New format: verifier_result.rewards.reward (Harbor >= 0.1.40)
+        rewards_dict = verifier_result.get("rewards")
+        if isinstance(rewards_dict, dict):
+            reward = rewards_dict.get("reward")
+        # Legacy format: verifier_result.reward
+        if reward is None:
+            reward = verifier_result.get("reward")
     if reward is None:
         reward = result.get("reward")
 
@@ -2867,8 +2881,12 @@ def _extract_trial_metadata(
         "agent_setup_ended_at": _parse_datetime((result.get("agent_setup") or {}).get("finished_at")),
         "agent_execution_started_at": _parse_datetime((agent_execution or {}).get("started_at")),
         "agent_execution_ended_at": _parse_datetime((agent_execution or {}).get("finished_at")),
-        "verifier_started_at": _parse_datetime((verifier_result or {}).get("started_at")),
-        "verifier_ended_at": _parse_datetime((verifier_result or {}).get("finished_at")),
+        "verifier_started_at": _parse_datetime(
+            (verifier_result or {}).get("started_at") or (result.get("verifier") or {}).get("started_at")
+        ),
+        "verifier_ended_at": _parse_datetime(
+            (verifier_result or {}).get("finished_at") or (result.get("verifier") or {}).get("finished_at")
+        ),
     }
 
     return trial_metadata
@@ -3689,6 +3707,44 @@ def upload_job_and_trial_records(
                 existing_job_id = line.split("=", 1)[1].strip()
                 logger.info(f"Found existing job ID in meta.env: {existing_job_id}")
                 break
+
+    # Also check eval_jobs/<run_tag>/meta.env as fallback (trace_jobs won't have meta.env)
+    if not existing_job_id:
+        # Try to find meta.env in sibling eval_jobs dir
+        eval_jobs_meta = job_dir.parent.parent / "eval_jobs" / job_dir.name / "meta.env"
+        if not eval_jobs_meta.exists():
+            # Try common eval_jobs locations
+            for parent in [Path("/leonardo_work/EUHPC_E03_068/bfeuer00/eval_jobs"),
+                           Path("/e/data1/datasets/playground/ot/eval_jobs")]:
+                candidate = parent / job_dir.name / "meta.env"
+                if candidate.exists():
+                    eval_jobs_meta = candidate
+                    break
+        if eval_jobs_meta.exists():
+            for line in eval_jobs_meta.read_text().splitlines():
+                if line.startswith("DB_JOB_ID="):
+                    val = line.split("=", 1)[1].strip()
+                    if val:
+                        existing_job_id = val
+                        logger.info(f"Found existing job ID in eval_jobs meta.env: {existing_job_id}")
+                    break
+
+    # Last resort: look up by model_id + benchmark_id to find sbatch-created "Started" job
+    if not existing_job_id:
+        try:
+            client = get_supabase_client()
+            resp = client.table('sandbox_jobs').select('id,job_status').eq(
+                'model_id', str(model_id)
+            ).eq(
+                'benchmark_id', str(benchmark_id)
+            ).eq(
+                'job_status', 'Started'
+            ).order('created_at', desc=True).limit(1).execute()
+            if resp.data:
+                existing_job_id = resp.data[0]['id']
+                logger.info(f"Found existing 'Started' job by model+benchmark lookup: {existing_job_id}")
+        except Exception as e:
+            logger.warning(f"Failed to look up existing job by model+benchmark: {e}")
 
     # Extract job metadata for both update and create scenarios
     job_metadata = _extract_job_metadata(
