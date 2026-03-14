@@ -266,15 +266,18 @@ echo "Starting vLLM server for model: $MODEL"
 source "$DCFT/eval/build_vllm_cmd.sh"
 build_vllm_cmd "$PYTHON_BIN" "$MODEL" "$GPU_MEMORY_UTIL"
 
-"${VLLM_CMD[@]}" \
+srun --overlap --gres=gpu:4 "${VLLM_CMD[@]}" \
     > "eval/leonardo/logs/vllm_${SLURM_JOB_ID}.log" 2>&1 &
 VLLM_PID=$!
 
 # Health check loop
+MASTER_ADDR=$(scontrol show hostname "$SLURM_NODELIST" | head -n1)
+VLLM_HEALTH_URL="http://${MASTER_ADDR}:8000/v1/models"
+echo "Health check URL: $VLLM_HEALTH_URL"
 MAX_RETRIES=30
 RETRY_INTERVAL=100
 for i in $(seq 1 $MAX_RETRIES); do
-    if curl -s http://localhost:8000/v1/models > /dev/null 2>&1; then
+    if curl -s "$VLLM_HEALTH_URL" > /dev/null 2>&1; then
         echo "vLLM server is ready"
         break
     fi
@@ -468,7 +471,7 @@ else
         --agent terminus-2 \
         --model "hosted_vllm/$MODEL" \
         --env "daytona" \
-        --agent-kwarg "api_base=http://localhost:8000/v1" \
+        --agent-kwarg "api_base=http://${MASTER_ADDR}:8000/v1" \
         --agent-kwarg "key=fake_key" \
         --n-attempts 3 \
         --job-name "$RUN_TAG" \
