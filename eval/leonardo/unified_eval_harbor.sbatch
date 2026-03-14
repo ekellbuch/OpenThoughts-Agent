@@ -588,6 +588,9 @@ fi
 # ==============================================================================
 # Upload results to DB (via proxychains for HF upload)
 # ==============================================================================
+# Re-enable HF Hub access for uploads (was set to offline for vLLM startup)
+export HF_HUB_OFFLINE=0
+
 export RUN_DIR
 export UPLOAD_USERNAME="${UPLOAD_USERNAME:-$USER}"
 export UPLOAD_MODE="${UPLOAD_MODE:-skip_on_error}"
