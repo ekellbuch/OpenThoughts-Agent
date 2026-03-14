@@ -328,17 +328,13 @@ class HPC(BaseModel):
         lines = [
             "# --- Ray defaults ---",
             'export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"',
-            "# Raise OOM kill threshold: FSDP init temporarily spikes CPU RAM",
-            'export RAY_memory_usage_threshold="${RAY_memory_usage_threshold:-0.99}"',
+            "# Disable Ray OOM monitor: FSDP init transiently spikes CPU RAM",
+            "# (e.g., 4 workers × 32B model peaks at ~249GB on 251GB nodes).",
+            "# The spike settles after init; Ray's default 0.95 threshold kills",
+            "# workers during this transient phase. Already disabled for GH200",
+            "# (unified memory), now disabled universally.",
+            'export RAY_memory_monitor_refresh_ms=0',
         ]
-
-        if self.unified_gpu_memory:
-            lines += [
-                "# GH200 unified memory: GPU HBM is part of system RAM, so Ray's",
-                "# memory monitor double-counts GPU allocations and kills workers",
-                "# during model loading.  Disable the monitor entirely.",
-                'export RAY_memory_monitor_refresh_ms=0',
-            ]
 
         lines += [
             'if [ -z "${RAY_TMPDIR:-}" ]; then',
