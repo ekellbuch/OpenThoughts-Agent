@@ -277,7 +277,7 @@ echo "Health check URL: $VLLM_HEALTH_URL"
 MAX_RETRIES=30
 RETRY_INTERVAL=100
 for i in $(seq 1 $MAX_RETRIES); do
-    if curl -s "$VLLM_HEALTH_URL" > /dev/null 2>&1; then
+    if env -u LD_PRELOAD curl -s "$VLLM_HEALTH_URL" > /dev/null 2>&1; then
         echo "vLLM server is ready"
         break
     fi
