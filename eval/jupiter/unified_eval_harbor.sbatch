@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --account reformo
 #SBATCH --output=eval/jupiter/logs/%x_%j.out
-#SBATCH --job-name=eval
+#SBATCH --job-name=eval_%j
 
 # ==============================================================================
 # Unified Eval Harbor — Jupiter Cluster (JSC GH200)
@@ -56,6 +56,10 @@ if [[ "$REPO_ID" == /* ]]; then
 else
     SAFE_REPO=$(echo "$REPO_ID" | tr '/:' '_')
 fi
+
+# Update SLURM job name to include model short name (default "%j" is just job ID)
+SHORT_MODEL=$(echo "$MODEL" | awk -F'/' '{print $NF}')
+scontrol update JobId=$SLURM_JOB_ID Name="eval_${SHORT_MODEL}" 2>/dev/null || true
 
 echo "=============================================="
 echo "Jupiter Eval Harbor"
@@ -555,6 +559,19 @@ mkdir -p "$RUN_DIR"
     echo "GPU_MEMORY_UTIL=$GPU_MEMORY_UTIL"
 } > "$RUN_DIR/meta.env"
 
+# Harbor writes trials, result.json, and config.json to trace_jobs/<RUN_TAG>/
+# (relative to DCFT working dir). Copy key files to eval_jobs for metadata persistence.
+TRACE_DIR="${DCFT}/trace_jobs/${RUN_TAG}"
+if [ -d "$TRACE_DIR" ]; then
+    echo "Syncing metadata from trace_jobs to eval_jobs..."
+    cp "$TRACE_DIR/result.json" "$RUN_DIR/" 2>/dev/null || true
+    cp "$TRACE_DIR/config.json" "$RUN_DIR/" 2>/dev/null || true
+    TRIAL_COUNT=$(find "$TRACE_DIR" -maxdepth 1 -type d -name '*__*' | wc -l)
+    echo "Found $TRIAL_COUNT trial dirs in $TRACE_DIR"
+else
+    echo "WARNING: trace_jobs dir not found: $TRACE_DIR"
+fi
+
 # If eval failed, don't attempt upload
 if [ ${SB_EXIT:-0} -ne 0 ]; then
     echo "Harbor eval exited with non-zero status: ${SB_EXIT}. Skipping upload."
@@ -638,6 +655,14 @@ fi
 # ==============================================================================
 # Upload results to DB (via proxychains for HF upload)
 # ==============================================================================
+# Use trace_jobs dir for upload (contains trial subdirectories)
+# Fall back to eval_jobs dir if trace_jobs doesn't exist
+if [ -d "$TRACE_DIR" ]; then
+    UPLOAD_DIR="$TRACE_DIR"
+else
+    UPLOAD_DIR="$RUN_DIR"
+fi
+export UPLOAD_DIR
 export RUN_DIR
 export UPLOAD_USERNAME="${UPLOAD_USERNAME:-$USER}"
 export UPLOAD_MODE="${UPLOAD_MODE:-skip_on_error}"
@@ -688,6 +713,7 @@ def sanitize_hf_repo_id(repo_id: str, max_length: int = 96) -> str:
     return f"{org}/{name}" if org else name
 
 
+upload_dir = os.environ.get("UPLOAD_DIR", os.environ["RUN_DIR"])
 run_dir = os.environ["RUN_DIR"]
 run_tag = os.environ["RUN_TAG"]
 username = os.environ.get("UPLOAD_USERNAME", os.environ.get("USER", "jupiter"))
@@ -710,8 +736,9 @@ import hashlib
 benchmark_version_hash = hashlib.sha256(benchmark_name.encode()).hexdigest()
 print(f"[uploader] benchmark_name={benchmark_name!r}, version_hash={benchmark_version_hash[:16]}...")
 
+print(f"[uploader] Using upload dir: {upload_dir}")
 upload_eval_results(
-    run_dir,
+    upload_dir,
     username=username,
     error_mode=error_mode,
     hf_token=hf_token,

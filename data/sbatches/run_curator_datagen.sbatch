@@ -163,6 +163,8 @@ echo "=== Step 3: Running Curator Datagen ==="
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OUTPUT_DIR="data/sbatches/logs/curator_output_${SLURM_JOB_ID}_${TIMESTAMP}"
 
+SAVE_EVERY="${5:-10000}"  # Optional: checkpoint every N prompts (default: 10000)
+
 CURATOR_ARGS=(
     --input-dataset "$INPUT_DATASET"
     --model "$MODEL"
@@ -173,6 +175,7 @@ CURATOR_ARGS=(
     --max-tokens 16384
     --temperature 0.7
     --top-p 0.95
+    --save-every "$SAVE_EVERY"
 )
 
 if [ -n "$LIMIT" ]; then

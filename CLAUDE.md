@@ -613,6 +613,41 @@ cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent
 
 When resubmitting cancelled jobs, look up the original launch command in these files first.
 
+## Manual Eval Upload (when auto-upload fails)
+
+When an eval job completes but the automatic HF upload or DB sync fails (e.g., path mismatch, missing result.json), use `manual_db_eval_push.py` to manually trigger the upload:
+
+```bash
+# On the cluster (source secrets first)
+source ~/secrets.env
+cd /path/to/OpenThoughts-Agent
+
+# Basic usage — auto-detects agent/model/benchmark from job metadata
+python scripts/database/manual_db_eval_push.py \
+    --job-dir trace_jobs/<RUN_TAG> \
+    --verbose
+
+# With explicit HuggingFace repo
+python scripts/database/manual_db_eval_push.py \
+    --job-dir trace_jobs/<RUN_TAG> \
+    --hf-repo DCAgent2/<RUN_TAG>-traces \
+    --verbose
+
+# Skip HF upload (database only)
+python scripts/database/manual_db_eval_push.py \
+    --job-dir trace_jobs/<RUN_TAG> \
+    --skip-hf --verbose
+
+# Force update existing records
+python scripts/database/manual_db_eval_push.py \
+    --job-dir trace_jobs/<RUN_TAG> \
+    --forced-update --verbose
+```
+
+**Important**: Pass the `trace_jobs/<RUN_TAG>` path (where Harbor writes trial dirs), NOT the `eval_jobs/<RUN_TAG>` path (which only has meta.env). The script auto-resolves nested directories to find trial subdirectories.
+
+**Required env vars**: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `HF_TOKEN` (from `secrets.env`).
+
 ## RL Job Cleanup Checklist
 
 After an RL job terminates (early or completed), follow these steps to preserve and publish the checkpoint:

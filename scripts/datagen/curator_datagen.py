@@ -166,6 +166,12 @@ def main():
     parser.add_argument("--output-dir", default=None,
                         help="Local directory to save results (default: ./curator_output/<timestamp>)")
 
+    # Checkpointing / sharding
+    parser.add_argument("--save-every", type=int, default=None,
+                        help="Save intermediate results every N prompts (for long runs / timeouts)")
+    # TODO: Add --shard-index and --num-shards for multi-node data parallelism
+    #       Each shard processes a disjoint slice of the dataset, then results are merged.
+
     args = parser.parse_args()
 
     # -----------------------------------------------------------------------
@@ -258,27 +264,64 @@ def main():
     )
 
     # -----------------------------------------------------------------------
-    # Run generation
-    # -----------------------------------------------------------------------
-    log.info(f"Starting generation for {len(input_rows)} prompts...")
-    t0 = time.time()
-    result = generator(input_rows)
-    elapsed = time.time() - t0
-
-    output_ds = result.dataset
-    log.info(f"Generation complete: {len(output_ds)} completions in {elapsed:.1f}s "
-             f"({len(output_ds) / elapsed:.1f} prompts/sec)")
-
-    # -----------------------------------------------------------------------
-    # Save output
+    # Run generation (with optional intermittent saving)
     # -----------------------------------------------------------------------
     if args.output_dir:
         out_path = args.output_dir
     else:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         out_path = f"./curator_output/{timestamp}"
-
     os.makedirs(out_path, exist_ok=True)
+
+    if args.save_every and args.save_every < len(input_rows):
+        # Process in chunks with intermittent saves
+        chunk_size = args.save_every
+        all_results = []
+        total = len(input_rows)
+        t0 = time.time()
+
+        for chunk_start in range(0, total, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, total)
+            chunk = input_rows[chunk_start:chunk_end]
+            log.info(f"Processing chunk {chunk_start}-{chunk_end} of {total}...")
+
+            chunk_result = generator(chunk)
+            chunk_ds = chunk_result.dataset
+            all_results.append(chunk_ds)
+            log.info(f"Chunk done: {len(chunk_ds)} completions")
+
+            # Save checkpoint
+            from datasets import concatenate_datasets
+            merged = concatenate_datasets(all_results)
+            ckpt_path = os.path.join(out_path, f"checkpoint_{chunk_end}.parquet")
+            merged.to_parquet(ckpt_path)
+            log.info(f"Checkpoint saved: {ckpt_path} ({len(merged)} total rows)")
+
+            # Push intermediate results to HF if configured
+            if args.output_repo:
+                try:
+                    merged.push_to_hub(args.output_repo, private=False)
+                    log.info(f"Intermediate push to {args.output_repo} ({len(merged)} rows)")
+                except Exception as e:
+                    log.warning(f"Intermediate HF push failed (will retry at end): {e}")
+
+        elapsed = time.time() - t0
+        from datasets import concatenate_datasets
+        output_ds = concatenate_datasets(all_results)
+    else:
+        # Single-shot generation
+        log.info(f"Starting generation for {len(input_rows)} prompts...")
+        t0 = time.time()
+        result = generator(input_rows)
+        elapsed = time.time() - t0
+        output_ds = result.dataset
+
+    log.info(f"Generation complete: {len(output_ds)} completions in {elapsed:.1f}s "
+             f"({len(output_ds) / max(elapsed, 0.1):.1f} prompts/sec)")
+
+    # -----------------------------------------------------------------------
+    # Save output
+    # -----------------------------------------------------------------------
     output_ds.save_to_disk(out_path)
     log.info(f"Saved to {out_path}")
 
