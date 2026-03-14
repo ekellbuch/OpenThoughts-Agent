@@ -136,59 +136,33 @@ echo "Python: $($PYTHON_BIN --version)"
 echo "PYTHONPATH: $PYTHONPATH"
 
 # ==============================================================================
-# Proxychains Setup (no internet on compute nodes)
-# Leonardo blocks SSH tunnel auth (pubkey disabled for intra-cluster).
-# Instead, a standalone SOCKS5 proxy runs on the login node (in tmux).
-# Start it before submitting jobs:
-#   python3 eval/leonardo/socks5_proxy.py --port 17003
+# Proxy Setup: SSH tunnel from compute node → login node
+#
+# Leonardo compute nodes have no internet. We create a SOCKS5 proxy via
+# SSH dynamic port forwarding to a login node (which has internet).
+#
+# Prerequisites (one-time setup on login node):
+#   1. ssh-keygen -t ed25519 -f ~/.ssh/leonardo_tunnel  (passphrase: 12345)
+#   2. cat ~/.ssh/leonardo_tunnel.pub >> ~/.ssh/authorized_keys
+#   3. Set SSH_KEY env var or ensure key is at ~/.ssh/leonardo_tunnel
 # ==============================================================================
 
-# Resolve login node IP at submission time (proxychains needs numeric IP)
-PROXY_IP="${PROXY_IP:-10.99.0.5}"
-PROXY_PORT="${PROXY_PORT:-17003}"
 PROXYCHAINS_BIN="$(which proxychains4 2>/dev/null || echo "${WORK}/miniforge3/envs/otagent/bin/proxychains4")"
 
-setup_proxy() {
-    echo "[proxy] Configuring proxychains to use SOCKS5 proxy at ${PROXY_IP}:${PROXY_PORT}..."
+# SSH key for intra-cluster tunnel (passphrase handled by ssh-agent in the script)
+export SSH_KEY="${SSH_KEY:-/leonardo/home/userexternal/bfeuer00/.ssh/leonardo_tunnel}"
 
-    # Verify connectivity to the proxy
-    if python3 -c "
-import socket, sys
-try:
-    s = socket.create_connection(('${PROXY_IP}', ${PROXY_PORT}), timeout=10)
-    s.close()
-    print('[proxy] Login node proxy is reachable')
-except Exception as e:
-    print(f'[proxy] ERROR: Cannot reach proxy at ${PROXY_IP}:${PROXY_PORT}: {e}')
-    sys.exit(1)
-"; then
-        echo "[proxy] Proxy connectivity confirmed"
-    else
-        echo "[proxy] WARNING: Proxy not reachable. External connectivity will fail."
-        echo "[proxy] Ensure socks5_proxy.py is running on login node port ${PROXY_PORT}"
-        return 1
-    fi
+echo "[proxy] Setting up SSH tunnel proxy..."
+# stdout = proxychains4 command; stderr = diagnostic messages (shown to log)
+CMD_PREFIX=$(bash "$DCFT/eval/leonardo/start_proxy_tunnel.sh")
 
-    # Generate proxychains config (proxy_dns required for domain resolution via proxy)
-    CFG_PATH="$HOME/.proxychains/proxychains_${SLURM_JOB_ID}.conf"
-    mkdir -p "$HOME/.proxychains"
+if [[ "$CMD_PREFIX" == proxychains4* ]]; then
+    echo "[proxy] Tunnel established. CMD_PREFIX=$CMD_PREFIX"
 
-    cat > "$CFG_PATH" <<PCEOF
-strict_chain
-proxy_dns
-quiet_mode
-tcp_read_time_out 30000
-tcp_connect_time_out 15000
-localnet 127.0.0.0/255.0.0.0
-[ProxyList]
-socks5 ${PROXY_IP} ${PROXY_PORT}
-PCEOF
-
-    export PROXYCHAINS_CONF_FILE="$CFG_PATH"
-    export PROXYCHAINS_SOCKS5_HOST="${PROXY_IP}"
-    export PROXYCHAINS_SOCKS5_PORT="${PROXY_PORT}"
-
-    echo "[proxy] Config at $CFG_PATH (socks5://${PROXY_IP}:${PROXY_PORT})"
+    # Source the exported env vars from the tunnel script
+    # (PROXYCHAINS_CONF_FILE was set in the subshell; re-extract from CMD_PREFIX)
+    PROXYCHAINS_CONF_FILE=$(echo "$CMD_PREFIX" | awk '{print $NF}')
+    export PROXYCHAINS_CONF_FILE
 
     # Daytona timeout/retry settings
     export DAYTONA_MAX_RETRIES=5
@@ -208,29 +182,25 @@ PCEOF
     unset SSL_CERT_DIR
 
     # Test connectivity
-    if [ -x "$PROXYCHAINS_BIN" ]; then
-        if "$PROXYCHAINS_BIN" -f "$CFG_PATH" curl -s --connect-timeout 10 https://huggingface.co -o /dev/null 2>/dev/null; then
-            echo "[proxy] Connectivity test passed"
-        else
-            echo "[proxy] WARNING: Connectivity test failed (may still work)"
-        fi
+    if $CMD_PREFIX curl -s --connect-timeout 10 https://huggingface.co -o /dev/null 2>/dev/null; then
+        echo "[proxy] Connectivity test passed (huggingface.co reachable)"
+    else
+        echo "[proxy] WARNING: Connectivity test failed (tunnel may still work for Daytona)"
     fi
-
-    echo "[proxy] Setup complete"
-    return 0
-}
+else
+    echo "[proxy] WARNING: SSH tunnel setup failed. External connectivity will not work."
+    echo "[proxy] CMD_PREFIX output was: $CMD_PREFIX"
+    CMD_PREFIX=""
+fi
 
 # Helper: run command through proxychains
 proxied() {
-    if [ -x "$PROXYCHAINS_BIN" ] && [ -n "${PROXYCHAINS_CONF_FILE:-}" ]; then
-        "$PROXYCHAINS_BIN" -f "$PROXYCHAINS_CONF_FILE" "$@"
+    if [ -n "${CMD_PREFIX:-}" ]; then
+        $CMD_PREFIX "$@"
     else
         "$@"
     fi
 }
-
-# Setup proxy
-setup_proxy || echo "[proxy] Continuing without proxy (some operations may fail)"
 
 # ==============================================================================
 # Cleanup trap
@@ -239,6 +209,15 @@ cleanup() {
     echo "Cleaning up..."
     if [ -n "${VLLM_PID:-}" ]; then
         kill "$VLLM_PID" 2>/dev/null || true
+    fi
+    # Kill SSH tunnel (all ssh -D processes for this job)
+    pkill -f "ssh.*-D.*${TUNNEL_PORT:-27003}" 2>/dev/null || true
+    # Kill ssh-agent (env vars saved by start_proxy_tunnel.sh)
+    _AGENT_ENV="/tmp/.ssh_agent_env_${SLURM_JOB_ID:-$$}"
+    if [ -f "$_AGENT_ENV" ]; then
+        source "$_AGENT_ENV"
+        kill "$SSH_AGENT_PID" 2>/dev/null || true
+        rm -f "$_AGENT_ENV"
     fi
     rm -f "${PROXYCHAINS_CONF_FILE:-}" 2>/dev/null || true
     echo "Cleanup done."
