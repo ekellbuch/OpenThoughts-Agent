@@ -328,6 +328,8 @@ class HPC(BaseModel):
         lines = [
             "# --- Ray defaults ---",
             'export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"',
+            "# Raise OOM kill threshold: FSDP init temporarily spikes CPU RAM",
+            'export RAY_memory_usage_threshold="${RAY_memory_usage_threshold:-0.99}"',
         ]
 
         if self.unified_gpu_memory:
