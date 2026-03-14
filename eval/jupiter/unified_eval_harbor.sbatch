@@ -506,6 +506,13 @@ echo "[DEBUG] DAYTONA_API_KEY=${DAYTONA_API_KEY:0:20}..."
 echo "[DEBUG] Full harbor command:"
 echo "  harbor jobs start -p $DATASET_PATH --n-concurrent $N_CONCURRENT --agent terminus-2 --model hosted_vllm/$MODEL --env daytona ... $EXTRA_HARBOR_ARGS"
 
+# Clean stale trace_jobs dir for this exact run tag to prevent config mismatch
+# (safe: scoped to this specific model+dataset pair only)
+if [ -d "trace_jobs/${RUN_TAG}" ]; then
+    echo "Removing stale trace_jobs/${RUN_TAG} to avoid config mismatch"
+    rm -rf "trace_jobs/${RUN_TAG}"
+fi
+
 # Check if a previous job dir exists for this run tag (for resume)
 EXISTING_JOB_DIR="${EVAL_JOBS_DIR}/${RUN_TAG}"
 if [ -d "$EXISTING_JOB_DIR" ] && [ -f "$EXISTING_JOB_DIR/config.json" ]; then
