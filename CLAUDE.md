@@ -456,6 +456,43 @@ cd /lus/eagle/projects/CausalAlign/penfever42/code/OpenThoughts-Agent
 
 **Package management**: Use `uv pip install` (not bare `pip`) for all installs on Polaris.
 
+## JSC Jupiter Access
+
+**SSH**: `ssh Jupiter` (alias in ~/.ssh/config). User: `feuer1`, group: `jureap59`.
+
+**Key paths**:
+- Code: `/e/scratch/jureap59/feuer1/OpenThoughts-Agent`
+- Experiments: `/e/scratch/jureap59/feuer1/OpenThoughts-Agent/experiments/`
+- Eval logs: `/e/scratch/jureap59/feuer1/OpenThoughts-Agent/eval/jupiter/logs/`
+- Eval job files: `/e/data1/datasets/playground/ot/eval_jobs/`
+- HF cache: `/e/data1/datasets/playground/ot/hf_hub`
+- Checkpoints (SFT/RL): `/e/data1/datasets/playground/ot/checkpoints/`
+- Conda env: `/e/scratch/jureap59/feuer1/miniforge3/envs/otagent/`
+- Dotenv: `hpc/dotenv/jupiter.env`
+- Wheels: `/e/data1/datasets/playground/ot-baf/wheels/`
+
+**Non-interactive SSH note**: `$DCFT_ACTIVATE_ENV` doesn't work in non-interactive SSH. Use full paths:
+```bash
+ssh Jupiter '/e/scratch/jureap59/feuer1/miniforge3/envs/otagent/bin/python ...'
+ssh Jupiter '/e/scratch/jureap59/feuer1/miniforge3/envs/otagent/bin/pip install ...'
+```
+
+**Cluster details**: GH200 96GB GPUs (aarch64), 4/node, 48 nodes, SLURM scheduler. No internet on compute (proxy via SSH tunnel on compute, direct internet on login nodes). Login nodes have direct HF Hub access.
+
+## NERSC Perlmutter Access
+
+**SSH**: `ssh perlmutter` (alias for `perlmutter.nersc.gov`). User: `penfever`.
+
+**Key paths**:
+- Code: `/pscratch/sd/p/penfever/OpenThoughts-Agent`
+- Experiments: `/pscratch/sd/p/penfever/OpenThoughts-Agent/experiments/`
+- Trace jobs (RL): `experiments/<job_name>/<job_name>/trace_jobs/`
+- Trace jobs (eval): `/pscratch/sd/p/penfever/OpenThoughts-Agent/trace_jobs/`
+- Home: `/global/homes/p/penfever`
+- Dotenv: `hpc/dotenv/perlmutter.env`
+
+**Cluster details**: A100 80GB GPUs, 4/node, SLURM scheduler. Internet on compute nodes. Conda env: `dcagent`.
+
 ## Eval Job Submission Defaults
 
 When submitting eval jobs via `unified_eval_listener.py`, always use these flags unless explicitly told otherwise:
@@ -492,7 +529,7 @@ python eval/jupiter/unified_eval_listener.py \
   --n-concurrent 48 \
   --harbor-config hpc/harbor_yaml/eval/eval_ctx32k_non_it.yaml \
   --pre-download \
-  --once --verbose --batch-size 4
+  --once --verbose --batch-size 12
 ```
 
 Key differences from Jupiter:
@@ -625,23 +662,31 @@ After an RL job terminates (early or completed), follow these steps to preserve 
 
 After an 8B SFT job completes on a no-internet cluster (Jupiter, Leonardo), follow these steps to publish and clean up:
 
-1. **Upload model weights to HuggingFace**:
+1. **Remove intermediate checkpoints** before uploading to avoid uploading unnecessary cruft:
    ```bash
-   # On the login node (has proxychains for HF access)
-   proxychains4 huggingface-cli upload-large-folder \
+   rm -rf $CHECKPOINTS_DIR/<job_name>/checkpoint-*
+   rm -rf $CHECKPOINTS_DIR/<job_name>/.cache
+   ```
+
+2. **Upload model weights to HuggingFace**:
+   ```bash
+   # On the login node (has direct internet on Jupiter; use proxychains on Leonardo)
+   source ~/secrets.env
+   huggingface-cli upload-large-folder \
      laion/<job_name> \
-     $CHECKPOINTS_DIR/<job_name>
+     $CHECKPOINTS_DIR/<job_name> \
+     --repo-type=model
    ```
    Wait for the upload to finish and verify the repo exists on HF Hub.
 
-2. **Register in the unified DB** (no W&B link needed):
+3. **Register in the unified DB** (no W&B link needed):
    ```bash
    python -m database.unified_db.register_model \
      --hf-repo laion/<job_name> \
      --base-model <base_model_hf>
    ```
 
-3. **Clean up experiments dir**: Only after steps 1 and 2 both succeed, remove the local experiment directory to free disk space:
+4. **Clean up experiments dir**: Only after steps 1-3 succeed, remove the local experiment directory to free disk space:
    ```bash
    rm -rf $EXPERIMENTS_DIR/<job_name>
    ```

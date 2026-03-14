@@ -70,6 +70,7 @@ terminal_bench:
     exclude_exceptions:
       - AgentTimeoutError
       - VerifierTimeoutError
+      - VerifierRuntimeError
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - VerifierOutputParseError

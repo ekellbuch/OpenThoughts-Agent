@@ -59,6 +59,7 @@ terminal_bench:
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - VerifierOutputParseError
+      - VerifierRuntimeError
       - ContextLengthExceededError
 
     n_concurrent_trials: 300
