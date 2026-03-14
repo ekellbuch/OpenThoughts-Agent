@@ -72,8 +72,7 @@ terminal_bench:
       - VerifierOutputParseError
       - ContextLengthExceededError
 
-    # 75% of max inference capacity (12 engines x 24 seqs = 288)
-    n_concurrent_trials: 216
+    n_concurrent_trials: 192
 
     # Logging settings
     log_level: INFO
@@ -128,9 +127,9 @@ trainer:
   update_epochs_per_batch: 1
 
   # Batch sizes
-  train_batch_size: 64
-  policy_mini_batch_size: 64
-  eval_batch_size: 64
+  train_batch_size: 32
+  policy_mini_batch_size: 32
+  eval_batch_size: 32
 
   # Micro batch sizes — reduced for 32B memory
   micro_forward_batch_size_per_gpu: 1
@@ -193,7 +192,7 @@ trainer:
   # Fully async generation (settings from v2_maxconcurrent)
   fully_async:
     max_staleness_steps: 12
-    num_parallel_generation_workers: 768
+    num_parallel_generation_workers: 384
 
 # Generator configuration
 generator:
