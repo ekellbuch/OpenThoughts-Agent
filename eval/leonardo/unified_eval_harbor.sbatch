@@ -89,6 +89,10 @@ conda activate otagent
 # Prepend conda's lib to ensure its libstdc++ wins over any system/module versions.
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+# Strip inherited LD_PRELOAD (proxychains from login node).
+# The proxied() helper re-adds it only for commands that need external access.
+unset LD_PRELOAD 2>/dev/null || true
+
 # Source Leonardo environment
 source "$DCFT/hpc/dotenv/leonardo.env"
 
@@ -270,14 +274,22 @@ srun --overlap --gres=gpu:4 "${VLLM_CMD[@]}" \
     > "eval/leonardo/logs/vllm_${SLURM_JOB_ID}.log" 2>&1 &
 VLLM_PID=$!
 
-# Health check loop
+# Health check loop (Python-based to avoid curl/proxychains issues)
 MASTER_ADDR=$(scontrol show hostname "$SLURM_NODELIST" | head -n1)
 VLLM_HEALTH_URL="http://${MASTER_ADDR}:8000/v1/models"
 echo "Health check URL: $VLLM_HEALTH_URL"
+echo "LD_PRELOAD=${LD_PRELOAD:-<unset>}"
 MAX_RETRIES=30
 RETRY_INTERVAL=100
 for i in $(seq 1 $MAX_RETRIES); do
-    if env -u LD_PRELOAD curl -s "$VLLM_HEALTH_URL" > /dev/null 2>&1; then
+    if $PYTHON_BIN -c "
+import urllib.request, sys
+try:
+    urllib.request.urlopen('$VLLM_HEALTH_URL', timeout=10)
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; then
         echo "vLLM server is ready"
         break
     fi
@@ -285,6 +297,23 @@ for i in $(seq 1 $MAX_RETRIES); do
     sleep $RETRY_INTERVAL
     if [ $i -eq $MAX_RETRIES ]; then
         echo "ERROR: vLLM server failed to start"
+        # Print diagnostic info
+        echo "--- Diagnostic: trying direct connection ---"
+        $PYTHON_BIN -c "
+import urllib.request, socket
+print(f'MASTER_ADDR=$MASTER_ADDR')
+try:
+    s = socket.create_connection(('$MASTER_ADDR', 8000), timeout=5)
+    s.close()
+    print('TCP connect to port 8000: OK')
+except Exception as e:
+    print(f'TCP connect to port 8000: FAILED ({e})')
+try:
+    resp = urllib.request.urlopen('$VLLM_HEALTH_URL', timeout=10)
+    print(f'HTTP response: {resp.status}')
+except Exception as e:
+    print(f'HTTP request failed: {e}')
+" 2>&1 || true
         tail -50 "eval/leonardo/logs/vllm_${SLURM_JOB_ID}.log" 2>/dev/null || true
         exit 1
     fi
