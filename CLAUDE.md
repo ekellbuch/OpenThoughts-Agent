@@ -526,9 +526,9 @@ ssh Leonardo    # Complete 2FA once; socket persists 8h
 **Pre-launch preamble** (run before launching any new job):
 ```bash
 source /leonardo_work/EUHPC_E03_068/bfeuer00/miniforge3/etc/profile.d/conda.sh && \
-conda activate otagent && module load gcc/12.2.0 cuda/12.6 && \
-cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent && git pull && \
-cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/harbor && git pull && \
+conda activate otagent && \
+cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent && GIT_TERMINAL_PROMPT=0 git pull && \
+cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/harbor && GIT_TERMINAL_PROMPT=0 git pull && \
 source hpc/dotenv/leonardo.env && source ~/secrets.env && \
 cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent
 ```
@@ -541,7 +541,7 @@ cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent
 
 **Cluster details**: A100 64GB GPUs, 4/node, 3456 nodes, SLURM scheduler. No internet on compute nodes (use proxychains/SSH tunnel). User: `bfeuer00`. Account: `AIFAC_5C0_290`.
 
-**Important**: Must load `gcc/12.2.0` and `cuda/12.6` modules before building or running vLLM. Default GCC (8.5) is too old.
+**Important**: Compilers come from conda (GCC 15.2, CUDA 13.2) — do NOT load system modules (`module load gcc cuda`), they are too old.
 
 ## Experiment Launch Command References
 

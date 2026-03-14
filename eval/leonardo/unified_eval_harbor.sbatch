@@ -23,7 +23,7 @@
 #
 # Env vars from listener:
 #   EVAL_N_CONCURRENT       (default: 64)
-#   EVAL_GPU_MEMORY_UTIL    (default: 0.90)
+#   EVAL_GPU_MEMORY_UTIL    (default: 0.85 — Leonardo A100 64GB OOMs at 0.90+)
 #   EVAL_DAYTONA_THRESHOLD  (default: 3)
 #   EVAL_HARBOR_CONFIG      (default: $DCFT/eval/leonardo/dcagent_eval_config.yaml)
 #   EVAL_DB_JOB_ID          (optional, pre-created Pending job ID)
@@ -43,7 +43,7 @@ RUN_TAG_ARG="${4:-}"
 
 # --- Read env vars from listener (with defaults) ---
 N_CONCURRENT="${EVAL_N_CONCURRENT:-64}"
-GPU_MEMORY_UTIL="${EVAL_GPU_MEMORY_UTIL:-0.90}"
+GPU_MEMORY_UTIL="${EVAL_GPU_MEMORY_UTIL:-0.85}"
 DAYTONA_ERROR_THRESHOLD="${EVAL_DAYTONA_THRESHOLD:-999999}"
 HARBOR_CONFIG="${EVAL_HARBOR_CONFIG:-$DCFT/eval/leonardo/dcagent_eval_config.yaml}"
 DB_JOB_ID="${EVAL_DB_JOB_ID:-}"
