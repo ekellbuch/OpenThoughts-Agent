@@ -337,19 +337,30 @@ else
     echo "Downloading/locating dataset: $REPO_ID"
     DATASET_LOCAL_DIR="${WORK}/data/datasets/${SAFE_REPO}"
     echo "[DEBUG] DATASET_LOCAL_DIR=$DATASET_LOCAL_DIR"
+
+    # Check if dataset was pre-downloaded on login node (compute nodes have no internet)
     if [ -d "$DATASET_LOCAL_DIR" ]; then
         TASK_COUNT=$(ls -d "$DATASET_LOCAL_DIR"/*/instruction.md 2>/dev/null | wc -l)
         echo "[DEBUG] Found $TASK_COUNT tasks with instruction.md in local dir"
     fi
-    DOWNLOAD_LOG=$(mktemp /tmp/download_XXXXXX.log)
-    proxied $PYTHON_BIN "$DCFT/eval/jupiter/snapshot_download.py" "$REPO_ID" --local-dir "$DATASET_LOCAL_DIR" > "$DOWNLOAD_LOG" 2>&1
-    DOWNLOAD_EXIT=$?
-    cat "$DOWNLOAD_LOG"
-    DATASET_PATH=$(grep DATASET_PATH "$DOWNLOAD_LOG" | tail -n 1 | cut -d'=' -f2)
-    rm -f "$DOWNLOAD_LOG"
-    if [ $DOWNLOAD_EXIT -ne 0 ] || [ -z "${DATASET_PATH:-}" ]; then
-        echo "ERROR: Failed to get dataset path (exit code: $DOWNLOAD_EXIT)"
-        exit 1
+
+    if [ "${TASK_COUNT:-0}" -gt 0 ]; then
+        echo "Using pre-downloaded dataset: $DATASET_LOCAL_DIR ($TASK_COUNT tasks)"
+        DATASET_PATH="$DATASET_LOCAL_DIR"
+    else
+        echo "Dataset not pre-downloaded, attempting proxied download..."
+        DOWNLOAD_LOG=$(mktemp /tmp/download_XXXXXX.log)
+        proxied $PYTHON_BIN "$DCFT/eval/jupiter/snapshot_download.py" "$REPO_ID" --local-dir "$DATASET_LOCAL_DIR" > "$DOWNLOAD_LOG" 2>&1
+        DOWNLOAD_EXIT=$?
+        cat "$DOWNLOAD_LOG"
+        DATASET_PATH=$(grep DATASET_PATH "$DOWNLOAD_LOG" | tail -n 1 | cut -d'=' -f2)
+        rm -f "$DOWNLOAD_LOG"
+        if [ $DOWNLOAD_EXIT -ne 0 ] || [ -z "${DATASET_PATH:-}" ]; then
+            echo "ERROR: Failed to get dataset path (exit code: $DOWNLOAD_EXIT)"
+            echo "Hint: pre-download the dataset on the login node first:"
+            echo "  python eval/jupiter/snapshot_download.py $REPO_ID --local-dir $DATASET_LOCAL_DIR"
+            exit 1
+        fi
     fi
 fi
 echo "Using dataset path: $DATASET_PATH"
