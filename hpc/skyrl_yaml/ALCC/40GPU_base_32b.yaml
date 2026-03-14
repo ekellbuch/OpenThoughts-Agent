@@ -8,8 +8,9 @@
 #
 # KEY CHANGES vs 48GPU_base_32b:
 #   - Training: 6 → 4 nodes (16 GPUs shared policy/ref)
-#   - fsdp_size: 4 → 2 (halves CPU RAM per worker)
+#   - fsdp_size: 4 (same as 48GPU; fsdp_size=2 OOMs on 251GB nodes)
 #   - gpu_memory_utilization: 0.90 (A100-80GB has more headroom)
+#   - RAY_memory_monitor_refresh_ms=0 required (init peaks at ~240GB/251GB)
 
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
@@ -173,13 +174,13 @@ trainer:
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
-      fsdp_size: 2
+      fsdp_size: 4
   # Reference model
   ref:
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
-      fsdp_size: 2
+      fsdp_size: 4
 
   # Model placement (async training) - 16 shared GPUs for policy/ref (4 nodes)
   placement:
