@@ -110,12 +110,15 @@ export FLASHINFER_WORKSPACE_BASE="/tmp/flashinfer_cache_${USER}"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$DCFT_SCRATCH/uv_cache_dir}"
 export HYDRA_FULL_ERROR=1
 # Pre-downloaded model cache — must match listener's HF_HUB_CACHE (compute nodes have no internet)
-export HF_HUB_CACHE="/e/data1/datasets/playground/ot/hf_hub"
-export HF_HOME="/e/data1/datasets/playground/ot/hf_hub"
+# Use DCFT_DATA from jupiter.env; fall back to user-owned path (avoids permission issues
+# with shared /e/data1/datasets/playground/ot owned by other users).
+export HF_HUB_CACHE="${DCFT_DATA}/hf_hub"
+export HF_HOME="${DCFT_DATA}/hf_hub"
 export HF_CACHE_DIR="$HF_HUB_CACHE"
 
 # Harbor and DB operations
-export PYTHONPATH="/e/scratch/jureap59/feuer1/harbor/src:${DCFT}:${PYTHONPATH:-}"
+HARBOR_SRC="${HARBOR_SRC:-${SCRATCH}/harbor/src}"
+export PYTHONPATH="${HARBOR_SRC}:${DCFT}:${PYTHONPATH:-}"
 
 # ==============================================================================
 # LD_LOADER Wrappers (Jupiter ARM GH200 — no execute perms on shared conda)
@@ -359,7 +362,7 @@ if [[ "$REPO_ID" == /* ]]; then
     echo "[DEBUG] Found $TASK_COUNT tasks with instruction.md"
 else
     echo "Downloading/locating dataset: $REPO_ID"
-    DATASET_LOCAL_DIR="/e/data1/datasets/playground/ot/datasets/${SAFE_REPO}"
+    DATASET_LOCAL_DIR="${DCFT_DATA}/datasets/${SAFE_REPO}"
     echo "[DEBUG] DATASET_LOCAL_DIR=$DATASET_LOCAL_DIR"
     echo "[DEBUG] Local dir exists: $([ -d "$DATASET_LOCAL_DIR" ] && echo yes || echo no)"
     if [ -d "$DATASET_LOCAL_DIR" ]; then
@@ -391,7 +394,7 @@ if [ -n "$RUN_TAG_ARG" ]; then
 else
     RUN_TAG="${SAFE_REPO}_${SAFE_MODEL}"
 fi
-EVAL_JOBS_DIR="${EVAL_JOBS_DIR:-/e/data1/datasets/playground/ot/eval_jobs}"
+EVAL_JOBS_DIR="${EVAL_JOBS_DIR:-${DCFT_DATA}/eval_jobs}"
 RUN_DIR="${EVAL_JOBS_DIR}/${RUN_TAG}"
 mkdir -p "$RUN_DIR"
 
@@ -400,9 +403,7 @@ echo "Run dir: $RUN_DIR"
 
 # --- Compute canonical benchmark name for DB uploads ---
 # Map dataset names to their canonical DB benchmark names.
-# This avoids issues where local paths produce wrong names (e.g.
-# /e/.../DCAgent2_aider_polyglot -> "DCAgent2_aider_polyglot" instead of
-# "aider_polyglot_10gb_8x").
+# No suffixes for timeout/memory — these are runtime settings, not benchmark identity.
 declare -A BENCHMARK_NAME_MAP=(
     ["DCAgent2_aider_polyglot"]="aider_polyglot"
     ["DCAgent_dev_set_v2"]="dev_set_v2"
@@ -411,23 +412,7 @@ declare -A BENCHMARK_NAME_MAP=(
     ["DCAgent_swebench_verified_eval_set"]="swebench-verified-random-100-folders"
     ["DCAgent2_bfcl-parity"]="bfcl-parity"
 )
-BASE_NAME="${BENCHMARK_NAME_MAP[$SAFE_REPO]:-$SAFE_REPO}"
-
-# Append suffix for non-default timeout/memory configs.
-# Order: memory first, then timeout — matching existing DB names (e.g. "aider_polyglot_10gb_8x").
-BENCHMARK_SUFFIX=""
-if [ -n "${EVAL_OVERRIDE_MEMORY_MB:-}" ] && [ "$EVAL_OVERRIDE_MEMORY_MB" != "1024" ]; then
-    mem_gb=$(( EVAL_OVERRIDE_MEMORY_MB / 1024 ))
-    BENCHMARK_SUFFIX="${BENCHMARK_SUFFIX}_${mem_gb}gb"
-fi
-if [ -n "${EVAL_TIMEOUT_MULTIPLIER:-}" ] && [ "$EVAL_TIMEOUT_MULTIPLIER" != "1" ] && [ "$EVAL_TIMEOUT_MULTIPLIER" != "1.0" ]; then
-    BENCHMARK_SUFFIX="${BENCHMARK_SUFFIX}_${EVAL_TIMEOUT_MULTIPLIER}x"
-fi
-if [ -n "$BENCHMARK_SUFFIX" ]; then
-    BENCHMARK_NAME="${BASE_NAME}${BENCHMARK_SUFFIX}"
-else
-    BENCHMARK_NAME="$BASE_NAME"
-fi
+BENCHMARK_NAME="${BENCHMARK_NAME_MAP[$SAFE_REPO]:-$SAFE_REPO}"
 export BENCHMARK_NAME
 echo "Benchmark name: $BENCHMARK_NAME"
 

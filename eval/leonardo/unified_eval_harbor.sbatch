@@ -367,21 +367,7 @@ declare -A BENCHMARK_NAME_MAP=(
     ["DCAgent_swebench_verified_eval_set"]="swebench-verified-random-100-folders"
     ["DCAgent2_bfcl-parity"]="bfcl-parity"
 )
-BASE_NAME="${BENCHMARK_NAME_MAP[$SAFE_REPO]:-$SAFE_REPO}"
-
-BENCHMARK_SUFFIX=""
-if [ -n "${EVAL_OVERRIDE_MEMORY_MB:-}" ] && [ "$EVAL_OVERRIDE_MEMORY_MB" != "1024" ]; then
-    mem_gb=$(( EVAL_OVERRIDE_MEMORY_MB / 1024 ))
-    BENCHMARK_SUFFIX="${BENCHMARK_SUFFIX}_${mem_gb}gb"
-fi
-if [ -n "${EVAL_TIMEOUT_MULTIPLIER:-}" ] && [ "$EVAL_TIMEOUT_MULTIPLIER" != "1" ] && [ "$EVAL_TIMEOUT_MULTIPLIER" != "1.0" ]; then
-    BENCHMARK_SUFFIX="${BENCHMARK_SUFFIX}_${EVAL_TIMEOUT_MULTIPLIER}x"
-fi
-if [ -n "$BENCHMARK_SUFFIX" ]; then
-    BENCHMARK_NAME="${BASE_NAME}${BENCHMARK_SUFFIX}"
-else
-    BENCHMARK_NAME="$BASE_NAME"
-fi
+BENCHMARK_NAME="${BENCHMARK_NAME_MAP[$SAFE_REPO]:-$SAFE_REPO}"
 export BENCHMARK_NAME
 echo "Benchmark name: $BENCHMARK_NAME"
 
