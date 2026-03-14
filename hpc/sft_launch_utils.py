@@ -167,8 +167,9 @@ def configure_sft_reporting(base_config: dict, exp_args: dict, model_path: str) 
     Returns:
         Updated base_config with reporting settings
     """
-    # Default: push on internet nodes, don't push on no-internet nodes
-    default_push = exp_args.get("internet_node", False)
+    # Default: push if cluster has internet or proxy/tunnel access to HF Hub
+    has_hf_access = exp_args.get("internet_node", False) or exp_args.get("needs_ssh_tunnel", False) or bool(exp_args.get("proxy_host"))
+    default_push = has_hf_access
     push_to_hub = parse_bool_with_default(exp_args.get("push_to_hub"), default_push)
 
     if exp_args.get("internet_node"):

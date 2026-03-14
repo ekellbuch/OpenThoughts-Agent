@@ -621,6 +621,31 @@ After an RL job terminates (early or completed), follow these steps to preserve 
 
 8. **Clean up experiments dir**: Only after all above steps succeed, remove the local job directory to free disk space.
 
+## 8B SFT Job Cleanup Checklist
+
+After an 8B SFT job completes on a no-internet cluster (Jupiter, Leonardo), follow these steps to publish and clean up:
+
+1. **Upload model weights to HuggingFace**:
+   ```bash
+   # On the login node (has proxychains for HF access)
+   proxychains4 huggingface-cli upload-large-folder \
+     laion/<job_name> \
+     $CHECKPOINTS_DIR/<job_name>
+   ```
+   Wait for the upload to finish and verify the repo exists on HF Hub.
+
+2. **Register in the unified DB** (no W&B link needed):
+   ```bash
+   python -m database.unified_db.register_model \
+     --hf-repo laion/<job_name> \
+     --base-model <base_model_hf>
+   ```
+
+3. **Clean up experiments dir**: Only after steps 1 and 2 both succeed, remove the local experiment directory to free disk space:
+   ```bash
+   rm -rf $EXPERIMENTS_DIR/<job_name>
+   ```
+
 ## Code Ownership (DRIs)
 
 - Data: Etash (`EtashGuha`)
