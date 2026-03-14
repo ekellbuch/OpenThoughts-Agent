@@ -378,7 +378,8 @@ cd /e/scratch/jureap59/feuer1/OpenThoughts-Agent/SkyRL && git stash && git pull;
 conda activate otagent; \
 cd /e/scratch/jureap59/feuer1/OpenThoughts-Agent && GIT_TERMINAL_PROMPT=0 git pull && \
 git submodule update --init --remote sft/llamafactory; \
-source hpc/dotenv/jupiter.env
+source hpc/dotenv/jupiter.env; \
+rm -rf trace_jobs/DCAgent*  # clean stale eval trace dirs to avoid config mismatch
 ```
 Note: `GIT_TERMINAL_PROMPT=0` prevents interactive auth prompts from blocking the shell.
 
@@ -462,6 +463,8 @@ When submitting eval jobs via `unified_eval_listener.py`, always use these flags
 - `--require-priority-list` — only eval models in the priority file
 - `--n-concurrent 64` on Jupiter (48 times out with fewer concurrent trials)
 - `--n-concurrent 48` on other clusters
+- `--gpu-memory-util 0.85` on Leonardo (A100 64GB OOMs at 0.90+)
+- `--gpu-memory-util 0.95` on all other clusters (default)
 - `--pre-download` on no-internet clusters (Jupiter, Leonardo)
 - `--harbor-config hpc/harbor_yaml/eval/eval_ctx32k_non_it.yaml` for 32k context models
 - `--harbor-config hpc/harbor_yaml/eval/eval_ctx131k_non_it.yaml` for 131k context models
@@ -498,6 +501,22 @@ Key differences from Jupiter:
 - `--pre-download` — essential (no internet on compute nodes)
 - SSH tunnel cert must be refreshed before each session
 
+### Post-Submission: Verify Eval Jobs Are Running
+
+After submitting eval jobs, wait ~15 minutes for the first jobs to start, then tail the logs to confirm they are healthy:
+```bash
+# Check job status
+ssh <cluster> "squeue -u $USER --format='%.18i %.50j %.8T %.10M'"
+
+# Tail the most recent log
+ssh <cluster> "tail -50 <log_dir>/$(ls -t <log_dir>/ | head -1)"
+```
+Things to look for:
+- vLLM server started successfully (health check passed)
+- SSH tunnel established (Leonardo only)
+- Harbor trials are running (look for `trial` or `reward` lines)
+- No OOM errors, no repeated DaytonaErrors
+
 ## Harbor Job File Organization
 
 Harbor eval jobs produce two directory trees:
@@ -530,7 +549,8 @@ conda activate otagent && \
 cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent && GIT_TERMINAL_PROMPT=0 git pull && \
 cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/harbor && GIT_TERMINAL_PROMPT=0 git pull && \
 source hpc/dotenv/leonardo.env && source ~/secrets.env && \
-cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent
+cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent && \
+rm -rf trace_jobs/DCAgent*  # clean stale eval trace dirs to avoid config mismatch
 ```
 
 **Key paths**:
