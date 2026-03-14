@@ -467,6 +467,24 @@ When submitting eval jobs via `unified_eval_listener.py`, always use these flags
 
 Model lists live in `eval/jupiter/lists/` (`models_32b.txt`, `models_131k.txt`).
 
+## Harbor Job File Organization
+
+Harbor eval jobs produce two directory trees:
+
+- **`trace_jobs/<run_tag>/`** (relative to working dir, e.g. `$DCFT`): Per-trial artifacts
+  - `<task_name>__<trial_id>/agent/trajectory.json` — full agent conversation trace
+  - `<task_name>__<trial_id>/exception.txt` — error traceback if the trial failed
+  - `<task_name>__<trial_id>/verifier/` — verifier output and reward
+- **`$EVAL_JOBS_DIR/<run_tag>/`**: Job-level metadata
+  - `result.json` — aggregate results, exception stats, metrics
+  - `config.json` — Harbor run configuration
+  - `meta.env` — model, dataset, SLURM job ID, DB job ID
+
+To debug DaytonaErrors or other trial failures, read `exception.txt` in the trial directory:
+```bash
+cat trace_jobs/<run_tag>/<task>__<id>/exception.txt
+```
+
 ## CINECA Leonardo Access
 
 **SSH**: Uses ControlMaster multiplexing + step-ca certificate auth:
