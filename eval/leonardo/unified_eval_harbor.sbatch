@@ -141,16 +141,16 @@ echo "PYTHONPATH: $PYTHONPATH"
 # Leonardo compute nodes have no internet. We create a SOCKS5 proxy via
 # SSH dynamic port forwarding to a login node (which has internet).
 #
-# Prerequisites (one-time setup on login node):
-#   1. ssh-keygen -t ed25519 -f ~/.ssh/leonardo_tunnel  (passphrase: 12345)
-#   2. cat ~/.ssh/leonardo_tunnel.pub >> ~/.ssh/authorized_keys
-#   3. Set SSH_KEY env var or ensure key is at ~/.ssh/leonardo_tunnel
+# Prerequisites (cert-based key, synced from local machine):
+#   1. step ssh certificate 'bfeuer00' --provisioner cineca-hpc ~/.ssh/leonardo_daytona --no-password --insecure
+#   2. rsync keys to Leonardo (see start_proxy_tunnel.sh)
+#   3. Set SSH_KEY env var or ensure key is at ~/.ssh/leonardo_daytona
 # ==============================================================================
 
 PROXYCHAINS_BIN="$(which proxychains4 2>/dev/null || echo "${WORK}/miniforge3/envs/otagent/bin/proxychains4")"
 
-# SSH key for intra-cluster tunnel (passphrase handled by ssh-agent in the script)
-export SSH_KEY="${SSH_KEY:-/leonardo/home/userexternal/bfeuer00/.ssh/leonardo_tunnel}"
+# SSH key for intra-cluster tunnel (cert-based, no passphrase)
+export SSH_KEY="${SSH_KEY:-/leonardo/home/userexternal/bfeuer00/.ssh/leonardo_daytona}"
 
 echo "[proxy] Setting up SSH tunnel proxy..."
 # stdout = proxychains4 command; stderr = diagnostic messages (shown to log)

@@ -462,10 +462,41 @@ When submitting eval jobs via `unified_eval_listener.py`, always use these flags
 - `--require-priority-list` — only eval models in the priority file
 - `--n-concurrent 64` on Jupiter (48 times out with fewer concurrent trials)
 - `--n-concurrent 48` on other clusters
+- `--pre-download` on no-internet clusters (Jupiter, Leonardo)
 - `--harbor-config hpc/harbor_yaml/eval/eval_ctx32k_non_it.yaml` for 32k context models
 - `--harbor-config hpc/harbor_yaml/eval/eval_ctx131k_non_it.yaml` for 131k context models
 
-Model lists live in `eval/jupiter/lists/` (`models_32b.txt`, `models_131k.txt`).
+Model lists live in `eval/jupiter/lists/` (`models_32b.txt`, `models_131k.txt`) and `eval/leonardo/lists/` (`models_32b.txt`).
+
+### Launching the Eval Listener on Leonardo
+
+The eval listener (`eval/jupiter/unified_eval_listener.py`) is shared across clusters. On Leonardo, point it to the Leonardo sbatch script and ensure the SSH tunnel cert is fresh:
+
+**Prerequisites** (from local machine, before launching):
+```bash
+# Refresh cert (expires ~12h) and sync to Leonardo
+step ssh certificate 'bfeuer00' --provisioner cineca-hpc ~/.ssh/leonardo_daytona --no-password --insecure
+ssh-keygen -R login.leonardo.cineca.it && rsync -avz -e 'ssh -i ~/.ssh/leonardo_daytona -o IdentitiesOnly=yes -o StrictHostKeyChecking=no' \
+  ~/.ssh/leonardo_daytona ~/.ssh/leonardo_daytona.pub ~/.ssh/leonardo_daytona-cert.pub \
+  bfeuer00@login.leonardo.cineca.it:~/.ssh/
+```
+
+**Launch** (on Leonardo login node):
+```bash
+python eval/jupiter/unified_eval_listener.py \
+  --sbatch-script eval/leonardo/unified_eval_harbor.sbatch \
+  --require-priority-list \
+  --priority-file eval/leonardo/lists/models_32b.txt \
+  --n-concurrent 48 \
+  --harbor-config hpc/harbor_yaml/eval/eval_ctx32k_non_it.yaml \
+  --pre-download \
+  --once --verbose --batch-size 4
+```
+
+Key differences from Jupiter:
+- `--sbatch-script eval/leonardo/unified_eval_harbor.sbatch`
+- `--pre-download` — essential (no internet on compute nodes)
+- SSH tunnel cert must be refreshed before each session
 
 ## Harbor Job File Organization
 
