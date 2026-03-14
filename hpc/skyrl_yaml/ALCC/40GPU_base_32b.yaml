@@ -1,15 +1,14 @@
-# SkyRL Configuration: 32B model on ALCC Perlmutter (14 nodes, 40 GPUs, A100-80GB)
-# Based on 48GPU_base_32b with fsdp_size=2 and 2 GPUs/node for policy
+# SkyRL Configuration: 32B model on ALCC Perlmutter (10 nodes, 40 GPUs, A100-80GB)
+# Based on 48GPU_base_32b with fsdp_size=2
 #
-# GPU ALLOCATION (colocate_all=false):
-#   - Policy + Ref (shared): 8 nodes x 2 GPUs = 16 GPUs (FSDP2, cpu_offload)
+# GPU ALLOCATION (colocate_all=false, 4 GPUs/node):
+#   - Policy + Ref (shared): 4 nodes x 4 GPUs = 16 GPUs (FSDP2, cpu_offload)
 #   - Inference engines:     6 nodes x 4 GPUs = 24 GPUs (12 engines x TP=2)
-#   - Total:                14 nodes, 40 GPUs
+#   - Total:                10 nodes x 4 GPUs = 40 GPUs
 #
 # KEY CHANGES vs 48GPU_base_32b:
-#   - Training: 2 GPUs/node across 8 nodes (not 4/node across 4)
-#   - fsdp_size: 4 → 2
-#   - Only 2 FSDP workers per node → ~100GB CPU RAM (fits 251GB nodes)
+#   - Training: 6 → 4 nodes (16 GPUs shared policy/ref)
+#   - fsdp_size: 4 → 2 (halves CPU RAM per worker)
 #   - gpu_memory_utilization: 0.90 (A100-80GB has more headroom)
 
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
@@ -182,14 +181,13 @@ trainer:
       reshard_after_forward: true
       fsdp_size: 2
 
-  # Model placement (async training) - 16 shared GPUs for policy/ref (8 nodes x 2 GPUs)
-  # 2 GPUs/node keeps CPU RAM under 251GB limit (4 GPUs/node OOMs at ~240GB)
+  # Model placement (async training) - 16 shared GPUs for policy/ref (4 nodes)
   placement:
     colocate_all: false
-    policy_num_nodes: 8
-    ref_num_nodes: 8
-    policy_num_gpus_per_node: 2
-    ref_num_gpus_per_node: 2
+    policy_num_nodes: 4
+    ref_num_nodes: 4
+    policy_num_gpus_per_node: 4
+    ref_num_gpus_per_node: 4
 
   # Fully async generation (settings from v2_maxconcurrent)
   fully_async:
@@ -202,7 +200,7 @@ generator:
   timeout_multiplier: 1.0
   model_dtype: bfloat16
 
-  # 12 TP=2 inference engines (6 nodes x 4 GPUs = 24 inference + 8 nodes x 2 GPUs = 16 policy/ref)
+  # 12 TP=2 inference engines (40 total GPUs: 24 inference + 16 policy/ref shared)
   inference_engine_tensor_parallel_size: 2
   num_inference_engines: 12
 
