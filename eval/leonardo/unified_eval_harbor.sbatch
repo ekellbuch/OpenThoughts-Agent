@@ -272,7 +272,7 @@ VLLM_PID=$!
 
 # Health check loop
 MAX_RETRIES=30
-RETRY_INTERVAL=60
+RETRY_INTERVAL=100
 for i in $(seq 1 $MAX_RETRIES); do
     if curl -s http://localhost:8000/v1/models > /dev/null 2>&1; then
         echo "vLLM server is ready"
