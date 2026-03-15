@@ -33,6 +33,7 @@ do_train: true
 finetuning_type: full
 deepspeed: sft/lf_configs/deepspeed/ds_z3_alst_offload.json
 include_mfu: true
+push_to_hub: false
 
 ### dataset
 template: qwen3
