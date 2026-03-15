@@ -75,7 +75,7 @@ trainer:
 
   policy:
     optimizer_config:
-      lr: 5e-6
+      lr: 5e-5
       weight_decay: 0.0
     fsdp_config:
       cpu_offload: false

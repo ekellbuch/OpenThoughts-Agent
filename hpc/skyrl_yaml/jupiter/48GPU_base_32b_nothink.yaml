@@ -169,7 +169,7 @@ trainer:
 
   policy:
     optimizer_config:
-      lr: 5e-6
+      lr: 5e-5
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
       max_grad_norm: 10.0
