@@ -305,6 +305,9 @@ def main():
 
     import litellm
     litellm.max_tokens = args.max_tokens
+    # Long timeout for slow completions (16k tokens at ~30 tok/s = ~550s)
+    # Default litellm timeout is too short and causes retry death spirals
+    litellm.request_timeout = 3600
 
     log.info(f"Model: {model_name}")
     log.info(f"Temperature: {args.temperature}, Top-p: {args.top_p}, Max tokens: {args.max_tokens}")

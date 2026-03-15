@@ -36,7 +36,7 @@ MODEL="${1:?Usage: sbatch run_curator_datagen_sharded.sbatch <model> <input_data
 INPUT_DATASET="${2:?Missing input dataset}"
 OUTPUT_REPO="${3:?Missing output repo}"
 LIMIT="${4:-}"
-SAVE_EVERY="${5:-5000}"
+SAVE_EVERY="${5:-200}"
 
 NUM_SHARDS="${SLURM_JOB_NUM_NODES}"
 
