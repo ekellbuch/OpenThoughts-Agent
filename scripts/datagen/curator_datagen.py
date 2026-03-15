@@ -151,8 +151,10 @@ def main():
     # Checkpointing / sharding
     parser.add_argument("--save-every", type=int, default=None,
                         help="Save intermediate results every N prompts (for long runs / timeouts)")
-    # TODO: Add --shard-index and --num-shards for multi-node data parallelism
-    #       Each shard processes a disjoint slice of the dataset, then results are merged.
+    parser.add_argument("--shard-index", type=int, default=None,
+                        help="Shard index for multi-node data parallelism (0-indexed)")
+    parser.add_argument("--num-shards", type=int, default=None,
+                        help="Total number of shards for data parallelism")
 
     args = parser.parse_args()
 
@@ -176,6 +178,14 @@ def main():
     else:
         ds = load_dataset(args.input_dataset, split=args.split)
         log.info(f"Loaded {len(ds)} rows")
+
+    # Apply sharding if requested (each shard gets a disjoint slice)
+    if args.shard_index is not None and args.num_shards is not None:
+        total = len(ds)
+        indices = list(range(args.shard_index, total, args.num_shards))
+        ds = ds.select(indices)
+        log.info(f"Shard {args.shard_index}/{args.num_shards}: selected {len(ds)} rows "
+                 f"(of {total} total)")
 
     # -----------------------------------------------------------------------
     # Prepare input rows for Curator
