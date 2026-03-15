@@ -6,11 +6,9 @@ Reads a HuggingFace dataset of prompts (conversations format), sends each prompt
 to a vLLM-served model via Curator's batch inference, and writes the completions
 back as a new dataset.
 
-Supports two modes:
-  1. hosted_vllm: Point at a running vLLM server (local or remote)
-  2. vllm: Let Curator load the model directly via vLLM backend
+Points at a running vLLM server via Curator's litellm backend (hosted_vllm provider).
 
-Usage (with a running vLLM server):
+Usage:
     # Start vLLM:
     vllm serve Qwen/Qwen3-32B --port 8000 --api-key token-abc123 --tensor-parallel-size 4
 
@@ -23,16 +21,9 @@ Usage (with a running vLLM server):
         --limit 100 \
         --output-repo my-org/my-completions
 
-Usage (direct vLLM backend, loads model locally):
-    python scripts/datagen/curator_datagen.py \
-        --input-dataset open-thoughts/OpenThoughts3-1.2M \
-        --model Qwen/Qwen3-32B \
-        --backend vllm \
-        --tensor-parallel-size 4 \
-        --limit 100
-
 Env vars:
     HOSTED_VLLM_API_KEY  - API key for vLLM server (alternative to --api-key)
+    HOSTED_VLLM_API_BASE - Base URL for vLLM server (alternative to --base-url)
     HF_TOKEN             - HuggingFace token for pushing results
 """
 
@@ -89,33 +80,31 @@ def build_system_prompt(conversations: List[Dict[str, str]]) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Curator LLM subclass
+# Curator prompt/parse functions (functional API, Curator >= 0.1.13)
 # ---------------------------------------------------------------------------
 
-class CompletionGenerator(curator.LLM):
-    """Generate completions for prompts from a dataset."""
+def prompt_func(input: dict) -> list:
+    """Build the prompt messages for the LLM."""
+    messages = []
+    system = input.get("_system_prompt")
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": input["_user_prompt"]})
+    return messages
 
-    def prompt(self, input: dict) -> Union[str, list]:
-        """Build the prompt messages for the LLM."""
-        messages = []
-        system = input.get("_system_prompt")
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": input["_user_prompt"]})
-        return messages
 
-    def parse(self, input: dict, response: str) -> dict:
-        """Combine input with the model's response."""
-        return {
-            "source": input.get("source", ""),
-            "domain": input.get("domain", ""),
-            "difficulty": input.get("difficulty", None),
-            "original_id": input.get("_original_id", ""),
-            "prompt": input["_user_prompt"],
-            "system_prompt": input.get("_system_prompt", ""),
-            "completion": response,
-            "model": input.get("_model_name", ""),
-        }
+def parse_func(input: dict, response) -> dict:
+    """Combine input with the model's response."""
+    return {
+        "source": input.get("source", ""),
+        "domain": input.get("domain", ""),
+        "difficulty": input.get("difficulty", None),
+        "original_id": input.get("_original_id", ""),
+        "prompt": input["_user_prompt"],
+        "system_prompt": input.get("_system_prompt", ""),
+        "completion": response,
+        "model": input.get("_model_name", ""),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -142,23 +131,16 @@ def main():
     # Model / serving
     parser.add_argument("--model", required=True,
                         help="Model name (e.g., Qwen/Qwen3-32B)")
-    parser.add_argument("--backend", default="litellm", choices=["litellm", "vllm"],
-                        help="Curator backend: litellm (for hosted vLLM) or vllm (direct)")
     parser.add_argument("--base-url", default=None,
                         help="vLLM server base URL (e.g., http://localhost:8000/v1)")
     parser.add_argument("--api-key", default=None,
                         help="API key for vLLM server")
 
-    # Generation params
-    parser.add_argument("--max-tokens", type=int, default=4096)
+    # Generation params (passed directly to Curator LLM)
+    parser.add_argument("--max-tokens", type=int, default=4096,
+                        help="Max tokens per completion (set via litellm.max_tokens)")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--top-k", type=int, default=20)
-
-    # vLLM direct backend params
-    parser.add_argument("--tensor-parallel-size", type=int, default=1)
-    parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)
-    parser.add_argument("--max-model-length", type=int, default=32768)
 
     # Output
     parser.add_argument("--output-repo", default=None,
@@ -221,46 +203,33 @@ def main():
         sys.exit(1)
 
     # -----------------------------------------------------------------------
-    # Configure Curator
+    # Configure Curator (v0.1.13 functional API)
     # -----------------------------------------------------------------------
-    backend_params = {}
-    generation_params = {
-        "max_tokens": args.max_tokens,
-        "temperature": args.temperature,
-        "top_p": args.top_p,
-    }
-
-    if args.backend == "litellm":
-        if args.base_url:
-            # Hosted vLLM via litellm — prefix model name for litellm routing
-            model_name = f"hosted_vllm/{args.model}"
-            if args.api_key:
-                os.environ["HOSTED_VLLM_API_KEY"] = args.api_key
-            backend_params["base_url"] = args.base_url
-            backend_params["request_timeout"] = 300
-        else:
-            # OpenAI / other litellm-supported provider (no base_url override)
-            model_name = args.model
-            backend_params["request_timeout"] = 300
-        # Keep truncated responses instead of crashing the entire run
-        backend_params["require_all_responses"] = False
+    # For hosted vLLM, litellm uses env vars for routing:
+    #   HOSTED_VLLM_API_KEY  — API key
+    #   HOSTED_VLLM_API_BASE — Base URL (e.g., http://localhost:8000/v1)
+    if args.base_url:
+        model_name = f"hosted_vllm/{args.model}"
+        if args.api_key:
+            os.environ["HOSTED_VLLM_API_KEY"] = args.api_key
+        os.environ["HOSTED_VLLM_API_BASE"] = args.base_url
     else:
-        # Direct vLLM backend
         model_name = args.model
-        backend_params["tensor_parallel_size"] = args.tensor_parallel_size
-        backend_params["gpu_memory_utilization"] = args.gpu_memory_utilization
-        backend_params["max_model_length"] = args.max_model_length
+
+    # Set max_tokens globally via litellm (Curator doesn't expose it directly)
+    import litellm
+    litellm.max_tokens = args.max_tokens
 
     log.info(f"Model: {model_name}")
-    log.info(f"Backend: {args.backend}")
-    log.info(f"Backend params: {backend_params}")
-    log.info(f"Generation params: {generation_params}")
+    log.info(f"Temperature: {args.temperature}, Top-p: {args.top_p}, Max tokens: {args.max_tokens}")
 
-    generator = CompletionGenerator(
+    generator = curator.LLM(
         model_name=model_name,
-        backend=args.backend,
-        backend_params=backend_params,
-        generation_params=generation_params,
+        prompt_func=prompt_func,
+        parse_func=parse_func,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        require_all_responses=False,
     )
 
     # -----------------------------------------------------------------------
@@ -273,6 +242,9 @@ def main():
         out_path = f"./curator_output/{timestamp}"
     os.makedirs(out_path, exist_ok=True)
 
+    # Convert input_rows to a Dataset for Curator
+    input_ds = Dataset.from_list(input_rows)
+
     if args.save_every and args.save_every < len(input_rows):
         # Process in chunks with intermittent saves
         chunk_size = args.save_every
@@ -282,13 +254,12 @@ def main():
 
         for chunk_start in range(0, total, chunk_size):
             chunk_end = min(chunk_start + chunk_size, total)
-            chunk = input_rows[chunk_start:chunk_end]
+            chunk_ds = input_ds.select(range(chunk_start, chunk_end))
             log.info(f"Processing chunk {chunk_start}-{chunk_end} of {total}...")
 
-            chunk_result = generator(chunk)
-            chunk_ds = chunk_result.dataset
-            all_results.append(chunk_ds)
-            log.info(f"Chunk done: {len(chunk_ds)} completions")
+            result_ds = generator(chunk_ds)
+            all_results.append(result_ds)
+            log.info(f"Chunk done: {len(result_ds)} completions")
 
             # Save checkpoint
             from datasets import concatenate_datasets
@@ -312,9 +283,8 @@ def main():
         # Single-shot generation
         log.info(f"Starting generation for {len(input_rows)} prompts...")
         t0 = time.time()
-        result = generator(input_rows)
+        output_ds = generator(input_ds)
         elapsed = time.time() - t0
-        output_ds = result.dataset
 
     log.info(f"Generation complete: {len(output_ds)} completions in {elapsed:.1f}s "
              f"({len(output_ds) / max(elapsed, 0.1):.1f} prompts/sec)")
