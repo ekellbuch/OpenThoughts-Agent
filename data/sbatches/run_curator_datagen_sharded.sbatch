@@ -13,38 +13,38 @@
 # Curator Sharded Datagen (Multi-Node DP)
 # ============================================
 # Runs N independent vLLM servers (one per node), each processing
-# a disjoint slice of the input dataset. Results are merged and
-# uploaded at the end.
+# a disjoint slice of the input dataset. Results are merged at the end.
 #
-# Uses a dedicated 'curator' conda env.
-#
-# Pre-requisites (run on login node before submitting):
-#   conda create -n curator python=3.12 -y
-#   conda activate curator
-#   pip install 'bespokelabs-curator>=0.1.0' 'vllm>=0.11.2' \
-#       'datasets>=2.0.0' 'huggingface_hub>=0.20.0'
-#
-#   # Pre-cache the input dataset (compute nodes have no internet):
-#   python -c "from datasets import load_dataset; ds = load_dataset('<dataset>', split='train'); print(f'Cached {len(ds)} rows')"
+# Supports auto-resume: each shard's output dir is stable across restarts,
+# so SLURM timeout kills + afterany restart chains work seamlessly.
 #
 # Usage:
+#   # Simple (no restarts):
 #   sbatch run_curator_datagen_sharded.sbatch \
 #     <model> <input_dataset> <output_repo> [limit] [save_every]
 #
-# Example:
-#   sbatch run_curator_datagen_sharded.sbatch \
-#     QuantTrio/GLM-4.7-AWQ \
-#     open-thoughts/OpenThoughts3-1.2M \
-#     laion/OT3-1.2M-GLM-4.7-AWQ-completions
+#   # With auto-restart (recommended for long datasets):
+#   MAX_RESTARTS=8 sbatch run_curator_datagen_sharded.sbatch \
+#     <model> <input_dataset> <output_repo> [limit] [save_every]
+#
+# Pre-requisites (run on login node before submitting):
+#   conda activate curator
+#   python -c "from datasets import load_dataset; ds = load_dataset('<dataset>', split='train'); print(f'Cached {len(ds)} rows')"
 # ============================================
 
 MODEL="${1:?Usage: sbatch run_curator_datagen_sharded.sbatch <model> <input_dataset> <output_repo> [limit] [save_every]}"
 INPUT_DATASET="${2:?Missing input dataset}"
 OUTPUT_REPO="${3:?Missing output repo}"
-LIMIT="${4:-}"  # Optional: limit total number of prompts
-SAVE_EVERY="${5:-10000}"  # Optional: checkpoint every N prompts per shard
+LIMIT="${4:-}"
+SAVE_EVERY="${5:-5000}"
 
 NUM_SHARDS="${SLURM_JOB_NUM_NODES}"
+
+# Stable output directory — must NOT contain timestamps or job IDs so that
+# restarts write to the same place. Based on model + dataset + shard count.
+MODEL_SHORT=$(echo "$MODEL" | sed 's|.*/||; s|[^a-zA-Z0-9._-]|_|g')
+DATASET_SHORT=$(echo "$INPUT_DATASET" | sed 's|.*/||; s|[^a-zA-Z0-9._-]|_|g')
+OUTPUT_BASE="data/sbatches/curator_runs/${MODEL_SHORT}__${DATASET_SHORT}__${NUM_SHARDS}shards"
 
 echo "============================================"
 echo "Curator Sharded Datagen (${NUM_SHARDS}-Way DP)"
@@ -55,9 +55,28 @@ echo "Output repo:    $OUTPUT_REPO"
 echo "Limit:          ${LIMIT:-all}"
 echo "Save every:     $SAVE_EVERY"
 echo "Shards:         $NUM_SHARDS"
+echo "Output base:    $OUTPUT_BASE"
 echo "Job ID:         $SLURM_JOB_ID"
 echo "Nodes:          $(scontrol show hostnames $SLURM_JOB_NODELIST | tr '\n' ' ')"
 echo "============================================"
+
+# Check for existing progress (resume indicator)
+EXISTING_ROWS=0
+for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
+    shard_dir="${OUTPUT_BASE}/shard_${shard_idx}"
+    if [ -d "$shard_dir" ]; then
+        latest_ckpt=$(ls -1 "$shard_dir"/checkpoint_*.parquet 2>/dev/null | sort | tail -1)
+        if [ -n "$latest_ckpt" ]; then
+            echo "  Shard $shard_idx: found checkpoint $latest_ckpt"
+            EXISTING_ROWS=$((EXISTING_ROWS + 1))
+        fi
+    fi
+done
+if [ "$EXISTING_ROWS" -gt 0 ]; then
+    echo "RESUMING: Found checkpoints in $EXISTING_ROWS shards"
+else
+    echo "Starting fresh run"
+fi
 
 # -----------------------------------------------
 # Step 1: Environment setup
@@ -91,7 +110,7 @@ module load nvidia-compilers/25.9-CUDA-13 2>&1 || true
 export VLLM_USE_V1=0
 
 cd "$REPO_DIR" || { echo "ERROR: Cannot cd to $REPO_DIR"; exit 1; }
-mkdir -p data/sbatches/logs
+mkdir -p data/sbatches/logs "$OUTPUT_BASE"
 
 echo "HF_HUB_CACHE: $HF_HUB_CACHE"
 echo "Python: $(python3 --version 2>&1)"
@@ -180,10 +199,6 @@ echo "All $NUM_SHARDS vLLM servers are ready!"
 echo ""
 echo "=== Step 3: Running $NUM_SHARDS Curator Datagen Shards ==="
 
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUTPUT_BASE="data/sbatches/logs/curator_sharded_${SLURM_JOB_ID}_${TIMESTAMP}"
-mkdir -p "$OUTPUT_BASE"
-
 declare -a CURATOR_PIDS
 declare -a SHARD_OUTPUTS
 
@@ -191,6 +206,7 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
     node=${ALL_NODES[$shard_idx]}
     port=$((VLLM_BASE_PORT + shard_idx))
     api_key="${VLLM_API_KEYS[$shard_idx]}"
+    # Stable shard output dir — same across restarts
     shard_output="${OUTPUT_BASE}/shard_${shard_idx}"
     shard_log="data/sbatches/logs/curator_sharded_${SLURM_JOB_ID}_shard${shard_idx}.log"
 
@@ -230,7 +246,7 @@ echo "All $NUM_SHARDS curator shards started. Waiting for completion..."
 FAILED=0
 for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
     if ! wait "${CURATOR_PIDS[$shard_idx]}"; then
-        echo "  Shard $shard_idx FAILED"
+        echo "  Shard $shard_idx exited with error (may have saved checkpoint)"
         FAILED=$((FAILED + 1))
     else
         echo "  Shard $shard_idx completed"
@@ -243,7 +259,6 @@ done
 echo ""
 echo "=== Step 4: Merging $NUM_SHARDS Shards ==="
 
-# Collect shard output dirs (space-separated)
 SHARD_DIRS=""
 for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
     SHARD_DIRS="$SHARD_DIRS ${SHARD_OUTPUTS[$shard_idx]}"
@@ -252,8 +267,8 @@ done
 MERGED_OUTPUT="${OUTPUT_BASE}/merged"
 
 python3 -c "
-import sys, os
-from datasets import load_from_disk, concatenate_datasets
+import sys, os, glob
+from datasets import Dataset, load_from_disk, concatenate_datasets
 
 shard_dirs = '''$SHARD_DIRS'''.split()
 print(f'Merging {len(shard_dirs)} shards...')
@@ -264,21 +279,27 @@ for sd in shard_dirs:
     if not sd or not os.path.exists(sd):
         print(f'  WARNING: Shard dir not found: {sd}')
         continue
+    # Try loading from save_to_disk format first
     try:
         ds = load_from_disk(sd)
         datasets.append(ds)
         print(f'  Loaded {sd}: {len(ds)} rows')
-    except Exception as e:
-        # Try loading from parquet checkpoints
-        import glob
-        parquets = sorted(glob.glob(os.path.join(sd, 'checkpoint_*.parquet')))
-        if parquets:
-            from datasets import Dataset
-            ds = Dataset.from_parquet(parquets[-1])  # latest checkpoint
+        continue
+    except Exception:
+        pass
+    # Fall back to latest checkpoint parquet
+    parquets = sorted(glob.glob(os.path.join(sd, 'checkpoint_*.parquet')))
+    if not parquets:
+        parquets = sorted(glob.glob(os.path.join(sd, 'data.parquet')))
+    if parquets:
+        try:
+            ds = Dataset.from_parquet(parquets[-1])
             datasets.append(ds)
             print(f'  Loaded checkpoint from {sd}: {len(ds)} rows')
-        else:
+        except Exception as e:
             print(f'  WARNING: Could not load {sd}: {e}')
+    else:
+        print(f'  WARNING: No data found in {sd}')
 
 if not datasets:
     print('ERROR: No datasets to merge')
@@ -296,8 +317,12 @@ print(f'Saved to {out_path}')
 repo = '$OUTPUT_REPO'
 if repo:
     print(f'Pushing to HuggingFace: {repo}')
-    merged.push_to_hub(repo, private=False)
-    print(f'Uploaded to https://huggingface.co/datasets/{repo}')
+    try:
+        merged.push_to_hub(repo, private=False)
+        print(f'Uploaded to https://huggingface.co/datasets/{repo}')
+    except Exception as e:
+        print(f'WARNING: HF push failed (offline?): {e}')
+        print('Merged data is available locally for manual upload.')
 "
 
 MERGE_EXIT=$?
@@ -313,19 +338,32 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
 done
 wait 2>/dev/null || true
 
+# Report total progress across all shards
 echo ""
 echo "============================================"
-if [ $FAILED -eq 0 ] && [ $MERGE_EXIT -eq 0 ]; then
-    echo "Curator Sharded Datagen COMPLETED"
+TOTAL_ROWS=0
+for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
+    shard_dir="${SHARD_OUTPUTS[$shard_idx]}"
+    latest=$(ls -1 "$shard_dir"/checkpoint_*.parquet 2>/dev/null | sort | tail -1)
+    if [ -n "$latest" ]; then
+        # Extract row count from filename (checkpoint_NNNNNNN.parquet)
+        count=$(basename "$latest" .parquet | sed 's/checkpoint_//')
+        echo "  Shard $shard_idx: ~$count rows (checkpoint: $(basename $latest))"
+        TOTAL_ROWS=$((TOTAL_ROWS + count))
+    fi
+done
+echo "  Total progress: ~$TOTAL_ROWS rows across $NUM_SHARDS shards"
+
+if [ $MERGE_EXIT -eq 0 ]; then
+    echo "Curator Sharded Datagen: merge OK"
     echo "  Input:  $INPUT_DATASET"
     echo "  Output: $OUTPUT_REPO"
-    echo "  Shards: $NUM_SHARDS"
     echo "  Local:  $MERGED_OUTPUT"
 else
-    echo "Curator Sharded Datagen PARTIALLY FAILED"
-    echo "  $FAILED / $NUM_SHARDS shards failed"
-    echo "  Merge exit: $MERGE_EXIT"
+    echo "Curator Sharded Datagen: merge had issues (exit $MERGE_EXIT)"
 fi
 echo "============================================"
 
-exit $((FAILED + MERGE_EXIT))
+# Exit 0 even if some shards failed — they saved checkpoints and will
+# resume on the next restart. Only fail hard on merge issues.
+exit $MERGE_EXIT
