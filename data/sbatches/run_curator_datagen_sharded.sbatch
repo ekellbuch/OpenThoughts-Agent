@@ -201,10 +201,10 @@ done
 echo "All $NUM_SHARDS vLLM servers are ready!"
 
 # -----------------------------------------------
-# Step 3: Run Curator datagen on each shard
+# Step 3: Run async datagen on each shard
 # -----------------------------------------------
 echo ""
-echo "=== Step 3: Running $NUM_SHARDS Curator Datagen Shards ==="
+echo "=== Step 3: Running $NUM_SHARDS Async Datagen Shards ==="
 
 declare -a CURATOR_PIDS
 declare -a SHARD_OUTPUTS
@@ -219,10 +219,10 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
 
     SHARD_OUTPUTS[$shard_idx]="$shard_output"
 
-    CURATOR_ARGS=(
+    DATAGEN_ARGS=(
         --input-dataset "$INPUT_DATASET"
         --model "$MODEL"
-        --base-url "http://localhost:${port}/v1"
+        --base-url "http://${node}:${port}/v1"
         --api-key "$api_key"
         --output-dir "$shard_output"
         --max-tokens 16384
@@ -231,17 +231,18 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
         --save-every "$SAVE_EVERY"
         --shard-index "$shard_idx"
         --num-shards "$NUM_SHARDS"
-        --max-requests-per-minute 200
+        --max-concurrent 45
+        --request-timeout 1200
     )
 
     if [ -n "$LIMIT" ]; then
-        CURATOR_ARGS+=(--limit "$LIMIT")
+        DATAGEN_ARGS+=(--limit "$LIMIT")
     fi
 
     echo "  Shard $shard_idx: node=$node, output=$shard_output"
 
     srun --nodes=1 --ntasks=1 --overlap --cpu-bind=none -w "$node" \
-        python3 scripts/datagen/curator_datagen.py "${CURATOR_ARGS[@]}" \
+        python3 scripts/datagen/async_datagen.py "${DATAGEN_ARGS[@]}" \
         >> "$shard_log" 2>&1 &
 
     CURATOR_PIDS[$shard_idx]=$!
