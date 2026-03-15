@@ -279,7 +279,7 @@ def extract_terminal_bench_agent_env(parsed: ParsedRLConfig) -> tuple:
     return agent_name, harbor_env
 
 
-def _flatten_dict(d: Dict[str, Any], prefix: str = "", leaf_key_suffixes: tuple = ("_kwargs",)) -> Dict[str, Any]:
+def _flatten_dict(d: Dict[str, Any], prefix: str = "", leaf_key_suffixes: tuple = ("rope_scaling",)) -> Dict[str, Any]:
     """Flatten a nested dictionary to dotted keys.
 
     Example:
@@ -373,8 +373,20 @@ def _format_hydra_arg(key: str, value: Any, prefix: str = "") -> str:
     elif isinstance(value, dict):
         # Format as Hydra dict literal: {k1: v1, k2: v2}
         # Used for passthrough kwargs (e.g. optimizer_kwargs: {momentum: 0.9})
+        # Supports nested dicts (e.g. hf_overrides: {rope_scaling: {rope_type: yarn}})
+        def _fmt_val(v: Any) -> str:
+            if isinstance(v, bool):
+                return str(v).lower()
+            elif isinstance(v, dict):
+                inner = ", ".join(f"{ik}: {_fmt_val(iv)}" for ik, iv in v.items())
+                return f"{{{inner}}}"
+            elif isinstance(v, (list, tuple)):
+                items = ", ".join(_fmt_val(i) for i in v)
+                return f"[{items}]"
+            else:
+                return str(v)
         dict_items = ", ".join(
-            f"{k}: {str(v).lower() if isinstance(v, bool) else v}"
+            f"{k}: {_fmt_val(v)}"
             for k, v in value.items()
         )
         return f"{prefix}{key}={{{dict_items}}}"
@@ -534,7 +546,7 @@ def build_skyrl_hydra_args(
     # - engine_init_kwargs: vLLM engine settings vary by config
     # - hf_hub_*: HuggingFace upload settings not in base config
     # - enable_db_registration: database registration setting
-    optional_patterns = {".engine_init_kwargs", ".hf_hub_", ".enable_db_registration", ".optimizer_kwargs"}
+    optional_patterns = {".engine_init_kwargs", ".hf_hub_", ".enable_db_registration", ".optimizer_kwargs", ".rope_scaling"}
 
     for section, values in [("trainer", trainer), ("generator", generator), ("data", data)]:
         for key, val in _flatten_dict(values, section).items():
