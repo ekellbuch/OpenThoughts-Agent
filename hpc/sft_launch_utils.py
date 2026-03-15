@@ -85,11 +85,13 @@ def maybe_compute_gradient_accumulation(base_config: dict, exp_args: dict) -> di
     tensor_model_parallel_size = coerce_positive_int(base_config.get("tensor_model_parallel_size"), 1)
     pipeline_model_parallel_size = coerce_positive_int(base_config.get("pipeline_model_parallel_size"), 1)
     expert_model_parallel_size = coerce_positive_int(base_config.get("expert_model_parallel_size"), 1)
+    sequence_parallel_size = coerce_positive_int(base_config.get("sequence_parallel_size"), 1)
 
     model_parallel_world_size = (
         tensor_model_parallel_size
         * pipeline_model_parallel_size
         * expert_model_parallel_size
+        * sequence_parallel_size
     )
 
     if total_gpu_count % model_parallel_world_size != 0:
