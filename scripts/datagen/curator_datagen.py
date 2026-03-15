@@ -199,6 +199,8 @@ def main():
     # Checkpointing / sharding
     parser.add_argument("--save-every", type=int, default=None,
                         help="Save intermediate results every N prompts (for long runs / timeouts)")
+    parser.add_argument("--max-requests-per-minute", type=int, default=None,
+                        help="Rate limit for Curator requests (prevents overwhelming vLLM)")
     parser.add_argument("--shard-index", type=int, default=None,
                         help="Shard index for multi-node data parallelism (0-indexed)")
     parser.add_argument("--num-shards", type=int, default=None,
@@ -307,7 +309,7 @@ def main():
     log.info(f"Model: {model_name}")
     log.info(f"Temperature: {args.temperature}, Top-p: {args.top_p}, Max tokens: {args.max_tokens}")
 
-    generator = curator.LLM(
+    curator_kwargs = dict(
         model_name=model_name,
         prompt_func=prompt_func,
         parse_func=parse_func,
@@ -315,6 +317,11 @@ def main():
         top_p=args.top_p,
         require_all_responses=False,
     )
+    if args.max_requests_per_minute:
+        curator_kwargs["max_requests_per_minute"] = args.max_requests_per_minute
+        log.info(f"Rate limit: {args.max_requests_per_minute} requests/minute")
+
+    generator = curator.LLM(**curator_kwargs)
 
     # -----------------------------------------------------------------------
     # Run generation (with checkpointing and graceful shutdown)

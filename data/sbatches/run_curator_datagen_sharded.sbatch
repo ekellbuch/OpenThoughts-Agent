@@ -224,6 +224,7 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
         --save-every "$SAVE_EVERY"
         --shard-index "$shard_idx"
         --num-shards "$NUM_SHARDS"
+        --max-requests-per-minute 500
     )
 
     if [ -n "$LIMIT" ]; then
