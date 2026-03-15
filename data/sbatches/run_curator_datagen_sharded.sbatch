@@ -152,7 +152,7 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
             --tensor-parallel-size 4 \
             --gpu-memory-utilization 0.92 \
             --max-model-len 32768 \
-            --max-num-seqs 64 \
+            --max-num-seqs 256 \
             --enable-prefix-caching \
             --trust-remote-code \
         >> "$vllm_log" 2>&1 &
@@ -224,7 +224,7 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
         --save-every "$SAVE_EVERY"
         --shard-index "$shard_idx"
         --num-shards "$NUM_SHARDS"
-        --max-requests-per-minute 500
+        --max-requests-per-minute 2000
     )
 
     if [ -n "$LIMIT" ]; then
