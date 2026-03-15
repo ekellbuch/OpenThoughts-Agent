@@ -14,7 +14,8 @@ terminal_bench:
     # Agent settings
     name: terminus-kira
     max_episodes: 999999
-    enable_summarize: false
+    enable_summarize: true
+    proactive_summarization_threshold: 8192
     store_all_messages: true
     enable_episode_logging: false
     record_terminal_session: false
@@ -62,7 +63,7 @@ terminal_bench:
       - VerifierRuntimeError
       - ContextLengthExceededError
 
-    n_concurrent_trials: 320
+    n_concurrent_trials: 128
 
     # Logging settings
     log_level: INFO
@@ -86,8 +87,8 @@ terminal_bench:
 
   # Model info for Harbor's hosted_vllm validation
   model_info:
-    max_input_tokens: 32768
-    max_output_tokens: 4096
+    max_input_tokens: 114688
+    max_output_tokens: 16384
 
   archiving:
     # Enable trial archiving callback
@@ -103,6 +104,12 @@ trainer:
     eps_clip_low: 0.2
     eps_clip_high: 0.2
     loss_reduction: token_mean
+
+  # YARN RoPE scaling: extend 32k native context to 131k
+  rope_scaling:
+    rope_type: yarn
+    factor: 4.0
+    original_max_position_embeddings: 32768
 
   # Training loop settings
   epochs: 2
@@ -175,7 +182,7 @@ trainer:
   # Fully async generation (settings from v2_maxconcurrent)
   fully_async:
     max_staleness_steps: 12
-    num_parallel_generation_workers: 768
+    num_parallel_generation_workers: 256
 
 # Generator configuration
 generator:
@@ -192,7 +199,7 @@ generator:
 
   gpu_memory_utilization: 0.90
 
-  max_num_seqs: 32
+  max_num_seqs: 16
   max_num_batched_tokens: 16384
 
   enable_prefix_caching: true
@@ -209,13 +216,19 @@ generator:
   max_turns: 999999
 
   sampling_params:
-    max_generate_length: 4096
+    max_generate_length: 16384
     temperature: 0.7
     top_p: 0.95
     top_k: 20
 
   engine_init_kwargs:
-    max_model_len: 32768
+    max_model_len: 131072
+    # YARN RoPE scaling override for vLLM inference engines
+    hf_overrides:
+      rope_scaling:
+        rope_type: yarn
+        factor: 4.0
+        original_max_position_embeddings: 32768
 
 # Data paths
 data:
