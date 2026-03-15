@@ -2,7 +2,7 @@
 #SBATCH --time=11:59:00
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=72
+#SBATCH --cpus-per-task=288
 #SBATCH --gres=gpu:4
 #SBATCH --output=data/sbatches/logs/curator_sharded_%j.out
 #SBATCH --job-name=curator_sharded
@@ -143,17 +143,24 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
 
     echo "  Shard $shard_idx: node=$node, port=$port"
 
-    srun --nodes=1 --ntasks=1 --overlap -w "$node" \
+    srun --nodes=1 --ntasks=1 --overlap --cpu-bind=none -w "$node" \
         python3 -m vllm.entrypoints.openai.api_server \
             --model "$MODEL" \
             --host "0.0.0.0" \
             --port "$port" \
             --api-key "$api_key" \
             --tensor-parallel-size 4 \
-            --gpu-memory-utilization 0.92 \
+            --gpu-memory-utilization 0.90 \
             --max-model-len 32768 \
-            --max-num-seqs 256 \
+            --max-num-seqs 50 \
+            --dtype bfloat16 \
+            --kv-cache-dtype fp8 \
+            --enable-chunked-prefill \
+            --max-num-partial-prefills 1 \
+            --max-num-batched-tokens 16384 \
             --enable-prefix-caching \
+            --swap-space 32 \
+            --enable-expert-parallel \
             --trust-remote-code \
         >> "$vllm_log" 2>&1 &
 
@@ -172,7 +179,7 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
 
     echo "  Checking shard $shard_idx ($node:$port)..."
     for i in {1..120}; do
-        if srun --nodes=1 --ntasks=1 --overlap -w "$node" \
+        if srun --nodes=1 --ntasks=1 --overlap --cpu-bind=none -w "$node" \
             curl -s "http://localhost:${port}/v1/models" \
                 -H "Authorization: Bearer ${api_key}" > /dev/null 2>&1; then
             echo "    Shard $shard_idx ready! (took ~$((i * 10))s)"
@@ -224,7 +231,7 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
         --save-every "$SAVE_EVERY"
         --shard-index "$shard_idx"
         --num-shards "$NUM_SHARDS"
-        --max-requests-per-minute 2000
+        --max-requests-per-minute 200
     )
 
     if [ -n "$LIMIT" ]; then
@@ -233,7 +240,7 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
 
     echo "  Shard $shard_idx: node=$node, output=$shard_output"
 
-    srun --nodes=1 --ntasks=1 --overlap -w "$node" \
+    srun --nodes=1 --ntasks=1 --overlap --cpu-bind=none -w "$node" \
         python3 scripts/datagen/curator_datagen.py "${CURATOR_ARGS[@]}" \
         >> "$shard_log" 2>&1 &
 
