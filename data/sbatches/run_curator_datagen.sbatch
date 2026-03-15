@@ -86,8 +86,38 @@ fi
 export HF_HUB_CACHE="${HF_HUB_CACHE:-/e/data1/datasets/playground/ot/hf_hub}"
 
 # No internet on compute nodes — force offline mode for HF
+# (dataset must be pre-cached on login node before submitting, see Step 1b)
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
+
+# -----------------------------------------------
+# Step 1b: Verify dataset is cached locally
+# -----------------------------------------------
+echo ""
+echo "=== Step 1b: Verifying Dataset Cache ==="
+
+# Check if the input dataset is available in the HF cache.
+# Compute nodes have no internet, so we must fail early with a clear message.
+python3 -c "
+import os, sys
+os.environ['HF_HUB_OFFLINE'] = '1'
+os.environ['TRANSFORMERS_OFFLINE'] = '1'
+from datasets import load_dataset
+ds_name = '$INPUT_DATASET'
+split = 'train'
+try:
+    ds = load_dataset(ds_name, split=split, streaming=True)
+    # Just check we can read one row
+    next(iter(ds))
+    print(f'Dataset {ds_name} is cached and accessible.')
+except Exception as e:
+    print(f'ERROR: Dataset {ds_name} is NOT cached in HF_HUB_CACHE={os.environ.get(\"HF_HUB_CACHE\", \"unset\")}')
+    print(f'Pre-cache it on the login node before submitting:')
+    print(f'  conda activate curator')
+    print(f'  python -c \"from datasets import load_dataset; ds = load_dataset(\\\"{ds_name}\\\", split=\\\"{split}\\\"); print(f\\\"Cached {{len(ds)}} rows\\\")\"')
+    print(f'Original error: {e}')
+    sys.exit(1)
+" || exit 1
 
 # Load modules (Jupiter GH200 uses CUDA 13.0 only)
 module purge 2>/dev/null || true
