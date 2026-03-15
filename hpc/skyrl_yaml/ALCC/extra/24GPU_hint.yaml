@@ -67,17 +67,6 @@ terminal_bench:
     # Logging settings
     log_level: INFO
 
-    # PRM: mid-trial teacher hints via GPT-5-mini
-    prm:
-      name: teacher_hint
-      engine_type: openai
-      engine_kwargs:
-        model: gpt-5-mini-2025-08-07
-        max_tokens: 8192
-      check_interval: 8
-      min_turns: 8
-      k: 8
-
     # RLOO-N error classification
     enable_error_classification: true
     mask_exceptions:
@@ -91,6 +80,19 @@ terminal_bench:
       - AgentTimeoutError
       - ContextLengthExceededError
     default_error_treatment: zero
+
+  # PRM: mid-trial teacher hints via GPT-5-mini
+  # NOTE: Must be at terminal_bench level (not under harbor) —
+  # SkyRL's _build_prm_turn_callback reads from terminal_bench_cfg.prm
+  prm:
+    name: teacher_hint
+    engine_type: openai
+    engine_kwargs:
+      model: gpt-5-mini-2025-08-07
+      max_tokens: 8192
+    check_interval: 8
+    min_turns: 8
+    k: 8
 
   # Model info for Harbor's hosted_vllm validation
   model_info:
