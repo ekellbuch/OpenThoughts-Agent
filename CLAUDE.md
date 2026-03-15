@@ -16,6 +16,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 mcp__ide__getDiagnostics(uri="file:///path/to/file.py")
 ```
 
+## Local Companion Codebases
+
+When making changes to Harbor or SkyRL, edit the local repos and sync via git (commit, push, then pull on the cluster). Do NOT manually patch files on remote clusters.
+
+- **Harbor**: `/Users/benjaminfeuer/Documents/harbor` — agent framework, environment backends, terminus agent
+- **SkyRL**: `/Users/benjaminfeuer/Documents/SkyRL` — RL training framework, trainer, terminal_bench generator
+
 ## Repository Overview
 
 ot-agent is a distributed training and evaluation system for large language models on HPC clusters. It consists of four main subsystems:
@@ -678,9 +685,13 @@ After an RL job terminates (early or completed), follow these steps to preserve 
    huggingface-cli upload-large-folder laion/<job_name> $CHECKPOINT_DIR
    ```
 
-6. **Register in DB**: Manual push of the RL model to the unified DB:
+6. **Register in DB**: Manual push to the unified DB via `scripts/database/manual_db_push.py`:
    ```bash
-   python -m database.unified_db.register_model --hf-repo laion/<job_name> --base-model <base_model_hf>
+   python scripts/database/manual_db_push.py \
+     --hf-model-id laion/<job_name> \
+     --base-model <base_model_hf> \
+     --dataset-name <dataset_name>
+   # --wandb-run is optional (timestamps default to now if omitted; Jupiter has no W&B)
    ```
 
 7. **Upload RL traces**: Upload the training traces from the job:
@@ -714,11 +725,12 @@ After an 8B SFT job completes on a no-internet cluster (Jupiter, Leonardo), foll
    ```
    Wait for the upload to finish and verify the repo exists on HF Hub.
 
-3. **Register in the unified DB** (no W&B link needed):
+3. **Register in the unified DB** (W&B run is optional — Jupiter has no W&B):
    ```bash
-   python -m database.unified_db.register_model \
-     --hf-repo laion/<job_name> \
-     --base-model <base_model_hf>
+   python scripts/database/manual_db_push.py \
+     --hf-model-id laion/<job_name> \
+     --base-model <base_model_hf> \
+     --dataset-name <dataset_name>
    ```
 
 4. **Clean up experiments dir**: Only after steps 1-3 succeed, remove the local experiment directory to free disk space:

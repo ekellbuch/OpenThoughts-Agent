@@ -13,8 +13,6 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import wandb
-
 # Add repo root to sys.path for imports
 _repo_root = Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
@@ -39,8 +37,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--wandb-run",
-        default=DEFAULT_WANDB_RUN,
-        help="Weights & Biases run path (entity/project/run_id) (default: %(default)s)",
+        default=None,
+        help="Weights & Biases run path (entity/project/run_id). Optional — timestamps default to now if omitted.",
     )
     parser.add_argument(
         "--dataset-name",
@@ -73,37 +71,44 @@ def _derive_agent_name(dataset_name: str) -> str:
 def main() -> None:
     args = _parse_args()
 
-    # 1. Pull timestamps from W&B
-    api = wandb.Api()
-    run = api.run(args.wandb_run)
+    # 1. Pull timestamps from W&B (if provided), otherwise default to now
+    if args.wandb_run:
+        import wandb
 
-    created = getattr(run, "created_at", None)
-    finished = getattr(run, "finished_at", None) or getattr(run, "stopped_at", None)
-    if finished is None:
-        attrs = getattr(run, "_attrs", {})
-        if isinstance(attrs, dict):
-            finished = attrs.get("finishedAt")
-    if finished is None:
-        finished = getattr(run, "updated_at", None)
+        api = wandb.Api()
+        run = api.run(args.wandb_run)
 
-    if isinstance(created, str):
-        created = datetime.fromisoformat(created.replace("Z", "+00:00"))
-    if isinstance(finished, str):
-        finished = datetime.fromisoformat(finished.replace("Z", "+00:00"))
+        created = getattr(run, "created_at", None)
+        finished = getattr(run, "finished_at", None) or getattr(run, "stopped_at", None)
+        if finished is None:
+            attrs = getattr(run, "_attrs", {})
+            if isinstance(attrs, dict):
+                finished = attrs.get("finishedAt")
+        if finished is None:
+            finished = getattr(run, "updated_at", None)
 
-    if created is None:
-        raise RuntimeError(f"W&B run {args.wandb_run} does not have created_at populated yet")
+        if isinstance(created, str):
+            created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+        if isinstance(finished, str):
+            finished = datetime.fromisoformat(finished.replace("Z", "+00:00"))
 
-    if created.tzinfo is None:
-        created = created.replace(tzinfo=timezone.utc)
-    if finished is not None and finished.tzinfo is None:
-        finished = finished.replace(tzinfo=timezone.utc)
+        if created is None:
+            raise RuntimeError(f"W&B run {args.wandb_run} does not have created_at populated yet")
 
-    if finished is None:
-        finished = datetime.now(timezone.utc)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if finished is not None and finished.tzinfo is None:
+            finished = finished.replace(tzinfo=timezone.utc)
 
-    training_start = created.astimezone(timezone.utc).isoformat()
-    training_end = finished.astimezone(timezone.utc).isoformat() if finished else None
+        if finished is None:
+            finished = datetime.now(timezone.utc)
+
+        training_start = created.astimezone(timezone.utc).isoformat()
+        training_end = finished.astimezone(timezone.utc).isoformat() if finished else None
+    else:
+        now = datetime.now(timezone.utc)
+        training_start = now.isoformat()
+        training_end = now.isoformat()
 
     # 2. Shape the record exactly the way Llama-Factory expects
     record = {
@@ -119,7 +124,7 @@ def main() -> None:
             "config_blob": f"https://huggingface.co/{args.hf_model_id}/blob/main/config.json",
             "hf_repo": args.hf_model_id,
         },
-        "wandb_link": f"https://wandb.ai/{args.wandb_run}",
+        "wandb_link": f"https://wandb.ai/{args.wandb_run}" if args.wandb_run else None,
         "traces_location_s3": os.environ.get("TRACE_S3_PATH"),
         "model_name": args.hf_model_id,
     }
