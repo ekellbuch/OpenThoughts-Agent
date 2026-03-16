@@ -225,9 +225,10 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
         --base-url "http://${node}:${port}/v1"
         --api-key "$api_key"
         --output-dir "$shard_output"
-        --max-tokens 16384
+        --max-tokens 20480
         --temperature 0.7
         --top-p 0.95
+        --enable-thinking
         --save-every "$SAVE_EVERY"
         --shard-index "$shard_idx"
         --num-shards "$NUM_SHARDS"

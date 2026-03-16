@@ -153,6 +153,12 @@ async def process_one(
         "top_p": params["top_p"],
     }
 
+    # Enable thinking mode (e.g., for GLM-4.7, Qwen3)
+    if params.get("enable_thinking"):
+        payload["extra_body"] = {
+            "chat_template_kwargs": {"enable_thinking": True}
+        }
+
     retries = 0
     max_retries = 5
     while retries <= max_retries:
@@ -172,7 +178,13 @@ async def process_one(
 
                 completion = ""
                 if data.get("choices"):
-                    completion = data["choices"][0].get("message", {}).get("content", "")
+                    msg_data = data["choices"][0].get("message", {})
+                    content = msg_data.get("content", "")
+                    reasoning = msg_data.get("reasoning_content", "")
+                    if reasoning:
+                        completion = f"<think>\n{reasoning}\n</think>\n{content}"
+                    else:
+                        completion = content
 
                 result = {
                     "source": row.get("source", ""),
@@ -362,6 +374,7 @@ async def run(args):
         "max_tokens": args.max_tokens,
         "temperature": args.temperature,
         "top_p": args.top_p,
+        "enable_thinking": args.enable_thinking,
     }
 
     log.info(
@@ -488,9 +501,11 @@ def main():
     parser.add_argument("--api-key", default="token-placeholder")
 
     # Generation params
-    parser.add_argument("--max-tokens", type=int, default=16384)
+    parser.add_argument("--max-tokens", type=int, default=20480)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--enable-thinking", action="store_true",
+                        help="Enable thinking mode (passes enable_thinking=True via extra_body)")
 
     # Concurrency / timeouts
     parser.add_argument("--max-concurrent", type=int, default=45,
