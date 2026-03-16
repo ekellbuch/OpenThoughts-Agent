@@ -154,10 +154,10 @@ async def process_one(
     }
 
     # Enable thinking mode (e.g., for GLM-4.7, Qwen3)
+    # vLLM accepts chat_template_kwargs as a top-level field in the raw HTTP payload.
+    # (extra_body is an OpenAI Python SDK concept, not valid for raw httpx requests.)
     if params.get("enable_thinking"):
-        payload["extra_body"] = {
-            "chat_template_kwargs": {"enable_thinking": True}
-        }
+        payload["chat_template_kwargs"] = {"enable_thinking": True}
 
     retries = 0
     max_retries = 5
