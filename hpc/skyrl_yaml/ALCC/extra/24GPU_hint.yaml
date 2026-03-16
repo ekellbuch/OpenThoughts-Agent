@@ -54,13 +54,11 @@ terminal_bench:
     wait_multiplier: 2.0
 
     exclude_exceptions:
-      - AgentTimeoutError
       - VerifierTimeoutError
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - VerifierOutputParseError
       - VerifierRuntimeError
-      - ContextLengthExceededError
 
     n_concurrent_trials: 300
 
@@ -91,9 +89,10 @@ terminal_bench:
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - AgentEnvironmentTimeoutError
+    default_error_treatment: zero
+    passthrough_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError
-    default_error_treatment: zero
 
   # PRM: mid-trial teacher hints via GPT-5-mini
   # NOTE: Must be at terminal_bench level (not under harbor) —

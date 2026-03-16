@@ -54,13 +54,11 @@ terminal_bench:
     wait_multiplier: 2.0
 
     exclude_exceptions:
-      - AgentTimeoutError
       - VerifierTimeoutError
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - VerifierOutputParseError
       - VerifierRuntimeError
-      - ContextLengthExceededError
 
     n_concurrent_trials: 300
 
@@ -95,9 +93,10 @@ terminal_bench:
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - AgentEnvironmentTimeoutError
+    default_error_treatment: zero
+    passthrough_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError
-    default_error_treatment: zero
 
   # Model info for Harbor's hosted_vllm validation
   model_info:

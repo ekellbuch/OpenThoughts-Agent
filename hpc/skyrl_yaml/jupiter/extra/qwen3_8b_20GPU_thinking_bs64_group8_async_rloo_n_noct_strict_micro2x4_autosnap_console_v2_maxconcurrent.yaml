@@ -49,12 +49,10 @@ terminal_bench:
     wait_multiplier: 2.0
 
     exclude_exceptions:
-      - AgentTimeoutError
       - VerifierTimeoutError
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - VerifierOutputParseError
-      - ContextLengthExceededError
 
     # INCREASED: 256 -> 512 concurrent trials (2x)
     n_concurrent_trials: 384
@@ -72,9 +70,10 @@ terminal_bench:
       - RewardFileNotFoundError
       - RewardFileEmptyError
     zero_exceptions:
+    default_error_treatment: zero
+    passthrough_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError
-    default_error_treatment: zero
 
   model_info:
     max_input_tokens: 32768

@@ -67,13 +67,11 @@ terminal_bench:
     wait_multiplier: 2.0
 
     exclude_exceptions:
-      - AgentTimeoutError
       - VerifierTimeoutError
       - VerifierRuntimeError
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - VerifierOutputParseError
-      - ContextLengthExceededError
 
     # Orchestrator settings - 3x from Run 1 to reduce wait_for_generation_buffer
     n_concurrent_trials: 768
@@ -94,9 +92,10 @@ terminal_bench:
       - RewardFileNotFoundError
       - RewardFileEmptyError
     zero_exceptions:
+    default_error_treatment: zero
+    passthrough_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError
-    default_error_treatment: zero
 
   model_info:
     max_input_tokens: 32768

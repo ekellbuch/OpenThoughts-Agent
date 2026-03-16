@@ -45,12 +45,10 @@ terminal_bench:
     max_wait_sec: 600.0
     wait_multiplier: 2.0
     exclude_exceptions:
-      - AgentTimeoutError
       - VerifierTimeoutError
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - VerifierOutputParseError
-      - ContextLengthExceededError
     n_concurrent_trials: 256
     log_level: INFO
     enable_reward_shaping: false
@@ -64,9 +62,10 @@ terminal_bench:
       - RewardFileEmptyError
       - AgentEnvironmentTimeoutError
     zero_exceptions:
+    default_error_treatment: zero
+    passthrough_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError
-    default_error_treatment: zero
 
   model_info:
     max_input_tokens: 32768

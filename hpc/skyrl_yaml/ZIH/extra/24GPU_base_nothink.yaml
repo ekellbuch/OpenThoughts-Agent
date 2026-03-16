@@ -84,12 +84,10 @@ terminal_bench:
     wait_multiplier: 2.0
 
     exclude_exceptions:
-      - AgentTimeoutError
       - VerifierTimeoutError
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - VerifierOutputParseError
-      - ContextLengthExceededError
 
     # Orchestrator settings (432 = 384 base + 48 for 4 additional engines)
     n_concurrent_trials: 320
@@ -111,9 +109,10 @@ terminal_bench:
       - RewardFileEmptyError
       - AgentEnvironmentTimeoutError
     zero_exceptions:
+    default_error_treatment: zero
+    passthrough_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError
-    default_error_treatment: zero
 
   # Model info for Harbor's hosted_vllm validation
   model_info:
