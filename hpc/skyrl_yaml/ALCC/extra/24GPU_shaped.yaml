@@ -68,12 +68,22 @@ terminal_bench:
     log_level: INFO
 
     # ==========================================================================
-    # Reward shaping (shaped - partial credit based on test pass ratios)
+    # Reward shaping: composite (verifier + trajectory signals)
     # ==========================================================================
     enable_reward_shaping: true
     reward_parser: null            # Auto-detect (pytest, unittest, generic)
-    reward_shaper: pass_ratio      # Simple mean: passed_tests / total_tests
+    reward_shaper: composite
     reward_shaping_fallback: true  # Fall back to original reward if parsing fails
+    composite_components:
+      verifier: 0.4
+      thinking_length: 0.2
+      format_quality: 0.2
+      command_quality: 0.2
+    composite_verifier_shaper: pass_ratio
+    thinking_target_tokens: 750
+    thinking_sigma_tokens: 250
+    thinking_min_turns_ratio: 0.5
+    command_quality_min_turns: 2
 
     # RLOO-N error classification
     enable_error_classification: true
@@ -162,7 +172,7 @@ trainer:
   # Policy optimizer
   policy:
     optimizer_config:
-      lr: 5e-5
+      lr: 1e-5
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
       max_grad_norm: null
