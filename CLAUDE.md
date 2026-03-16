@@ -103,6 +103,19 @@ python -m hpc.launch \
 
 Key modules in `data/generation/`: `base.py` (BaseDataGenerator), `schemas.py` (GenerationRequest/Result), `engines.py` (InferenceEngine implementations for OpenAI/Anthropic/vLLM)
 
+**Curator sharded datagen (`run_curator_datagen_sharded.sbatch`)**: Multi-node data-parallel generation using vLLM + async_datagen.py. Default: 32 nodes (one vLLM server per node). Supports auto-resume via stable shard output dirs.
+```bash
+# Submit with restart chain (recommended for long datasets):
+FIRST=$(sbatch data/sbatches/run_curator_datagen_sharded.sbatch \
+  <model> <input_dataset> <output_repo> [limit] [save_every] | awk '{print $4}')
+PREV=$FIRST; for i in $(seq 1 6); do
+  PREV=$(sbatch --dependency=afterany:$PREV \
+    data/sbatches/run_curator_datagen_sharded.sbatch \
+    <model> <input_dataset> <output_repo> [limit] [save_every] | awk '{print $4}')
+done
+```
+Note: The `MAX_RESTARTS` env var in the sbatch header comments is **not implemented** — you must manually create the `--dependency=afterany:` chain as shown above.
+
 ### Harbor Environment Backends
 
 Harbor supports three environment backends for running sandbox containers:
