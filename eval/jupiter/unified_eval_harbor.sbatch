@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=72
 #SBATCH --gres=gpu:4
 #SBATCH --account reformo
-#SBATCH --output=eval/jupiter/logs/%x_%j.out
-#SBATCH --job-name=eval_%j
+#SBATCH --output=eval/jupiter/logs/%j.out
+#SBATCH --job-name=eval
 
 # ==============================================================================
 # Unified Eval Harbor — Jupiter Cluster (JSC GH200)
@@ -296,9 +296,34 @@ cleanup() {
 trap cleanup EXIT
 
 # ==============================================================================
+# Construct run tag and unified run directory (BEFORE vLLM start)
+# ==============================================================================
+EVAL_JOBS_DIR="${EVAL_JOBS_DIR:-${DCFT_DATA}/eval_jobs}"
+
+if [ -n "$RUN_TAG_ARG" ]; then
+    RUN_TAG="$RUN_TAG_ARG"
+else
+    RUN_TAG="eval-${SAFE_MODEL}_${SAFE_REPO}"
+fi
+RUN_DIR="${EVAL_JOBS_DIR}/${RUN_TAG}"
+mkdir -p "$RUN_DIR"
+
+# Symlink SLURM log into run dir for consolidated access
+mkdir -p eval/jupiter/logs
+SLURM_LOG="${DCFT}/eval/jupiter/logs/${SLURM_JOB_ID}.out"
+ln -sf "$SLURM_LOG" "$RUN_DIR/slurm.log" 2>/dev/null || true
+
+# Ensure Harbor writes directly to our unified run dir via symlink
+mkdir -p "${DCFT}/trace_jobs"
+rm -rf "${DCFT}/trace_jobs/${RUN_TAG}" 2>/dev/null || true
+ln -sfn "$RUN_DIR" "${DCFT}/trace_jobs/${RUN_TAG}"
+
+echo "Run tag: $RUN_TAG"
+echo "Run dir: $RUN_DIR"
+
+# ==============================================================================
 # Start vLLM Server (single node, TP=4 for 4 GH200 GPUs)
 # ==============================================================================
-mkdir -p eval/jupiter/logs
 
 # Pre-download model via proxychains (compute nodes have no direct internet)
 echo "Pre-downloading model: $MODEL"
@@ -328,7 +353,7 @@ env TORCHDYNAMO_DISABLE=1 \
     HF_HUB_OFFLINE=1 \
     VLLM_ALL2ALL_BACKEND=pplx \
 "${VLLM_CMD[@]}" \
-    > "eval/jupiter/logs/vllm_${SLURM_JOB_ID}.log" 2>&1 &
+    > "$RUN_DIR/vllm.log" 2>&1 &
 VLLM_PID=$!
 
 # Health check loop
@@ -344,7 +369,7 @@ for i in $(seq 1 $MAX_RETRIES); do
     if [ $i -eq $MAX_RETRIES ]; then
         echo "ERROR: vLLM server failed to start"
         # Dump last 50 lines of vLLM log
-        tail -50 "eval/jupiter/logs/vllm_${SLURM_JOB_ID}.log" 2>/dev/null || true
+        tail -50 "$RUN_DIR/vllm.log" 2>/dev/null || true
         exit 1
     fi
 done
@@ -389,21 +414,6 @@ fi
 echo "Using dataset path: $DATASET_PATH"
 echo "[DEBUG] Dataset source: $([ -L "$DATASET_PATH/$(ls "$DATASET_PATH" | head -1)/environment/Dockerfile" ] && echo 'SYMLINK' || echo 'REAL FILE')"
 echo "[DEBUG] Task count in dataset: $(ls -d "$DATASET_PATH"/*/instruction.md 2>/dev/null | wc -l)"
-
-# ==============================================================================
-# Construct run tag and directory
-# ==============================================================================
-if [ -n "$RUN_TAG_ARG" ]; then
-    RUN_TAG="$RUN_TAG_ARG"
-else
-    RUN_TAG="${SAFE_REPO}_${SAFE_MODEL}"
-fi
-EVAL_JOBS_DIR="${EVAL_JOBS_DIR:-${DCFT_DATA}/eval_jobs}"
-RUN_DIR="${EVAL_JOBS_DIR}/${RUN_TAG}"
-mkdir -p "$RUN_DIR"
-
-echo "Run tag: $RUN_TAG"
-echo "Run dir: $RUN_DIR"
 
 # --- Compute canonical benchmark name for DB uploads ---
 # Map dataset names to their canonical DB benchmark names.
@@ -510,19 +520,11 @@ echo "[DEBUG] DAYTONA_API_KEY=${DAYTONA_API_KEY:0:20}..."
 echo "[DEBUG] Full harbor command:"
 echo "  harbor jobs start -p $DATASET_PATH --n-concurrent $N_CONCURRENT --agent terminus-2 --model hosted_vllm/$MODEL --env daytona ... $EXTRA_HARBOR_ARGS"
 
-# Clean stale trace_jobs dir for this exact run tag to prevent config mismatch
-# (safe: scoped to this specific model+dataset pair only)
-if [ -d "trace_jobs/${RUN_TAG}" ]; then
-    echo "Removing stale trace_jobs/${RUN_TAG} to avoid config mismatch"
-    rm -rf "trace_jobs/${RUN_TAG}"
-fi
-
 # Check if a previous job dir exists for this run tag (for resume)
-EXISTING_JOB_DIR="${EVAL_JOBS_DIR}/${RUN_TAG}"
-if [ -d "$EXISTING_JOB_DIR" ] && [ -f "$EXISTING_JOB_DIR/config.json" ]; then
-    echo "Found existing job dir, resuming: $EXISTING_JOB_DIR"
+if [ -d "$RUN_DIR" ] && [ -f "$RUN_DIR/config.json" ]; then
+    echo "Found existing job dir, resuming: $RUN_DIR"
     proxied $WRAPPER_DIR/harbor jobs resume \
-        -p "$EXISTING_JOB_DIR" \
+        -p "$RUN_DIR" \
         --filter-error-type EnvironmentStartTimeoutError \
         --filter-error-type DaytonaError \
         --filter-error-type DaytonaRateLimitError
@@ -559,18 +561,10 @@ mkdir -p "$RUN_DIR"
     echo "GPU_MEMORY_UTIL=$GPU_MEMORY_UTIL"
 } > "$RUN_DIR/meta.env"
 
-# Harbor writes trials, result.json, and config.json to trace_jobs/<RUN_TAG>/
-# (relative to DCFT working dir). Copy key files to eval_jobs for metadata persistence.
-TRACE_DIR="${DCFT}/trace_jobs/${RUN_TAG}"
-if [ -d "$TRACE_DIR" ]; then
-    echo "Syncing metadata from trace_jobs to eval_jobs..."
-    cp "$TRACE_DIR/result.json" "$RUN_DIR/" 2>/dev/null || true
-    cp "$TRACE_DIR/config.json" "$RUN_DIR/" 2>/dev/null || true
-    TRIAL_COUNT=$(find "$TRACE_DIR" -maxdepth 1 -type d -name '*__*' | wc -l)
-    echo "Found $TRIAL_COUNT trial dirs in $TRACE_DIR"
-else
-    echo "WARNING: trace_jobs dir not found: $TRACE_DIR"
-fi
+# Harbor writes trials, result.json, and config.json directly to RUN_DIR
+# (via trace_jobs symlink → RUN_DIR)
+TRIAL_COUNT=$(find "$RUN_DIR" -maxdepth 1 -type d -name '*__*' 2>/dev/null | wc -l)
+echo "Found $TRIAL_COUNT trial dirs in $RUN_DIR"
 
 # If eval failed, don't attempt upload
 if [ ${SB_EXIT:-0} -ne 0 ]; then
@@ -588,7 +582,7 @@ fi
 # Check for DaytonaErrors before upload
 # ==============================================================================
 RESULT_FILE="$RUN_DIR/result.json"
-ERROR_LOG="${EVAL_JOBS_DIR}/daytona_errors.log"
+ERROR_LOG="$RUN_DIR/daytona_errors.log"
 
 if [ -f "$RESULT_FILE" ]; then
     echo "Checking for DaytonaErrors in $RESULT_FILE..."
@@ -655,21 +649,14 @@ fi
 # ==============================================================================
 # Upload results to DB (via proxychains for HF upload)
 # ==============================================================================
-# Use trace_jobs dir for upload (contains trial subdirectories)
-# Fall back to eval_jobs dir if trace_jobs doesn't exist
-if [ -d "$TRACE_DIR" ]; then
-    UPLOAD_DIR="$TRACE_DIR"
-else
-    UPLOAD_DIR="$RUN_DIR"
-fi
-export UPLOAD_DIR
+# All data (trials, result.json, config.json, meta.env) is in RUN_DIR
+export UPLOAD_DIR="$RUN_DIR"
 export RUN_DIR
 export UPLOAD_USERNAME="${UPLOAD_USERNAME:-$USER}"
 export UPLOAD_MODE="${UPLOAD_MODE:-skip_on_error}"
 export RUN_TAG
 
-UPLOAD_LOG="eval/jupiter/logs/upload_${SLURM_JOB_ID}.log"
-mkdir -p "$(dirname "$UPLOAD_LOG")"
+UPLOAD_LOG="$RUN_DIR/upload.log"
 
 echo "Uploading results from: $RUN_DIR" | tee -a "$UPLOAD_LOG"
 echo "Using username=${UPLOAD_USERNAME}, mode=${UPLOAD_MODE}" | tee -a "$UPLOAD_LOG"

@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --account AIFAC_5C0_290
-#SBATCH --output=eval/leonardo/logs/%x_%j.out
-#SBATCH --job-name=eval_%j
+#SBATCH --output=eval/leonardo/logs/%j.out
+#SBATCH --job-name=eval
 
 # ==============================================================================
 # Unified Eval Harbor — Leonardo Cluster (CINECA A100-64GB)
@@ -229,9 +229,34 @@ cleanup() {
 trap cleanup EXIT
 
 # ==============================================================================
+# Construct run tag and unified run directory (BEFORE vLLM start)
+# ==============================================================================
+EVAL_JOBS_DIR="${EVAL_JOBS_DIR:-${WORK}/eval_jobs}"
+
+if [ -n "$RUN_TAG_ARG" ]; then
+    RUN_TAG="$RUN_TAG_ARG"
+else
+    RUN_TAG="eval-${SAFE_MODEL}_${SAFE_REPO}"
+fi
+RUN_DIR="${EVAL_JOBS_DIR}/${RUN_TAG}"
+mkdir -p "$RUN_DIR"
+
+# Symlink SLURM log into run dir for consolidated access
+mkdir -p eval/leonardo/logs
+SLURM_LOG="${DCFT}/eval/leonardo/logs/${SLURM_JOB_ID}.out"
+ln -sf "$SLURM_LOG" "$RUN_DIR/slurm.log" 2>/dev/null || true
+
+# Ensure Harbor writes directly to our unified run dir via symlink
+mkdir -p "${DCFT}/trace_jobs"
+rm -rf "${DCFT}/trace_jobs/${RUN_TAG}" 2>/dev/null || true
+ln -sfn "$RUN_DIR" "${DCFT}/trace_jobs/${RUN_TAG}"
+
+echo "Run tag: $RUN_TAG"
+echo "Run dir: $RUN_DIR"
+
+# ==============================================================================
 # Start vLLM Server (single node, TP=4 for 4 A100-64GB GPUs)
 # ==============================================================================
-mkdir -p eval/leonardo/logs
 
 # Pre-download model via proxychains (compute nodes have no direct internet)
 echo "Pre-downloading model: $MODEL"
@@ -254,7 +279,7 @@ source "$DCFT/eval/build_vllm_cmd.sh"
 build_vllm_cmd "$PYTHON_BIN" "$MODEL" "$GPU_MEMORY_UTIL"
 
 srun --overlap --gres=gpu:4 "${VLLM_CMD[@]}" \
-    > "eval/leonardo/logs/vllm_${SLURM_JOB_ID}.log" 2>&1 &
+    > "$RUN_DIR/vllm.log" 2>&1 &
 VLLM_PID=$!
 
 # Health check loop (Python-based to avoid curl/proxychains issues)
@@ -297,7 +322,7 @@ try:
 except Exception as e:
     print(f'HTTP request failed: {e}')
 " 2>&1 || true
-        tail -50 "eval/leonardo/logs/vllm_${SLURM_JOB_ID}.log" 2>/dev/null || true
+        tail -50 "$RUN_DIR/vllm.log" 2>/dev/null || true
         exit 1
     fi
 done
@@ -305,8 +330,6 @@ done
 # ==============================================================================
 # Download dataset (via proxychains for HF access)
 # ==============================================================================
-EVAL_JOBS_DIR="${EVAL_JOBS_DIR:-${WORK}/eval_jobs}"
-
 if [[ "$REPO_ID" == /* ]]; then
     echo "Using local dataset path: $REPO_ID"
     DATASET_PATH="$REPO_ID"
@@ -347,20 +370,6 @@ else
     fi
 fi
 echo "Using dataset path: $DATASET_PATH"
-
-# ==============================================================================
-# Construct run tag and directory
-# ==============================================================================
-if [ -n "$RUN_TAG_ARG" ]; then
-    RUN_TAG="$RUN_TAG_ARG"
-else
-    RUN_TAG="${SAFE_REPO}_${SAFE_MODEL}"
-fi
-RUN_DIR="${EVAL_JOBS_DIR}/${RUN_TAG}"
-mkdir -p "$RUN_DIR"
-
-echo "Run tag: $RUN_TAG"
-echo "Run dir: $RUN_DIR"
 
 # --- Compute canonical benchmark name for DB uploads ---
 declare -A BENCHMARK_NAME_MAP=(
@@ -463,19 +472,11 @@ echo "[DEBUG] EXTRA_HARBOR_ARGS=$EXTRA_HARBOR_ARGS"
 echo "[DEBUG] Full harbor command:"
 echo "  harbor jobs start -p $DATASET_PATH --n-concurrent $N_CONCURRENT --agent terminus-2 --model hosted_vllm/$MODEL --env daytona ... $EXTRA_HARBOR_ARGS"
 
-# Clean stale trace_jobs dir for this exact run tag to prevent config mismatch
-# (safe: scoped to this specific model+dataset pair only)
-if [ -d "trace_jobs/${RUN_TAG}" ]; then
-    echo "Removing stale trace_jobs/${RUN_TAG} to avoid config mismatch"
-    rm -rf "trace_jobs/${RUN_TAG}"
-fi
-
 # Check if a previous job dir exists for this run tag (for resume)
-EXISTING_JOB_DIR="${EVAL_JOBS_DIR}/${RUN_TAG}"
-if [ -d "$EXISTING_JOB_DIR" ] && [ -f "$EXISTING_JOB_DIR/config.json" ]; then
-    echo "Found existing job dir, resuming: $EXISTING_JOB_DIR"
+if [ -d "$RUN_DIR" ] && [ -f "$RUN_DIR/config.json" ]; then
+    echo "Found existing job dir, resuming: $RUN_DIR"
     proxied harbor jobs resume \
-        -p "$EXISTING_JOB_DIR" \
+        -p "$RUN_DIR" \
         --filter-error-type EnvironmentStartTimeoutError \
         --filter-error-type DaytonaError \
         --filter-error-type DaytonaRateLimitError
@@ -512,18 +513,10 @@ mkdir -p "$RUN_DIR"
     echo "GPU_MEMORY_UTIL=$GPU_MEMORY_UTIL"
 } > "$RUN_DIR/meta.env"
 
-# Harbor writes trials, result.json, and config.json to trace_jobs/<RUN_TAG>/
-# (relative to DCFT working dir). Copy key files to eval_jobs for metadata persistence.
-TRACE_DIR="${DCFT}/trace_jobs/${RUN_TAG}"
-if [ -d "$TRACE_DIR" ]; then
-    echo "Syncing metadata from trace_jobs to eval_jobs..."
-    cp "$TRACE_DIR/result.json" "$RUN_DIR/" 2>/dev/null || true
-    cp "$TRACE_DIR/config.json" "$RUN_DIR/" 2>/dev/null || true
-    TRIAL_COUNT=$(find "$TRACE_DIR" -maxdepth 1 -type d -name '*__*' | wc -l)
-    echo "Found $TRIAL_COUNT trial dirs in $TRACE_DIR"
-else
-    echo "WARNING: trace_jobs dir not found: $TRACE_DIR"
-fi
+# Harbor writes trials, result.json, and config.json directly to RUN_DIR
+# (via trace_jobs symlink → RUN_DIR)
+TRIAL_COUNT=$(find "$RUN_DIR" -maxdepth 1 -type d -name '*__*' 2>/dev/null | wc -l)
+echo "Found $TRIAL_COUNT trial dirs in $RUN_DIR"
 
 if [ ${SB_EXIT:-0} -ne 0 ]; then
     echo "Harbor eval exited with non-zero status: ${SB_EXIT}. Skipping upload."
@@ -539,7 +532,7 @@ fi
 # Check for DaytonaErrors before upload
 # ==============================================================================
 RESULT_FILE="$RUN_DIR/result.json"
-ERROR_LOG="${EVAL_JOBS_DIR}/daytona_errors.log"
+ERROR_LOG="$RUN_DIR/daytona_errors.log"
 
 if [ -f "$RESULT_FILE" ]; then
     echo "Checking for DaytonaErrors in $RESULT_FILE..."
@@ -580,21 +573,14 @@ fi
 # Re-enable HF Hub access for uploads (was set to offline for vLLM startup)
 export HF_HUB_OFFLINE=0
 
-# Use trace_jobs dir for upload (contains trial subdirectories)
-# Fall back to eval_jobs dir if trace_jobs doesn't exist
-if [ -d "$TRACE_DIR" ]; then
-    UPLOAD_DIR="$TRACE_DIR"
-else
-    UPLOAD_DIR="$RUN_DIR"
-fi
-export UPLOAD_DIR
+# All data (trials, result.json, config.json, meta.env) is in RUN_DIR
+export UPLOAD_DIR="$RUN_DIR"
 export RUN_DIR
 export UPLOAD_USERNAME="${UPLOAD_USERNAME:-$USER}"
 export UPLOAD_MODE="${UPLOAD_MODE:-skip_on_error}"
 export RUN_TAG
 
-UPLOAD_LOG="eval/leonardo/logs/upload_${SLURM_JOB_ID}.log"
-mkdir -p "$(dirname "$UPLOAD_LOG")"
+UPLOAD_LOG="$RUN_DIR/upload.log"
 
 echo "Uploading results from: $RUN_DIR" | tee -a "$UPLOAD_LOG"
 echo "Using username=${UPLOAD_USERNAME}, mode=${UPLOAD_MODE}" | tee -a "$UPLOAD_LOG"
