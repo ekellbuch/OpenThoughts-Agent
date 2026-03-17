@@ -20,8 +20,12 @@ mcp__ide__getDiagnostics(uri="file:///path/to/file.py")
 
 When making changes to Harbor or SkyRL, edit the local repos and sync via git (commit, push, then pull on the cluster). Do NOT manually patch files on remote clusters.
 
+All three codebases (Harbor, SkyRL, OT-Agent) are installed as **editable installs** (`pip install -e .`) on all clusters. After `git pull`, the updated source is immediately active — no reinstall needed.
+
 - **Harbor**: `/Users/benjaminfeuer/Documents/harbor` — agent framework, environment backends, terminus agent
 - **SkyRL**: `/Users/benjaminfeuer/Documents/SkyRL` — RL training framework, trainer, terminal_bench generator
+
+**Jupiter conda environments**: Use `otagent` for all OT-Agent work (job launching, scripts, uploads). Use `curator` only for curator data-generation jobs.
 
 ## Repository Overview
 
@@ -103,7 +107,7 @@ python -m hpc.launch \
 
 Key modules in `data/generation/`: `base.py` (BaseDataGenerator), `schemas.py` (GenerationRequest/Result), `engines.py` (InferenceEngine implementations for OpenAI/Anthropic/vLLM)
 
-**Curator sharded datagen (`run_curator_datagen_sharded.sbatch`)**: Multi-node data-parallel generation using vLLM + async_datagen.py. Default: 32 nodes (one vLLM server per node). Supports auto-resume via stable shard output dirs.
+**Curator sharded datagen (`run_curator_datagen_sharded.sbatch`)**: Multi-node data-parallel generation using vLLM + async_datagen.py. Default: 32 nodes (one vLLM server per node). Supports auto-resume via stable shard output dirs. Uses `--account=reformo` on Jupiter (not the default `jureap59` account).
 ```bash
 # Submit with restart chain (recommended for long datasets):
 FIRST=$(sbatch data/sbatches/run_curator_datagen_sharded.sbatch \

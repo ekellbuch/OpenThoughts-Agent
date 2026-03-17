@@ -6,6 +6,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --output=data/sbatches/logs/curator_sharded_%j.out
 #SBATCH --job-name=curator_sharded
+#SBATCH --account=reformo
 
 # NOTE: set -eo pipefail is deferred until after environment setup
 
