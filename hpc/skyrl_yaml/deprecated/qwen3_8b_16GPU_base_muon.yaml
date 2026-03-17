@@ -3,7 +3,7 @@
 #
 # TEST VARIANT: Muon optimizer (momentum + orthogonalization)
 #   - optimizer: Muon
-#   - lr: 1e-5 (Muon paper recommends similar to Adam range)
+#   - lr: 3e-5 (Muon paper recommends similar to Adam range)
 
 # SkyRL entrypoint module
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
@@ -109,7 +109,7 @@ trainer:
   policy:
     optimizer_config:
       optimizer: "Muon"
-      lr: 1e-5
+      lr: 3e-5
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
       max_grad_norm: 5.0

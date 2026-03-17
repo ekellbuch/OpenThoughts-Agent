@@ -677,15 +677,33 @@ python scripts/database/manual_db_eval_push.py \
 
 **Required env vars**: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `HF_TOKEN` (from `secrets.env`).
 
+## RL Job Monitoring Format
+
+When reporting RL job progress, use this table format:
+
+```
+┌─────────────────────────┬───────┬────────┬─────────────┬───────────┬─────────────────────────────────────────┐
+│           Job           │ Step  │ Reward │ Policy Loss │ Grad Norm │                  Trend                  │
+├─────────────────────────┼───────┼────────┼─────────────┼───────────┼─────────────────────────────────────────┤
+│ SWE-rebench 8B (shaped) │ 15/80 │ 0.619  │ -0.0040     │ 0.006     │ Checkpoint saved. Slight dip from 0.652 │
+├─────────────────────────┼───────┼────────┼─────────────┼───────────┼─────────────────────────────────────────┤
+│ Code-contests 8B (base) │ 26/80 │ 0.451  │ -0.0930     │ 0.021     │ Stable, gradients strong                │
+└─────────────────────────┴───────┴────────┴─────────────┴───────────┴─────────────────────────────────────────┘
+```
+
+Use box-drawing characters for the table borders. Include columns: Job, Step, Reward, Policy Loss, Grad Norm, Trend. Use a separate table for new jobs that are still filling their generation buffer.
+
 ## RL Job Cleanup Checklist
 
 After an RL job terminates (early or completed), follow these steps to preserve and publish the checkpoint:
 
-1. **Locate the last checkpoint** in the exports folder:
+1. **Locate the best checkpoint** (by reward) in the exports folder:
    ```bash
-   ls -lt $EXPERIMENTS_DIR/<job_name>/exports/ | head -10
+   # NOTE: There is an empty exports/ dir at the base level — ignore it.
+   # The real HF-exportable checkpoints are in the nested subdir:
+   ls -lt $EXPERIMENTS_DIR/<job_name>/<job_name>/exports/ | head -10
    ```
-   The most recent `global_step_*` or `episode_*` directory is the final checkpoint.
+   Check `trainer_log.jsonl` for `reward/avg_raw_reward` at each step to identify the checkpoint with the highest reward. Upload that one, not necessarily the last one (reward can degrade in later steps).
 
 2. **Locate the W&B run**: Check the job logs or `trainer_log.jsonl` for the wandb run URL. Format: `https://wandb.ai/dogml/OpenThoughts-Agent/runs/<run_id>`
 
@@ -702,21 +720,32 @@ After an RL job terminates (early or completed), follow these steps to preserve 
    cp hpc/skyrl_yaml/<config_used>.yaml $CHECKPOINT_DIR/rl_config.yaml
    ```
 
-5. **Upload to HuggingFace**: Use `huggingface-cli upload-large-folder` to push to `laion/<job_name>`:
+5. **Scan for secrets**: Before uploading, scan the checkpoint dir and traces for leaked API keys/tokens. HuggingFace runs [TruffleHog](https://huggingface.co/docs/hub/en/security-secrets) post-upload, but we should catch secrets *before* they hit the Hub:
    ```bash
-   huggingface-cli upload-large-folder laion/<job_name> $CHECKPOINT_DIR
+   # If trufflehog is installed:
+   trufflehog filesystem $CHECKPOINT_DIR --no-update
+   # Also scan the experiment logs/traces dir:
+   trufflehog filesystem $EXPERIMENTS_DIR/<job_name>/<job_name> --no-update
+   # If trufflehog is not available, use grep as a fallback:
+   grep -rIE '(sk-[a-zA-Z0-9]{20,}|AKIA[0-9A-Z]{16}|ghp_[a-zA-Z0-9]{36}|hf_[a-zA-Z0-9]{34}|eyJ[a-zA-Z0-9._-]+)' $CHECKPOINT_DIR
+   ```
+   If any secrets are found, remove or redact them before proceeding.
+
+6. **Upload to HuggingFace**: Use `huggingface-cli upload-large-folder` to push to `laion/<job_name>-<step>` (append the global step number to the HF model name, e.g. `-20` for step 20):
+   ```bash
+   huggingface-cli upload-large-folder laion/<job_name>-<step> $CHECKPOINT_DIR
    ```
 
-6. **Register in DB**: Manual push to the unified DB via `scripts/database/manual_db_push.py`:
+7. **Register in DB**: Manual push to the unified DB via `scripts/database/manual_db_push.py`:
    ```bash
    python scripts/database/manual_db_push.py \
-     --hf-model-id laion/<job_name> \
+     --hf-model-id laion/<job_name>-<step> \
      --base-model <base_model_hf> \
      --dataset-name <dataset_name>
    # --wandb-run is optional (timestamps default to now if omitted; Jupiter has no W&B)
    ```
 
-7. **Upload RL traces**: Upload the training traces from the job:
+8. **Upload RL traces**: Upload the training traces from the job:
    ```bash
    python -m scripts.harbor.make_and_upload_trace_dataset \
      --job_dir "$EXPERIMENTS_DIR/<job_name>/<job_name>" \
@@ -724,7 +753,7 @@ After an RL job terminates (early or completed), follow these steps to preserve 
      --episodes last
    ```
 
-8. **Clean up experiments dir**: Only after all above steps succeed, remove the local job directory to free disk space.
+9. **Clean up experiments dir**: Only after all above steps succeed, remove the local job directory to free disk space.
 
 ## 8B SFT Job Cleanup Checklist
 
@@ -741,7 +770,7 @@ After an 8B SFT job completes on a no-internet cluster (Jupiter, Leonardo), foll
    # On the login node (has direct internet on Jupiter; use proxychains on Leonardo)
    source ~/secrets.env
    huggingface-cli upload-large-folder \
-     laion/<job_name> \
+     laion/<job_name>-<step> \
      $CHECKPOINTS_DIR/<job_name> \
      --repo-type=model
    ```
