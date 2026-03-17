@@ -5,8 +5,8 @@
 # Student: Qwen3-8B (passed via --model_path)
 #
 # GPU allocation (28 GPUs = 7 nodes × 4 GH200):
-#   - Policy FSDP (Qwen3 8B):     2 nodes × 4 = 8 GPUs
-#   - Ref FSDP (Qwen3 8B init):   2 nodes × 4 = 8 GPUs  (KL regularization)
+#   - Policy FSDP (Qwen3 8B):     2 nodes × 4 = 8 GPUs   (NOT colocated with ref)
+#   - Ref FSDP (Qwen3 8B init):   2 nodes × 4 = 8 GPUs   (KL regularization)
 #   - Student vLLM (Qwen3 8B):    2 nodes × 4 = 8 engines (TP=1)
 #   - Teacher vLLM (GLM 4.6 AWQ): 1 node  × 4 = 1 engine  (TP=4)
 #
@@ -179,6 +179,12 @@ trainer:
 
   placement:
     colocate_all: false
+    # IMPORTANT: colocate_policy_ref defaults to true in SkyRL, which puts
+    # both policy and ref FSDP on the same 2 nodes. With micro_forward_batch_size=4
+    # and 32k context, the activation memory spike (~35GB) OOMs on 95GB GH200s
+    # that already hold both model shards + optimizer states.
+    # Setting to false gives policy and ref their own 2 nodes each (4 total).
+    colocate_policy_ref: false
     policy_num_nodes: 2
     ref_num_nodes: 2
     policy_num_gpus_per_node: 4

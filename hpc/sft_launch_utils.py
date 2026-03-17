@@ -195,10 +195,10 @@ def configure_sft_reporting(base_config: dict, exp_args: dict, model_path: str) 
 
 # Templates that use LLaMA-Factory's ReasoningTemplate and need thinking preprocessing.
 # Other templates (e.g. qwen3_nothink, qwen2_5, chatml) do NOT use ReasoningTemplate.
-_REASONING_TEMPLATES = {"qwen3"}
+_REASONING_TEMPLATES = {"qwen3", "qwen3_5"}
 
 # Mapping from ReasoningTemplate names to their non-thinking counterparts.
-_NOTHINK_TEMPLATE_MAP = {"qwen3": "qwen3_nothink"}
+_NOTHINK_TEMPLATE_MAP = {"qwen3": "qwen3_nothink", "qwen3_5": "qwen3_5_nothink"}
 
 # Threshold: if fewer than this fraction of assistant messages contain real
 # <think> content, automatically switch to the _nothink template variant.
