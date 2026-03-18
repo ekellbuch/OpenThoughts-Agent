@@ -106,6 +106,8 @@ JOB_NAME_IGNORE_KEYS: list[str] = [
     "sandbox_memory_gb",
     "sandbox_disk_gb",
     "sandbox_gpu",
+    # Model/training infrastructure toggles
+    "attn",
     # Noisy toggles that shouldn't impact identity
     "overwrite_output_dir",
     "enable_task_gen",
