@@ -922,11 +922,9 @@ def construct_sft_sbatch_script(exp_args: dict, hpc) -> str:
         cuda_setup = """# CUDA path detection (handled by Python runner)
 # Additional CUDA setup can be done in SFTJobRunner._setup_environment()"""
 
-    srun_prefix = f"srun --nodes={num_nodes}"
-    # Generate srun command based on launcher
+    srun_prefix = f"srun --nodes={num_nodes} --ntasks-per-node=1"
     # Use --nodes and --ntasks-per-node=1 to ensure one process per node for multi-node training
     # Each node then launches its own accelerate processes for local GPUs
-    srun_base = "srun --nodes=$SLURM_JOB_NUM_NODES --ntasks-per-node=1"
     if hpc.needs_ssh_tunnel:
         # JSC clusters use proxychains4 for internet access
         srun_prefix += " $PROXY_CMD"
