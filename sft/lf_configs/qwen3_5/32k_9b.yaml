@@ -18,7 +18,10 @@ optim: adamw_torch_fused
 stage: sft
 do_train: true
 finetuning_type: full
-deepspeed: sft/lf_configs/deepspeed/ds_z3_accelerate.json
+# Qwen3.5-9B at 32k OOMs on A100 64GB with ZeRO-3 alone.
+# Use CPU offload (ds_z3_offload_nomat) for 64GB GPUs.
+# On GH200 96GB (Jupiter), ds_z3_accelerate.json may work.
+deepspeed: sft/llamafactory/examples/deepspeed/ds_z3_offload_nomat_config.json
 include_mfu: true
 
 ### dataset
@@ -53,4 +56,4 @@ bf16: true
 pure_bf16: false
 gradient_checkpointing: true
 ddp_timeout: 180000000
-push_to_hub: true
+push_to_hub: false
