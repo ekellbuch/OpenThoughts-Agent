@@ -336,11 +336,6 @@ def construct_config_yaml(exp_args):
     os.makedirs(checkpoints_dir, exist_ok=True)
     base_config = _load_base_train_config(train_config_path)
     exp_args = _maybe_include_model_in_job_name(base_config, exp_args)
-    # Update experiments_dir to reflect the (potentially updated) job_name.
-    # experiments_dir was set earlier from the CLI-derived job_name, but
-    # _maybe_include_model_in_job_name may have appended the model identifier.
-    experiments_base = os.path.dirname(exp_args["experiments_dir"])
-    exp_args["experiments_dir"] = os.path.join(experiments_base, exp_args["job_name"])
     _drop_deprecated_fields(exp_args, base_config)
     base_config = _merge_launch_overrides(base_config, exp_args)
     base_config = ensure_deepspeed_config(base_config, exp_args)
