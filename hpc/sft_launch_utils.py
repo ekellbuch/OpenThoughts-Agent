@@ -53,10 +53,15 @@ def build_training_parameters_link(hub_model_id: Optional[str]) -> Optional[str]
 
 
 def ensure_deepspeed_config(base_config: dict, exp_args: dict) -> dict:
-    """Ensure DeepSpeed settings exist."""
-    default_ds = LlamaFactoryArgs.__dataclass_fields__["deepspeed"].default
-    if not base_config.get("deepspeed"):
-        base_config["deepspeed"] = exp_args.get("deepspeed", default_ds) or default_ds
+    """Pass through DeepSpeed config if explicitly set in YAML or CLI.
+
+    Does NOT inject a default — if neither the YAML nor CLI specifies
+    deepspeed, the job uses FSDP via accelerate instead.
+    """
+    # CLI override takes priority
+    if exp_args.get("deepspeed"):
+        base_config["deepspeed"] = exp_args["deepspeed"]
+    # Otherwise, keep whatever the base YAML had (including None/absent)
     return base_config
 
 

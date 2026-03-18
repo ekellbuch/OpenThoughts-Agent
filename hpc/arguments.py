@@ -51,8 +51,8 @@ class LlamaFactoryArgs:
         default=None, metadata={"help": "Finetuning type: full, lora, qlora"}
     )
     deepspeed: Optional[str] = field(
-        default="sft/llamafactory/examples/deepspeed/ds_z3_config.json",
-        metadata={"help": "Path to deepspeed config file"},
+        default=None,
+        metadata={"help": "Path to deepspeed config file. If None, uses FSDP via accelerate."},
     )
     packing: Optional[bool] = field(
         default=None,
