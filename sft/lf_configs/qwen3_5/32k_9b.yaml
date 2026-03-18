@@ -54,5 +54,8 @@ warmup_ratio: 0.1
 bf16: true
 pure_bf16: false
 gradient_checkpointing: true
+# Cut Cross-Entropy: computes loss without materializing full [seq_len × vocab_size]
+# logits tensor. Essential for Qwen3.5's 151k vocab at 32k context (would be 30 GiB).
+use_cce: true
 ddp_timeout: 180000000
 push_to_hub: false
