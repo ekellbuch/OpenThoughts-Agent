@@ -64,6 +64,9 @@ class LlamaFactoryArgs:
     enable_liger_kernel: Optional[bool] = field(
         default=None, metadata={"help": "Whether to use liger kernel"}
     )
+    use_cce: Optional[bool] = field(
+        default=None, metadata={"help": "Whether to use Cut Cross-Entropy for memory-efficient loss computation"}
+    )
 
     # Attention implementation
     attn: Optional[str] = field(
