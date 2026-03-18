@@ -170,6 +170,10 @@ def _merge_launch_overrides(base_config: dict, exp_args: dict) -> dict:
             continue
         if key == "deepspeed" and key not in explicit_cli_keys:
             continue
+        # Don't overwrite base config values with None defaults from LlamaFactoryArgs.
+        # Only override if the value was explicitly set on CLI or is non-None.
+        if value is None and key not in explicit_cli_keys and key in base_config:
+            continue
         if key in base_config or key in llama_fields:
             print(f"Setting {key} to {value}")
             base_config[key] = value
