@@ -21,7 +21,10 @@ finetuning_type: full
 # Qwen3.5-9B at 32k OOMs on A100 64GB with ZeRO-3 alone.
 # Use CPU offload (ds_z3_offload_nomat) for 64GB GPUs.
 # On GH200 96GB (Jupiter), ds_z3_accelerate.json may work.
-deepspeed: sft/llamafactory/examples/deepspeed/ds_z3_offload_nomat_config.json
+# GH200 96GB has enough memory for 9B without CPU offload.
+# CPU offload + pin_memory causes illegal memory access on GH200 unified memory.
+# Use ds_z3_offload_nomat for A100 64GB (Leonardo).
+deepspeed: sft/lf_configs/deepspeed/ds_z3_accelerate.json
 include_mfu: true
 
 ### dataset
