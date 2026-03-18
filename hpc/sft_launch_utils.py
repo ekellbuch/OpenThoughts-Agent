@@ -137,6 +137,31 @@ def apply_data_argument_overrides(base_config: dict, exp_args: dict) -> None:
                 base_config[tag] = tag_value
 
 
+# Models that require a dedicated conda environment with transformers v5+
+# and specialized kernels (e.g., flash-linear-attention for Gated DeltaNet).
+_MODELS_REQUIRING_SPECIAL_ENV = {
+    "qwen3.5": "sft-qwen35",
+    "qwen3_5": "sft-qwen35",
+}
+
+
+def _get_sft_conda_activate(hpc, exp_args: dict) -> str:
+    """Determine the conda activation command for SFT jobs.
+
+    If the model requires a special environment (e.g., Qwen3.5 needs
+    transformers v5 + flash-linear-attention), override the default
+    conda env with the model-specific one.
+    """
+    model_name = str(exp_args.get("model_name_or_path") or exp_args.get("_original_model_name_or_path") or "").lower()
+
+    for pattern, env_name in _MODELS_REQUIRING_SPECIAL_ENV.items():
+        if pattern in model_name:
+            print(f"[conda] Model '{model_name}' requires special env '{env_name}'")
+            return f"conda activate {env_name}"
+
+    return hpc.conda_activate or "# No conda activation configured"
+
+
 def maybe_apply_cluster_specific_env_overrides(exp_args: dict, hpc) -> dict:
     """Inject cluster-specific defaults into exp_args when the user hasn't set them."""
 
@@ -903,7 +928,7 @@ def construct_sft_sbatch_script(exp_args: dict, hpc) -> str:
         "job_name": job_name,
         "sbatch_extra_directives": "\n".join(sbatch_directives),
         "module_commands": hpc.get_module_commands(),
-        "conda_activate": hpc.conda_activate or "# No conda activation configured",
+        "conda_activate": _get_sft_conda_activate(hpc, exp_args),
         "cluster_env_file": hpc.dotenv_filename,
         "cuda_setup": cuda_setup,
         "nccl_exports": hpc.get_nccl_exports(),
