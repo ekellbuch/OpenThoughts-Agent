@@ -157,6 +157,22 @@ def _get_sft_conda_activate(hpc, exp_args: dict) -> str:
     for pattern, env_name in _MODELS_REQUIRING_SPECIAL_ENV.items():
         if pattern in model_name:
             print(f"[conda] Model '{model_name}' requires special env '{env_name}'")
+            # If the HPC config already has a conda_activate command, extract
+            # the conda.sh source path from it and swap the env name.
+            if hpc.conda_activate and "conda.sh" in hpc.conda_activate:
+                # e.g. "source /path/to/conda.sh && conda activate old_env"
+                # → "source /path/to/conda.sh && conda activate sft-qwen35"
+                conda_sh = hpc.conda_activate.split("&&")[0].strip()
+                return f"{conda_sh} && conda activate {env_name}"
+            # Otherwise, detect conda.sh from CONDA_PREFIX at launch time.
+            conda_prefix = os.environ.get("CONDA_PREFIX", "")
+            if conda_prefix:
+                # CONDA_PREFIX is e.g. /path/to/miniforge3/envs/otagent
+                # conda.sh is at the base: /path/to/miniforge3/etc/profile.d/conda.sh
+                import re
+                base = re.sub(r"/envs/[^/]+$", "", conda_prefix)
+                return f"source {base}/etc/profile.d/conda.sh && conda activate {env_name}"
+            # Fallback: just try conda activate (may fail if conda isn't initialized)
             return f"conda activate {env_name}"
 
     return hpc.conda_activate or "# No conda activation configured"
