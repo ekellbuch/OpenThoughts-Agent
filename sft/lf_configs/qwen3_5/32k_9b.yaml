@@ -9,23 +9,18 @@ global_batch_size: 16
 model_name_or_path: Qwen/Qwen3.5-9B
 trust_remote_code: true
 attn: fa2
-# NOTE: Liger kernel may not support Qwen3.5's hybrid architecture (Gated DeltaNet layers).
-# Disable if you hit errors; only the 1-in-4 Gated Attention layers use standard attention.
-enable_liger_kernel: false
+# Liger kernel: fused cross-entropy avoids materializing full vocab logits (~30 GiB).
+# DeltaNet layers are unaffected — Liger only fuses attention + CE for standard layers.
+enable_liger_kernel: true
 optim: adamw_torch_fused
 
 ### method
 stage: sft
 do_train: true
 finetuning_type: full
-# Qwen3.5-9B at 32k OOMs on A100 64GB with ZeRO-3 alone.
-# Use CPU offload (ds_z3_offload_nomat) for 64GB GPUs.
-# On GH200 96GB (Jupiter), ds_z3_accelerate.json may work.
-# GH200 96GB: optimizer offload only (no param offload, no pin_memory).
-# Full param+optim offload with pin_memory causes illegal memory access on
-# GH200 unified memory. No offload OOMs at 32k context.
-# For A100 64GB (Leonardo): use ds_z3_offload_nomat.
-deepspeed: sft/lf_configs/deepspeed/ds_z3_optim_offload.json
+# No deepspeed — use FSDP via accelerate on GH200.
+# DeepSpeed ZeRO-3 has issues with GH200 unified memory.
+# For A100 64GB (Leonardo): add deepspeed: ds_z3_offload_nomat.
 include_mfu: true
 
 ### dataset
