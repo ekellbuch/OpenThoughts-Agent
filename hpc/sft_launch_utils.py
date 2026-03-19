@@ -215,17 +215,22 @@ def configure_sft_reporting(base_config: dict, exp_args: dict, model_path: str) 
     Returns:
         Updated base_config with reporting settings
     """
-    # Default: push if cluster has internet or proxy/tunnel access to HF Hub
-    # Check CLI args first, then YAML config, then auto-detect
-    has_hf_access = exp_args.get("internet_node", False) or exp_args.get("needs_ssh_tunnel", False) or bool(exp_args.get("proxy_host"))
-    default_push = has_hf_access
+    # Default: push only if cluster has direct internet. SSH tunnels/proxychains
+    # on no-internet clusters (Jupiter, Leonardo) often can't reach HF Hub API
+    # during trainer init, causing ConnectionError crashes.
+    # Only enable push_to_hub on no-internet clusters if explicitly set via CLI.
+    has_direct_internet = exp_args.get("internet_node", False)
+    default_push = has_direct_internet
     cli_push = exp_args.get("push_to_hub")
     yaml_push = base_config.get("push_to_hub")
     if cli_push is not None:
+        # Explicit CLI flag always wins
         push_to_hub = parse_bool_with_default(cli_push, default_push)
-    elif yaml_push is not None:
+    elif has_direct_internet and yaml_push is not None:
+        # On internet nodes, respect the YAML config
         push_to_hub = parse_bool_with_default(yaml_push, default_push)
     else:
+        # On no-internet nodes, default to False regardless of YAML
         push_to_hub = default_push
 
     if exp_args.get("internet_node"):
