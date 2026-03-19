@@ -256,7 +256,7 @@ teacher:
   num_inference_engines: 1
   inference_engine_tensor_parallel_size: 4
   inference_engine_pipeline_parallel_size: 1
-  gpu_memory_utilization: 0.85
+  gpu_memory_utilization: 0.80
   enforce_eager: false
   backend: vllm
   engine_init_kwargs:
