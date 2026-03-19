@@ -384,7 +384,10 @@ def construct_config_yaml(exp_args):
         base_config["dataset"] = artifacts.dataset_path
         base_config["dataset_dir"] = artifacts.dataset_path
     elif not exp_args["internet_node"]:
-        if artifacts.dataset_paths:
+        # Don't overwrite dataset if the thinking preprocessor already set it
+        # (it uses relative paths with dataset_dir for local file loading).
+        preprocessor_owned = base_config.get("_preprocessor_owned_keys", set())
+        if artifacts.dataset_paths and "dataset" not in preprocessor_owned:
             base_config["dataset"] = ",".join(artifacts.dataset_paths)
 
     base_config = configure_sft_reporting(base_config, exp_args, artifacts.model_path)
