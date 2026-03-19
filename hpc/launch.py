@@ -163,6 +163,9 @@ def _drop_deprecated_fields(exp_args: dict, base_config: dict) -> None:
 def _merge_launch_overrides(base_config: dict, exp_args: dict) -> dict:
     explicit_cli_keys = set(exp_args.get("_explicit_cli_keys", []))
     exp_args.pop("_explicit_cli_keys", None)
+    # Keys owned by the thinking preprocessor should not be overwritten
+    # by CLI defaults (e.g., dataset/dataset_dir after prep_for_thinking).
+    preprocessor_owned = base_config.pop("_preprocessor_owned_keys", set())
 
     llama_fields = {field.name for field in dataclasses.fields(LlamaFactoryArgs)}
     for key, value in exp_args.items():
@@ -173,6 +176,10 @@ def _merge_launch_overrides(base_config: dict, exp_args: dict) -> dict:
         # Don't overwrite base config values with None defaults from LlamaFactoryArgs.
         # Only override if the value was explicitly set on CLI or is non-None.
         if value is None and key not in explicit_cli_keys and key in base_config:
+            continue
+        # Don't overwrite preprocessor-owned keys (e.g., dataset path set by
+        # prep_for_thinking) unless the user explicitly set them on CLI.
+        if key in preprocessor_owned and key not in explicit_cli_keys:
             continue
         if key in base_config or key in llama_fields:
             print(f"Setting {key} to {value}")

@@ -481,6 +481,10 @@ def maybe_preprocess_thinking(
     rel_names = [os.path.relpath(p, common_parent) for p in new_paths]
     base_config["dataset"] = ",".join(rel_names)
     base_config["dataset_dir"] = common_parent
+    # Mark these keys as preprocessor-owned so _merge_launch_overrides
+    # won't overwrite them with the original CLI values.
+    base_config.setdefault("_preprocessor_owned_keys", set())
+    base_config["_preprocessor_owned_keys"].update(["dataset", "dataset_dir"])
 
     # Return a new artifacts object with updated paths.  We reconstruct the
     # same dataclass the caller passed in so we don't need to import it here.
