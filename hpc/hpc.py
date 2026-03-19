@@ -779,6 +779,13 @@ jupiter = HPC(
         "DISABLE_AIOHTTP_TRANSPORT": "True",
         # Disable symmetric memory allreduce — send_fd fails in Singularity containers
         "VLLM_ALLREDUCE_USE_SYMM_MEM": "0",
+        # Disable cuDNN SDP backend in SDPA. On GH200 + torch 2.9.1 + CUDA 13,
+        # cuDNN's MHA graph execution hits an edge case on long sequences:
+        #   RuntimeError: Expected mha_graph->execute(...).is_good() to be true
+        # This was fixed upstream (disabled by default) in pytorch/pytorch#459e2aa
+        # but that commit post-dates torch 2.9.1. Flash SDP and math backends
+        # still work fine. Only affects SFT (RL uses vLLM, not SDPA).
+        "TORCH_CUDNN_SDPA_ENABLED": "0",
     },
     # NOTE: Do NOT use master_addr_suffix="i" - the "i" suffixed hostname is not DNS-resolvable
     # InfiniBand routing is handled by NCCL_SOCKET_IFNAME=ib0 instead
