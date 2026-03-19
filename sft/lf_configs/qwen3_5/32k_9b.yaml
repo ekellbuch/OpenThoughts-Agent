@@ -18,9 +18,9 @@ optim: adamw_torch_fused
 stage: sft
 do_train: true
 finetuning_type: full
-# No deepspeed — use FSDP via accelerate on GH200.
-# DeepSpeed ZeRO-3 has issues with GH200 unified memory.
-# For A100 64GB (Leonardo): add deepspeed: ds_z3_offload_nomat.
+# DeepSpeed ZeRO-3 with optimizer-only offload (no param offload, no pin_memory).
+# FSDP breaks with CCE hooks. DeepSpeed may handle chunked CE backward differently.
+deepspeed: sft/lf_configs/deepspeed/ds_z3_optim_offload.json
 include_mfu: true
 
 ### dataset
