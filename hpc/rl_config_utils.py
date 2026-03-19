@@ -131,6 +131,7 @@ class ParsedRLConfig:
     generator: Dict[str, Any] = field(default_factory=dict)
     data: Dict[str, Any] = field(default_factory=dict)
     terminal_bench: Optional[Dict[str, Any]] = None
+    teacher: Optional[Dict[str, Any]] = None
     tensor_parallel_size: int = 1
 
 
@@ -199,6 +200,7 @@ def parse_rl_config(
     generator = raw.get("generator", {})
     data = raw.get("data", {})
     terminal_bench = raw.get("terminal_bench")
+    teacher = raw.get("teacher")
 
     # Validate engine_init_kwargs doesn't contain SkyRL-internal keys
     engine_init_kwargs = generator.get("engine_init_kwargs", {})
@@ -228,6 +230,7 @@ def parse_rl_config(
         generator=generator,
         data=data,
         terminal_bench=terminal_bench,
+        teacher=teacher,
         tensor_parallel_size=tensor_parallel_size,
     )
 
@@ -554,6 +557,12 @@ def build_skyrl_hydra_args(
             # (+ would fail if key already exists, empty prefix fails if key doesn't exist)
             prefix = "++" if any(pattern in key for pattern in optional_patterns) else ""
             args.append(_format_hydra_arg(key, val, prefix=prefix))
+
+    # Teacher config (for on-policy distillation) — all keys use ++ since
+    # the teacher section doesn't exist in SkyRL's base Hydra config
+    if parsed.teacher:
+        for key, val in _flatten_dict(parsed.teacher, "teacher").items():
+            args.append(_format_hydra_arg(key, val, prefix="++"))
 
     # Terminal bench with + prefix (these are new keys added by the config group)
     if parsed.terminal_bench:

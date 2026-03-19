@@ -635,6 +635,78 @@ cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent
 
 **Important**: Compilers come from conda (GCC 15.2, CUDA 13.2) — do NOT load system modules (`module load gcc cuda`), they are too old.
 
+**Max wall time**: 24 hours (`--time 23:59:00`). The boost_usr_prod partition has a 1-day limit.
+
+### SFT Launch on Leonardo
+
+SFT jobs use a separate conda env from eval/datagen due to different transformers requirements.
+
+**Available conda environments**:
+- `otagent` — eval, datagen, general use (transformers 4.x)
+- `sft-qwen35` — Qwen3.5 SFT (transformers 5.3.0+, torch 2.10+, deepspeed 0.18+)
+
+**Pre-launch preamble** (for SFT):
+```bash
+source /leonardo_work/EUHPC_E03_068/bfeuer00/miniforge3/etc/profile.d/conda.sh && \
+conda activate sft-qwen35 && \
+cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent && \
+GIT_TERMINAL_PROMPT=0 git pull && \
+source hpc/dotenv/leonardo.env && source ~/secrets.env
+```
+
+**Launch command**:
+```bash
+DISABLE_VERSION_CHECK=1 python -m hpc.launch \
+  --train_config_path sft/lf_configs/qwen3_5/32k_9b.yaml \
+  --time_limit 23:59:00 \
+  --num_nodes 4 --gpus_per_node 4 \
+  --dataset DCAgent/exp_tas_optimal_combined_traces \
+  --role_tag role --user_tag user --assistant_tag assistant --content_tag content \
+  --hub_model_id laion/exp_tas_optimal_combined_traces-Qwen3.5-9B
+```
+
+**IMPORTANT — sbatch patching required**: The launcher does NOT auto-configure conda activation or WORKDIR for SFT jobs on Leonardo. After the launcher generates the sbatch, you MUST manually patch it before submitting:
+
+```bash
+SBATCH=experiments/<exp_dir>/sbatch/<job_name>_sft.sbatch
+
+# 1. Add conda activation
+sed -i 's|# No conda activation configured|source /leonardo_work/EUHPC_E03_068/bfeuer00/miniforge3/etc/profile.d/conda.sh\nconda activate sft-qwen35|' $SBATCH
+
+# 2. Fix WORKDIR (defaults to $PWD which is wrong on compute nodes)
+sed -i 's|WORKDIR="$PWD"|WORKDIR="/leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent"|' $SBATCH
+
+# 3. Fix DCFT
+sed -i 's|export DCFT="$WORKDIR"|export DCFT="/leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent"|' $SBATCH
+
+# 4. Fix any doubled paths ($DCFT//leonardo_work/...)
+sed -i 's|\$DCFT//leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent/experiments|/leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent/experiments|g' $SBATCH
+
+# 5. Submit
+sbatch $SBATCH
+```
+
+**SFT config files**: `sft/lf_configs/qwen3_5/` — configs for Qwen3.5-9B and 27B at 32k and 131k context. These require transformers >= 5.3.0 (Qwen3.5 uses a hybrid GDN+Attention architecture not in transformers 4.x).
+
+**Multi-node SFT**: Leonardo uses `accelerate launch` (not `torchrun`) for multi-node SFT, matching Jupiter. This is set via `training_launcher="accelerate"` in hpc.py. The `torchrun` c10d rendezvous consistently fails on Leonardo due to TCP connectivity issues between compute nodes.
+
+### LLaMA-Factory Patching Workflow
+
+LLaMA-Factory lives as a **git submodule** at `sft/llamafactory/`. When making changes:
+
+1. **Edit locally** in `/Users/benjaminfeuer/Documents/LLaMA-Factory/`
+2. **Commit and push** to the LLaMA-Factory repo
+3. **On the cluster**, pull the changes via:
+   ```bash
+   cd /path/to/OpenThoughts-Agent
+   git submodule update --init --remote sft/llamafactory
+   ```
+
+Do NOT rsync or manually copy files — use the git submodule workflow. The editable pip install from `/code/LLaMA-Factory/` may not take precedence over the submodule copy if both exist.
+
+**Known transformers v5 incompatibilities** (patched in our fork):
+- `AutoModelForVision2Seq` removed → falls back to `AutoModelForImageTextToText`
+
 ## Experiment Launch Command References
 
 - **SFT experiments**: `/Users/benjaminfeuer/Documents/notes/ot-agent/sft_experiments.md`
@@ -697,6 +769,12 @@ Use box-drawing characters for the table borders. Include columns: Job, Step, Re
 
 After an RL job terminates (early or completed), follow these steps to preserve and publish the checkpoint:
 
+0. **Cancel pending retries**: Before anything else, cancel any queued retry jobs for the same run so they don't start while you're uploading:
+   ```bash
+   squeue -u $USER --format='%.18i %.80j %.8T' | grep <job_name>
+   scancel <retry_job_ids>
+   ```
+
 1. **Locate the best checkpoint** (by reward) in the exports folder:
    ```bash
    # NOTE: There is an empty exports/ dir at the base level — ignore it.
@@ -707,12 +785,13 @@ After an RL job terminates (early or completed), follow these steps to preserve 
 
 2. **Locate the W&B run**: Check the job logs or `trainer_log.jsonl` for the wandb run URL. Format: `https://wandb.ai/dogml/OpenThoughts-Agent/runs/<run_id>`
 
-3. **Flatten model files**: Move all files out of nested subdirectories into the checkpoint root. Remove empty dirs:
+3. **Flatten model files to upload dir root**: The HF model files **must be at the base** of the directory you upload — not nested in `policy/` or any subdirectory. Copy from the export's `policy/` subdir into a flat staging dir:
    ```bash
-   cd $CHECKPOINT_DIR
-   # Move nested files up (e.g., from global_step_*/policy/ or actor/)
-   find . -mindepth 2 -type f -exec mv {} . \;
-   find . -mindepth 1 -type d -empty -delete
+   UPLOAD_DIR=/e/scratch/jureap59/feuer1/upload_staging/<job_name>-<step>
+   mkdir -p $UPLOAD_DIR
+   cp $EXPORT_DIR/policy/* $UPLOAD_DIR/
+   # Verify: safetensors, config.json, tokenizer files should all be at the root
+   ls $UPLOAD_DIR/
    ```
 
 4. **Copy the launch config**: Copy the RL YAML config used to launch the job into the model folder for reproducibility:
