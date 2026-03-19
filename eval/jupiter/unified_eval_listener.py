@@ -157,6 +157,71 @@ JOB_STATUS_FINISHED = "Finished"
 
 
 # ---------------------------------------------------------------------------
+# Datagen config loading — extract vLLM serving params from datagen YAML
+# ---------------------------------------------------------------------------
+
+def load_datagen_config_env(path: Optional[str]) -> Dict[str, str]:
+    """Load a datagen/serving YAML and extract vLLM params as EVAL_VLLM_* env vars.
+
+    This provides global defaults for vLLM serving when running evals with
+    custom TP/DP/PP configurations (e.g., multi-GPU serving on Jupiter/Leonardo).
+    """
+    if not path or not os.path.isfile(path):
+        return {}
+
+    try:
+        import yaml
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as e:
+        log(f"WARNING: failed to load datagen config from {path}: {e}")
+        return {}
+
+    server = data.get("vllm_server", {})
+    backend = data.get("backend", {})
+    env: Dict[str, str] = {}
+
+    # Core serving params
+    if server.get("tensor_parallel_size") is not None:
+        env["EVAL_VLLM_TENSOR_PARALLEL_SIZE"] = str(server["tensor_parallel_size"])
+    if server.get("pipeline_parallel_size") is not None:
+        env["EVAL_VLLM_PIPELINE_PARALLEL_SIZE"] = str(server["pipeline_parallel_size"])
+    if server.get("data_parallel_size") is not None:
+        env["EVAL_VLLM_DATA_PARALLEL_SIZE"] = str(server["data_parallel_size"])
+    if server.get("max_model_len") is not None:
+        env["EVAL_VLLM_MAX_MODEL_LEN"] = str(server["max_model_len"])
+    if server.get("gpu_memory_utilization") is not None:
+        env["EVAL_GPU_MEMORY_UTIL"] = str(server["gpu_memory_utilization"])
+    if server.get("swap_space") is not None:
+        env["EVAL_VLLM_SWAP_SPACE"] = str(server["swap_space"])
+    if server.get("max_num_seqs") is not None:
+        env["EVAL_VLLM_MAX_NUM_SEQS"] = str(server["max_num_seqs"])
+    if server.get("trust_remote_code"):
+        env["EVAL_VLLM_TRUST_REMOTE_CODE"] = "1"
+    if server.get("tool_call_parser"):
+        env["EVAL_VLLM_TOOL_CALL_PARSER"] = server["tool_call_parser"]
+    if server.get("reasoning_parser"):
+        env["EVAL_VLLM_REASONING_PARSER"] = server["reasoning_parser"]
+    if server.get("enable_expert_parallel"):
+        env["EVAL_VLLM_ENABLE_EXPERT_PARALLEL"] = "1"
+    if server.get("extra_args"):
+        # Convert list to space-separated string
+        extra = server["extra_args"]
+        if isinstance(extra, list):
+            extra = " ".join(str(a) for a in extra)
+        env["EVAL_VLLM_EXTRA_ARGS"] = extra
+
+    # Backend params (healthcheck)
+    if backend.get("healthcheck_max_attempts") is not None:
+        env["EVAL_HEALTHCHECK_MAX_ATTEMPTS"] = str(backend["healthcheck_max_attempts"])
+    if backend.get("healthcheck_retry_delay") is not None:
+        env["EVAL_HEALTHCHECK_RETRY_DELAY"] = str(backend["healthcheck_retry_delay"])
+
+    log(f"Loaded datagen config from {path}: {', '.join(f'{k}={v}' for k, v in env.items())}")
+    return env
+
+
+# ---------------------------------------------------------------------------
 # Baseline model config mapping — per-model vLLM overrides
 # ---------------------------------------------------------------------------
 _BASELINE_MODEL_CONFIGS: Optional[Dict[str, Dict[str, Any]]] = None
@@ -227,6 +292,10 @@ def get_vllm_env_overrides(hf_model: str, configs: Dict[str, Dict[str, Any]]) ->
     env = {}
     if cfg.get("tensor_parallel_size") is not None:
         env["EVAL_VLLM_TENSOR_PARALLEL_SIZE"] = str(cfg["tensor_parallel_size"])
+    if cfg.get("pipeline_parallel_size") is not None:
+        env["EVAL_VLLM_PIPELINE_PARALLEL_SIZE"] = str(cfg["pipeline_parallel_size"])
+    if cfg.get("data_parallel_size") is not None:
+        env["EVAL_VLLM_DATA_PARALLEL_SIZE"] = str(cfg["data_parallel_size"])
     if cfg.get("max_model_len") is not None:
         env["EVAL_VLLM_MAX_MODEL_LEN"] = str(cfg["max_model_len"])
     if cfg.get("swap_space") is not None:
@@ -783,6 +852,9 @@ Examples:
     p.add_argument("--baseline-model-configs", default=None,
                    help="Path to YAML mapping baseline models to vLLM serving params "
                         "(e.g., eval/baseline_model_configs.yaml)")
+    p.add_argument("--datagen-config", default=None,
+                   help="Path to datagen/serving YAML (e.g., hpc/datagen_yaml/qwen3_8b_vllm_serve_32k_4xGH200.yaml). "
+                        "Extracts vLLM serving params (TP, DP, PP, max_model_len, etc.) as global defaults.")
 
     # Modes
     p.add_argument("--dry-run", action="store_true")
@@ -828,14 +900,23 @@ def main() -> None:
         log("ERROR: No datasets specified. Use --preset, --datasets, or EVAL_LISTENER_DATASETS.")
         sys.exit(2)
 
-    # Sbatch env vars
+    # Sbatch env vars — start with datagen config defaults (if provided),
+    # then layer on CLI overrides.
+    sbatch_env: Dict[str, str] = {}
+
+    # Load datagen config as base defaults for vLLM serving params
+    if args.datagen_config:
+        sbatch_env.update(load_datagen_config_env(args.datagen_config))
+
+    # CLI overrides take precedence
     n_concurrent = args.n_concurrent or preset_config.get("n_concurrent", 128)
     gpu_mem_util = args.gpu_memory_util or preset_config.get("gpu_memory_util", 0.95)
-    sbatch_env = {
-        "EVAL_N_CONCURRENT": str(n_concurrent),
-        "EVAL_GPU_MEMORY_UTIL": str(gpu_mem_util),
-        "EVAL_DAYTONA_THRESHOLD": str(args.daytona_threshold),
-    }
+    sbatch_env["EVAL_N_CONCURRENT"] = str(n_concurrent)
+    # Only override gpu_mem_util if explicitly set via CLI or preset (don't clobber datagen)
+    if args.gpu_memory_util is not None or "EVAL_GPU_MEMORY_UTIL" not in sbatch_env:
+        sbatch_env["EVAL_GPU_MEMORY_UTIL"] = str(gpu_mem_util)
+    sbatch_env["EVAL_DAYTONA_THRESHOLD"] = str(args.daytona_threshold)
+
     # Harbor config (CLI > preset > sbatch default)
     harbor_config = args.harbor_config or preset_config.get("harbor_config")
     if harbor_config:
