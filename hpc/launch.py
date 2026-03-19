@@ -318,14 +318,8 @@ def _write_train_config(configs_dir: str, job_name: str, base_config: dict) -> s
 
 
 def construct_config_yaml(exp_args):
-    # Legacy SFT path - auto-derive job_name if not provided
-    job_setup = resolve_job_and_paths(
-        exp_args,
-        job_type_label="SFT",
-        derive_job_name_fn=derive_default_job_name,
-    )
-    configs_dir = str(job_setup.paths.configs)
-
+    # Load base config first so we can finalize the job name (which may
+    # include the model identifier) BEFORE creating experiment directories.
     train_config_path = exp_args.get("train_config_path")
     checkpoints_dir = exp_args.get("checkpoints_dir")
     models_dir = exp_args.get("models_dir")
@@ -339,12 +333,18 @@ def construct_config_yaml(exp_args):
 
     os.makedirs(checkpoints_dir, exist_ok=True)
     base_config = _load_base_train_config(train_config_path)
+
+    # Finalize job name (may append model identifier) before creating dirs.
+    if not exp_args.get("job_name"):
+        exp_args["job_name"] = derive_default_job_name(exp_args)
     exp_args = _maybe_include_model_in_job_name(base_config, exp_args)
-    # Update experiments_dir to reflect the (potentially updated) job_name.
-    # experiments_dir was set earlier from the CLI-derived job_name, but
-    # _maybe_include_model_in_job_name may have appended the model identifier.
-    experiments_base = os.path.dirname(exp_args["experiments_dir"])
-    exp_args["experiments_dir"] = os.path.join(experiments_base, exp_args["job_name"])
+
+    # Now create experiment directories with the finalized job name.
+    job_setup = resolve_job_and_paths(
+        exp_args,
+        job_type_label="SFT",
+    )
+    configs_dir = str(job_setup.paths.configs)
     _drop_deprecated_fields(exp_args, base_config)
     base_config = _merge_launch_overrides(base_config, exp_args)
     base_config = ensure_deepspeed_config(base_config, exp_args)
