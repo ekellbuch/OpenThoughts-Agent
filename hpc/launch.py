@@ -165,7 +165,7 @@ def _merge_launch_overrides(base_config: dict, exp_args: dict) -> dict:
     exp_args.pop("_explicit_cli_keys", None)
     # Keys owned by the thinking preprocessor should not be overwritten
     # by CLI defaults (e.g., dataset/dataset_dir after prep_for_thinking).
-    preprocessor_owned = base_config.pop("_preprocessor_owned_keys", set())
+    preprocessor_owned = set(base_config.pop("_preprocessor_owned_keys", []))
 
     llama_fields = {field.name for field in dataclasses.fields(LlamaFactoryArgs)}
     for key, value in exp_args.items():
@@ -317,6 +317,8 @@ def _maybe_assign_tokenized_path(base_config: dict, exp_args: dict, dataset_entr
 
 
 def _write_train_config(configs_dir: str, job_name: str, base_config: dict) -> str:
+    # Remove internal-only keys before writing YAML
+    base_config.pop("_preprocessor_owned_keys", None)
     train_config_path_out = os.path.join(configs_dir, f"{job_name}_train_config.yaml")
     with open(train_config_path_out, "w") as f:
         yaml.dump(base_config, f)

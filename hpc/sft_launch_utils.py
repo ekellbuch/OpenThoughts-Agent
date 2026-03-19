@@ -483,8 +483,12 @@ def maybe_preprocess_thinking(
     base_config["dataset_dir"] = common_parent
     # Mark these keys as preprocessor-owned so _merge_launch_overrides
     # won't overwrite them with the original CLI values.
-    base_config.setdefault("_preprocessor_owned_keys", set())
-    base_config["_preprocessor_owned_keys"].update(["dataset", "dataset_dir"])
+    # Use a list (not set) to avoid OmegaConf serialization errors.
+    owned = base_config.get("_preprocessor_owned_keys", [])
+    for key in ["dataset", "dataset_dir"]:
+        if key not in owned:
+            owned.append(key)
+    base_config["_preprocessor_owned_keys"] = owned
 
     # Return a new artifacts object with updated paths.  We reconstruct the
     # same dataclass the caller passed in so we don't need to import it here.
