@@ -163,9 +163,7 @@ def _drop_deprecated_fields(exp_args: dict, base_config: dict) -> None:
 def _merge_launch_overrides(base_config: dict, exp_args: dict) -> dict:
     explicit_cli_keys = set(exp_args.get("_explicit_cli_keys", []))
     exp_args.pop("_explicit_cli_keys", None)
-    # Keys owned by the thinking preprocessor should not be overwritten
-    # by CLI defaults (e.g., dataset/dataset_dir after prep_for_thinking).
-    preprocessor_owned = set(base_config.pop("_preprocessor_owned_keys", []))
+    preprocessor_owned = set()
 
     llama_fields = {field.name for field in dataclasses.fields(LlamaFactoryArgs)}
     for key, value in exp_args.items():
@@ -317,8 +315,6 @@ def _maybe_assign_tokenized_path(base_config: dict, exp_args: dict, dataset_entr
 
 
 def _write_train_config(configs_dir: str, job_name: str, base_config: dict) -> str:
-    # Remove internal-only keys before writing YAML
-    base_config.pop("_preprocessor_owned_keys", None)
     train_config_path_out = os.path.join(configs_dir, f"{job_name}_train_config.yaml")
     with open(train_config_path_out, "w") as f:
         yaml.dump(base_config, f)
@@ -386,10 +382,7 @@ def construct_config_yaml(exp_args):
         base_config["dataset"] = artifacts.dataset_path
         base_config["dataset_dir"] = artifacts.dataset_path
     elif not exp_args["internet_node"]:
-        # Don't overwrite dataset if the thinking preprocessor already set it
-        # (it uses relative paths with dataset_dir for local file loading).
-        preprocessor_owned = base_config.get("_preprocessor_owned_keys", set())
-        if artifacts.dataset_paths and "dataset" not in preprocessor_owned:
+        if artifacts.dataset_paths:
             base_config["dataset"] = ",".join(artifacts.dataset_paths)
 
     base_config = configure_sft_reporting(base_config, exp_args, artifacts.model_path)
