@@ -469,10 +469,18 @@ def maybe_preprocess_thinking(
         new_paths.append(processed_path)
 
     new_dataset_path = new_paths[0] if new_paths else artifacts.dataset_path
-    # Force the config to use the local preprocessed paths (even on internet
-    # nodes where LlamaFactory would otherwise load from HF Hub directly).
-    base_config["dataset"] = ",".join(new_paths)
-    base_config["dataset_dir"] = "ONLINE"
+    # Force the config to use the local preprocessed paths as local files.
+    # We set dataset_dir to the common parent of all preprocessed paths and
+    # use relative names so LlamaFactory loads them via "file" mode (not hub).
+    # This avoids datasets>=4.7.0 cache resolution bugs where load_dataset()
+    # with cache_dir misplaces the arrow cache for local directory paths.
+    common_parent = os.path.commonpath(new_paths) if len(new_paths) > 1 else os.path.dirname(new_paths[0])
+    # If commonpath IS one of the paths (single dataset), use its parent
+    if common_parent in new_paths:
+        common_parent = os.path.dirname(common_parent)
+    rel_names = [os.path.relpath(p, common_parent) for p in new_paths]
+    base_config["dataset"] = ",".join(rel_names)
+    base_config["dataset_dir"] = common_parent
 
     # Return a new artifacts object with updated paths.  We reconstruct the
     # same dataclass the caller passed in so we don't need to import it here.
