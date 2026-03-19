@@ -797,6 +797,7 @@ jupiter = HPC(
     # GH200 NUMA: --gpu-bind=closest restricts CPU affinity to NUMA node 0 only
     # and overrides --cpu-bind=none. Use gpu_bind="none" + disable_cpu_bind=True
     # to let SKYRL_ENABLE_NUMA_AFFINITY handle per-GPU NUMA binding at app level.
+    conda_activate="source /e/scratch/jureap59/feuer1/miniforge3/etc/profile.d/conda.sh && conda activate otagent",
     gpu_bind="none",
     disable_cpu_bind=True,
     pre_run_commands=["ulimit -c 0"],
