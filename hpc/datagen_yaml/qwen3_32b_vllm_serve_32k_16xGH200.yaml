@@ -7,6 +7,8 @@ engine:
 backend:
   type: ray
   wait_for_endpoint: true
+  healthcheck_max_attempts: 240
+  healthcheck_retry_delay: 15
 vllm_server:
   model_path: Qwen/Qwen3-32B
   num_replicas: 1
