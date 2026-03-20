@@ -832,7 +832,26 @@ After an RL job terminates (early or completed), follow these steps to preserve 
      --episodes last
    ```
 
-9. **Clean up experiments dir**: Only after all above steps succeed, remove the local job directory to free disk space.
+9. **Parse metrics and preserve training logs**: Run the metrics parser to generate tables and plots, then upload the logs and analysis alongside the model on HF. This is especially important on Jupiter where W&B is unavailable.
+   ```bash
+   # Generate metrics CSV, markdown report, and reward plot
+   python scripts/analysis/parse_skyrl_metrics.py \
+     $EXPERIMENTS_DIR/<job_name>/logs \
+     $UPLOAD_DIR/training_logs \
+     --trace_jobs_dir $EXPERIMENTS_DIR/<job_name>/<job_name>/trace_jobs
+
+   # Also copy raw logs for archival
+   cp $EXPERIMENTS_DIR/<job_name>/<job_name>/trainer_log.jsonl $UPLOAD_DIR/training_logs/
+   cp $EXPERIMENTS_DIR/<job_name>/logs/<job_name>_*.out $UPLOAD_DIR/training_logs/
+
+   # Re-upload the model folder (now includes training_logs/)
+   huggingface-cli upload-large-folder laion/<job_name>-<step> $UPLOAD_DIR
+   ```
+   This produces: `metrics.csv`, `vllm_metrics.csv`, `trial_stats.csv`, `report.md`, `reward_plot.png` in `training_logs/`.
+
+   **WARNING**: Do NOT use `huggingface_hub.upload_folder()` Python API to add files to an existing repo without setting `delete_patterns=[]`. By default it deletes files not present in the local folder, which will clobber existing model weights. Always use `huggingface-cli upload-large-folder` (which is additive) or pass `delete_patterns=[]` explicitly.
+
+10. **Clean up experiments dir**: Only after all above steps succeed, remove the local job directory to free disk space.
 
 ## 8B SFT Job Cleanup Checklist
 
