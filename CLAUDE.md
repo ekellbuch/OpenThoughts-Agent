@@ -529,7 +529,27 @@ When submitting eval jobs via `unified_eval_listener.py`, always use these flags
 - `--harbor-config hpc/harbor_yaml/eval/eval_ctx32k_non_it.yaml` for 32k context models
 - `--harbor-config hpc/harbor_yaml/eval/eval_ctx131k_non_it.yaml` for 131k context models
 
-Model lists live in `eval/lists/` (`models_32b.txt`, `models_131k.txt`, `models_8b_sft.txt`).
+Model lists live in `eval/lists/` (`models_32b.txt`, `models_131k.txt`, `models_8b_dsv2_remaining.txt`).
+
+### Querying Unevaled Models
+
+Use `scripts/database/query_unevaled_models.py` to find models not yet evaluated on a benchmark family. The script resolves benchmark families via the `duplicate_of` field in Supabase (e.g. `dev_set_v2` includes `DCAgent_dev_set_v2`, `dev_set_v2_2.0x`, `openthoughts-tblite`).
+
+```bash
+# List 8B models not yet evaluated on dev_set_v2 family
+python scripts/database/query_unevaled_models.py --benchmark dev_set_v2 --size 8 --exclude test_ --exclude NO_EVAL -v
+
+# List 8B models not yet evaluated on terminal_bench_2 family
+python scripts/database/query_unevaled_models.py --benchmark terminal_bench_2 --size 8 -v
+
+# Write to priority list file
+python scripts/database/query_unevaled_models.py --benchmark dev_set_v2 --size 8 -o eval/lists/models_8b_dsv2_remaining.txt
+
+# 32B models on terminal_bench_2
+python scripts/database/query_unevaled_models.py --benchmark terminal_bench_2 --size 32 -o eval/lists/models_32b_tb2_remaining.txt
+```
+
+Requires `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` env vars.
 
 ### Launching the Eval Listener on Leonardo
 
