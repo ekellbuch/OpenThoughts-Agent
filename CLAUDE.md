@@ -529,7 +529,7 @@ When submitting eval jobs via `unified_eval_listener.py`, always use these flags
 - `--harbor-config hpc/harbor_yaml/eval/eval_ctx32k_non_it.yaml` for 32k context models
 - `--harbor-config hpc/harbor_yaml/eval/eval_ctx131k_non_it.yaml` for 131k context models
 
-Model lists live in `eval/jupiter/lists/` (`models_32b.txt`, `models_131k.txt`) and `eval/leonardo/lists/` (`models_32b.txt`).
+Model lists live in `eval/lists/` (`models_32b.txt`, `models_131k.txt`, `models_8b_sft.txt`).
 
 ### Launching the Eval Listener on Leonardo
 
@@ -549,7 +549,7 @@ ssh-keygen -R login.leonardo.cineca.it && rsync -avz -e 'ssh -i ~/.ssh/leonardo_
 python eval/jupiter/unified_eval_listener.py \
   --sbatch-script eval/leonardo/unified_eval_harbor.sbatch \
   --require-priority-list \
-  --priority-file eval/leonardo/lists/models_32b.txt \
+  --priority-file eval/lists/models_32b.txt \
   --n-concurrent 48 \
   --harbor-config hpc/harbor_yaml/eval/eval_ctx32k_non_it.yaml \
   --pre-download \
