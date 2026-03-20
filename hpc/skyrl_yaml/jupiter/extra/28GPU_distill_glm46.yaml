@@ -252,7 +252,7 @@ generator:
 # DISTILL-ONLY: Teacher model configuration (GLM 4.6 AWQ via vLLM)
 teacher:
   model_path: QuantTrio/GLM-4.6-AWQ
-  top_k_logprobs: 256
+  top_k_logprobs: 128
   num_inference_engines: 1
   inference_engine_tensor_parallel_size: 4
   inference_engine_pipeline_parallel_size: 1
