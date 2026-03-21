@@ -537,6 +537,25 @@ def setup_experiments_dir(
         experiments_subdir = "experiments"
     experiments_abs = resolve_workspace_path(experiments_subdir)
 
+    # Deduplicate: if experiments dir already exists with configs from a different
+    # run, append a numeric suffix to avoid collisions. This prevents a new job
+    # from silently reusing (and potentially overwriting) an existing experiment.
+    if create_dirs and experiments_abs.exists() and (experiments_abs / "configs").exists():
+        existing_configs = list((experiments_abs / "configs").glob("*.json")) + list(
+            (experiments_abs / "configs").glob("*.yaml")
+        )
+        if existing_configs:
+            base = experiments_abs
+            suffix = 2
+            while experiments_abs.exists() and list(
+                (experiments_abs / "configs").glob("*.json")
+                if (experiments_abs / "configs").exists()
+                else []
+            ):
+                experiments_abs = base.parent / f"{base.name}_{suffix}"
+                suffix += 1
+            print(f"[launch_utils] Experiment dir collision detected. Using {experiments_abs} instead of {base}")
+
     paths = ExperimentsPaths(
         root=experiments_abs,
         sbatch=experiments_abs / sbatch_subdir,
