@@ -93,7 +93,7 @@ def get_evaled_model_ids(client, benchmark_family_ids: Set[str]) -> Set[str]:
 
 def get_models(client, size: Optional[int] = None) -> Dict[str, str]:
     """Get all models, optionally filtered by size. Returns {id: name}."""
-    models = client.table("models").select("id,name,model_size_B").execute()
+    models = client.table("models").select("id,name,model_size_b").execute()
 
     result = {}
     for m in models.data:
@@ -102,7 +102,7 @@ def get_models(client, size: Optional[int] = None) -> Dict[str, str]:
             continue
 
         if size is not None:
-            model_size = m.get("model_size_B")
+            model_size = m.get("model_size_b")
             size_str = f"{size}B"
             size_str_lower = f"{size}b"
             if model_size == size:
