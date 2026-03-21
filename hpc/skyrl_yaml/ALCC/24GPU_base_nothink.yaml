@@ -197,7 +197,7 @@ generator:
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
 
-  gpu_memory_utilization: 0.90
+  gpu_memory_utilization: 0.85
 
   max_num_seqs: 24
   max_num_batched_tokens: 16384
