@@ -637,19 +637,19 @@ ssh Leonardo    # Complete 2FA once; socket persists 8h
 
 **Pre-launch preamble** (run before launching any new job):
 ```bash
-source /leonardo_work/EUHPC_E03_068/bfeuer00/miniforge3/etc/profile.d/conda.sh && \
+source /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/etc/profile.d/conda.sh && \
 conda activate otagent && \
-cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent && GIT_TERMINAL_PROMPT=0 git pull && \
-cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/harbor && GIT_TERMINAL_PROMPT=0 git pull && \
+cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent && GIT_TERMINAL_PROMPT=0 git pull && \
+cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/harbor && GIT_TERMINAL_PROMPT=0 git pull && \
 source hpc/dotenv/leonardo.env && source ~/secrets.env && \
-cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent
+cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent
 ```
 
 **Key paths**:
-- Code: `/leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent`
-- Harbor: `/leonardo_work/EUHPC_E03_068/bfeuer00/code/harbor`
-- Data/HF cache: `/leonardo_work/EUHPC_E03_068/bfeuer00/data/hub`
-- Experiments: `/leonardo_work/EUHPC_E03_068/bfeuer00/experiments`
+- Code: `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent`
+- Harbor: `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/harbor`
+- Data/HF cache: `/leonardo_work/AIFAC_5C0_290/bfeuer00/data/hub`
+- Experiments: `/leonardo_work/AIFAC_5C0_290/bfeuer00/experiments`
 
 **Cluster details**: A100 64GB GPUs, 4/node, 3456 nodes, SLURM scheduler. No internet on compute nodes (use proxychains/SSH tunnel). User: `bfeuer00`. Account: `AIFAC_5C0_290`.
 
@@ -667,9 +667,9 @@ SFT jobs use a separate conda env from eval/datagen due to different transformer
 
 **Pre-launch preamble** (for SFT):
 ```bash
-source /leonardo_work/EUHPC_E03_068/bfeuer00/miniforge3/etc/profile.d/conda.sh && \
+source /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/etc/profile.d/conda.sh && \
 conda activate sft-qwen35 && \
-cd /leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent && \
+cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent && \
 GIT_TERMINAL_PROMPT=0 git pull && \
 source hpc/dotenv/leonardo.env && source ~/secrets.env
 ```
@@ -691,16 +691,16 @@ DISABLE_VERSION_CHECK=1 python -m hpc.launch \
 SBATCH=experiments/<exp_dir>/sbatch/<job_name>_sft.sbatch
 
 # 1. Add conda activation
-sed -i 's|# No conda activation configured|source /leonardo_work/EUHPC_E03_068/bfeuer00/miniforge3/etc/profile.d/conda.sh\nconda activate sft-qwen35|' $SBATCH
+sed -i 's|# No conda activation configured|source /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/etc/profile.d/conda.sh\nconda activate sft-qwen35|' $SBATCH
 
 # 2. Fix WORKDIR (defaults to $PWD which is wrong on compute nodes)
-sed -i 's|WORKDIR="$PWD"|WORKDIR="/leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent"|' $SBATCH
+sed -i 's|WORKDIR="$PWD"|WORKDIR="/leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent"|' $SBATCH
 
 # 3. Fix DCFT
-sed -i 's|export DCFT="$WORKDIR"|export DCFT="/leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent"|' $SBATCH
+sed -i 's|export DCFT="$WORKDIR"|export DCFT="/leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent"|' $SBATCH
 
 # 4. Fix any doubled paths ($DCFT//leonardo_work/...)
-sed -i 's|\$DCFT//leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent/experiments|/leonardo_work/EUHPC_E03_068/bfeuer00/code/OpenThoughts-Agent/experiments|g' $SBATCH
+sed -i 's|\$DCFT//leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent/experiments|/leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent/experiments|g' $SBATCH
 
 # 5. Submit
 sbatch $SBATCH

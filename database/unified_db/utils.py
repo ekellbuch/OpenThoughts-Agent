@@ -3714,7 +3714,7 @@ def upload_job_and_trial_records(
         eval_jobs_meta = job_dir.parent.parent / "eval_jobs" / job_dir.name / "meta.env"
         if not eval_jobs_meta.exists():
             # Try common eval_jobs locations
-            for parent in [Path("/leonardo_work/EUHPC_E03_068/bfeuer00/eval_jobs"),
+            for parent in [Path("/leonardo_work/AIFAC_5C0_290/bfeuer00/eval_jobs"),
                            Path("/e/data1/datasets/playground/ot/eval_jobs")]:
                 candidate = parent / job_dir.name / "meta.env"
                 if candidate.exists():

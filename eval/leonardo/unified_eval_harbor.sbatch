@@ -79,7 +79,7 @@ echo "=============================================="
 
 # Hardcode WORK — Leonardo sets WORK=/leonardo_work/AIFAC_5C0_290 system-wide
 # which is the project dir, not the user dir. Override unconditionally.
-WORK="/leonardo_work/EUHPC_E03_068/bfeuer00"
+WORK="/leonardo_work/AIFAC_5C0_290/bfeuer00"
 DCFT="${WORK}/code/OpenThoughts-Agent"
 
 # Reset PYTHONPATH
