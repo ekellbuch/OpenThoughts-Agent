@@ -5,7 +5,11 @@ Query Supabase for models that have NOT been evaluated on a given benchmark fami
 Uses the `duplicate_of` field in the benchmarks table to resolve benchmark families:
 a parent benchmark and all its children (duplicates) form one family. A model is
 considered "evaluated" if it has ANY sandbox_job (Finished, Started, or Pending)
-against ANY benchmark in the family.
+against ANY benchmark in that specific family. Each family is independent — a
+dev_set_v2 result does NOT count as evaluated for terminal_bench_2.
+
+Size matching uses a range: --size 8 matches models with model_size_b in [8, 12),
+--size 32 matches [32, 48), etc.
 
 Usage:
     # List 8B models not yet evaluated on dev_set_v2 (and its duplicates)
@@ -91,6 +95,19 @@ def get_evaled_model_ids(client, benchmark_family_ids: Set[str]) -> Set[str]:
     return evaled
 
 
+def _size_matches(model_size_b: Optional[float], target_size: int) -> bool:
+    """Check if a model's size matches the target size bucket.
+
+    Uses a range to handle small variations (e.g. 8.2B matches --size 8,
+    32.5B matches --size 32).
+    """
+    if model_size_b is None:
+        return False
+    # Models within 50% above the target and down to the target count as a match.
+    # e.g. --size 8 matches 8.0-11.9, --size 32 matches 32.0-47.9
+    return target_size <= model_size_b < target_size * 1.5
+
+
 def get_models(client, size: Optional[int] = None) -> Dict[str, str]:
     """Get all models, optionally filtered by size. Returns {id: name}."""
     models = client.table("models").select("id,name,model_size_b").execute()
@@ -105,7 +122,7 @@ def get_models(client, size: Optional[int] = None) -> Dict[str, str]:
             model_size = m.get("model_size_b")
             size_str = f"{size}B"
             size_str_lower = f"{size}b"
-            if model_size == size:
+            if _size_matches(model_size, size):
                 result[m["id"]] = name
             elif model_size is None and (size_str in name or size_str_lower in name):
                 result[m["id"]] = name
