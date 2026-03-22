@@ -151,7 +151,7 @@ echo "PYTHONPATH: $PYTHONPATH"
 #   3. Set SSH_KEY env var or ensure key is at ~/.ssh/leonardo_daytona
 # ==============================================================================
 
-PROXYCHAINS_BIN="$(which proxychains4 2>/dev/null || echo "${WORK}/miniforge3/envs/otagent/bin/proxychains4")"
+PROXYCHAINS_BIN="$(which proxychains4 2>/dev/null || echo "${WORK}/proxychains/bin/proxychains4")"
 
 # SSH key for intra-cluster tunnel (cert-based, no passphrase)
 export SSH_KEY="${SSH_KEY:-/leonardo/home/userexternal/bfeuer00/.ssh/leonardo_daytona}"

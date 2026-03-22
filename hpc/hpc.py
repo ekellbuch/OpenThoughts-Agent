@@ -889,7 +889,7 @@ leonardo = HPC(
     # pretok_partition="lrd_all_serial",
     # SSH tunnel + proxychains for no-internet compute nodes (like JSC clusters)
     needs_ssh_tunnel=True,
-    proxychains_binary="/leonardo/home/userexternal/bfeuer00/proxychains/bin/proxychains4",
+    proxychains_binary="/leonardo_work/AIFAC_5C0_290/bfeuer00/proxychains/bin/proxychains4",
     # Note: PBS Pro is NOT used here — Leonardo uses SLURM
 )
 
