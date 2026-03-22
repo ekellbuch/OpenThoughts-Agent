@@ -19,6 +19,7 @@
 #   EVAL_VLLM_TRUST_REMOTE_CODE     (default: unset; set to "1" to enable)
 #   EVAL_VLLM_TOOL_CALL_PARSER      (default: unset)
 #   EVAL_VLLM_REASONING_PARSER      (default: unset)
+#   EVAL_VLLM_DATA_PARALLEL_SIZE    (default: unset; vLLM v0.8+ only)
 #   EVAL_VLLM_EXTRA_ARGS            (default: unset; space-separated string)
 # ==============================================================================
 
@@ -29,6 +30,7 @@ build_vllm_cmd() {
 
     # Read overrides from env (set by listener via sbatch --export)
     local tp="${EVAL_VLLM_TENSOR_PARALLEL_SIZE:-4}"
+    local dp="${EVAL_VLLM_DATA_PARALLEL_SIZE:-}"
     local max_model_len="${EVAL_VLLM_MAX_MODEL_LEN:-}"
     local swap_space="${EVAL_VLLM_SWAP_SPACE:-4}"
     local trust_remote_code="${EVAL_VLLM_TRUST_REMOTE_CODE:-}"
@@ -47,6 +49,10 @@ build_vllm_cmd() {
         --swap-space "$swap_space"
         --disable-custom-all-reduce
     )
+
+    if [ -n "$dp" ] && [ "$dp" -gt 1 ] 2>/dev/null; then
+        VLLM_CMD+=(--data-parallel-size "$dp")
+    fi
 
     if [ -n "$max_model_len" ]; then
         VLLM_CMD+=(--max-model-len "$max_model_len")
@@ -72,7 +78,7 @@ build_vllm_cmd() {
 
     # Log what we built
     echo "vLLM command config:"
-    echo "  TP=$tp, swap=$swap_space, max_model_len=${max_model_len:-auto}"
+    echo "  TP=$tp, DP=${dp:-1}, swap=$swap_space, max_model_len=${max_model_len:-auto}"
     echo "  trust_remote_code=${trust_remote_code:-no}"
     echo "  tool_call_parser=${tool_call_parser:-none}"
     echo "  reasoning_parser=${reasoning_parser:-none}"
