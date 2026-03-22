@@ -347,9 +347,27 @@ else
     echo "[DEBUG] DATASET_LOCAL_DIR=$DATASET_LOCAL_DIR"
 
     # Check if dataset was pre-downloaded on login node (compute nodes have no internet)
+    # First check the custom local dir, then check the HF cache
     if [ -d "$DATASET_LOCAL_DIR" ]; then
         TASK_COUNT=$(ls -d "$DATASET_LOCAL_DIR"/*/instruction.md 2>/dev/null | wc -l)
         echo "[DEBUG] Found $TASK_COUNT tasks with instruction.md in local dir"
+    fi
+
+    # Also check HF cache (listener pre-downloads datasets there via snapshot_download)
+    if [ "${TASK_COUNT:-0}" -eq 0 ]; then
+        HF_CACHE_DIR="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
+        HF_DATASET_CACHE=$(find "$HF_CACHE_DIR" -maxdepth 3 -type d -name "snapshots" -path "*datasets--${SAFE_REPO/\//__}*" 2>/dev/null | head -1)
+        if [ -n "$HF_DATASET_CACHE" ]; then
+            HF_SNAPSHOT=$(ls -dt "$HF_DATASET_CACHE"/*/ 2>/dev/null | head -1)
+            if [ -n "$HF_SNAPSHOT" ]; then
+                HF_TASK_COUNT=$(ls -d "$HF_SNAPSHOT"/*/instruction.md 2>/dev/null | wc -l)
+                echo "[DEBUG] Found $HF_TASK_COUNT tasks in HF cache: $HF_SNAPSHOT"
+                if [ "$HF_TASK_COUNT" -gt 0 ]; then
+                    TASK_COUNT=$HF_TASK_COUNT
+                    DATASET_LOCAL_DIR="$HF_SNAPSHOT"
+                fi
+            fi
+        fi
     fi
 
     if [ "${TASK_COUNT:-0}" -gt 0 ]; then

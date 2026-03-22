@@ -1012,6 +1012,17 @@ def main() -> None:
                 if pre_download:
                     from huggingface_hub import snapshot_download
                     downloaded_models: set = set()
+                    # Pre-download datasets (same for all submissions, download once)
+                    downloaded_datasets: set = set()
+                    for _, _, dataset_hf, _, _ in submissions:
+                        if dataset_hf not in downloaded_datasets:
+                            log(f"  Pre-downloading dataset {dataset_hf}...")
+                            try:
+                                path = snapshot_download(repo_id=dataset_hf, repo_type="dataset")
+                                log(f"  Dataset cached at {path}")
+                            except Exception as e:
+                                log(f"  WARNING: Failed to download dataset {dataset_hf}: {e}")
+                            downloaded_datasets.add(dataset_hf)
 
                 # Sliding-window dependency: job N depends on job N-batch_size
                 # so at most batch_size jobs run concurrently. As one finishes,
