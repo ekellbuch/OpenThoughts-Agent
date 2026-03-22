@@ -921,6 +921,14 @@ def parse_args():
             help=f"HPC {field}" if field != "gpu_type" else "GPU type override (e.g., h200, l40s) for clusters with multiple GPU types",
         )
 
+    # Ray object store size (applies to RL, eval, datagen job types)
+    hpc_group.add_argument(
+        "--ray_object_store_gb", "--ray-object-store-gb",
+        type=float,
+        default=40.0,
+        help="Ray object store (plasma) size in GB (default: 40).",
+    )
+
     # Add LlamaFactoryArgs arguments
     _add_dataclass_arguments(train_group, LlamaFactoryArgs, bool_fields=bool_keys)
 

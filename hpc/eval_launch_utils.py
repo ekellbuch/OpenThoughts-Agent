@@ -272,6 +272,9 @@ class EvalJobConfig:
     pinggy_persistent_url: Optional[str] = None
     pinggy_token: Optional[str] = None
 
+    # Ray object store size in GB (default: 40)
+    ray_object_store_gb: float = 40.0
+
 
 class EvalJobRunner:
     """Runs Harbor eval jobs with optional vLLM management.
@@ -425,7 +428,7 @@ class EvalJobRunner:
             srun_export_env=hpc.get_srun_export_env(),
             ray_env_vars=hpc.get_ray_env_vars(),
             memory_per_node=ray_memory,
-            object_store_memory=DEFAULT_OBJECT_STORE_MEMORY_BYTES,
+            object_store_memory=int(self.config.ray_object_store_gb * 1024 * 1024 * 1024),
             disable_cpu_bind=getattr(hpc, "disable_cpu_bind", False),
             gpu_bind=getattr(hpc, "gpu_bind", "none"),
             proxychains_binary=self._proxychains_binary or None,
@@ -690,6 +693,7 @@ def launch_eval_job_v2(exp_args: dict, hpc) -> None:
         # Pinggy tunnel settings
         pinggy_persistent_url=exp_args.get("pinggy_persistent_url"),
         pinggy_token=exp_args.get("pinggy_token"),
+        ray_object_store_gb=float(exp_args.get("ray_object_store_gb", 40.0)),
     )
 
     # Write config JSON

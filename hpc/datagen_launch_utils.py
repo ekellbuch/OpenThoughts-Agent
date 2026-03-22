@@ -305,6 +305,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             gpus_per_node=gpus_per_node,
             cpus_per_node=cpus_per_node,
             vllm_server_config=vllm_server_config,
+            ray_object_store_gb=float(exp_args.get("ray_object_store_gb", 40.0)),
         )
 
         # Write task config JSON
@@ -498,6 +499,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
                 chunk_size=chunk_size if is_chunked else None,
                 chunk_index=chunk_idx,
                 num_chunks=num_chunks if is_chunked else None,
+                ray_object_store_gb=float(exp_args.get("ray_object_store_gb", 40.0)),
             )
 
             trace_config_path = exp_paths.configs / f"{chunk_job_name}_tracegen_config.json"
@@ -588,6 +590,9 @@ class TaskgenJobConfig:
     num_nodes: int = 1
     gpus_per_node: Optional[int] = None
     cpus_per_node: Optional[int] = None
+
+    # Ray object store size in GB (default: 40)
+    ray_object_store_gb: float = 40.0
 
 
 class TaskgenJobRunner:
@@ -680,7 +685,7 @@ class TaskgenJobRunner:
             srun_export_env=hpc.get_srun_export_env(),
             ray_env_vars=hpc.get_ray_env_vars(),
             memory_per_node=ray_memory,
-            object_store_memory=DEFAULT_OBJECT_STORE_MEMORY_BYTES,
+            object_store_memory=int(self.config.ray_object_store_gb * 1024 * 1024 * 1024),
             disable_cpu_bind=getattr(hpc, "disable_cpu_bind", False),
             gpu_bind=getattr(hpc, "gpu_bind", "none"),
             proxychains_binary=self._proxychains_binary or None,
@@ -830,6 +835,9 @@ class TracegenJobConfig:
     # Pinggy tunnel settings (for cloud backends that can't reach local vLLM)
     pinggy_persistent_url: Optional[str] = None
     pinggy_token: Optional[str] = None
+
+    # Ray object store size in GB (default: 40)
+    ray_object_store_gb: float = 40.0
 
     # Chunking settings (for splitting large task sets across parallel jobs)
     chunk_size: Optional[int] = None
@@ -1111,7 +1119,7 @@ class TracegenJobRunner:
             srun_export_env=hpc.get_srun_export_env(),
             ray_env_vars=hpc.get_ray_env_vars(),
             memory_per_node=ray_memory,
-            object_store_memory=DEFAULT_OBJECT_STORE_MEMORY_BYTES,
+            object_store_memory=int(self.config.ray_object_store_gb * 1024 * 1024 * 1024),
             disable_cpu_bind=getattr(hpc, "disable_cpu_bind", False),
             gpu_bind=getattr(hpc, "gpu_bind", "none"),
             proxychains_binary=self._proxychains_binary or None,

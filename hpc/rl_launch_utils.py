@@ -586,6 +586,9 @@ class RLJobConfig:
 
     proxychains_binary: Optional[str] = None
 
+    # Ray object store size in GB (default: 40)
+    ray_object_store_gb: float = 40.0
+
     # Post-training trace upload settings
     trace_upload_enabled: bool = False
     trace_upload_repo_org: str = "DCAgent"
@@ -754,6 +757,7 @@ def construct_rl_sbatch_script(exp_args: dict, hpc) -> str:
         pinggy_token=exp_args.get("pinggy_token"),
         agent_name=agent_name,
         harbor_env=harbor_env,
+        ray_object_store_gb=float(exp_args.get("ray_object_store_gb", 40.0)),
     )
 
     # Populate trace upload settings from parsed terminal_bench config
@@ -1160,7 +1164,7 @@ class RLJobRunner:
             srun_export_env=hpc.get_srun_export_env(),
             ray_env_vars=hpc.get_ray_env_vars(),
             memory_per_node=ray_memory,
-            object_store_memory=DEFAULT_OBJECT_STORE_MEMORY_BYTES,
+            object_store_memory=int(self.config.ray_object_store_gb * 1024 * 1024 * 1024),
             disable_cpu_bind=getattr(hpc, "disable_cpu_bind", False),
             gpu_bind=getattr(hpc, "gpu_bind", "none"),
             proxychains_binary=getattr(hpc, "proxychains_binary", None),
