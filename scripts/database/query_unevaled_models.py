@@ -8,8 +8,10 @@ considered "evaluated" if it has ANY sandbox_job (Finished, Started, or Pending)
 against ANY benchmark in that specific family. Each family is independent — a
 dev_set_v2 result does NOT count as evaluated for terminal_bench_2.
 
-Size matching uses a range: --size 8 matches models with model_size_b in [8, 12),
---size 32 matches [32, 48), etc.
+Size matching walks the base_model_id chain to the root ancestor and classifies
+by the root's model_size_b. For example, any model whose root is Qwen/Qwen3-8B
+(8.2B) will match --size 8. Falls back to the model's own model_size_b or name
+heuristic if the chain is missing.
 
 Usage:
     # List 8B models not yet evaluated on dev_set_v2 (and its duplicates)
@@ -95,22 +97,66 @@ def get_evaled_model_ids(client, benchmark_family_ids: Set[str]) -> Set[str]:
     return evaled
 
 
-def _size_matches(model_size_b: Optional[float], target_size: int) -> bool:
-    """Check if a model's size matches the target size bucket.
+def _size_in_bucket(model_size_b: Optional[float], target_size: int) -> bool:
+    """Check if a model size falls in the target bucket.
 
-    Uses a range to handle small variations (e.g. 8.2B matches --size 8,
-    32.5B matches --size 32).
+    e.g. 8.2B matches --size 8, 32.8B matches --size 32.
+    Uses a range: [target, target * 1.5).
     """
     if model_size_b is None:
         return False
-    # Models within 50% above the target and down to the target count as a match.
-    # e.g. --size 8 matches 8.0-11.9, --size 32 matches 32.0-47.9
     return target_size <= model_size_b < target_size * 1.5
 
 
+def _build_root_size_map(models_data: list) -> Dict[str, Optional[float]]:
+    """Walk base_model_id chains to find each model's root ancestor size.
+
+    Returns {model_id: root_model_size_b}.
+    """
+    by_id = {m["id"]: m for m in models_data}
+    cache: Dict[str, Optional[float]] = {}
+
+    def _get_root_size(model_id: str, visited: Optional[Set[str]] = None) -> Optional[float]:
+        if model_id in cache:
+            return cache[model_id]
+        if visited is None:
+            visited = set()
+        if model_id in visited:
+            # Cycle — shouldn't happen, but guard against it
+            return by_id.get(model_id, {}).get("model_size_b")
+        visited.add(model_id)
+
+        m = by_id.get(model_id)
+        if m is None:
+            return None
+
+        parent_id = m.get("base_model_id")
+        if parent_id and parent_id in by_id:
+            root_size = _get_root_size(parent_id, visited)
+        else:
+            # This is a root model — use its own size
+            root_size = m.get("model_size_b")
+
+        cache[model_id] = root_size
+        return root_size
+
+    for m in models_data:
+        _get_root_size(m["id"])
+
+    return cache
+
+
 def get_models(client, size: Optional[int] = None) -> Dict[str, str]:
-    """Get all models, optionally filtered by size. Returns {id: name}."""
-    models = client.table("models").select("id,name,model_size_b").execute()
+    """Get all models, optionally filtered by size. Returns {id: name}.
+
+    Size classification walks each model's base_model_id chain to the root
+    ancestor and uses the root's model_size_b. Falls back to the model's
+    own size or name heuristic.
+    """
+    models = client.table("models").select("id,name,model_size_b,base_model_id").execute()
+
+    if size is not None:
+        root_sizes = _build_root_size_map(models.data)
 
     result = {}
     for m in models.data:
@@ -119,13 +165,22 @@ def get_models(client, size: Optional[int] = None) -> Dict[str, str]:
             continue
 
         if size is not None:
-            model_size = m.get("model_size_b")
-            size_str = f"{size}B"
-            size_str_lower = f"{size}b"
-            if _size_matches(model_size, size):
+            # Primary: classify by root ancestor size
+            root_size = root_sizes.get(m["id"])
+            if _size_in_bucket(root_size, size):
                 result[m["id"]] = name
-            elif model_size is None and (size_str in name or size_str_lower in name):
+                continue
+            # Fallback: model's own size (for orphans with no chain)
+            own_size = m.get("model_size_b")
+            if own_size and _size_in_bucket(own_size, size):
                 result[m["id"]] = name
+                continue
+            # Last resort: name heuristic (for models with no size at all)
+            if own_size is None and root_size is None:
+                size_str = f"{size}B"
+                size_str_lower = f"{size}b"
+                if size_str in name or size_str_lower in name:
+                    result[m["id"]] = name
         else:
             result[m["id"]] = name
 
