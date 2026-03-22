@@ -357,7 +357,7 @@ else
     # HF cache uses "datasets--<org>--<name>" format (double-dash separated)
     if [ "${TASK_COUNT:-0}" -eq 0 ]; then
         HF_CACHE_DIR="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
-        HF_REPO_CACHE_NAME="datasets--$(echo "$REPO_ID" | tr '/' '--')"
+        HF_REPO_CACHE_NAME="datasets--$(echo "$REPO_ID" | sed 's/\//--/g')"
         HF_DATASET_CACHE=$(find "$HF_CACHE_DIR" -maxdepth 3 -type d -name "snapshots" -path "*${HF_REPO_CACHE_NAME}*" 2>/dev/null | head -1)
         if [ -n "$HF_DATASET_CACHE" ]; then
             HF_SNAPSHOT=$(ls -dt "$HF_DATASET_CACHE"/*/ 2>/dev/null | head -1)
