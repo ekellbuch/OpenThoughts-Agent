@@ -151,6 +151,8 @@ echo "PYTHONPATH: $PYTHONPATH"
 #   3. Set SSH_KEY env var or ensure key is at ~/.ssh/leonardo_daytona
 # ==============================================================================
 
+# Add proxychains to PATH so start_proxy_tunnel.sh (and all subprocesses) can find it
+export PATH="${WORK}/proxychains/bin:${PATH}"
 PROXYCHAINS_BIN="$(which proxychains4 2>/dev/null || echo "${WORK}/proxychains/bin/proxychains4")"
 
 # SSH key for intra-cluster tunnel (cert-based, no passphrase)

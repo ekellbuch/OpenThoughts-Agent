@@ -566,20 +566,32 @@ ssh-keygen -R login.leonardo.cineca.it && rsync -avz -e 'ssh -i ~/.ssh/leonardo_
 
 **Launch** (on Leonardo login node):
 ```bash
+# IMPORTANT: Use & + disown to keep the listener alive after SSH disconnect.
+# nohup alone is NOT sufficient — the listener gets killed when the SSH
+# session closes because it takes minutes to pre-download each model.
 python eval/jupiter/unified_eval_listener.py \
+  --preset tb2 \
   --sbatch-script eval/leonardo/unified_eval_harbor.sbatch \
   --require-priority-list \
-  --priority-file eval/lists/models_32b.txt \
+  --priority-file eval/lists/models_8b_tb2_remaining.txt \
   --n-concurrent 48 \
-  --harbor-config hpc/harbor_yaml/eval/eval_ctx32k_non_it.yaml \
+  --gpu-memory-util 0.85 \
+  --harbor-config hpc/harbor_yaml/eval/eval_ctx32k_non_it_2x_eval_.yaml \
   --pre-download \
-  --once --verbose --batch-size 12
+  --once --verbose --batch-size 12 \
+  > eval/leonardo/logs/tb2_listener_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+disown
 ```
+
+**Available presets**: `tb2` (terminal_bench_2), `v2` (dev_set_v2), `dev` (dev_set_71_tasks), `swebench`, `bfcl`, `aider`. Use `--preset` OR `--datasets`, not both.
 
 Key differences from Jupiter:
 - `--sbatch-script eval/leonardo/unified_eval_harbor.sbatch`
 - `--pre-download` — essential (no internet on compute nodes)
+- `--gpu-memory-util 0.85` — Leonardo A100 64GB OOMs at 0.90+
 - SSH tunnel cert must be refreshed before each session
+- Must use `& disown` (not just `nohup &`) to survive SSH disconnect
+- proxychains4 built at `/leonardo_work/AIFAC_5C0_290/bfeuer00/proxychains/bin/proxychains4`
 
 ### Post-Submission: Verify Eval Jobs Are Running
 
