@@ -184,12 +184,12 @@ trainer:
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
-      fsdp_size: 4
+      fsdp_size: 8
   ref:
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
-      fsdp_size: 4
+      fsdp_size: 8
 
   # Model placement (async training) - 16 shared GPUs for policy/ref
   placement:
