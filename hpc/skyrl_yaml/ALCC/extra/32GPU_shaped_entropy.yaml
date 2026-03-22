@@ -1,6 +1,6 @@
 # 32GPU shaped rewards + entropy regularization (coef=0.003) — ALCC variant
-# 8 extra GPUs (2 nodes) go to training (4 nodes policy/ref instead of 2).
-# Inference engines unchanged (16 TP=1 on 4 nodes).
+# Layout: 2 training nodes (8 GPUs policy/ref), 6 inference nodes (24 engines).
+# Extra nodes vs 24GPU go to inference for faster buffer fill.
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
 # Hydra config groups (+ prefix in CLI)
@@ -191,11 +191,11 @@ trainer:
       reshard_after_forward: true
       fsdp_size: 4
 
-  # Model placement (async training) - 16 shared GPUs for policy/ref (4 nodes)
+  # Model placement (async training) - 8 shared GPUs for policy/ref (2 nodes)
   placement:
     colocate_all: false
-    policy_num_nodes: 4
-    ref_num_nodes: 4
+    policy_num_nodes: 2
+    ref_num_nodes: 2
     policy_num_gpus_per_node: 4
     ref_num_gpus_per_node: 4
 
@@ -211,7 +211,7 @@ generator:
   model_dtype: bfloat16
 
   inference_engine_tensor_parallel_size: 1
-  num_inference_engines: 16
+  num_inference_engines: 24
 
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
