@@ -407,6 +407,15 @@ class LaunchArgs:
         },
     )
 
+    conda_env: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Override the conda environment name for this job. "
+            "Generates 'source <conda.sh> && conda activate <name>' in the sbatch. "
+            "Useful for models requiring a different env (e.g. Qwen3.5 needs transformers 5.3+)."
+        },
+    )
+
     internet_node: bool = field(
         default=False,
         metadata={

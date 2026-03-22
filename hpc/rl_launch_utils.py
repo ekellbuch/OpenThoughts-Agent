@@ -629,6 +629,7 @@ def construct_rl_sbatch_script(exp_args: dict, hpc) -> str:
         resolve_job_and_paths,
         substitute_template,
         build_sbatch_directives,
+        resolve_conda_activate,
     )
     from hpc.rl_config_utils import parse_rl_config, build_skyrl_hydra_args, extract_terminal_bench_agent_env
 
@@ -812,7 +813,7 @@ fi"""
         "job_name": job_name,
         "sbatch_extra_directives": "\n".join(sbatch_directives),
         "module_commands": hpc.get_module_commands(),
-        "conda_activate": hpc.conda_activate or "# No conda activation configured",
+        "conda_activate": resolve_conda_activate(hpc, exp_args),
         "cluster_env_file": hpc.dotenv_filename,
         "cuda_setup": cuda_setup,
         "nccl_exports": hpc.get_nccl_exports(),

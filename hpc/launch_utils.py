@@ -37,6 +37,36 @@ _VALID_TRACE_BACKENDS = {"vllm", "ray", "vllm_local", "none"}
 """Valid backend options for trace generation."""
 
 _HOSTED_VLLM_PREFIX = "hosted_vllm/"
+
+
+def resolve_conda_activate(hpc, exp_args: dict) -> str:
+    """Resolve the conda activation command for an sbatch script.
+
+    If --conda_env is set in exp_args, generates a conda activation
+    command using that env name (extracting the conda.sh path from
+    the HPC config). Otherwise falls back to hpc.conda_activate.
+
+    Args:
+        hpc: HPC cluster configuration object.
+        exp_args: Experiment arguments dict (from CLI).
+
+    Returns:
+        Shell command string for conda activation, or a comment if none configured.
+    """
+    conda_env_override = exp_args.get("conda_env")
+    if conda_env_override:
+        # Extract conda.sh path from the HPC config's existing activate command
+        if hpc.conda_activate and "conda.sh" in hpc.conda_activate:
+            conda_sh = hpc.conda_activate.split("&&")[0].strip()
+            return f"{conda_sh} && conda activate {conda_env_override}"
+        # Fallback: try common conda paths
+        conda_prefix = os.environ.get("CONDA_PREFIX", "")
+        if conda_prefix:
+            import re as _re
+            base = _re.sub(r"/envs/[^/]+$", "", conda_prefix)
+            return f"source {base}/etc/profile.d/conda.sh && conda activate {conda_env_override}"
+        return f"conda activate {conda_env_override}"
+    return hpc.conda_activate or "# No conda activation configured"
 """Provider prefix expected by LiteLLM when routing to managed vLLM endpoints."""
 
 # Placeholder API key for local vLLM endpoints (Harbor agents require this to be set)

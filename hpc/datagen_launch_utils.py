@@ -27,6 +27,7 @@ from hpc.launch_utils import (
     set_or_pop,
     resolve_job_and_paths,
     substitute_template,
+    resolve_conda_activate,
 )
 from hpc.harbor_utils import (
     get_harbor_env_from_config,
@@ -330,7 +331,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             "job_name": f"{job_name}_tasks",
             "sbatch_extra_directives": "\n".join(sbatch_directives),
             "module_commands": hpc.get_module_commands(),
-            "conda_activate": hpc.conda_activate or "# No conda activation configured",
+            "conda_activate": resolve_conda_activate(hpc, exp_args),
             "cluster_env_file": cluster_env_file,
             "config_path": str(task_config_path),
             "email_address": os.environ.get("EMAIL_ADDRESS", ""),
@@ -513,7 +514,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
                 "job_name": chunk_job_name,
                 "sbatch_extra_directives": "\n".join(sbatch_directives),
                 "module_commands": hpc.get_module_commands(),
-                "conda_activate": hpc.conda_activate or "# No conda activation configured",
+                "conda_activate": resolve_conda_activate(hpc, exp_args),
                 "cluster_env_file": cluster_env_file,
                 "config_path": str(trace_config_path),
                 "email_address": os.environ.get("EMAIL_ADDRESS", ""),
