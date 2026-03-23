@@ -44,11 +44,9 @@ environment:
   type: daytona
   force_build: true
   delete: true
-  override_cpus: 1
-  override_memory_mb: 2048
-  override_storage_mb: 2048
   kwargs:
     assume_global_snapshot: false
+    auto_snapshot: true
 
 verifier:
   override_timeout_sec:
