@@ -47,7 +47,8 @@ environment:
   override_cpus: 1
   override_memory_mb: 2048
   override_storage_mb: 2048
-  kwargs: {}
+  kwargs:
+    assume_global_snapshot: false
 
 verifier:
   override_timeout_sec:
