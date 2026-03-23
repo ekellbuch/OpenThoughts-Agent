@@ -4597,6 +4597,13 @@ def create_job_entry_pending(
 
         # Build minimal job entry for Pending status
         now = datetime.now(timezone.utc)
+        # Get harbor package version to satisfy sandbox_job_version_check constraint
+        try:
+            import harbor
+            harbor_version = harbor.__version__
+        except Exception:
+            harbor_version = "unknown"
+
         job_data = {
             "job_name": job_name,
             "username": username or "listener",
@@ -4607,6 +4614,7 @@ def create_job_entry_pending(
             "submitted_at": now.isoformat(),
             "slurm_job_id": slurm_job_id,
             "created_at": now.isoformat(),
+            "package_version": harbor_version,
             # These are set to None/minimal for Pending, updated when job starts
             "config": config or {},
             "n_trials": 0,
