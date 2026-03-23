@@ -1,14 +1,10 @@
-# SkyRL Configuration: 32B model on Jupiter (12 nodes, 48 GPUs)
-# Variant of 24GPU_base.yaml scaled for ~4x larger model
+# SkyRL Configuration: 32B model on Jupiter (12 nodes, 48 GPUs) with composite reward shaping + entropy regularization
+# Variant of 48GPU_shaped_32b.yaml with use_entropy_loss=true (coef=0.003).
 #
 # GPU ALLOCATION (colocate_all=false, 4 GPUs/node):
 #   - Policy + Ref (shared): 4 nodes x 4 GPUs = 16 GPUs (FSDP4, cpu_offload)
 #   - Inference engines:     8 nodes x 4 GPUs = 32 GPUs (16 engines x TP=2)
 #   - Total:                12 nodes x 4 GPUs = 48 GPUs
-#
-# KEY CHANGES vs 40GPU_base_32b:
-#   - Inference: 6 → 8 nodes, 12 → 16 engines (more throughput)
-#   - n_concurrent_trials: 216 → 288 (75% of 16 engines × 24 seqs)
 
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
@@ -75,8 +71,23 @@ terminal_bench:
     # Logging settings
     log_level: INFO
 
-    # Reward shaping (disabled - binary rewards)
-    enable_reward_shaping: false
+    # ==========================================================================
+    # Reward shaping: composite (verifier + trajectory signals)
+    # ==========================================================================
+    enable_reward_shaping: true
+    reward_parser: null            # Auto-detect (pytest, unittest, generic)
+    reward_shaper: composite
+    reward_shaping_fallback: true  # Fall back to original reward if parsing fails
+    composite_components:
+      verifier: 0.4
+      thinking_length: 0.2
+      format_quality: 0.2
+      command_quality: 0.2
+    composite_verifier_shaper: pass_ratio
+    thinking_target_tokens: 350
+    thinking_sigma_tokens: 100
+    thinking_min_turns_ratio: 0.5
+    command_quality_min_turns: 2
 
     # RLOO-N error classification
     enable_error_classification: true
@@ -117,6 +128,8 @@ trainer:
     advantage_estimator: rloo_n
     use_kl_loss: false
     kl_loss_coef: 0.0
+    use_entropy_loss: true
+    entropy_loss_coef: 0.003
     eps_clip_low: 0.2
     eps_clip_high: 0.2
     loss_reduction: token_mean
@@ -173,12 +186,12 @@ trainer:
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
-      fsdp_size: 8
+      fsdp_size: 4
   ref:
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
-      fsdp_size: 8
+      fsdp_size: 4
 
   # Model placement (async training) - 16 shared GPUs for policy/ref
   placement:
@@ -205,7 +218,6 @@ generator:
   eval_n_samples_per_prompt: 8
 
   # GH200 96GB unified memory — 0.75 is conservative even for 32B at TP=2
-  # (~32GB weights per GPU, leaves ~40GB for KV cache)
   gpu_memory_utilization: 0.75
 
   max_num_seqs: 24
