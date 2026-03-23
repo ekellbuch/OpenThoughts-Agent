@@ -1014,15 +1014,17 @@ def main() -> None:
                     downloaded_models: set = set()
                     # Pre-download datasets (same for all submissions, download once)
                     downloaded_datasets: set = set()
+                    failed_datasets: set = set()
                     for _, _, dataset_hf, _, _ in submissions:
-                        if dataset_hf not in downloaded_datasets:
+                        if dataset_hf not in downloaded_datasets and dataset_hf not in failed_datasets:
                             log(f"  Pre-downloading dataset {dataset_hf}...")
                             try:
                                 path = snapshot_download(repo_id=dataset_hf, repo_type="dataset")
                                 log(f"  Dataset cached at {path}")
+                                downloaded_datasets.add(dataset_hf)
                             except Exception as e:
-                                log(f"  WARNING: Failed to download dataset {dataset_hf}: {e}")
-                            downloaded_datasets.add(dataset_hf)
+                                log(f"  ERROR: Failed to download dataset {dataset_hf}: {e}")
+                                failed_datasets.add(dataset_hf)
 
                 # Sliding-window dependency: job N depends on job N-batch_size
                 # so at most batch_size jobs run concurrently. As one finishes,
@@ -1034,16 +1036,29 @@ def main() -> None:
                     log(f"Using sliding-window batch-size={batch_size}: "
                         f"first {batch_size} run immediately, rest chain one-by-one")
 
+                failed_models: set = set() if pre_download else set()
                 for idx, (mid, hf_model, dataset_hf, bench_id, reason) in enumerate(submissions):
+                    # Skip if dataset download failed
+                    if pre_download and dataset_hf in failed_datasets:
+                        log(f"  Skipping {hf_model} (dataset {dataset_hf} download failed)")
+                        all_job_ids.append(f"FAILED_{idx}")
+                        continue
                     # Pre-download this model before submitting (download-then-submit per model)
                     if pre_download and hf_model not in downloaded_models:
+                        if hf_model in failed_models:
+                            log(f"  Skipping {hf_model} (pre-download already failed)")
+                            all_job_ids.append(f"FAILED_{idx}")
+                            continue
                         log(f"  Pre-downloading model {hf_model}...")
                         try:
                             path = snapshot_download(repo_id=hf_model, repo_type="model")
                             log(f"  Cached at {path}")
+                            downloaded_models.add(hf_model)
                         except Exception as e:
-                            log(f"  WARNING: Failed to download {hf_model}: {e}")
-                        downloaded_models.add(hf_model)
+                            log(f"  WARNING: Failed to download {hf_model}: {e} — skipping submission")
+                            failed_models.add(hf_model)
+                            all_job_ids.append(f"FAILED_{idx}")
+                            continue
 
                     log(f"Submitting [{idx+1}/{len(submissions)}]: model={hf_model}, dataset={dataset_hf}, reason={reason}")
 
@@ -1096,7 +1111,11 @@ def main() -> None:
 
                     time.sleep(1)
 
-                log(f"Submitted {len([j for j in all_job_ids if not j.startswith('FAILED')])} jobs total")
+                n_submitted = len([j for j in all_job_ids if not j.startswith('FAILED')])
+                n_failed = len([j for j in all_job_ids if j.startswith('FAILED')])
+                log(f"Submitted {n_submitted} jobs, skipped {n_failed} (download failures)")
+                if pre_download and failed_models:
+                    log(f"  Failed models: {sorted(failed_models)}")
 
             if args.once:
                 log("Single iteration complete (--once). Exiting.")
