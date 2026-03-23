@@ -150,6 +150,7 @@ JOB_NAME_IGNORE_KEYS: list[str] = [
     "consolidate_workdir",
     "consolidate_commit_message",
     "dependency",
+    "reservation",
     # RL environment toggles
     "rl_use_conda",
     "rl_conda_env",

@@ -793,6 +793,10 @@ def build_sbatch_directives(
 
     if mem_directive:
         directives.append(mem_directive)
+    # Add reservation directive if specified
+    reservation = exp_args.get("reservation")
+    if reservation:
+        directives.append(f"#SBATCH --reservation={reservation}")
     if hpc.node_exclusion_list:
         directives.append(f"#SBATCH --exclude={hpc.node_exclusion_list}")
     # Add constraint directive based on GPU type (e.g., Perlmutter A100 variants)

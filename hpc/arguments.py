@@ -381,6 +381,10 @@ class LaunchArgs:
         default=None,
         metadata={"help": "SLURM dependency expression to include with submissions (e.g., 'afterany:12345')"},
     )
+    reservation: Optional[str] = field(
+        default=None,
+        metadata={"help": "SLURM reservation name to submit into (adds #SBATCH --reservation=<name>)"},
+    )
 
     # Pretokenize
     pretokenize: bool = field(
