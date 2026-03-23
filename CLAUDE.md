@@ -856,10 +856,17 @@ After an RL job terminates (early or completed), follow these steps to preserve 
 
 7. **Register in DB**: Manual push to the unified DB via `scripts/database/manual_db_push.py`:
    ```bash
+   # Single dataset:
    python scripts/database/manual_db_push.py \
      --hf-model-id laion/<job_name>-<step> \
      --base-model <base_model_hf> \
      --dataset-name <dataset_name>
+
+   # Multi-dataset (comma-separated → sets dataset_names instead of dataset_id):
+   python scripts/database/manual_db_push.py \
+     --hf-model-id laion/<job_name>-<step> \
+     --base-model <base_model_hf> \
+     --dataset-name "DCAgent/dataset-a,DCAgent/dataset-b"
    # --wandb-run is optional (timestamps default to now if omitted; Jupiter has no W&B)
    ```
 
@@ -915,10 +922,17 @@ After an 8B SFT job completes on a no-internet cluster (Jupiter, Leonardo), foll
 
 3. **Register in the unified DB** (W&B run is optional — Jupiter has no W&B):
    ```bash
+   # Single dataset:
    python scripts/database/manual_db_push.py \
      --hf-model-id laion/<job_name> \
      --base-model <base_model_hf> \
      --dataset-name <dataset_name>
+
+   # Multi-dataset (comma-separated → sets dataset_names instead of dataset_id):
+   python scripts/database/manual_db_push.py \
+     --hf-model-id laion/<job_name> \
+     --base-model <base_model_hf> \
+     --dataset-name "DCAgent/dataset-a,DCAgent/dataset-b"
    ```
 
 4. **Clean up experiments dir**: Only after steps 1-3 succeed, remove the local experiment directory to free disk space:

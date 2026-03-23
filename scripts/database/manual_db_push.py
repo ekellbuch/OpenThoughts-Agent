@@ -4,7 +4,13 @@ Manually register a trained model with Supabase.
 
 Usage (from OpenThoughts-Agent/):
     source hpc/dotenv/tacc.env  # or otherwise export the Supabase + WANDB env vars
-    python scripts/database/manual_db_push.py --hf-model-id org/model --wandb-run entity/project/run
+
+    # Single dataset:
+    python scripts/database/manual_db_push.py --hf-model-id org/model --dataset-name DCAgent/my-dataset
+
+    # Multiple datasets (comma-separated → sets dataset_names instead of dataset_id):
+    python scripts/database/manual_db_push.py --hf-model-id org/model \
+        --dataset-name "DCAgent/dataset-a,DCAgent/dataset-b,DCAgent/dataset-c"
 """
 
 import argparse
@@ -43,7 +49,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset-name",
         default=DEFAULT_DATASET_NAME,
-        help="Dataset name used during training (default: %(default)s)",
+        help="Dataset name(s) used during training. For multi-dataset models, "
+        "pass comma-separated names (e.g. 'DCAgent/ds-a,DCAgent/ds-b'). "
+        "Single dataset → sets dataset_id. Multiple → sets dataset_names. "
+        "(default: %(default)s)",
     )
     parser.add_argument(
         "--base-model",
@@ -110,7 +119,15 @@ def main() -> None:
         training_start = now.isoformat()
         training_end = now.isoformat()
 
-    # 2. Shape the record exactly the way Llama-Factory expects
+    # 2. Detect single vs multi-dataset
+    is_multi = "," in args.dataset_name
+    if is_multi:
+        ds_list = [d.strip() for d in args.dataset_name.split(",") if d.strip()]
+        print(f"Multi-dataset mode: {len(ds_list)} datasets")
+        for ds in ds_list:
+            print(f"  - {ds}")
+
+    # 3. Shape the record
     record = {
         "agent_name": args.agent_name or _derive_agent_name(args.dataset_name),
         "training_start": training_start,
@@ -129,7 +146,7 @@ def main() -> None:
         "model_name": args.hf_model_id,
     }
 
-    # 3. Insert / upsert into Supabase
+    # 4. Insert / upsert into Supabase
     result = register_trained_model(record, forced_update=True)
     if result.get("success"):
         model = result["model"]
