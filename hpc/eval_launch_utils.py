@@ -146,7 +146,7 @@ def prepare_eval_configuration(exp_args: dict) -> dict:
     if not model_name and harbor_job.agents:
         model_name = harbor_job.agents[0].model_name
     if not model_name:
-        raise ValueError("Eval jobs require --trace-model (or --datagen-model).")
+        raise ValueError("Eval jobs require --model (or --trace-model / --datagen-model).")
     exp_args["_eval_model_name"] = model_name
     exp_args["trace_model"] = model_name
 
@@ -668,7 +668,7 @@ def launch_eval_job_v2(exp_args: dict, hpc) -> None:
         gpus_per_node=gpus_per_node,
         cpus_per_node=cpus_per_node,
         needs_vllm=requires_vllm,
-        vllm_model_path=getattr(vllm_cfg, "model_path", None) if vllm_cfg else model_name,
+        vllm_model_path=model_name or (getattr(vllm_cfg, "model_path", None) if vllm_cfg else None),
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         data_parallel_size=data_parallel_size,

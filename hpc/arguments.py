@@ -559,7 +559,7 @@ class DataGenArgs:
     )
     trace_model: Optional[str] = field(
         default=None,
-        metadata={"help": "Override Harbor agent model for trace generation"}
+        metadata={"help": "DEPRECATED: use --model instead. Alias for model."}
     )
     trace_agent_name: Optional[str] = field(
         default=None,
@@ -684,7 +684,7 @@ class RLArgs:
     )
     model_path: Optional[str] = field(
         default=None,
-        metadata={"help": "Model path for RL training (e.g., Qwen/Qwen2.5-7B-Instruct)"}
+        metadata={"help": "DEPRECATED: use --model instead. Alias for model."}
     )
     train_data: Optional[str] = field(
         default=None,
@@ -891,11 +891,13 @@ def parse_args():
         help=argparse.SUPPRESS,  # Hidden alias
     )
 
-    # Add --model as alias for --trace_model (more concise for eval jobs)
+    # --model is the canonical flag for specifying the model to serve/evaluate/train.
+    # --model_path and --trace_model are deprecated aliases that map to the same dest.
     launch_group.add_argument(
         "--model",
         dest="trace_model",
-        help=argparse.SUPPRESS,  # Hidden alias
+        help="Model to serve/evaluate (e.g. laion/100k_baseline__Qwen3-8B). "
+             "Overrides datagen config model_path for vLLM serving.",
     )
 
     # Add DataGenArgs arguments
@@ -947,10 +949,15 @@ def parse_args():
 
     args = parser.parse_args()
 
-    # --model is an alias for --trace_model (eval/datagen) but also doubles as
-    # shorthand for --model_name_or_path (SFT) when the latter is unset.
-    if getattr(args, "trace_model", None) and not getattr(args, "model_name_or_path", None):
-        args.model_name_or_path = args.trace_model
+    # Unify --model, --model_path, --trace_model into a single "model" key.
+    # Priority: --model (via trace_model dest) > --model_path > None
+    _model = getattr(args, "trace_model", None) or getattr(args, "model_path", None)
+    if _model:
+        args.trace_model = _model
+        args.model_path = _model
+    # Also set model_name_or_path for SFT compatibility
+    if _model and not getattr(args, "model_name_or_path", None):
+        args.model_name_or_path = _model
 
     args_dict = {k: v for k, v in vars(args).items() if v is not None}
     args_dict["_explicit_cli_keys"] = explicit_cli_keys
