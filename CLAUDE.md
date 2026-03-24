@@ -869,6 +869,14 @@ After an RL job terminates (early or completed), follow these steps to preserve 
      --dataset-name "DCAgent/dataset-a,DCAgent/dataset-b"
    # --wandb-run is optional (timestamps default to now if omitted; Jupiter has no W&B)
    ```
+   **IMPORTANT — verify `--base-model` carefully**: The `--base-model` flag must be
+   the exact HF repo name of the SFT/base model that RL was trained *from* — NOT
+   a default or the most common base. The base is encoded in the job name suffix
+   (e.g. `__exp_tas_optimal_comb` → `laion/exp_tas_optimal_combined_traces`,
+   `__GLM-4_7-swesmith-san` → `laion/GLM-4_7-swesmith-sandboxes-with_tests-...`).
+   Cross-check against the RL config YAML or the launch command in
+   `notes/ot-agent/rl_experiments.md`. Getting this wrong corrupts the base_model_id
+   tree used for size classification and RL bump analysis.
 
 8. **Upload RL traces**: Upload the training traces from the job:
    ```bash
