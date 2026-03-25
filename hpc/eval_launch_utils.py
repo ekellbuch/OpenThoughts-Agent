@@ -244,6 +244,7 @@ class EvalJobConfig:
     # vLLM settings (if launching inline)
     needs_vllm: bool = False
     vllm_model_path: Optional[str] = None
+    model_hf_name: Optional[str] = None  # Original HF repo name (before pre-download to local path)
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     data_parallel_size: int = 1
@@ -355,11 +356,18 @@ class EvalJobRunner:
 
         from hpc.launch_utils import sync_eval_to_database, upload_traces_to_hf
 
-        # Derive model name (strip hosted_vllm prefix if present)
-        model_name = self.config.model
+        # Derive model name for DB registration.
+        # Prefer the original HF name over local paths or hosted_vllm aliases.
+        model_name = self.config.model_hf_name or self.config.model
         if model_name and model_name.startswith("hosted_vllm/"):
-            # Use original model path for database records
             model_name = self.config.vllm_model_path or model_name
+        # Strip any remaining local snapshot paths back to HF name
+        if model_name and "/snapshots/" in model_name:
+            # /path/hub/models--org--name/snapshots/hash -> org/name
+            import re
+            match = re.search(r"models--(.+?)--(.+?)/snapshots/", model_name)
+            if match:
+                model_name = f"{match.group(1)}/{match.group(2)}"
 
         if self.config.upload_to_database:
             # Full database sync (includes optional HF upload)
@@ -623,6 +631,8 @@ def launch_eval_job_v2(exp_args: dict, hpc) -> None:
         dl_result = pre_download_model(eval_model)
         if vllm_cfg and hasattr(vllm_cfg, "model_path"):
             vllm_cfg.model_path = dl_result.local_path
+        # Use local path for vLLM serving, but preserve original HF name for DB registration
+        exp_args["_eval_model_hf_name"] = eval_model  # original HF name for DB
         exp_args["_eval_model_name"] = dl_result.local_path
         exp_args["trace_model"] = dl_result.local_path
         model_name = dl_result.local_path
@@ -669,6 +679,7 @@ def launch_eval_job_v2(exp_args: dict, hpc) -> None:
         cpus_per_node=cpus_per_node,
         needs_vllm=requires_vllm,
         vllm_model_path=model_name or (getattr(vllm_cfg, "model_path", None) if vllm_cfg else None),
+        model_hf_name=exp_args.get("_eval_model_hf_name"),
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         data_parallel_size=data_parallel_size,
