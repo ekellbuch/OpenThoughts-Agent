@@ -65,8 +65,7 @@ terminal_bench:
       - RewardFileEmptyError
       - VerifierOutputParseError
 
-    # 75% of max inference capacity (16 engines x 24 seqs = 384)
-    n_concurrent_trials: 288
+    n_concurrent_trials: 512
 
     # Logging settings
     log_level: INFO
@@ -203,16 +202,16 @@ trainer:
 
   fully_async:
     max_staleness_steps: 16
-    num_parallel_generation_workers: 768
+    num_parallel_generation_workers: 1536
 
 generator:
   backend: vllm
   timeout_multiplier: 1.0
   model_dtype: bfloat16
 
-  # 16 TP=2 inference engines (48 total GPUs: 32 inference + 16 policy/ref shared)
-  inference_engine_tensor_parallel_size: 2
-  num_inference_engines: 24
+  # 48 TP=1 inference engines (48 total GPUs: 48 inference + 16 policy/ref shared)
+  inference_engine_tensor_parallel_size: 1
+  num_inference_engines: 48
 
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8

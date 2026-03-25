@@ -37,11 +37,11 @@ plot_loss: true
 ### train
 learning_rate: 4.0e-5
 num_train_epochs: 5.0
-max_grad_norm: 5.0e-4
+max_grad_norm: 1.0e-3
 adam_beta2: 0.98
 lr_scheduler_type: cosine
 warmup_ratio: 0.1
-weight_decay: 1e-4
+weight_decay: 0.04
 bf16: true
 pure_bf16: false
 gradient_checkpointing: true

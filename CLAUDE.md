@@ -517,6 +517,36 @@ ssh Jupiter '/e/scratch/jureap59/feuer1/miniforge3/envs/otagent/bin/pip install 
 
 **Cluster details**: A100 80GB GPUs, 4/node, SLURM scheduler. Internet on compute nodes. Conda env: `dcagent`.
 
+**One-off eval launch** (via HPC launcher, not the Leonardo listener):
+```bash
+python -m hpc.launch \
+  --job_type eval \
+  --model_path laion/<model_name> \
+  --tasks_input_path DCAgent2/swebench-verified-random-100-folders \
+  --trace_harbor_config hpc/harbor_yaml/eval/eval_ctx32k_non_it_2x_eval_.yaml \
+  --datagen_config hpc/datagen_yaml/qwen3_8b_vllm_serve_32k_4xA100.yaml \
+  --trace-n-concurrent 48 \
+  --upload_to_database \
+  --daytona_api_key "$DAYTONA_BASE_API_KEY" \
+  --time_limit 11:59:00 \
+  --num_nodes 1 \
+  --gpus_per_node 4
+```
+
+**IMPORTANT — Daytona key and datagen config for Perlmutter evals:**
+- **`--daytona_api_key "$DAYTONA_BASE_API_KEY"`** — required. The default
+  `DAYTONA_API_KEY` (RL org) blocks declarative builds needed for SWE-bench.
+  Use `DAYTONA_BASE_API_KEY` for eval jobs. Available keys in `~/secrets.env`:
+  `DAYTONA_API_KEY` (RL), `DAYTONA_B_API_KEY`, `DAYTONA_BASE_API_KEY` (evals),
+  `DAYTONA_DATA_API_KEY`.
+- **`--datagen_config qwen3_8b_vllm_serve_32k_4xA100.yaml`** — use the A100
+  variant, NOT the GH200 one. The GH200 config has `--all2all-backend pplx`
+  which crashes on A100 (PPLX library not available). A100 variants:
+  `qwen3_8b_vllm_serve_32k_4xA100.yaml` (8B) and
+  `qwen3_32b_vllm_serve_32k_4xA100.yaml` (32B).
+
+Replace `--tasks_input_path` with the appropriate benchmark dataset (`DCAgent/dev_set_v2`, `DCAgent2/terminal_bench_2`, etc.).
+
 ## Eval Job Submission Defaults
 
 When submitting eval jobs via `unified_eval_listener.py`, always use these flags unless explicitly told otherwise:
@@ -911,10 +941,27 @@ After an RL job terminates (early or completed), follow these steps to preserve 
 
 After an 8B SFT job completes on a no-internet cluster (Jupiter, Leonardo), follow these steps to publish and clean up:
 
+0. **Cancel pending retries** before anything else, so stale restarts don't start
+   while you're uploading or after you've cleaned up:
+   ```bash
+   squeue -u $USER --format='%i %j %T' | grep <job_name> | grep PENDING | awk '{print $1}' | xargs -r scancel
+   ```
+
 1. **Remove intermediate checkpoints** before uploading to avoid uploading unnecessary cruft:
    ```bash
    rm -rf $CHECKPOINTS_DIR/<job_name>/checkpoint-*
    rm -rf $CHECKPOINTS_DIR/<job_name>/.cache
+   ```
+
+1b. **Qwen 3.5 only — copy `preprocessor_config.json` from the base model**:
+   LLaMA-Factory does not emit `preprocessor_config.json` during SFT, but some
+   inference engines (e.g. vLLM) require it. Without it, the model may fail to
+   load or produce garbled output. Copy it from the base model before uploading:
+   ```bash
+   # For Qwen3.5-9B:
+   cp /path/to/Qwen3.5-9B/preprocessor_config.json $CHECKPOINTS_DIR/<job_name>/
+   # For Qwen3.5-27B:
+   cp /path/to/Qwen3.5-27B/preprocessor_config.json $CHECKPOINTS_DIR/<job_name>/
    ```
 
 2. **Upload model weights to HuggingFace**:
