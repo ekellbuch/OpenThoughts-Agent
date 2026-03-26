@@ -191,12 +191,10 @@ generator:
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
 
-  # GH200 96GB unified memory — 0.75 is conservative even for 32B at TP=2
-  # (~32GB weights per GPU, leaves ~40GB for KV cache)
-  gpu_memory_utilization: 0.75
+  gpu_memory_utilization: 0.85
 
   max_num_seqs: 24
-  max_num_batched_tokens: 65536
+  max_num_batched_tokens: 16384
 
   enable_prefix_caching: true
   enable_chunked_prefill: true
