@@ -33,7 +33,6 @@ vllm_server:
   max_num_seqs: 32
   gpu_memory_utilization: 0.93
   swap_space: 32
-  quantization: awq
   enable_expert_parallel: true
   enable_auto_tool_choice: true
   tool_call_parser: glm47
