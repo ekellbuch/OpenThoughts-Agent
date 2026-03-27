@@ -49,7 +49,7 @@ RUN_TAG_ARG="${4:-}"
 N_CONCURRENT="${EVAL_N_CONCURRENT:-16}"
 GPU_MEMORY_UTIL="${EVAL_GPU_MEMORY_UTIL:-0.95}"
 DAYTONA_ERROR_THRESHOLD="${EVAL_DAYTONA_THRESHOLD:-999999}"
-HARBOR_CONFIG="${EVAL_HARBOR_CONFIG:-${DCFT:-/home/groups/swl1/ekb/Projects/coding_agent/modules/OpenThoughts-Agent}/eval/sherlock/dcagent_eval_config.yaml}"
+HARBOR_CONFIG="${EVAL_HARBOR_CONFIG:-${DCFT:-$GROUP_HOME/ekb/Projects/coding_agent/modules/OpenThoughts-Agent}/eval/sherlock/dcagent_eval_config.yaml}"
 DB_JOB_ID="${EVAL_DB_JOB_ID:-}"
 
 # Strip slashes and special chars for file-safe names
@@ -77,9 +77,9 @@ echo "=============================================="
 # Sherlock Environment Setup
 # ==============================================================================
 
-DCFT="${DCFT:-/home/groups/swl1/ekb/Projects/coding_agent/modules/OpenThoughts-Agent}"
-CODING_AGENT_DIR="/home/groups/swl1/ekb/Projects/coding_agent"
-HARBOR_DIR="/home/groups/swl1/ekb/Projects/harbor"
+DCFT="${DCFT:-$GROUP_HOME/ekb/Projects/coding_agent/modules/OpenThoughts-Agent}"
+CODING_AGENT_DIR="$GROUP_HOME/ekb/Projects/coding_agent"
+HARBOR_DIR="$CODING_AGENT_DIR/modules/harbor"
 HARBOR_VENV="$CODING_AGENT_DIR/scripts/harbor/.venv"
 
 # Reset PYTHONPATH to avoid inheriting submitter's environment
@@ -98,11 +98,11 @@ if [ -f "$DC_AGENT_SECRET_ENV" ]; then
 fi
 
 # Apptainer cache
-export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-/scratch/groups/swl1/ekb/.cache/singularity}"
+export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-$GROUP_SCRATCH/$USER/.cache/singularity}"
 
 # --- vLLM / Ray env vars ---
 export VLLM_USE_V1=1
-export VLLM_CONFIG_ROOT="${VLLM_CONFIG_ROOT:-/scratch/groups/swl1/ekb/.cache/vllm}"
+export VLLM_CONFIG_ROOT="${VLLM_CONFIG_ROOT:-$GROUP_SCRATCH/$USER/.cache/vllm}"
 export TRITON_CACHE_DIR="/tmp/triton_cache_${USER}"
 export FLASHINFER_WORKSPACE_BASE="/tmp/flashinfer_cache_${USER}"
 export HYDRA_FULL_ERROR=1
@@ -190,7 +190,7 @@ if [[ "$REPO_ID" == /* ]]; then
     echo "[DEBUG] Found $TASK_COUNT tasks with instruction.md"
 else
     echo "Downloading/locating dataset: $REPO_ID"
-    DATASET_LOCAL_DIR="/scratch/groups/swl1/ekb/eval_datasets/${SAFE_REPO}"
+    DATASET_LOCAL_DIR="$GROUP_SCRATCH/$USER/eval_datasets/${SAFE_REPO}"
     echo "[DEBUG] DATASET_LOCAL_DIR=$DATASET_LOCAL_DIR"
     DOWNLOAD_LOG=$(mktemp /tmp/download_XXXXXX.log)
     $PYTHON_BIN "$DCFT/eval/sherlock/snapshot_download.py" "$REPO_ID" --local-dir "$DATASET_LOCAL_DIR" > "$DOWNLOAD_LOG" 2>&1
@@ -214,7 +214,7 @@ if [ -n "$RUN_TAG_ARG" ]; then
 else
     RUN_TAG="${SAFE_REPO}_${SAFE_MODEL}"
 fi
-EVAL_JOBS_DIR="${EVAL_JOBS_DIR:-/home/groups/swl1/ekb/data/coding_agent/outputs/harbor/eval_jobs}"
+EVAL_JOBS_DIR="${EVAL_JOBS_DIR:-$GROUP_HOME/ekb/data/coding_agent/outputs/harbor/eval_jobs}"
 RUN_DIR="${EVAL_JOBS_DIR}/${RUN_TAG}"
 mkdir -p "$RUN_DIR"
 
@@ -228,7 +228,7 @@ echo "Run dir: $RUN_DIR"
 # ==============================================================================
 set +e
 
-HARBOR_RUNNER_IMAGE="${HARBOR_RUNNER_IMAGE:-/scratch/groups/swl1/ekb/.cache/harbor/harbor_runner.sif}"
+HARBOR_RUNNER_IMAGE="${HARBOR_RUNNER_IMAGE:-$GROUP_SCRATCH/$USER/.cache/harbor/harbor_runner.sif}"
 HARBOR_SITE_PACKAGES="$HARBOR_VENV/lib/python3.13/site-packages"
 HARBOR_SRC="$HARBOR_DIR/src"
 
