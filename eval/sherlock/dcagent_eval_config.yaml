@@ -27,6 +27,7 @@ environment:
     extra_binds:
       - /home/groups/swl1/ekb/Projects/coding_agent/scripts/harbor/tools/bin/uv:/usr/local/bin/uv:ro
       - /home/groups/swl1/ekb/Projects/coding_agent/scripts/harbor/tools/bin/uvx:/usr/local/bin/uvx:ro
+      - /home/groups/swl1/ekb/Projects/coding_agent/scripts/harbor/tools/etc/99-no-sandbox.conf:/etc/apt/apt.conf.d/99-no-sandbox:ro
 agents:
   - name: terminus-2
     trajectory_config:

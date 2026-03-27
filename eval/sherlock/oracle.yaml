@@ -1,0 +1,38 @@
+# Harbor job config: Oracle agent on Terminal-Bench 2.0 (Sherlock)
+#
+# Runs gold reference solution.sh for each task to establish the infrastructure
+# ceiling — max possible score given our Apptainer environment.
+#
+# No model needed. No vLLM needed. No GPU needed.
+#
+# Usage:
+#   sbatch eval/sherlock/oracle.sbatch                    # all tasks
+#   sbatch eval/sherlock/oracle.sbatch 3                  # smoke test (3 tasks)
+#   sbatch eval/sherlock/oracle.sbatch 1 largest-eigenval # single task
+
+jobs_dir: jobs/terminal-bench-oracle
+
+orchestrator:
+  n_concurrent_trials: 4
+
+agents:
+  - name: oracle
+
+environment:
+  type: apptainer
+  delete: false
+  kwargs:
+    image_cache_dir: /scratch/groups/swl1/ekb/.cache/harbor
+    use_fakeroot: true
+    default_cwd: /app
+    default_env:
+      TMPDIR: /tmp
+    extra_binds:
+      - /home/groups/swl1/ekb/Projects/coding_agent/scripts/harbor/tools/bin/uv:/usr/local/bin/uv:ro
+      - /home/groups/swl1/ekb/Projects/coding_agent/scripts/harbor/tools/bin/uvx:/usr/local/bin/uvx:ro
+      - /home/groups/swl1/ekb/Projects/coding_agent/scripts/harbor/tools/etc/99-no-sandbox.conf:/etc/apt/apt.conf.d/99-no-sandbox:ro
+
+datasets:
+  - registry: {}
+    name: terminal-bench
+    version: "2.0"
