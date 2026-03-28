@@ -3543,6 +3543,54 @@ def upload_job_and_trial_records(
     if not trial_dirs:
         raise ValueError(f"No complete trial directories found in {job_dir}")
 
+    # Quality gate: block upload if score is too low or trial count is incomplete
+    _n_expected = job_result.get("n_total_trials", 0)
+    _n_complete = len(trial_dirs)
+    _stats = job_result.get("stats", {})
+    _evals = _stats.get("evals", {})
+    _accuracy = None
+    for _eval_data in _evals.values():
+        for _m in _eval_data.get("metrics", []):
+            if "mean_drop_ei_reward" in _m:
+                _accuracy = _m["mean_drop_ei_reward"]
+                break
+            if "accuracy" in _m:
+                _accuracy = _m["accuracy"]
+                break
+        if _accuracy is not None:
+            break
+
+    _force = os.environ.get("EVAL_UPLOAD_FORCE", "").lower() in ("1", "true", "yes")
+
+    if _accuracy is not None and _accuracy < 0.01:
+        msg = (
+            f"Upload blocked: accuracy {_accuracy:.4f} is below 1% threshold. "
+            f"This likely indicates a broken eval (all trials errored). "
+            f"Use --force to override."
+        )
+        if _force:
+            logger.warning(f"FORCED: {msg}")
+        else:
+            raise ValueError(msg)
+
+    if _n_expected > 0 and _n_complete < _n_expected:
+        _completion_pct = _n_complete / _n_expected * 100
+        if _completion_pct < 50:
+            msg = (
+                f"Upload blocked: only {_n_complete}/{_n_expected} trials complete "
+                f"({_completion_pct:.0f}%). Eval is too incomplete to register. "
+                f"Use --force to override."
+            )
+            if _force:
+                logger.warning(f"FORCED: {msg}")
+            else:
+                raise ValueError(msg)
+        else:
+            logger.warning(
+                f"Partial eval: {_n_complete}/{_n_expected} trials complete "
+                f"({_completion_pct:.0f}%). Proceeding with upload."
+            )
+
     # Read first trial to auto-detect metadata
     first_trial_result = json.loads((trial_dirs[0] / "result.json").read_text())
     first_trial_config = json.loads((trial_dirs[0] / "config.json").read_text())
