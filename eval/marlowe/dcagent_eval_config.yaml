@@ -1,0 +1,33 @@
+jobs_dir: /scratch/m000120-pm05/ekb/sky_harbor/ot_eval_jobs
+n_attempts: 3
+timeout_multiplier: 1.0
+orchestrator:
+  type: local
+  n_concurrent_trials: 16
+  quiet: false
+  retry:
+    max_retries: 3
+    exclude_exceptions:
+      - AgentTimeoutError
+      - EnvironmentStartTimeoutError
+      - SandboxBuildFailedError
+      - VerifierTimeoutError
+    wait_multiplier: 1.0
+    min_wait_sec: 1.0
+    max_wait_sec: 60.0
+environment:
+  type: apptainer
+  force_build: false
+  delete: false
+  kwargs:
+    image_cache_dir: /scratch/m000120-pm05/ekb/.apptainer-cache
+    default_cwd: /app
+    default_env:
+      TMPDIR: /tmp
+agents:
+  - name: terminus-2
+    trajectory_config:
+      raw_content: true
+      linear_history: true
+datasets:
+  - registry: {}
