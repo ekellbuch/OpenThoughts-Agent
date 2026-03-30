@@ -6,6 +6,9 @@ __pycache__/
 # Beam cruft
 scripts/beam/helm-chart/charts/localstack-0.6.5.tgz
 
+# database bu
+scripts/database/backups
+
 # C extensions
 *.so
 

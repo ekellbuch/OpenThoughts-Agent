@@ -240,7 +240,10 @@ def configure_sft_reporting(base_config: dict, exp_args: dict, model_path: str) 
         base_config.pop("report_to", None)
         base_config["push_to_hub"] = push_to_hub
         base_config["model_name_or_path"] = model_path
-        base_config["datasets_cache_dir"] = os.environ.get("HF_HUB_CACHE", "")
+        # Use a dedicated arrow cache dir alongside HF_HUB_CACHE (not inside it) to avoid
+        # datasets>=4.7.0 cache resolution bugs while keeping arrow caches off /tmp.
+        _hf_cache = os.environ.get("HF_HUB_CACHE", "")
+        base_config["datasets_cache_dir"] = os.path.join(os.path.dirname(_hf_cache), "arrow_cache") if _hf_cache else ""
     return base_config
 
 
