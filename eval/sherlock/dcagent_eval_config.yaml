@@ -1,20 +1,33 @@
+# Harbor eval config for Sherlock — Apptainer environment.
+# Based on TACC's eval_ctx32k_non_it_2x_eval_.yaml with Sherlock-specific
+# environment settings (Apptainer, fakeroot, bind-mounts).
+
 jobs_dir: /scratch/groups/swl1/ekb/data/coding_agent/outputs/harbor/eval_jobs
 n_attempts: 3
-timeout_multiplier: 1.0
+timeout_multiplier: 2.0
+debug: false
+
 orchestrator:
   type: local
   n_concurrent_trials: 16
   quiet: false
+  plain_output: true
   retry:
-    max_retries: 3
+    max_retries: 10
     exclude_exceptions:
       - AgentTimeoutError
-      - EnvironmentStartTimeoutError
-      - SandboxBuildFailedError
       - VerifierTimeoutError
-    wait_multiplier: 1.0
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - VerifierOutputParseError
+      - SandboxBuildFailedError
+      - VerifierRuntimeError
+      - SummarizationTimeoutError
+      - ContextLengthExceededError
+    wait_multiplier: 2.0
     min_wait_sec: 1.0
-    max_wait_sec: 60.0
+    max_wait_sec: 90.0
+
 environment:
   type: apptainer
   force_build: false
@@ -30,11 +43,27 @@ environment:
       - /home/groups/swl1/ekb/Projects/coding_agent/scripts/harbor/tools/bin/uvx:/usr/local/bin/uvx:ro
       - /home/groups/swl1/ekb/Projects/coding_agent/scripts/harbor/tools/etc/99-no-sandbox.conf:/etc/apt/apt.conf.d/99-no-sandbox:ro
       - /home/groups/swl1/ekb/Projects/coding_agent/scripts/harbor/tools/lib/libutempter.so.0:/usr/lib/x86_64-linux-gnu/libutempter.so.0:ro
+
 agents:
   - name: terminus-2
+    kwargs:
+      model_info:
+        max_input_tokens: 32768
+        max_output_tokens: 8192
+        input_cost_per_token: 0
+        output_cost_per_token: 0
+      enable_summarize: true
+      proactive_summarization_threshold: 8192
+      parser_name: json
+      tmux_pane_width: 160
+      tmux_pane_height: 40
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: true
     trajectory_config:
       raw_content: true
       linear_history: true
+
 datasets:
   - registry: {}
     name: terminal-bench

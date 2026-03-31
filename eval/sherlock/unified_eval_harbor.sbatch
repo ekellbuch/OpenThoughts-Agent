@@ -161,7 +161,7 @@ echo "  Args: $VLLM_ARGS"
 singularity exec --nv \
     "$VLLM_IMAGE" \
     python3 -m vllm.entrypoints.openai.api_server $VLLM_ARGS \
-    > "eval/sherlock/logs/vllm_${SLURM_JOB_ID}.log" 2>&1 &
+    > "/scratch/groups/swl1/ekb/logs/eval_sherlock/vllm_${SLURM_JOB_ID}.log" 2>&1 &
 VLLM_PID=$!
 
 # Health check loop
@@ -172,12 +172,12 @@ while ! curl -s http://localhost:8000/v1/models > /dev/null 2>&1; do
     ELAPSED=$(( SECONDS - VLLM_START ))
     if [ $ELAPSED -ge $VLLM_TIMEOUT ]; then
         echo "ERROR: vLLM server failed to start after ${VLLM_TIMEOUT}s"
-        tail -50 "eval/sherlock/logs/vllm_${SLURM_JOB_ID}.log" 2>/dev/null || true
+        tail -50 "/scratch/groups/swl1/ekb/logs/eval_sherlock/vllm_${SLURM_JOB_ID}.log" 2>/dev/null || true
         exit 1
     fi
     if ! kill -0 "$VLLM_PID" 2>/dev/null; then
         echo "ERROR: vLLM process died"
-        tail -50 "eval/sherlock/logs/vllm_${SLURM_JOB_ID}.log" 2>/dev/null || true
+        tail -50 "/scratch/groups/swl1/ekb/logs/eval_sherlock/vllm_${SLURM_JOB_ID}.log" 2>/dev/null || true
         exit 1
     fi
     echo "Waiting for vLLM server (${ELAPSED}s/${VLLM_TIMEOUT}s)..."

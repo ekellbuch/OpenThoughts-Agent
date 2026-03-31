@@ -61,10 +61,10 @@ If you have a `DAYTONA_API_KEY`, test that cloud containers work from Sherlock:
 
 ```bash
 # Oracle test (no GPU, runs on login node)
-DAYTONA_API_KEY=dtn_... test/test_daytona_oracle.sh
+DAYTONA_API_KEY=dtn_... tests/test_daytona_oracle.sh
 
 # Override task:
-TASK=qemu-startup DAYTONA_API_KEY=dtn_... test/test_daytona_oracle.sh
+TASK=qemu-startup DAYTONA_API_KEY=dtn_... tests/test_daytona_oracle.sh
 ```
 
 To use Daytona for a full eval, pass the daytona config:
@@ -110,8 +110,8 @@ tail -f eval/sherlock/logs/vllm_<JOBID>.log
 | `dcagent_eval_config_daytona.yaml` | Harbor config for model agent + Daytona (cloud containers) |
 | `secret.env.template` | API keys template |
 | `snapshot_download.py` | HuggingFace dataset downloader |
-| `$CODING_AGENT_DIR/test/test_daytona_oracle.sh` | Smoke test: 1 task via Daytona + oracle (no GPU needed) |
-| `$CODING_AGENT_DIR/test/test_daytona.sh` | Smoke test: 1 task via Daytona + terminus-2 (needs vLLM) |
+| `$CODING_AGENT_DIR/tests/test_daytona_oracle.sh` | Smoke test: 1 task via Daytona + oracle (no GPU needed) |
+| `$CODING_AGENT_DIR/tests/test_daytona.sh` | Smoke test: 1 task via Daytona + terminus-2 (needs vLLM) |
 
 ## Environment Variables
 
