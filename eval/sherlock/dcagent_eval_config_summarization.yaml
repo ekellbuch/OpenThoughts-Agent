@@ -1,9 +1,15 @@
+# Run 5: Summarization timeout experiment.
+# Changes from dcagent_eval_config.yaml:
+#   - summarization_timeout: 600 (was default 300)
+#   - n_concurrent_trials: 8 (was 16) — halves GPU contention
+#   - SummarizationTimeoutError excluded from retries
+
 jobs_dir: /scratch/groups/swl1/ekb/data/coding_agent/outputs/harbor/eval_jobs
 n_attempts: 3
 timeout_multiplier: 1.0
 orchestrator:
   type: local
-  n_concurrent_trials: 16
+  n_concurrent_trials: 8
   quiet: false
   retry:
     max_retries: 3
@@ -12,6 +18,7 @@ orchestrator:
       - EnvironmentStartTimeoutError
       - SandboxBuildFailedError
       - VerifierTimeoutError
+      - SummarizationTimeoutError
     wait_multiplier: 1.0
     min_wait_sec: 1.0
     max_wait_sec: 60.0
@@ -32,6 +39,8 @@ environment:
       - /home/groups/swl1/ekb/Projects/coding_agent/scripts/harbor/tools/lib/libutempter.so.0:/usr/lib/x86_64-linux-gnu/libutempter.so.0:ro
 agents:
   - name: terminus-2
+    kwargs:
+      summarization_timeout: 600
     trajectory_config:
       raw_content: true
       linear_history: true

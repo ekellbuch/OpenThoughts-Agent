@@ -15,9 +15,19 @@ End-to-end guide for running Harbor agent evaluations on Sherlock.
   (GPU node)
 ```
 
-Key difference from other clusters: Sherlock uses **Apptainer** (not Docker/Daytona)
-as the sandbox backend. Harbor runs inside `harbor_runner.sif` which launches
-nested Apptainer containers for each task.
+Two sandbox backends are supported:
+
+- **Apptainer** (default): Containers run locally on the compute node. Requires
+  fakeroot workarounds for Sherlock's CentOS 7 / kernel 3.10. Higher system RAM
+  usage (each container ~2-4 GB).
+- **Daytona** (cloud): Containers run on Daytona's cloud. No fakeroot issues, no
+  local RAM pressure, supports higher concurrency (64-128). Requires
+  `DAYTONA_API_KEY` and outbound HTTPS from compute nodes (Sherlock has this).
+
+In both cases, Harbor itself runs inside `harbor_runner.sif` (Singularity container)
+because Sherlock's glibc 2.17 is too old for tiktoken and other compiled Python
+packages. This matches the pattern on TACC, except TACC can run Harbor natively
+because their OS is newer.
 
 ## Prerequisites
 
@@ -45,7 +55,25 @@ sbatch eval/sherlock/oracle.sbatch
 
 Oracle should achieve ~100% on tasks whose images are cached.
 
-### 2. Run model evaluation
+### 2. Test Daytona backend (optional)
+
+If you have a `DAYTONA_API_KEY`, test that cloud containers work from Sherlock:
+
+```bash
+# Oracle test (no GPU, runs on login node)
+DAYTONA_API_KEY=dtn_... test/test_daytona_oracle.sh
+
+# Override task:
+TASK=qemu-startup DAYTONA_API_KEY=dtn_... test/test_daytona_oracle.sh
+```
+
+To use Daytona for a full eval, pass the daytona config:
+```bash
+EVAL_HARBOR_CONFIG=eval/sherlock/dcagent_eval_config_daytona.yaml \
+sbatch eval/sherlock/unified_eval_harbor.sbatch <MODEL> <DATASET>
+```
+
+### 3. Run model evaluation
 
 ```bash
 # Submit eval job (starts vLLM + Harbor)
@@ -79,8 +107,11 @@ tail -f eval/sherlock/logs/vllm_<JOBID>.log
 | `oracle.yaml` | Harbor config for oracle agent + Apptainer |
 | `unified_eval_harbor.sbatch` | Model eval (GPU, vLLM + Harbor) |
 | `dcagent_eval_config.yaml` | Harbor config for model agent + Apptainer |
+| `dcagent_eval_config_daytona.yaml` | Harbor config for model agent + Daytona (cloud containers) |
 | `secret.env.template` | API keys template |
 | `snapshot_download.py` | HuggingFace dataset downloader |
+| `$CODING_AGENT_DIR/test/test_daytona_oracle.sh` | Smoke test: 1 task via Daytona + oracle (no GPU needed) |
+| `$CODING_AGENT_DIR/test/test_daytona.sh` | Smoke test: 1 task via Daytona + terminus-2 (needs vLLM) |
 
 ## Environment Variables
 

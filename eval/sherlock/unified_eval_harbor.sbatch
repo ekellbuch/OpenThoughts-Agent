@@ -2,10 +2,11 @@
 #SBATCH --job-name=eval
 #SBATCH --partition=swl1,gpu,owners
 #SBATCH --gres=gpu:1
+#SBATCH --constraint="GPU_MEM:80GB"
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --time=24:00:00
-#SBATCH --output=eval/sherlock/logs/%x_%j.out
+#SBATCH --output=/scratch/groups/swl1/ekb/logs/eval_sherlock/%x_%j.out
 
 # ==============================================================================
 # Unified Eval Harbor — Sherlock (Stanford Research Computing)
@@ -86,10 +87,10 @@ HARBOR_VENV="$CODING_AGENT_DIR/scripts/harbor/.venv"
 unset PYTHONPATH
 
 # Load Sherlock modules
+# Note: vLLM runs in Singularity container (not system module) for newer model support
 module load cuda
 module load python/3.12
 module load py-pyarrow/18.1.0_py312
-module load py-vllm/0.7.0_py312
 
 # Source secrets
 DC_AGENT_SECRET_ENV="${DC_AGENT_SECRET_ENV:-$HOME/.env}"
@@ -129,52 +130,60 @@ cleanup() {
 trap cleanup EXIT
 
 # ==============================================================================
-# Start vLLM Server
+# Start vLLM Server (via Singularity container)
+#
+# The system py-vllm/0.7.0_py312 module has transformers 4.48 which is too old
+# for Qwen3 and other recent architectures. Use the containerized vLLM instead.
 # ==============================================================================
 mkdir -p eval/sherlock/logs
 
-# Download model (Sherlock compute nodes have internet)
-echo "Downloading/caching model: $MODEL"
-$PYTHON_BIN -c "
-from huggingface_hub import snapshot_download
-import os
-path = snapshot_download('$MODEL')
-print(f'Model cached at: {path}')
-"
-if [ $? -ne 0 ]; then
-    echo "ERROR: Model download failed for $MODEL. Exiting."
-    exit 1
-fi
+VLLM_IMAGE="${VLLM_IMAGE:-docker://vllm/vllm-openai:latest}"
+VLLM_PORT=8000
+
+# Build vLLM args from EVAL_VLLM_* env vars
+# Note: --swap-space removed (not supported in vLLM 0.18+)
+VLLM_TP="${EVAL_VLLM_TENSOR_PARALLEL_SIZE:-1}"
+VLLM_MAX_LEN="${EVAL_VLLM_MAX_MODEL_LEN:-}"
+VLLM_TCP="${EVAL_VLLM_TOOL_CALL_PARSER:-}"
+
+VLLM_ARGS="--model $MODEL --host 0.0.0.0 --port $VLLM_PORT"
+VLLM_ARGS="$VLLM_ARGS --served-model-name $MODEL"
+VLLM_ARGS="$VLLM_ARGS --tensor-parallel-size $VLLM_TP"
+VLLM_ARGS="$VLLM_ARGS --gpu-memory-utilization $GPU_MEMORY_UTIL"
+VLLM_ARGS="$VLLM_ARGS --trust-remote-code"
+[ -n "$VLLM_MAX_LEN" ] && VLLM_ARGS="$VLLM_ARGS --max-model-len $VLLM_MAX_LEN"
+[ -n "$VLLM_TCP" ] && VLLM_ARGS="$VLLM_ARGS --enable-auto-tool-choice --tool-call-parser $VLLM_TCP"
 
 echo "Starting vLLM server for model: $MODEL"
-source "$DCFT/eval/build_vllm_cmd.sh"
-build_vllm_cmd "$PYTHON_BIN" "$MODEL" "$GPU_MEMORY_UTIL"
+echo "  Image: $VLLM_IMAGE"
+echo "  Args: $VLLM_ARGS"
 
-env TORCHDYNAMO_DISABLE=1 \
-    TMPDIR="/tmp" \
-    TRITON_CACHE_DIR="/tmp/triton_cache_${USER}" \
-    TORCH_COMPILE_CACHE_DIR="/tmp/torch_cache_${USER}" \
-    TORCHINDUCTOR_CACHE_DIR="/tmp/torchinductor_${USER}" \
-"${VLLM_CMD[@]}" \
+singularity exec --nv \
+    "$VLLM_IMAGE" \
+    python3 -m vllm.entrypoints.openai.api_server $VLLM_ARGS \
     > "eval/sherlock/logs/vllm_${SLURM_JOB_ID}.log" 2>&1 &
 VLLM_PID=$!
 
 # Health check loop
-MAX_RETRIES=20
-RETRY_INTERVAL=100
-for i in $(seq 1 $MAX_RETRIES); do
-    if curl -s http://localhost:8000/v1/models > /dev/null 2>&1; then
-        echo "vLLM server is ready"
-        break
-    fi
-    echo "Waiting for vLLM server (attempt $i/$MAX_RETRIES)..."
-    sleep $RETRY_INTERVAL
-    if [ $i -eq $MAX_RETRIES ]; then
-        echo "ERROR: vLLM server failed to start"
+# Health check: wait up to 30 minutes for vLLM to be ready
+VLLM_TIMEOUT=1800
+VLLM_START=$SECONDS
+while ! curl -s http://localhost:8000/v1/models > /dev/null 2>&1; do
+    ELAPSED=$(( SECONDS - VLLM_START ))
+    if [ $ELAPSED -ge $VLLM_TIMEOUT ]; then
+        echo "ERROR: vLLM server failed to start after ${VLLM_TIMEOUT}s"
         tail -50 "eval/sherlock/logs/vllm_${SLURM_JOB_ID}.log" 2>/dev/null || true
         exit 1
     fi
+    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+        echo "ERROR: vLLM process died"
+        tail -50 "eval/sherlock/logs/vllm_${SLURM_JOB_ID}.log" 2>/dev/null || true
+        exit 1
+    fi
+    echo "Waiting for vLLM server (${ELAPSED}s/${VLLM_TIMEOUT}s)..."
+    $PYTHON_BIN -c "import time; time.sleep(30)"
 done
+echo "vLLM server is ready (took $(( SECONDS - VLLM_START ))s)"
 
 # ==============================================================================
 # Download dataset
@@ -210,11 +219,11 @@ echo "[DEBUG] Task count in dataset: $(ls -d "$DATASET_PATH"/*/instruction.md 2>
 # Construct run tag and directory
 # ==============================================================================
 if [ -n "$RUN_TAG_ARG" ]; then
-    RUN_TAG="$RUN_TAG_ARG"
+    RUN_TAG="${RUN_TAG_ARG}_${SLURM_JOB_ID}"
 else
-    RUN_TAG="${SAFE_REPO}_${SAFE_MODEL}"
+    RUN_TAG="${SAFE_REPO}_${SAFE_MODEL}_${SLURM_JOB_ID}"
 fi
-EVAL_JOBS_DIR="${EVAL_JOBS_DIR:-$GROUP_HOME/ekb/data/coding_agent/outputs/harbor/eval_jobs}"
+EVAL_JOBS_DIR="${EVAL_JOBS_DIR:-$GROUP_SCRATCH/ekb/data/coding_agent/outputs/harbor/eval_jobs}"
 RUN_DIR="${EVAL_JOBS_DIR}/${RUN_TAG}"
 mkdir -p "$RUN_DIR"
 
@@ -232,7 +241,8 @@ HARBOR_RUNNER_IMAGE="${HARBOR_RUNNER_IMAGE:-$GROUP_SCRATCH/$USER/.cache/harbor/h
 HARBOR_SITE_PACKAGES="$HARBOR_VENV/lib/python3.13/site-packages"
 HARBOR_SRC="$HARBOR_DIR/src"
 
-HARBOR_ARGS="jobs start -p $DATASET_PATH --n-concurrent $N_CONCURRENT --agent terminus-2 --model hosted_vllm/$MODEL --env apptainer --agent-kwarg api_base=http://localhost:8000/v1 --agent-kwarg key=fake_key --n-attempts 3 --job-name $RUN_TAG --config $HARBOR_CONFIG --jobs-dir $EVAL_JOBS_DIR"
+HARBOR_EXTRA_ARGS="${EVAL_HARBOR_EXTRA_ARGS:-}"
+HARBOR_ARGS="jobs start -p $DATASET_PATH --n-concurrent $N_CONCURRENT --agent terminus-2 --model hosted_vllm/$MODEL --env apptainer --agent-kwarg api_base=http://localhost:8000/v1 --agent-kwarg key=fake_key --n-attempts 3 --job-name $RUN_TAG --config $HARBOR_CONFIG --jobs-dir $EVAL_JOBS_DIR $HARBOR_EXTRA_ARGS"
 
 echo "[DEBUG] Harbor args: $HARBOR_ARGS"
 
