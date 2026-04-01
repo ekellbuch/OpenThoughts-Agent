@@ -947,7 +947,12 @@ def construct_sft_sbatch_script(exp_args: dict, hpc) -> str:
     #     print(f"Using Apptainer image: {os.environ['IMAGE']}")
     #     srun_prefix += f' apptainer exec --nv {os.environ["IMAGE"]}'
 
-    cmd = f'python -m hpc.sft_launch_utils --config "{config_path}"'
+    # The srun child processes need the conda environment re-activated because
+    # srun launches a non-interactive shell that doesn't inherit the batch step's
+    # conda activation.  Prepend the conda activate so every node uses the right
+    # Python (critical for sft-qwen35 which needs transformers >= 5.3.0).
+    conda_activate = _get_sft_conda_activate(hpc, exp_args)
+    cmd = f'{conda_activate} && python -m hpc.sft_launch_utils --config "{config_path}"'
     srun_command = f"{srun_prefix} bash -c '{cmd}'"
     substitutions = {
         "time_limit": exp_args.get("time_limit") or "24:00:00",
