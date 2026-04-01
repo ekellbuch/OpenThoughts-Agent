@@ -350,6 +350,7 @@ def construct_config_yaml(exp_args):
         job_type_label="SFT",
     )
     configs_dir = str(job_setup.paths.configs)
+    exp_args["logs_dir"] = str(job_setup.paths.logs)
     _drop_deprecated_fields(exp_args, base_config)
     base_config = _merge_launch_overrides(base_config, exp_args)
     base_config = ensure_deepspeed_config(base_config, exp_args)
@@ -402,13 +403,17 @@ def submit_job(
     exp_args=None,
     dependency=None,
 ):
-    # Legacy SFT path - auto-derive job_name if not provided
-    job_setup = resolve_job_and_paths(
-        exp_args or {},
-        job_type_label="SFT",
-        derive_job_name_fn=derive_default_job_name,
-    )
-    exp_args["logs_dir"] = str(job_setup.paths.logs)
+    # Reuse existing logs_dir if already set (from earlier resolve_job_and_paths
+    # call in _build_training_artifacts). Calling resolve_job_and_paths again
+    # here would detect the configs we just wrote as a "collision" and create
+    # a spurious _2 directory.
+    if not exp_args.get("logs_dir"):
+        job_setup = resolve_job_and_paths(
+            exp_args or {},
+            job_type_label="SFT",
+            derive_job_name_fn=derive_default_job_name,
+        )
+        exp_args["logs_dir"] = str(job_setup.paths.logs)
 
     base_dependency = _merge_dependencies(exp_args.get("dependency"), dependency)
     current_dependency = base_dependency

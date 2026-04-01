@@ -8,7 +8,7 @@ global_batch_size: 32
 #   pip install "transformers>=5.3.0"
 model_name_or_path: Qwen/Qwen3.5-27B
 trust_remote_code: true
-attn: fa2
+attn: sdpa
 # NOTE: Liger kernel may not support Qwen3.5's hybrid architecture (Gated DeltaNet layers).
 enable_liger_kernel: false
 optim: adamw_torch_fused
