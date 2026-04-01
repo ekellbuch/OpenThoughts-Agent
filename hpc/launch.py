@@ -393,6 +393,13 @@ def construct_config_yaml(exp_args):
     apply_data_argument_overrides(base_config, exp_args)
 
     train_config_path_out = _write_train_config(configs_dir, exp_args["job_name"], base_config)
+
+    # Pre-build arrow cache on the login node to avoid NFS race condition
+    # when multiple compute nodes try to build it simultaneously.
+    if not exp_args.get("internet_node", True):
+        from hpc.sft_launch_utils import prebuild_arrow_cache
+        prebuild_arrow_cache(base_config)
+
     exp_args["output_dir"] = base_config["output_dir"]
     exp_args["dataset"] = base_config["dataset"]
     exp_args["model_name_or_path"] = base_config["model_name_or_path"]

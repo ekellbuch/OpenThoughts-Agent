@@ -130,6 +130,52 @@ def maybe_compute_gradient_accumulation(base_config: dict, exp_args: dict) -> di
     return base_config
 
 
+def prebuild_arrow_cache(base_config: dict) -> None:
+    """Pre-build HF datasets arrow cache on the login node (single process).
+
+    When training on multi-node no-internet clusters (Jupiter, Leonardo), all
+    ranks race to build the arrow cache simultaneously on shared NFS, causing
+    ``FileNotFoundError`` when one rank reads a partially-written ``.arrow``
+    file from another.  Running the dataset load once on the login node
+    before submitting the SLURM job avoids this race entirely.
+
+    This only loads the raw dataset into the arrow cache — it does NOT run
+    tokenization (which requires the model and is fast per-rank).  The key
+    benefit is that ``load_dataset()`` on compute nodes will find the cached
+    arrow files and skip the slow download/generation step.
+    """
+    dataset_path = base_config.get("dataset", "")
+    cache_dir = base_config.get("datasets_cache_dir", "")
+
+    if not dataset_path or not cache_dir:
+        return
+
+    # Only pre-build for local/resolved paths (not HF Hub IDs on internet clusters)
+    # Multiple comma-separated datasets are supported
+    dataset_paths = [p.strip() for p in dataset_path.split(",") if p.strip()]
+    local_paths = [p for p in dataset_paths if os.path.isdir(p)]
+
+    if not local_paths:
+        return
+
+    print(f"[arrow-cache] Pre-building arrow cache for {len(local_paths)} dataset(s)...")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    try:
+        from datasets import load_dataset
+
+        for ds_path in local_paths:
+            ds_name = os.path.basename(ds_path)[:50]
+            print(f"[arrow-cache]   Loading {ds_name}...")
+            load_dataset(ds_path, cache_dir=cache_dir)
+
+        print("[arrow-cache] Pre-build complete.")
+    except Exception as exc:
+        # Best-effort: don't block the job submission if pre-build fails
+        print(f"[arrow-cache] WARNING: Pre-build failed ({exc}). "
+              "Training may still work if compute nodes can build the cache.")
+
+
 def apply_data_argument_overrides(base_config: dict, exp_args: dict) -> None:
     tool_call_tag = exp_args.get("tool_call_tag")
     if tool_call_tag:
