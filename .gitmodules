@@ -1,3 +1,11 @@
 [submodule "sft/llamafactory"]
 	path = sft/llamafactory
 	url = https://github.com/mlfoundations/llama-factory
+[submodule "modules/OpenThoughts-Agent"]
+	path = modules/OpenThoughts-Agent
+	url = https://github.com/ekellbuch/OpenThoughts-Agent.git
+	branch = marlowe
+[submodule "modules/harbor"]
+	path = modules/harbor
+	url = https://github.com/ekellbuch/harbor.git
+	branch = marlowe
