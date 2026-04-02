@@ -32,7 +32,6 @@ vllm_server:
   max_model_len: 131072
   max_num_seqs: 32
   gpu_memory_utilization: 0.93
-  swap_space: 32
   enable_expert_parallel: true
   enable_auto_tool_choice: true
   tool_call_parser: glm47

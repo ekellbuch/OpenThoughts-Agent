@@ -64,7 +64,7 @@ agents:
 - name: terminus-2
   import_path:
   model_name: placeholder/override-at-runtime
-  max_timeout_sec:
+  max_timeout_sec: 7200
   kwargs:
     record_terminal_session: false
     enable_episode_logging: false

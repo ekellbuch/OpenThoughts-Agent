@@ -132,6 +132,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow updating existing job records",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Override quality gates (low accuracy <1%%, incomplete trial count <50%%)",
+    )
 
     # Debug options
     parser.add_argument(
@@ -263,6 +268,10 @@ def main() -> None:
         print(f"  register_benchmark: {args.register_benchmark}")
         print(f"  forced_update: {args.forced_update}")
         return
+
+    # Set force flag via env var for quality gate bypass
+    if args.force:
+        os.environ["EVAL_UPLOAD_FORCE"] = "1"
 
     # Import and call the sync function
     from hpc.launch_utils import sync_eval_to_database

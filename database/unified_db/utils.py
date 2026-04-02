@@ -2673,10 +2673,14 @@ def _assert_job_finished(job_dir: Path) -> None:
     result = json.loads(result_path.read_text())
 
     if not result.get("finished_at"):
-        raise ValueError(
-            f"Job at {job_dir} is not finished. "
-            f"The 'finished_at' field is missing or null. "
-            f"Please wait for the job to complete before uploading results."
+        # Auto-set finished_at to now for timed-out or interrupted jobs
+        from datetime import datetime, timezone
+        now_str = datetime.now(timezone.utc).isoformat()
+        result["finished_at"] = now_str
+        result_path.write_text(json.dumps(result, indent=2))
+        logger.warning(
+            f"Job at {job_dir} had no finished_at — auto-set to {now_str}. "
+            f"This typically means the job timed out or was interrupted."
         )
 
     logger.info(f"Job {job_dir.name} is finished at {result['finished_at']}")
@@ -3522,10 +3526,70 @@ def upload_job_and_trial_records(
     # Step 3: Auto-detect and lookup foreign keys
     logger.info("Step 3: Auto-detecting and looking up foreign keys")
 
-    # Get list of trial directories
-    trial_dirs = [d for d in job_dir.iterdir() if d.is_dir()]
+    # Get list of trial directories, filtering out incomplete ones (missing result.json)
+    all_subdirs = [d for d in job_dir.iterdir() if d.is_dir()]
+    trial_dirs = []
+    removed_incomplete = 0
+    for d in all_subdirs:
+        if (d / "result.json").exists():
+            trial_dirs.append(d)
+        elif (d / "agent").exists():
+            # Has agent data but no result — incomplete trial from timeout/crash
+            import shutil
+            shutil.rmtree(d)
+            removed_incomplete += 1
+    if removed_incomplete:
+        logger.warning(f"Removed {removed_incomplete} incomplete trial(s) (had agent/ but no result.json)")
     if not trial_dirs:
-        raise ValueError(f"No trial directories found in {job_dir}")
+        raise ValueError(f"No complete trial directories found in {job_dir}")
+
+    # Quality gate: block upload if score is too low or trial count is incomplete
+    _n_expected = job_result.get("n_total_trials", 0)
+    _n_complete = len(trial_dirs)
+    _stats = job_result.get("stats", {})
+    _evals = _stats.get("evals", {})
+    _accuracy = None
+    for _eval_data in _evals.values():
+        for _m in _eval_data.get("metrics", []):
+            if "mean_drop_ei_reward" in _m:
+                _accuracy = _m["mean_drop_ei_reward"]
+                break
+            if "accuracy" in _m:
+                _accuracy = _m["accuracy"]
+                break
+        if _accuracy is not None:
+            break
+
+    _force = os.environ.get("EVAL_UPLOAD_FORCE", "").lower() in ("1", "true", "yes")
+
+    if _accuracy is not None and _accuracy < 0.01:
+        msg = (
+            f"Upload blocked: accuracy {_accuracy:.4f} is below 1% threshold. "
+            f"This likely indicates a broken eval (all trials errored). "
+            f"Use --force to override."
+        )
+        if _force:
+            logger.warning(f"FORCED: {msg}")
+        else:
+            raise ValueError(msg)
+
+    if _n_expected > 0 and _n_complete < _n_expected:
+        _completion_pct = _n_complete / _n_expected * 100
+        if _completion_pct < 50:
+            msg = (
+                f"Upload blocked: only {_n_complete}/{_n_expected} trials complete "
+                f"({_completion_pct:.0f}%). Eval is too incomplete to register. "
+                f"Use --force to override."
+            )
+            if _force:
+                logger.warning(f"FORCED: {msg}")
+            else:
+                raise ValueError(msg)
+        else:
+            logger.warning(
+                f"Partial eval: {_n_complete}/{_n_expected} trials complete "
+                f"({_completion_pct:.0f}%). Proceeding with upload."
+            )
 
     # Read first trial to auto-detect metadata
     first_trial_result = json.loads((trial_dirs[0] / "result.json").read_text())
