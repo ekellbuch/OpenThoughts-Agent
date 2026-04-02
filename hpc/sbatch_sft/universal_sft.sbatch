@@ -97,6 +97,10 @@ export PYTHONFAULTHANDLER=1
 export TORCH_SHOW_CPP_STACKTRACES=1
 export CUDA_LAUNCH_BLOCKING=0
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+# Increase NCCL heartbeat timeout for multi-node tokenization (default 480s too short
+# when 48+ ranks tokenize large datasets on shared NFS — fast ranks enter collectives
+# while slow ranks are still in CPU-bound tokenization)
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
 export OMP_NUM_THREADS=1
 export PYTHONPATH="$WORKDIR:${PYTHONPATH:-}"
 export DISABLE_VERSION_CHECK=1  # Skip LlamaFactory transformers version check

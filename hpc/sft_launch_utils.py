@@ -131,21 +131,24 @@ def maybe_compute_gradient_accumulation(base_config: dict, exp_args: dict) -> di
 
 
 def prebuild_arrow_cache(base_config: dict) -> None:
-    """Pre-build HF datasets arrow cache on the login node (single process).
+    """Pre-build HF datasets arrow cache AND tokenization cache on the login node.
 
     When training on multi-node no-internet clusters (Jupiter, Leonardo), all
     ranks race to build the arrow cache simultaneously on shared NFS, causing
     ``FileNotFoundError`` when one rank reads a partially-written ``.arrow``
-    file from another.  Running the dataset load once on the login node
-    before submitting the SLURM job avoids this race entirely.
+    file from another, or NCCL heartbeat timeouts when fast ranks enter
+    collectives while slow ranks are still tokenizing.
 
-    This only loads the raw dataset into the arrow cache — it does NOT run
-    tokenization (which requires the model and is fast per-rank).  The key
-    benefit is that ``load_dataset()`` on compute nodes will find the cached
-    arrow files and skip the slow download/generation step.
+    This function:
+    1. Loads the raw dataset into the arrow cache
+    2. Runs the LlamaFactory tokenization pipeline (single process) to build
+       the ``.map()`` cache files that would otherwise race during training
+
+    Both steps run on the login node (no GPU required) before SLURM submission.
     """
     dataset_path = base_config.get("dataset", "")
     cache_dir = base_config.get("datasets_cache_dir", "")
+    model_path = base_config.get("model_name_or_path", "")
 
     if not dataset_path or not cache_dir:
         return
@@ -166,14 +169,75 @@ def prebuild_arrow_cache(base_config: dict) -> None:
 
         for ds_path in local_paths:
             ds_name = os.path.basename(ds_path)[:50]
-            print(f"[arrow-cache]   Loading {ds_name}...")
+            print(f"[arrow-cache]   Loading raw dataset: {ds_name}...")
             load_dataset(ds_path, cache_dir=cache_dir)
 
-        print("[arrow-cache] Pre-build complete.")
+        print("[arrow-cache] Raw dataset cache built.")
     except Exception as exc:
-        # Best-effort: don't block the job submission if pre-build fails
-        print(f"[arrow-cache] WARNING: Pre-build failed ({exc}). "
-              "Training may still work if compute nodes can build the cache.")
+        print(f"[arrow-cache] WARNING: Raw cache pre-build failed ({exc}).")
+
+    # Phase 2: Run LlamaFactory tokenization to build .map() cache
+    if not model_path:
+        return
+
+    try:
+        print(f"[arrow-cache] Pre-tokenizing with model tokenizer: {os.path.basename(model_path)[:40]}...")
+        # Force CPU-only mode for login node tokenization
+        prev_cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+
+        for ds_path in local_paths:
+            ds = load_dataset(ds_path, cache_dir=cache_dir, split="train")
+            ds_name = os.path.basename(ds_path)[:40]
+            print(f"[arrow-cache]   Tokenizing {ds_name} ({len(ds)} examples)...")
+
+            # Run a lightweight tokenization pass that mirrors LlamaFactory's
+            # preprocessing. This builds the .map() cache files so compute
+            # nodes find them pre-built.
+            template = base_config.get("template", "")
+            cutoff_len = int(base_config.get("cutoff_len", 32768))
+
+            def _tokenize_fn(examples):
+                """Minimal tokenization to warm the cache."""
+                texts = []
+                for conv in examples.get("conversations", examples.get("messages", [[]])):
+                    if isinstance(conv, list):
+                        texts.append(" ".join(
+                            turn.get("content", turn.get("value", ""))
+                            for turn in conv if isinstance(turn, dict)
+                        ))
+                    else:
+                        texts.append(str(conv))
+                return tokenizer(
+                    texts,
+                    truncation=True,
+                    max_length=cutoff_len,
+                    padding=False,
+                    return_attention_mask=False,
+                )
+
+            ds.map(
+                _tokenize_fn,
+                batched=True,
+                batch_size=100,
+                num_proc=min(16, os.cpu_count() or 4),
+                remove_columns=ds.column_names,
+                desc=f"Pre-tokenizing {ds_name}",
+            )
+
+        # Restore CUDA_VISIBLE_DEVICES
+        if prev_cuda is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = prev_cuda
+        else:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+
+        print("[arrow-cache] Pre-tokenization complete.")
+    except Exception as exc:
+        print(f"[arrow-cache] WARNING: Pre-tokenization failed ({exc}). "
+              "Training may still work but tokenization will race on compute nodes.")
 
 
 def apply_data_argument_overrides(base_config: dict, exp_args: dict) -> None:
