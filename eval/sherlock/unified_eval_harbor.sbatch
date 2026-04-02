@@ -40,18 +40,19 @@ ulimit -n 65536 2>/dev/null || true
 
 TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
 
-# --- Parse positional args ---
-MODEL="${1:-mlfoundations-dev/claude_3_7_20250219_tbench_traces_sharegptv1}"
-REPO_ID="${2:-DCAgent/dev_set_71_tasks}"
-BENCHMARK_ID="${3:-}"
-RUN_TAG_ARG="${4:-}"
-
 # --- Read env vars from listener (with defaults) ---
 N_CONCURRENT="${EVAL_N_CONCURRENT:-16}"
 GPU_MEMORY_UTIL="${EVAL_GPU_MEMORY_UTIL:-0.95}"
 DAYTONA_ERROR_THRESHOLD="${EVAL_DAYTONA_THRESHOLD:-999999}"
-HARBOR_CONFIG="${EVAL_HARBOR_CONFIG:-${DCFT:-$GROUP_HOME/ekb/Projects/coding_agent/modules/OpenThoughts-Agent}/eval/sherlock/dcagent_eval_config.yaml}"
+HARBOR_CONFIG="${EVAL_HARBOR_CONFIG:-${DCFT:-$GROUP_HOME/$USER/Projects/coding_agent/modules/OpenThoughts-Agent}/eval/sherlock/dcagent_eval_config.yaml}"
 DB_JOB_ID="${EVAL_DB_JOB_ID:-}"
+
+# --- Parse args: read from YAML config, positional args override ---
+_yaml_model=$(grep 'model_name:' "$HARBOR_CONFIG" 2>/dev/null | head -1 | sed 's/.*model_name: *//' | sed 's|hosted_vllm/||')
+MODEL="${1:-${_yaml_model:-mlfoundations-dev/claude_3_7_20250219_tbench_traces_sharegptv1}}"
+REPO_ID="${2:-DCAgent/dev_set_71_tasks}"
+BENCHMARK_ID="${3:-}"
+RUN_TAG_ARG="${4:-}"
 
 # Strip slashes and special chars for file-safe names
 SAFE_MODEL=$(echo "$MODEL" | tr '/:' '_')
