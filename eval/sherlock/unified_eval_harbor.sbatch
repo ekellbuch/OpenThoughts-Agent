@@ -247,7 +247,9 @@ HARBOR_EXTRA_ARGS="${EVAL_HARBOR_EXTRA_ARGS:-}"
 # The YAML config controls everything: agent, model, environment, kwargs.
 # We don't pass --agent/--model on CLI because that replaces the YAML agent
 # config entirely, losing model_info, enable_summarize, enable_thinking, etc.
-HARBOR_ARGS="jobs start -p $DATASET_PATH --n-concurrent $N_CONCURRENT --n-attempts 3 --job-name $RUN_TAG --config $HARBOR_CONFIG --jobs-dir $EVAL_JOBS_DIR $HARBOR_EXTRA_ARGS"
+# Only pass what the YAML doesn't know: dataset path (local), job name (per-run), config path.
+# n_concurrent, n_attempts, jobs_dir, agent, model, environment — all in the YAML.
+HARBOR_ARGS="jobs start -p $DATASET_PATH --job-name $RUN_TAG --config $HARBOR_CONFIG $HARBOR_EXTRA_ARGS"
 
 echo "[DEBUG] Harbor args: $HARBOR_ARGS"
 
