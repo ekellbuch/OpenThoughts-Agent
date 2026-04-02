@@ -243,14 +243,10 @@ HARBOR_SRC="$HARBOR_DIR/src"
 
 HARBOR_EXTRA_ARGS="${EVAL_HARBOR_EXTRA_ARGS:-}"
 
-# If EVAL_HARBOR_STANDALONE_CONFIG=1, the YAML has model_name + all agent kwargs.
-# Don't pass --agent/--model on CLI (that replaces the YAML agent config entirely,
-# losing model_info, enable_summarize, enable_thinking, etc.)
-if [ "${EVAL_HARBOR_STANDALONE_CONFIG:-0}" = "1" ]; then
-    HARBOR_ARGS="jobs start -p $DATASET_PATH --n-concurrent $N_CONCURRENT --n-attempts 3 --job-name $RUN_TAG --config $HARBOR_CONFIG --jobs-dir $EVAL_JOBS_DIR $HARBOR_EXTRA_ARGS"
-else
-    HARBOR_ARGS="jobs start -p $DATASET_PATH --n-concurrent $N_CONCURRENT --agent terminus-2 --model hosted_vllm/$MODEL --env apptainer --agent-kwarg api_base=http://localhost:8000/v1 --agent-kwarg key=fake_key --n-attempts 3 --job-name $RUN_TAG --config $HARBOR_CONFIG --jobs-dir $EVAL_JOBS_DIR $HARBOR_EXTRA_ARGS"
-fi
+# The YAML config controls everything: agent, model, environment, kwargs.
+# We don't pass --agent/--model on CLI because that replaces the YAML agent
+# config entirely, losing model_info, enable_summarize, enable_thinking, etc.
+HARBOR_ARGS="jobs start -p $DATASET_PATH --n-concurrent $N_CONCURRENT --n-attempts 3 --job-name $RUN_TAG --config $HARBOR_CONFIG --jobs-dir $EVAL_JOBS_DIR $HARBOR_EXTRA_ARGS"
 
 echo "[DEBUG] Harbor args: $HARBOR_ARGS"
 
