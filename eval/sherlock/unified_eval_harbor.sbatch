@@ -11,27 +11,24 @@
 # ==============================================================================
 # Unified Eval Harbor — Sherlock (Stanford Research Computing)
 #
-# Starts vLLM, runs Harbor eval via Apptainer, checks errors, uploads results.
-# Adapted from eval/perlmutter/unified_eval_harbor.sbatch.
+# Starts vLLM, downloads dataset, runs Harbor eval, checks errors.
+# Harbor runs inside harbor_runner.sif (Sherlock glibc too old for tiktoken).
 #
-# Key differences from other clusters:
-#   - Uses Apptainer (not Docker/Daytona) as environment backend
-#   - Harbor runs inside a Singularity container (harbor_runner.sif)
-#   - Modules: cuda, python/3.12, py-vllm/0.7.0_py312
-#   - Compute nodes have internet access
+# The YAML config (EVAL_HARBOR_CONFIG) controls:
+#   model, agent, environment type, concurrency, retries, timeouts, agent kwargs
+# This script only handles: vLLM startup, dataset download, singularity exec.
 #
-# Positional args:
-#   $1 = MODEL (HF model name, e.g. mlfoundations-dev/some_model)
-#   $2 = REPO_ID (HF dataset repo, e.g. DCAgent/dev_set_v2)
+# Positional args (all optional — model read from YAML if $1 empty):
+#   $1 = MODEL (HF model name, overrides YAML model_name)
+#   $2 = REPO_ID (HF dataset repo, e.g. DCAgent2/terminal_bench_2)
 #   $3 = BENCHMARK_ID (optional, DB benchmark UUID)
 #   $4 = RUN_TAG_ARG (optional, override run tag)
 #
-# Env vars from listener:
-#   EVAL_N_CONCURRENT       (default: 16)
+# Env vars:
+#   EVAL_HARBOR_CONFIG      YAML config path (required for standalone configs)
+#   EVAL_VLLM_TENSOR_PARALLEL_SIZE, EVAL_VLLM_MAX_MODEL_LEN, EVAL_VLLM_TOOL_CALL_PARSER
 #   EVAL_GPU_MEMORY_UTIL    (default: 0.95)
-#   EVAL_DAYTONA_THRESHOLD  (default: 3)
-#   EVAL_HARBOR_CONFIG      (default: $DCFT/eval/sherlock/dcagent_eval_config.yaml)
-#   EVAL_DB_JOB_ID          (optional, pre-created Pending job ID)
+#   EVAL_HARBOR_EXTRA_ARGS  (optional, extra CLI args for Harbor)
 # ==============================================================================
 
 set -eo pipefail
