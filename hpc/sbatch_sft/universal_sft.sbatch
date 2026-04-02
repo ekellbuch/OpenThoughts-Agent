@@ -100,7 +100,11 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 # Increase NCCL heartbeat timeout for multi-node tokenization (default 480s too short
 # when 48+ ranks tokenize large datasets on shared NFS — fast ranks enter collectives
 # while slow ranks are still in CPU-bound tokenization)
-export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
+# Disable NCCL heartbeat monitoring entirely. Multi-node tokenization on
+# shared NFS causes ranks to enter collectives at different times (some still
+# tokenizing while others are in allreduce). The watchdog falsely detects this
+# as a hang and aborts. Training-time hangs are caught by ddp_timeout instead.
+export TORCH_NCCL_ENABLE_MONITORING=0
 export OMP_NUM_THREADS=1
 export PYTHONPATH="$WORKDIR:${PYTHONPATH:-}"
 export DISABLE_VERSION_CHECK=1  # Skip LlamaFactory transformers version check
