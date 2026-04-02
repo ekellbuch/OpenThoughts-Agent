@@ -130,8 +130,8 @@ def maybe_compute_gradient_accumulation(base_config: dict, exp_args: dict) -> di
     return base_config
 
 
-def prebuild_arrow_cache(base_config: dict) -> None:
-    """Pre-build HF datasets arrow cache AND tokenization cache on the login node.
+def prebuild_arrow_cache(base_config: dict, train_config_path: str = "") -> None:
+    """Pre-build HF datasets arrow cache AND LlamaFactory tokenization cache.
 
     When training on multi-node no-internet clusters (Jupiter, Leonardo), all
     ranks race to build the arrow cache simultaneously on shared NFS, causing
@@ -139,105 +139,91 @@ def prebuild_arrow_cache(base_config: dict) -> None:
     file from another, or NCCL heartbeat timeouts when fast ranks enter
     collectives while slow ranks are still tokenizing.
 
-    This function:
-    1. Loads the raw dataset into the arrow cache
-    2. Runs the LlamaFactory tokenization pipeline (single process) to build
-       the ``.map()`` cache files that would otherwise race during training
-
-    Both steps run on the login node (no GPU required) before SLURM submission.
+    This runs LlamaFactory's actual data pipeline (single process, CPU-only)
+    on the login node before SLURM submission.  The resulting ``.map()`` cache
+    files will be found by all compute ranks, skipping tokenization entirely.
     """
     dataset_path = base_config.get("dataset", "")
     cache_dir = base_config.get("datasets_cache_dir", "")
-    model_path = base_config.get("model_name_or_path", "")
 
     if not dataset_path or not cache_dir:
         return
 
-    # Only pre-build for local/resolved paths (not HF Hub IDs on internet clusters)
-    # Multiple comma-separated datasets are supported
+    # Only pre-build for local/resolved paths
     dataset_paths = [p.strip() for p in dataset_path.split(",") if p.strip()]
     local_paths = [p for p in dataset_paths if os.path.isdir(p)]
 
     if not local_paths:
         return
 
-    print(f"[arrow-cache] Pre-building arrow cache for {len(local_paths)} dataset(s)...")
+    if not train_config_path:
+        print("[arrow-cache] No train_config_path provided, skipping pre-build.")
+        return
+
+    print(f"[arrow-cache] Pre-building tokenization cache via LlamaFactory pipeline...")
     os.makedirs(cache_dir, exist_ok=True)
 
     try:
-        from datasets import load_dataset
-
-        for ds_path in local_paths:
-            ds_name = os.path.basename(ds_path)[:50]
-            print(f"[arrow-cache]   Loading raw dataset: {ds_name}...")
-            load_dataset(ds_path, cache_dir=cache_dir)
-
-        print("[arrow-cache] Raw dataset cache built.")
-    except Exception as exc:
-        print(f"[arrow-cache] WARNING: Raw cache pre-build failed ({exc}).")
-
-    # Phase 2: Run LlamaFactory tokenization to build .map() cache
-    if not model_path:
-        return
-
-    try:
-        print(f"[arrow-cache] Pre-tokenizing with model tokenizer: {os.path.basename(model_path)[:40]}...")
-        # Force CPU-only mode for login node tokenization
+        # Force CPU-only and single-process
         prev_cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        # Prevent distributed init
+        prev_world = os.environ.get("WORLD_SIZE")
+        os.environ.pop("WORLD_SIZE", None)
+        os.environ.pop("RANK", None)
+        os.environ.pop("LOCAL_RANK", None)
 
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        # Run LlamaFactory's data loading with the actual training config.
+        # This uses the real template, tokenizer, and preprocessing — the
+        # exact same .map() calls that training will use — so the cache
+        # fingerprints match and compute nodes skip tokenization.
+        import subprocess, sys
+        result = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import os; os.environ['CUDA_VISIBLE_DEVICES']=''; "
+                "from llamafactory.hparams import get_train_args; "
+                "from llamafactory.data.loader import get_dataset; "
+                "from transformers import AutoTokenizer; "
+                f"model_args, data_args, training_args, finetuning_args, gen_args = "
+                f"get_train_args(['--config', '{train_config_path}']); "
+                "tokenizer = AutoTokenizer.from_pretrained("
+                "  model_args.model_name_or_path, trust_remote_code=True); "
+                "ds = get_dataset(model_args, data_args, training_args, "
+                "  stage='sft', tokenizer=tokenizer, processor=None); "
+                "print(f'Cache built: {len(ds[\"train_dataset\"])} examples')"
+            ],
+            capture_output=True, text=True, timeout=600,
+            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+        )
+        if result.returncode == 0:
+            print(f"[arrow-cache] {result.stdout.strip()}")
+        else:
+            # Common failure: bf16 validation on CPU. Fall back to raw cache only.
+            stderr_short = result.stderr.strip().split("\n")[-3:]
+            print(f"[arrow-cache] LlamaFactory pipeline failed (non-fatal):")
+            for line in stderr_short:
+                print(f"[arrow-cache]   {line}")
+            print("[arrow-cache] Falling back to raw dataset cache only.")
 
-        for ds_path in local_paths:
-            ds = load_dataset(ds_path, cache_dir=cache_dir, split="train")
-            ds_name = os.path.basename(ds_path)[:40]
-            print(f"[arrow-cache]   Tokenizing {ds_name} ({len(ds)} examples)...")
+            from datasets import load_dataset
+            for ds_path in local_paths:
+                ds_name = os.path.basename(ds_path)[:50]
+                print(f"[arrow-cache]   Loading raw: {ds_name}...")
+                load_dataset(ds_path, cache_dir=cache_dir)
+            print("[arrow-cache] Raw cache built.")
 
-            # Run a lightweight tokenization pass that mirrors LlamaFactory's
-            # preprocessing. This builds the .map() cache files so compute
-            # nodes find them pre-built.
-            template = base_config.get("template", "")
-            cutoff_len = int(base_config.get("cutoff_len", 32768))
-
-            def _tokenize_fn(examples):
-                """Minimal tokenization to warm the cache."""
-                texts = []
-                for conv in examples.get("conversations", examples.get("messages", [[]])):
-                    if isinstance(conv, list):
-                        texts.append(" ".join(
-                            turn.get("content", turn.get("value", ""))
-                            for turn in conv if isinstance(turn, dict)
-                        ))
-                    else:
-                        texts.append(str(conv))
-                return tokenizer(
-                    texts,
-                    truncation=True,
-                    max_length=cutoff_len,
-                    padding=False,
-                    return_attention_mask=False,
-                )
-
-            ds.map(
-                _tokenize_fn,
-                batched=True,
-                batch_size=100,
-                num_proc=min(16, os.cpu_count() or 4),
-                remove_columns=ds.column_names,
-                desc=f"Pre-tokenizing {ds_name}",
-            )
-
-        # Restore CUDA_VISIBLE_DEVICES
+        # Restore env
         if prev_cuda is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = prev_cuda
         else:
             os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        if prev_world is not None:
+            os.environ["WORLD_SIZE"] = prev_world
 
-        print("[arrow-cache] Pre-tokenization complete.")
     except Exception as exc:
-        print(f"[arrow-cache] WARNING: Pre-tokenization failed ({exc}). "
-              "Training may still work but tokenization will race on compute nodes.")
+        print(f"[arrow-cache] WARNING: Pre-build failed ({exc}). "
+              "Training may work but tokenization will race on compute nodes.")
 
 
 def apply_data_argument_overrides(base_config: dict, exp_args: dict) -> None:

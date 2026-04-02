@@ -1,5 +1,5 @@
 ### HPC Launch Settings
-global_batch_size: 96
+global_batch_size: 128
 # gradient_accumulation_steps = global_batch_size // (num_nodes * gpus_per_node)
 
 ### model
