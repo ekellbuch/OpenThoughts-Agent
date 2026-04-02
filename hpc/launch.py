@@ -398,7 +398,7 @@ def construct_config_yaml(exp_args):
     # when multiple compute nodes try to build it simultaneously.
     if not exp_args.get("internet_node", True):
         from hpc.sft_launch_utils import prebuild_arrow_cache
-        prebuild_arrow_cache(base_config)
+        prebuild_arrow_cache(base_config, train_config_path=train_config_path_out)
 
     exp_args["output_dir"] = base_config["output_dir"]
     exp_args["dataset"] = base_config["dataset"]
