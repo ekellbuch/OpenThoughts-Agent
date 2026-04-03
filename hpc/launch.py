@@ -294,11 +294,14 @@ def _configure_output_and_logging(base_config: dict, exp_args: dict, checkpoints
     return base_config
 
 def _maybe_assign_tokenized_path(base_config: dict, exp_args: dict, dataset_entries: list[str]) -> None:
-    if base_config.get("tokenized_path") is not None or not should_run_pretokenize(exp_args):
+    if base_config.get("tokenized_path") is not None:
         return
 
     tokenized_dir = exp_args.get("tokenized_dir")
     tokenized_dir = os.path.expandvars(os.environ.get("TOKENIZED_DATASETS_DIR", tokenized_dir))
+    if not tokenized_dir:
+        return
+
     model_name = "_".join(base_config["model_name_or_path"].split("/")[-2:]).replace(".", "-")
 
     def _slugify(entry: str) -> str:
@@ -310,8 +313,27 @@ def _maybe_assign_tokenized_path(base_config: dict, exp_args: dict, dataset_entr
     dataset_name_parts = [_slugify(entry) for entry in dataset_entries] or ["dataset"]
     dataset_name = "-".join(dataset_name_parts)
     tokenized_path = os.path.join(tokenized_dir, "_".join([dataset_name, model_name, "tokenized"]))
-    base_config["tokenized_path"] = tokenized_path
-    exp_args["tokenized_path"] = tokenized_path
+
+    if should_run_pretokenize(exp_args):
+        # Pretokenize mode: always set the path (will be created)
+        base_config["tokenized_path"] = tokenized_path
+        exp_args["tokenized_path"] = tokenized_path
+    elif os.path.isdir(tokenized_path):
+        # Training mode: reuse pre-tokenized data if it exists (our naming convention)
+        print(f"[pretok] Found pre-tokenized dataset at {tokenized_path} — reusing it")
+        base_config["tokenized_path"] = tokenized_path
+        base_config["overwrite_cache"] = False
+        exp_args["tokenized_path"] = tokenized_path
+    elif os.path.isdir(tokenized_dir):
+        # Training mode: check if LlamaFactory saved a tokenized cache under its own
+        # naming convention (hash-based). If any *_tokenized dir exists in TOKENIZED_DATASETS_DIR,
+        # set overwrite_cache=false so LlamaFactory discovers it via its internal lookup.
+        import glob
+        lf_caches = glob.glob(os.path.join(tokenized_dir, "*_tokenized"))
+        if lf_caches:
+            print(f"[pretok] Found {len(lf_caches)} LlamaFactory tokenized cache(s) in {tokenized_dir}")
+            print(f"[pretok] Setting overwrite_cache=false so LlamaFactory reuses them")
+            base_config["overwrite_cache"] = False
 
 
 def _write_train_config(configs_dir: str, job_name: str, base_config: dict) -> str:
