@@ -761,8 +761,9 @@ jupiter = HPC(
     unified_gpu_memory=True,
     total_partition_nodes=6000,  # ~6000 booster nodes
     gpu_directive_format="--gres=gpu:{n}",
-    # CUDA module required for DeepSpeed (sets CUDA_HOME=/e/software/.../CUDA/13)
-    modules=["nvidia-compilers/25.9-CUDA-13"],
+    # GCC 14 + CUDA 13 modules required for vLLM wheel builds and DeepSpeed
+    # (sets CUDA_HOME=/e/software/.../CUDA/13)
+    modules=["GCC/14.3.0", "nvidia-compilers/25.9-CUDA-13"],
     env_vars={
         "WANDB_MODE": "offline",  # Compute nodes have no internet
         # Force GLOO and NCCL to use IPv4 (IPv6 doesn't work on Jupiter compute nodes)
