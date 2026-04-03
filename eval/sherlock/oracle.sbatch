@@ -3,7 +3,7 @@
 #SBATCH --partition=owners,normal,swl1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
+#SBATCH --time=01:00:00
 #SBATCH --output=/scratch/groups/swl1/ekb/logs/eval_sherlock/oracle_%j.out
 #SBATCH --error=/scratch/groups/swl1/ekb/logs/eval_sherlock/oracle_%j.err
 

@@ -2,7 +2,7 @@
 #SBATCH --job-name=eval
 #SBATCH --partition=swl1,gpu,owners
 #SBATCH --gres=gpu:1
-#SBATCH --constraint="GPU_MEM:80GB"
+#SBATCH --constraint="GPU_SKU:H100_SXM5"
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00
