@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
 #SBATCH --time=12:00:00
-#SBATCH --output=/scratch/m000120-pm05/ekb/sky_harbor/logs/ot-eval-%x_%j.out
-#SBATCH --error=/scratch/m000120-pm05/ekb/sky_harbor/logs/ot-eval-%x_%j.out
+#SBATCH --output=/scratch/m000120-pm05/ekb/data/coding_agent/outputs/logs/ot-eval-%x_%j.out
+#SBATCH --error=/scratch/m000120-pm05/ekb/data/coding_agent/outputs/logs/ot-eval-%x_%j.out
 
 # ==============================================================================
 # Unified Eval Harbor — Marlowe (Stanford DGX H100 SuperPod)
@@ -16,10 +16,10 @@
 # Adapted from eval/sherlock/unified_eval_harbor.sbatch.
 #
 # Key differences from Sherlock:
-#   - No module system for vLLM — uses uv from sky_harbor project
-#   - Harbor installed in sky_harbor/.venv (not harbor_runner.sif)
+#   - vLLM runs in Singularity container (no module, no native install)
+#   - Harbor runs natively from scripts/harbor/.venv (not harbor_runner.sif)
+#   - No fakeroot needed (Ubuntu 22.04, kernel 5.15)
 #   - H100 80GB GPUs (8 per node)
-#   - Apptainer SIF images pre-pulled with tmux baked in
 #   - Compute nodes have internet access
 #
 # Positional args:
@@ -40,15 +40,17 @@ ulimit -n 65536 2>/dev/null || true
 
 TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
 
-# --- Parse positional args ---
-MODEL="${1:-nvidia/Nemotron-Terminal-8B}"
-REPO_ID="${2:-/scratch/m000120-pm05/ekb/sky_harbor/terminal-bench-2}"
-BENCHMARK_ID="${3:-}"
-RUN_TAG_ARG="${4:-}"
-
 # --- Env vars (with defaults) ---
 N_CONCURRENT="${EVAL_N_CONCURRENT:-16}"
 GPU_MEMORY_UTIL="${EVAL_GPU_MEMORY_UTIL:-0.95}"
+
+# --- Parse args: read from YAML config, positional args override ---
+_harbor_cfg="${EVAL_HARBOR_CONFIG:-}"
+_yaml_model=$(grep 'model_name:' "$_harbor_cfg" 2>/dev/null | head -1 | sed 's/.*model_name: *//' | sed 's|hosted_vllm/||')
+MODEL="${1:-${_yaml_model:-nvidia/Nemotron-Terminal-8B}}"
+REPO_ID="${2:-DCAgent2/terminal_bench_2}"
+BENCHMARK_ID="${3:-}"
+RUN_TAG_ARG="${4:-}"
 
 # Strip slashes and special chars for file-safe names
 SAFE_MODEL=$(echo "$MODEL" | tr '/:' '_')
@@ -72,9 +74,9 @@ echo "=============================================="
 # Marlowe Environment Setup
 # ==============================================================================
 
-PROJ_DIR="${PROJ_DIR:-/users/ekb/Projects/sky_harbor}"
+PROJ_DIR="${PROJ_DIR:-$HOME/Projects/tbench_sherlock}"
 SCRATCH_DIR="/scratch/m000120-pm05/ekb"
-OT_AGENT_DIR="${PROJ_DIR}/modules/OpenThoughts-Agent"
+OT_AGENT_DIR="$PROJ_DIR/modules/OpenThoughts-Agent"
 HARBOR_CONFIG="${EVAL_HARBOR_CONFIG:-${OT_AGENT_DIR}/eval/marlowe/dcagent_eval_config.yaml}"
 
 unset PYTHONPATH
@@ -84,17 +86,21 @@ DC_AGENT_SECRET_ENV="${DC_AGENT_SECRET_ENV:-$HOME/.env}"
 if [ -f "$DC_AGENT_SECRET_ENV" ]; then
     source "$DC_AGENT_SECRET_ENV"
 fi
+SECRET_ENV="${OT_AGENT_DIR}/eval/marlowe/secret.env"
+if [ -f "$SECRET_ENV" ]; then
+    source "$SECRET_ENV"
+fi
 
 # Apptainer cache (SIF images with tmux pre-baked)
-export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-${SCRATCH_DIR}/.apptainer-cache}"
+export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-${SCRATCH_DIR}/.cache/singularity}"
 
 # vLLM / Ray env vars
 export VLLM_USE_V1=1
 export VLLM_CONFIG_ROOT="${VLLM_CONFIG_ROOT:-${SCRATCH_DIR}/.cache/vllm}"
 export TRITON_CACHE_DIR="/tmp/triton_cache_${USER}"
 export FLASHINFER_WORKSPACE_BASE="/tmp/flashinfer_cache_${USER}"
-export HF_HOME="${HF_HOME:-${SCRATCH_DIR}/sky_harbor/hf_cache}"
-export UV_CACHE_DIR="${UV_CACHE_DIR:-${SCRATCH_DIR}/.uv-cache}"
+export HF_HOME="${HF_HOME:-${SCRATCH_DIR}/.cache/huggingface}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-${SCRATCH_DIR}/.cache/uv}"
 export PATH="$HOME/.local/bin:$PATH"
 
 echo "Node: $(hostname)"
@@ -113,37 +119,42 @@ cleanup() {
 trap cleanup EXIT
 
 # ==============================================================================
-# Start vLLM Server
+# Start vLLM Server (via Singularity container)
+#
+# Marlowe has no native vLLM install. We use the containerized vLLM
+# (same approach as scripts/harbor/serve_qwen3_8b.sh).
 # ==============================================================================
-LOGS_DIR="${SCRATCH_DIR}/sky_harbor/logs"
+LOGS_DIR="${SCRATCH_DIR}/data/coding_agent/outputs/logs"
 mkdir -p "$LOGS_DIR"
 
-# Download model (Marlowe compute nodes have internet)
-echo "Downloading/caching model: $MODEL"
-cd "$PROJ_DIR"
-uv run --no-sync python -c "
-from huggingface_hub import snapshot_download
-path = snapshot_download('$MODEL')
-print(f'Model cached at: {path}')
-"
-if [ $? -ne 0 ]; then
-    echo "ERROR: Model download failed for $MODEL. Exiting."
-    exit 1
-fi
+HARBOR_VENV="$PROJ_DIR/scripts/harbor/.venv"
+HARBOR_CLI="$HARBOR_VENV/bin/harbor"
+PYTHON_BIN="$HARBOR_VENV/bin/python"
+
+VLLM_IMAGE="${VLLM_IMAGE:-docker://vllm/vllm-openai:latest}"
+VLLM_PORT=8000
+
+# Build vLLM args
+VLLM_TP="${EVAL_VLLM_TENSOR_PARALLEL_SIZE:-1}"
+VLLM_MAX_LEN="${EVAL_VLLM_MAX_MODEL_LEN:-}"
+VLLM_TCP="${EVAL_VLLM_TOOL_CALL_PARSER:-}"
+
+VLLM_ARGS="--model $MODEL --host 0.0.0.0 --port $VLLM_PORT"
+VLLM_ARGS="$VLLM_ARGS --served-model-name $MODEL"
+VLLM_ARGS="$VLLM_ARGS --tensor-parallel-size $VLLM_TP"
+VLLM_ARGS="$VLLM_ARGS --gpu-memory-utilization $GPU_MEMORY_UTIL"
+VLLM_ARGS="$VLLM_ARGS --trust-remote-code"
+[ -n "$VLLM_MAX_LEN" ] && VLLM_ARGS="$VLLM_ARGS --max-model-len $VLLM_MAX_LEN"
+[ -n "$VLLM_TCP" ] && VLLM_ARGS="$VLLM_ARGS --enable-auto-tool-choice --tool-call-parser $VLLM_TCP"
 
 echo "Starting vLLM server for model: $MODEL"
-cd "$OT_AGENT_DIR"
-source "eval/build_vllm_cmd.sh"
-# Use uv-managed Python from project venv
-PYTHON_BIN="$PROJ_DIR/.venv/bin/python"
-build_vllm_cmd "$PYTHON_BIN" "$MODEL" "$GPU_MEMORY_UTIL"
+echo "  Image: $VLLM_IMAGE"
+echo "  Args: $VLLM_ARGS"
 
-env TORCHDYNAMO_DISABLE=1 \
-    TMPDIR="/tmp" \
-    TRITON_CACHE_DIR="/tmp/triton_cache_${USER}" \
-    TORCH_COMPILE_CACHE_DIR="/tmp/torch_cache_${USER}" \
-    TORCHINDUCTOR_CACHE_DIR="/tmp/torchinductor_${USER}" \
-"${VLLM_CMD[@]}" \
+singularity exec --nv \
+    --bind /scratch:/scratch \
+    "$VLLM_IMAGE" \
+    python3 -m vllm.entrypoints.openai.api_server $VLLM_ARGS \
     > "${LOGS_DIR}/ot-vllm_${SLURM_JOB_ID}.log" 2>&1 &
 VLLM_PID=$!
 
@@ -183,10 +194,10 @@ if [[ "$REPO_ID" == /* ]]; then
     echo "Found $TASK_COUNT tasks with instruction.md"
 else
     echo "Downloading/locating dataset: $REPO_ID"
-    DATASET_LOCAL_DIR="${SCRATCH_DIR}/sky_harbor/eval_datasets/${SAFE_REPO}"
+    DATASET_LOCAL_DIR="${SCRATCH_DIR}/data/coding_agent/eval_datasets/${SAFE_REPO}"
     DOWNLOAD_LOG=$(mktemp /tmp/download_XXXXXX.log)
     cd "$OT_AGENT_DIR"
-    "$PYTHON_BIN" "eval/sherlock/snapshot_download.py" "$REPO_ID" --local-dir "$DATASET_LOCAL_DIR" > "$DOWNLOAD_LOG" 2>&1
+    "$PYTHON_BIN" "eval/marlowe/snapshot_download.py" "$REPO_ID" --local-dir "$DATASET_LOCAL_DIR" > "$DOWNLOAD_LOG" 2>&1
     DOWNLOAD_EXIT=$?
     cat "$DOWNLOAD_LOG"
     DATASET_PATH=$(grep DATASET_PATH "$DOWNLOAD_LOG" | tail -n 1 | cut -d'=' -f2)
@@ -206,7 +217,7 @@ if [ -n "$RUN_TAG_ARG" ]; then
 else
     RUN_TAG="${SAFE_REPO}_${SAFE_MODEL}"
 fi
-EVAL_JOBS_DIR="${EVAL_JOBS_DIR:-${SCRATCH_DIR}/sky_harbor/ot_eval_jobs}"
+EVAL_JOBS_DIR="${EVAL_JOBS_DIR:-${SCRATCH_DIR}/data/coding_agent/outputs/harbor/eval_jobs}"
 RUN_DIR="${EVAL_JOBS_DIR}/${RUN_TAG}"
 mkdir -p "$RUN_DIR"
 
@@ -216,25 +227,22 @@ echo "Run dir: $RUN_DIR"
 # ==============================================================================
 # Run Harbor Eval
 #
-# On Marlowe, harbor is installed in the sky_harbor project venv — no
-# harbor_runner.sif container needed. Harbor spawns Apptainer sandboxes
-# for each task directly.
+# On Marlowe, harbor is installed in scripts/harbor/.venv — no
+# harbor_runner.sif container needed.
+#
+# The YAML config controls everything: agent, model, environment, kwargs.
+# We don't pass --agent/--model on CLI because that replaces the YAML agent
+# config entirely, losing model_info, enable_summarize, enable_thinking, etc.
+# Only pass what the YAML doesn't know: dataset path (local), job name (per-run), config path.
 # ==============================================================================
 set +e
 
-cd "$PROJ_DIR"
-uv run --no-sync harbor jobs start \
-    -p "$DATASET_PATH" \
-    --n-concurrent "$N_CONCURRENT" \
-    --agent terminus-2 \
-    --model "hosted_vllm/$MODEL" \
-    --env apptainer \
-    --agent-kwarg "api_base=http://localhost:8000/v1" \
-    --agent-kwarg "key=fake_key" \
-    --n-attempts 3 \
-    --job-name "$RUN_TAG" \
-    --config "$HARBOR_CONFIG" \
-    --jobs-dir "$EVAL_JOBS_DIR"
+HARBOR_EXTRA_ARGS="${EVAL_HARBOR_EXTRA_ARGS:-}"
+HARBOR_ARGS="jobs start -p $DATASET_PATH --job-name $RUN_TAG --config $HARBOR_CONFIG $HARBOR_EXTRA_ARGS"
+
+echo "[DEBUG] Harbor args: $HARBOR_ARGS"
+
+"$HARBOR_CLI" $HARBOR_ARGS
 
 SB_EXIT=$?
 set -e

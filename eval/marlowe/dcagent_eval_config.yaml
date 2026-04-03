@@ -1,33 +1,72 @@
-jobs_dir: /scratch/m000120-pm05/ekb/sky_harbor/ot_eval_jobs
+# Harbor eval config for Marlowe — Apptainer environment.
+# Adapted from eval/sherlock/dcagent_eval_config.yaml for Marlowe DGX H100 SuperPod.
+#
+# Key differences from Sherlock:
+#   - No fakeroot (Ubuntu 22.04, kernel 5.15)
+#   - No 99-no-sandbox.conf or libutempter bind-mounts
+#   - Harbor runs natively (no harbor_runner.sif)
+
+jobs_dir: /scratch/m000120-pm05/ekb/data/coding_agent/outputs/harbor/eval_jobs
 n_attempts: 3
-timeout_multiplier: 1.0
+timeout_multiplier: 2.0
+debug: false
+
 orchestrator:
   type: local
   n_concurrent_trials: 16
   quiet: false
+  plain_output: true
   retry:
-    max_retries: 3
+    max_retries: 10
     exclude_exceptions:
       - AgentTimeoutError
-      - EnvironmentStartTimeoutError
-      - SandboxBuildFailedError
       - VerifierTimeoutError
-    wait_multiplier: 1.0
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - VerifierOutputParseError
+      - SandboxBuildFailedError
+      - VerifierRuntimeError
+      - SummarizationTimeoutError
+      - ContextLengthExceededError
+    wait_multiplier: 2.0
     min_wait_sec: 1.0
-    max_wait_sec: 60.0
+    max_wait_sec: 90.0
+
 environment:
   type: apptainer
   force_build: false
   delete: false
   kwargs:
-    image_cache_dir: /scratch/m000120-pm05/ekb/.apptainer-cache
+    image_cache_dir: /scratch/m000120-pm05/ekb/.cache/harbor
+    use_fakeroot: false
     default_cwd: /app
     default_env:
       TMPDIR: /tmp
+    extra_binds:
+      - /users/ekb/Projects/tbench_sherlock/scripts/harbor/tools/bin/uv:/usr/local/bin/uv:ro
+      - /users/ekb/Projects/tbench_sherlock/scripts/harbor/tools/bin/uvx:/usr/local/bin/uvx:ro
+
 agents:
   - name: terminus-2
+    kwargs:
+      model_info:
+        max_input_tokens: 32768
+        max_output_tokens: 8192
+        input_cost_per_token: 0
+        output_cost_per_token: 0
+      enable_summarize: true
+      proactive_summarization_threshold: 8192
+      parser_name: json
+      tmux_pane_width: 160
+      tmux_pane_height: 40
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: true
     trajectory_config:
       raw_content: true
       linear_history: true
+
 datasets:
   - registry: {}
+    name: terminal-bench
+    version: "2.0"
