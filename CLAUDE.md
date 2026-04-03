@@ -677,6 +677,111 @@ ls $EVAL_JOBS_DIR/<run_tag>/*/result.json 2>/dev/null | wc -l
 rm -rf $EVAL_JOBS_DIR/<run_tag>
 ```
 
+## Parsing Eval Trial Directories
+
+Each trial lives in `<run_tag>/<task_name>__<trial_id>/` under the trace_jobs directory. Use these techniques to extract timing, progress, and health information.
+
+### Trial directory structure
+```
+<task_name>__<trial_id>/
+├── config.json         # Trial config (mtime ≈ trial start time)
+├── trial.log           # Harbor-level log (agent setup, env build, errors)
+├── result.json         # Written on completion (has timestamps + reward)
+├── exception.txt       # Traceback if trial failed
+├── agent/
+│   ├── trajectory.json              # Main agent trajectory (ATIF format)
+│   ├── trajectory.cont-N.json       # Continuation after Nth summarization
+│   └── trajectory.summarization-*   # Summarization subagent traces
+├── verifier/
+│   ├── reward.txt                   # Raw reward value
+│   ├── detailed_scores.json         # Per-test results
+│   └── test-stdout.txt              # Verifier output
+└── artifacts/
+    └── manifest.json                # Downloaded artifacts list
+```
+
+### Key fields in result.json
+```python
+{
+    "started_at": "2026-03-31T09:46:42+00:00",     # ISO 8601 UTC
+    "finished_at": "2026-03-31T10:22:59+00:00",    # ISO 8601 UTC
+    "exception_info": {                              # null if no error
+        "exception_type": "AgentTimeoutError",
+        "exception_message": "..."
+    },
+    "verifier_result": {
+        "rewards": {"reward": 1.0}                  # 0.0 or 1.0 typically
+    },
+    "agent_info": {"name": "terminus-2", "model_info": {"name": "..."}},
+    "environment_setup": {"started_at": "...", "finished_at": "..."},
+    "agent_setup":       {"started_at": "...", "finished_at": "..."},
+    "agent_execution":   {"started_at": "...", "finished_at": "..."},
+    "verifier":          {"started_at": "...", "finished_at": "..."}
+}
+```
+
+### Computing trial stats from result.json
+```python
+import json, os, glob, statistics
+from datetime import datetime
+from collections import Counter
+
+jobs_dir = "trace_jobs/<RUN_TAG>"
+durations, rewards, exceptions = [], [], []
+
+for trial_dir in glob.glob(os.path.join(jobs_dir, "*__*")):
+    result = os.path.join(trial_dir, "result.json")
+    if not os.path.exists(result): continue
+    with open(result) as f:
+        data = json.load(f)
+    s, e = data.get("started_at"), data.get("finished_at")
+    if s and e:
+        d = (datetime.fromisoformat(e) - datetime.fromisoformat(s)).total_seconds()
+        durations.append(d)
+    vr = data.get("verifier_result") or {}
+    r = (vr.get("rewards") or {}).get("reward")
+    if r is not None: rewards.append(r)
+    exc = (data.get("exception_info") or {}).get("exception_type")
+    if exc: exceptions.append(exc)
+
+# Throughput
+completed_times = sorted([datetime.fromisoformat(json.load(open(os.path.join(d, "result.json")))["finished_at"])
+    for d in glob.glob(os.path.join(jobs_dir, "*__*"))
+    if os.path.exists(os.path.join(d, "result.json")) and json.load(open(os.path.join(d, "result.json"))).get("finished_at")])
+if len(completed_times) >= 2:
+    wall = (completed_times[-1] - completed_times[0]).total_seconds()
+    rate = len(completed_times) / wall * 3600  # trials/hr
+```
+
+### Detecting stalls and anomalies
+```bash
+# Count completed trials
+find trace_jobs/<RUN_TAG> -maxdepth 2 -name "result.json" | wc -l
+
+# Most recent result.json (stale = possible hang)
+ls -lt trace_jobs/<RUN_TAG>/*/result.json | head -1
+
+# In-flight trials (started but no result)
+for d in trace_jobs/<RUN_TAG>/*__*/; do
+  [ -d "$d/agent" ] && [ ! -f "$d/result.json" ] && echo "$d"
+done | wc -l
+
+# Check vLLM health (Running: 0 = idle, no agent requests)
+tail -5 experiments/<RUN_TAG>/logs/<RUN_TAG>_vllm.log
+
+# Trials stuck on Daytona env build (no trajectory, only "Building environment")
+for d in trace_jobs/<RUN_TAG>/*__*/; do
+  [ ! -f "$d/agent/trajectory.json" ] && [ -f "$d/trial.log" ] && \
+    grep -q "Building environment" "$d/trial.log" && echo "$(basename $d)"
+done
+```
+
+### Health check thresholds
+- **No result.json in 60+ minutes** with job RUNNING → stall (Harbor hung or all trials in long timeout)
+- **vLLM Running: 0 reqs for 10+ minutes** → agents not generating (env build stall, auth errors, or drain)
+- **All trials complete but job still RUNNING** → zombie (Harbor process didn't exit, cancel immediately)
+- **Repeated "Bearer token is invalid" in job.log** → Daytona auth degradation (trials will retry but waste time)
+
 ## CINECA Leonardo Access
 
 **SSH**: Uses ControlMaster multiplexing + step-ca certificate auth:
@@ -815,6 +920,36 @@ python scripts/database/manual_db_eval_push.py \
 ```
 
 **Important**: Pass the `trace_jobs/<RUN_TAG>` path (where Harbor writes trial dirs), NOT the `eval_jobs/<RUN_TAG>` path (which only has meta.env). The script auto-resolves nested directories to find trial subdirectories.
+
+**CRITICAL — verify the model name in the DB after upload**: The script auto-detects
+the model from trial `result.json` → `agent_info.model_info.name`. For vLLM-served
+models, this field contains the **vLLM served model name** (a numeric ID like
+`1774950145766573`), NOT the HuggingFace model name. The script may register a
+bogus model entry with this numeric name instead of the real HF name.
+
+To get the correct model name, read the eval config:
+```bash
+python3 -c "import json; d=json.load(open('experiments/<RUN_TAG>/configs/<RUN_TAG>_eval_config.json')); print(d['model_hf_name'])"
+```
+
+After running `manual_db_eval_push.py`, verify the model name in Supabase:
+```python
+# Check what model name was registered
+c.table("sandbox_jobs").select("model_id").eq("id", "<JOB_ID>").execute()
+c.table("models").select("name").eq("id", "<MODEL_ID>").execute()
+```
+
+If the model name is a numeric ID instead of an HF repo name, fix it:
+```python
+# Find the correct model by HF name
+correct = c.table("models").select("id").eq("name", "laion/<real-model-name>").execute()
+# Update the job
+c.table("sandbox_jobs").update({"model_id": correct.data[0]["id"]}).eq("id", "<JOB_ID>").execute()
+# Update trial_model_usage rows
+c.table("sandbox_trial_model_usage").update({"model_id": correct.data[0]["id"]}).eq("model_id", "<BOGUS_ID>").execute()
+# Delete the bogus model entry
+c.table("models").delete().eq("id", "<BOGUS_ID>").execute()
+```
 
 **Required env vars**: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `HF_TOKEN` (from `secrets.env`).
 

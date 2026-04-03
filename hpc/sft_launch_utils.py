@@ -130,6 +130,102 @@ def maybe_compute_gradient_accumulation(base_config: dict, exp_args: dict) -> di
     return base_config
 
 
+def prebuild_arrow_cache(base_config: dict, train_config_path: str = "") -> None:
+    """Pre-build HF datasets arrow cache AND LlamaFactory tokenization cache.
+
+    When training on multi-node no-internet clusters (Jupiter, Leonardo), all
+    ranks race to build the arrow cache simultaneously on shared NFS, causing
+    ``FileNotFoundError`` when one rank reads a partially-written ``.arrow``
+    file from another, or NCCL heartbeat timeouts when fast ranks enter
+    collectives while slow ranks are still tokenizing.
+
+    This runs LlamaFactory's actual data pipeline (single process, CPU-only)
+    on the login node before SLURM submission.  The resulting ``.map()`` cache
+    files will be found by all compute ranks, skipping tokenization entirely.
+    """
+    dataset_path = base_config.get("dataset", "")
+    cache_dir = base_config.get("datasets_cache_dir", "")
+
+    if not dataset_path or not cache_dir:
+        return
+
+    # Only pre-build for local/resolved paths
+    dataset_paths = [p.strip() for p in dataset_path.split(",") if p.strip()]
+    local_paths = [p for p in dataset_paths if os.path.isdir(p)]
+
+    if not local_paths:
+        return
+
+    if not train_config_path:
+        print("[arrow-cache] No train_config_path provided, skipping pre-build.")
+        return
+
+    print(f"[arrow-cache] Pre-building tokenization cache via LlamaFactory pipeline...")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    try:
+        # Force CPU-only and single-process
+        prev_cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        # Prevent distributed init
+        prev_world = os.environ.get("WORLD_SIZE")
+        os.environ.pop("WORLD_SIZE", None)
+        os.environ.pop("RANK", None)
+        os.environ.pop("LOCAL_RANK", None)
+
+        # Run LlamaFactory's data loading with the actual training config.
+        # This uses the real template, tokenizer, and preprocessing — the
+        # exact same .map() calls that training will use — so the cache
+        # fingerprints match and compute nodes skip tokenization.
+        import subprocess, sys
+        result = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import os; os.environ['CUDA_VISIBLE_DEVICES']=''; "
+                "from llamafactory.hparams import get_train_args; "
+                "from llamafactory.data.loader import get_dataset; "
+                "from transformers import AutoTokenizer; "
+                f"model_args, data_args, training_args, finetuning_args, gen_args = "
+                f"get_train_args(['--config', '{train_config_path}']); "
+                "tokenizer = AutoTokenizer.from_pretrained("
+                "  model_args.model_name_or_path, trust_remote_code=True); "
+                "ds = get_dataset(model_args, data_args, training_args, "
+                "  stage='sft', tokenizer=tokenizer, processor=None); "
+                "print(f'Cache built: {len(ds[\"train_dataset\"])} examples')"
+            ],
+            capture_output=True, text=True, timeout=600,
+            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+        )
+        if result.returncode == 0:
+            print(f"[arrow-cache] {result.stdout.strip()}")
+        else:
+            # Common failure: bf16 validation on CPU. Fall back to raw cache only.
+            stderr_short = result.stderr.strip().split("\n")[-3:]
+            print(f"[arrow-cache] LlamaFactory pipeline failed (non-fatal):")
+            for line in stderr_short:
+                print(f"[arrow-cache]   {line}")
+            print("[arrow-cache] Falling back to raw dataset cache only.")
+
+            from datasets import load_dataset
+            for ds_path in local_paths:
+                ds_name = os.path.basename(ds_path)[:50]
+                print(f"[arrow-cache]   Loading raw: {ds_name}...")
+                load_dataset(ds_path, cache_dir=cache_dir)
+            print("[arrow-cache] Raw cache built.")
+
+        # Restore env
+        if prev_cuda is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = prev_cuda
+        else:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        if prev_world is not None:
+            os.environ["WORLD_SIZE"] = prev_world
+
+    except Exception as exc:
+        print(f"[arrow-cache] WARNING: Pre-build failed ({exc}). "
+              "Training may work but tokenization will race on compute nodes.")
+
+
 def apply_data_argument_overrides(base_config: dict, exp_args: dict) -> None:
     tool_call_tag = exp_args.get("tool_call_tag")
     if tool_call_tag:
@@ -947,7 +1043,12 @@ def construct_sft_sbatch_script(exp_args: dict, hpc) -> str:
     #     print(f"Using Apptainer image: {os.environ['IMAGE']}")
     #     srun_prefix += f' apptainer exec --nv {os.environ["IMAGE"]}'
 
-    cmd = f'python -m hpc.sft_launch_utils --config "{config_path}"'
+    # The srun child processes need the conda environment re-activated because
+    # srun launches a non-interactive shell that doesn't inherit the batch step's
+    # conda activation.  Prepend the conda activate so every node uses the right
+    # Python (critical for sft-qwen35 which needs transformers >= 5.3.0).
+    conda_activate = _get_sft_conda_activate(hpc, exp_args)
+    cmd = f'{conda_activate} && python -m hpc.sft_launch_utils --config "{config_path}"'
     srun_command = f"{srun_prefix} bash -c '{cmd}'"
     substitutions = {
         "time_limit": exp_args.get("time_limit") or "24:00:00",

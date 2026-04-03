@@ -95,6 +95,13 @@ fi
 # --- CUDA path detection (Perlmutter and similar) ---
 {cuda_setup}
 
+# --- Ensure CUDA_HOME/PATH survive conda activation ---
+# Module loads set CUDA_HOME but conda activation can reset PATH.
+# Re-export to ensure vLLM and DeepSpeed find the right CUDA.
+if [ -n "${CUDA_HOME:-}" ]; then
+  export PATH="$CUDA_HOME/bin:$PATH"
+fi
+
 # --- NCCL/Networking settings (cluster-specific) ---
 {nccl_exports}
 
@@ -103,6 +110,7 @@ export PYTHONFAULTHANDLER=1
 export TORCH_SHOW_CPP_STACKTRACES=1
 export CUDA_LAUNCH_BLOCKING=0
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
 export OMP_NUM_THREADS=1
 export PYTHONPATH="$WORKDIR:${PYTHONPATH:-}"
 

@@ -8,7 +8,7 @@ global_batch_size: 96
 #   pip install "transformers>=5.3.0"
 model_name_or_path: Qwen/Qwen3.5-9B
 trust_remote_code: true
-attn: fa2
+attn: sdpa
 # Liger kernel: fused cross-entropy avoids materializing full vocab logits (~30 GiB).
 # DeltaNet layers are unaffected — Liger only fuses attention + CE for standard layers.
 enable_liger_kernel: true

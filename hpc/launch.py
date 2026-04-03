@@ -294,11 +294,14 @@ def _configure_output_and_logging(base_config: dict, exp_args: dict, checkpoints
     return base_config
 
 def _maybe_assign_tokenized_path(base_config: dict, exp_args: dict, dataset_entries: list[str]) -> None:
-    if base_config.get("tokenized_path") is not None or not should_run_pretokenize(exp_args):
+    if base_config.get("tokenized_path") is not None:
         return
 
     tokenized_dir = exp_args.get("tokenized_dir")
     tokenized_dir = os.path.expandvars(os.environ.get("TOKENIZED_DATASETS_DIR", tokenized_dir))
+    if not tokenized_dir:
+        return
+
     model_name = "_".join(base_config["model_name_or_path"].split("/")[-2:]).replace(".", "-")
 
     def _slugify(entry: str) -> str:
@@ -310,8 +313,27 @@ def _maybe_assign_tokenized_path(base_config: dict, exp_args: dict, dataset_entr
     dataset_name_parts = [_slugify(entry) for entry in dataset_entries] or ["dataset"]
     dataset_name = "-".join(dataset_name_parts)
     tokenized_path = os.path.join(tokenized_dir, "_".join([dataset_name, model_name, "tokenized"]))
-    base_config["tokenized_path"] = tokenized_path
-    exp_args["tokenized_path"] = tokenized_path
+
+    if should_run_pretokenize(exp_args):
+        # Pretokenize mode: always set the path (will be created)
+        base_config["tokenized_path"] = tokenized_path
+        exp_args["tokenized_path"] = tokenized_path
+    elif os.path.isdir(tokenized_path):
+        # Training mode: reuse pre-tokenized data if it exists (our naming convention)
+        print(f"[pretok] Found pre-tokenized dataset at {tokenized_path} — reusing it")
+        base_config["tokenized_path"] = tokenized_path
+        base_config["overwrite_cache"] = False
+        exp_args["tokenized_path"] = tokenized_path
+    elif os.path.isdir(tokenized_dir):
+        # Training mode: check if LlamaFactory saved a tokenized cache under its own
+        # naming convention (hash-based). If any *_tokenized dir exists in TOKENIZED_DATASETS_DIR,
+        # set overwrite_cache=false so LlamaFactory discovers it via its internal lookup.
+        import glob
+        lf_caches = glob.glob(os.path.join(tokenized_dir, "*_tokenized"))
+        if lf_caches:
+            print(f"[pretok] Found {len(lf_caches)} LlamaFactory tokenized cache(s) in {tokenized_dir}")
+            print(f"[pretok] Setting overwrite_cache=false so LlamaFactory reuses them")
+            base_config["overwrite_cache"] = False
 
 
 def _write_train_config(configs_dir: str, job_name: str, base_config: dict) -> str:
@@ -350,6 +372,7 @@ def construct_config_yaml(exp_args):
         job_type_label="SFT",
     )
     configs_dir = str(job_setup.paths.configs)
+    exp_args["logs_dir"] = str(job_setup.paths.logs)
     _drop_deprecated_fields(exp_args, base_config)
     base_config = _merge_launch_overrides(base_config, exp_args)
     base_config = ensure_deepspeed_config(base_config, exp_args)
@@ -392,6 +415,13 @@ def construct_config_yaml(exp_args):
     apply_data_argument_overrides(base_config, exp_args)
 
     train_config_path_out = _write_train_config(configs_dir, exp_args["job_name"], base_config)
+
+    # Pre-build arrow cache on the login node to avoid NFS race condition
+    # when multiple compute nodes try to build it simultaneously.
+    if not exp_args.get("internet_node", True):
+        from hpc.sft_launch_utils import prebuild_arrow_cache
+        prebuild_arrow_cache(base_config, train_config_path=train_config_path_out)
+
     exp_args["output_dir"] = base_config["output_dir"]
     exp_args["dataset"] = base_config["dataset"]
     exp_args["model_name_or_path"] = base_config["model_name_or_path"]
@@ -402,13 +432,17 @@ def submit_job(
     exp_args=None,
     dependency=None,
 ):
-    # Legacy SFT path - auto-derive job_name if not provided
-    job_setup = resolve_job_and_paths(
-        exp_args or {},
-        job_type_label="SFT",
-        derive_job_name_fn=derive_default_job_name,
-    )
-    exp_args["logs_dir"] = str(job_setup.paths.logs)
+    # Reuse existing logs_dir if already set (from earlier resolve_job_and_paths
+    # call in _build_training_artifacts). Calling resolve_job_and_paths again
+    # here would detect the configs we just wrote as a "collision" and create
+    # a spurious _2 directory.
+    if not exp_args.get("logs_dir"):
+        job_setup = resolve_job_and_paths(
+            exp_args or {},
+            job_type_label="SFT",
+            derive_job_name_fn=derive_default_job_name,
+        )
+        exp_args["logs_dir"] = str(job_setup.paths.logs)
 
     base_dependency = _merge_dependencies(exp_args.get("dependency"), dependency)
     current_dependency = base_dependency
