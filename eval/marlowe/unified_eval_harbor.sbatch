@@ -151,6 +151,8 @@ VLLM_PORT=8000
 VLLM_TP="${EVAL_VLLM_TENSOR_PARALLEL_SIZE:-1}"
 VLLM_MAX_LEN="${EVAL_VLLM_MAX_MODEL_LEN:-}"
 VLLM_TCP="${EVAL_VLLM_TOOL_CALL_PARSER:-}"
+VLLM_RP="${EVAL_VLLM_REASONING_PARSER:-}"
+VLLM_EXTRA="${EVAL_VLLM_EXTRA_ARGS:-}"
 
 VLLM_ARGS="--model $MODEL --host 0.0.0.0 --port $VLLM_PORT"
 VLLM_ARGS="$VLLM_ARGS --served-model-name $MODEL"
@@ -159,6 +161,8 @@ VLLM_ARGS="$VLLM_ARGS --gpu-memory-utilization $GPU_MEMORY_UTIL"
 VLLM_ARGS="$VLLM_ARGS --trust-remote-code"
 [ -n "$VLLM_MAX_LEN" ] && VLLM_ARGS="$VLLM_ARGS --max-model-len $VLLM_MAX_LEN"
 [ -n "$VLLM_TCP" ] && VLLM_ARGS="$VLLM_ARGS --enable-auto-tool-choice --tool-call-parser $VLLM_TCP"
+[ -n "$VLLM_RP" ] && VLLM_ARGS="$VLLM_ARGS --reasoning-parser $VLLM_RP"
+[ -n "$VLLM_EXTRA" ] && VLLM_ARGS="$VLLM_ARGS $VLLM_EXTRA"
 
 echo "Starting vLLM server for model: $MODEL"
 echo "  Image: $VLLM_IMAGE"
