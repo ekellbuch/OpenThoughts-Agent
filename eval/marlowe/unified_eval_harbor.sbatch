@@ -43,11 +43,26 @@ TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
 N_CONCURRENT="${EVAL_N_CONCURRENT:-16}"
 GPU_MEMORY_UTIL="${EVAL_GPU_MEMORY_UTIL:-0.95}"
 
-# --- Read config from YAML ---
+# --- Read config from YAML (proper parser, not grep/sed) ---
 _harbor_cfg="${EVAL_HARBOR_CONFIG:?EVAL_HARBOR_CONFIG must be set}"
-MODEL=$(grep 'model_name:' "$_harbor_cfg" | head -1 | sed 's/.*model_name: *//' | sed 's|hosted_vllm/||')
-REPO_ID=$(grep 'dataset_repo:' "$_harbor_cfg" | head -1 | sed 's/.*dataset_repo: *//')
-RUN_TAG_ARG=$(grep 'job_name:' "$_harbor_cfg" | head -1 | sed 's/.*job_name: *//')
+_parse_yaml() {
+    "$HARBOR_VENV/bin/python3" -c "
+import yaml, sys
+with open(sys.argv[1]) as f:
+    cfg = yaml.safe_load(f)
+agents = cfg.get('agents', [{}])
+model = agents[0].get('model_name', '') if agents else ''
+# Strip litellm provider prefix to get HF model name
+if '/' in model:
+    parts = model.split('/')
+    if parts[0] in ('hosted_vllm', 'openai'):
+        model = '/'.join(parts[1:])
+print(model)
+print(cfg.get('dataset_repo', ''))
+print(cfg.get('job_name', ''))
+" "$1"
+}
+read -r MODEL REPO_ID RUN_TAG_ARG <<< "$(_parse_yaml "$_harbor_cfg" | paste -s -d' ')"
 BENCHMARK_ID=""
 
 # Strip slashes and special chars for file-safe names
