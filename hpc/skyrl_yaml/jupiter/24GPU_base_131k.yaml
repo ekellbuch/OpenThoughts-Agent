@@ -29,6 +29,8 @@ terminal_bench:
     max_episodes: 999999
     enable_summarize: false
     store_all_messages: true
+    trajectory_config:
+      raw_content: true
     enable_episode_logging: false
     record_terminal_session: false
     enable_pane_logging: false
