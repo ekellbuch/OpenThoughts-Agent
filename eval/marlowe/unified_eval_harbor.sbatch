@@ -1,7 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=eval
-#SBATCH --account=marlowe-m000120
-#SBATCH --partition=preempt
+#SBATCH --account=marlowe-m000120-pm05
+#SBATCH --partition=batch
+#SBATCH --qos=medium
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
@@ -22,16 +23,14 @@
 #   - H100 80GB GPUs (8 per node)
 #   - Compute nodes have internet access
 #
-# Positional args:
-#   $1 = MODEL (HF model name, e.g. nvidia/Nemotron-Terminal-8B)
-#   $2 = REPO_ID (HF dataset repo or local path, e.g. DCAgent/dev_set_v2)
-#   $3 = BENCHMARK_ID (optional, DB benchmark UUID)
-#   $4 = RUN_TAG_ARG (optional, override run tag)
+# All config comes from the YAML at EVAL_HARBOR_CONFIG:
+#   model_name, dataset_repo, run_tag, agent, environment, datasets.
 #
-# Env vars:
+# Env vars (set by run_eval.sh):
+#   EVAL_HARBOR_CONFIG      (required — path to Harbor YAML)
+#   EVAL_VLLM_*             (from vllm_serve.yaml, parsed by run_eval.sh)
 #   EVAL_N_CONCURRENT       (default: 16)
 #   EVAL_GPU_MEMORY_UTIL    (default: 0.95)
-#   EVAL_VLLM_TENSOR_PARALLEL_SIZE (default: 1)
 # ==============================================================================
 
 set -eo pipefail
@@ -44,13 +43,12 @@ TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
 N_CONCURRENT="${EVAL_N_CONCURRENT:-16}"
 GPU_MEMORY_UTIL="${EVAL_GPU_MEMORY_UTIL:-0.95}"
 
-# --- Parse args: read from YAML config, positional args override ---
-_harbor_cfg="${EVAL_HARBOR_CONFIG:-}"
-_yaml_model=$(grep 'model_name:' "$_harbor_cfg" 2>/dev/null | head -1 | sed 's/.*model_name: *//' | sed 's|hosted_vllm/||')
-MODEL="${1:-${_yaml_model:-nvidia/Nemotron-Terminal-8B}}"
-REPO_ID="${2:-DCAgent2/terminal_bench_2}"
-BENCHMARK_ID="${3:-}"
-RUN_TAG_ARG="${4:-}"
+# --- Read config from YAML ---
+_harbor_cfg="${EVAL_HARBOR_CONFIG:?EVAL_HARBOR_CONFIG must be set}"
+MODEL=$(grep 'model_name:' "$_harbor_cfg" | head -1 | sed 's/.*model_name: *//' | sed 's|hosted_vllm/||')
+REPO_ID=$(grep 'dataset_repo:' "$_harbor_cfg" | head -1 | sed 's/.*dataset_repo: *//')
+RUN_TAG_ARG=$(grep 'job_name:' "$_harbor_cfg" | head -1 | sed 's/.*job_name: *//')
+BENCHMARK_ID=""
 
 # Strip slashes and special chars for file-safe names
 SAFE_MODEL=$(echo "$MODEL" | tr '/:' '_')
@@ -230,15 +228,15 @@ echo "Run dir: $RUN_DIR"
 # On Marlowe, harbor is installed in scripts/harbor/.venv — no
 # harbor_runner.sif container needed.
 #
-# The YAML config controls everything: agent, model, environment, kwargs.
-# We don't pass --agent/--model on CLI because that replaces the YAML agent
-# config entirely, losing model_info, enable_summarize, enable_thinking, etc.
-# Only pass what the YAML doesn't know: dataset path (local), job name (per-run), config path.
+# The YAML config controls everything: agent, model, environment, datasets, kwargs.
+# We don't pass --agent/--model/-p on CLI because CLI flags replace the YAML
+# config entirely, losing model_info, enable_summarize, task_names, etc.
+# The YAML datasets section has the local path and task_names — Harbor uses it directly.
 # ==============================================================================
 set +e
 
 HARBOR_EXTRA_ARGS="${EVAL_HARBOR_EXTRA_ARGS:-}"
-HARBOR_ARGS="jobs start -p $DATASET_PATH --job-name $RUN_TAG --config $HARBOR_CONFIG $HARBOR_EXTRA_ARGS"
+HARBOR_ARGS="jobs start --config $HARBOR_CONFIG $HARBOR_EXTRA_ARGS"
 
 echo "[DEBUG] Harbor args: $HARBOR_ARGS"
 
