@@ -199,8 +199,10 @@ generator:
 
   gpu_memory_utilization: 0.85
 
-  max_num_seqs: 12
-  max_num_batched_tokens: 8192
+  # 512 workers / 24 engines = ~21.3 workers per engine.
+  # max_num_seqs must exceed this to avoid request queuing.
+  max_num_seqs: 24
+  max_num_batched_tokens: 16384
 
   enable_prefix_caching: true
   enable_chunked_prefill: true
