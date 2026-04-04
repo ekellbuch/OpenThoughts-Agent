@@ -146,7 +146,6 @@ mkdir -p "{experiments_dir}/ray_logs"
 # Ray uses /tmp by default for logs/sockets. This trap copies them to the
 # experiments directory for debugging after the job terminates.
 cleanup_ray_logs() {
-  local JOB_RAY_DIR="{experiments_dir}/ray_logs/ray_$SLURM_JOB_ID"
   echo "Preserving Ray logs to {experiments_dir}/ray_logs/"
 
   # --- Head node logs ---
@@ -159,23 +158,11 @@ cleanup_ray_logs() {
     fi
   done
 
-  # --- Worker node logs ---
-  # Collect Ray logs from all worker nodes in the SLURM allocation.
-  # Requires SSH_KEY to be set (e.g. in secrets.env) for intra-cluster SSH.
-  if [[ -n "${SSH_KEY:-}" && -n "${SLURM_JOB_NODELIST:-}" ]]; then
-    local WORKERS_DIR="{experiments_dir}/ray_logs/ray_${SLURM_JOB_ID}_workers"
-    mkdir -p "$WORKERS_DIR"
-    local HEAD_NODE
-    HEAD_NODE=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-    for node in $(scontrol show hostnames "$SLURM_JOB_NODELIST"); do
-      [[ "$node" == "$HEAD_NODE" ]] && continue  # head node already copied above
-      echo "  Collecting Ray logs from worker $node..."
-      mkdir -p "$WORKERS_DIR/$node"
-      rsync -az --ignore-errors \
-        -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i $SSH_KEY" \
-        "$node:/tmp/ray/" "$WORKERS_DIR/$node/" 2>/dev/null || \
-        echo "  WARNING: Failed to collect logs from $node"
-    done
+  # --- Worker node logs (clusters with intra-node SSH, e.g. Jupiter) ---
+  local WORKER_LOG_SCRIPT="$WORKDIR/scripts/ray/collect_worker_ray_logs.sh"
+  if [[ -f "$WORKER_LOG_SCRIPT" ]]; then
+    source "$WORKER_LOG_SCRIPT"
+    collect_worker_ray_logs "{experiments_dir}/ray_logs"
   fi
 
   echo "Ray log preservation complete"
