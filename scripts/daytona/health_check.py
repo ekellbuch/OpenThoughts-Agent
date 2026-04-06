@@ -138,6 +138,7 @@ def create_sandbox(
                 auto_stop_interval=0,
                 auto_archive_interval=0,
                 auto_delete_interval=30,
+                ephemeral=True,
             )
             sandbox = daytona.create(params, timeout=timeout)
             return sandbox, time.monotonic() - t0
@@ -155,6 +156,7 @@ def create_sandbox(
             auto_stop_interval=0,
             auto_archive_interval=0,
             auto_delete_interval=30,
+            ephemeral=True,
         )
         sandbox = daytona.create(params, timeout=timeout)
         return sandbox, time.monotonic() - t0
