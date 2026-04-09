@@ -59,7 +59,7 @@ terminal_bench:
       - RewardFileEmptyError
       - VerifierOutputParseError
 
-    n_concurrent_trials: 384
+    n_concurrent_trials: 512
 
     # Logging settings
     log_level: INFO
@@ -115,7 +115,6 @@ trainer:
   max_steps: 60
   update_epochs_per_batch: 1
 
-  # Batch sizes
   train_batch_size: 64
   policy_mini_batch_size: 64
   eval_batch_size: 64
@@ -155,7 +154,7 @@ trainer:
 
   policy:
     optimizer_config:
-      lr: 8e-6
+      lr: 9e-6
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
       max_grad_norm: 10.0
@@ -170,7 +169,6 @@ trainer:
       fsdp_size: 4
 
   # Model placement (async training) - 16 shared GPUs for policy/ref
-  # 96 GPUs total (24 nodes): 4 policy + 4 ref + 20 inference nodes
   placement:
     colocate_all: false
     policy_num_nodes: 4
@@ -180,7 +178,7 @@ trainer:
 
   fully_async:
     max_staleness_steps: 16
-    num_parallel_generation_workers: 768
+    num_parallel_generation_workers: 1024
 
 generator:
   backend: vllm
@@ -188,15 +186,14 @@ generator:
   model_dtype: bfloat16
 
   inference_engine_tensor_parallel_size: 2
-  # 20 inference nodes × 4 GPUs / TP=2 = 40 engines
-  num_inference_engines: 40
+  num_inference_engines: 56
 
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
 
   gpu_memory_utilization: 0.85
 
-  # 768 workers / 40 engines = ~19.2 workers per engine.
+  # 1024 workers / 56 engines = ~18.3 workers per engine.
   # max_num_seqs must exceed this to avoid request queuing.
   max_num_seqs: 24
   max_num_batched_tokens: 16384
@@ -215,7 +212,7 @@ generator:
   max_turns: 999999
 
   sampling_params:
-    max_generate_length: 8192
+    max_generate_length: 16384
     temperature: 0.7
     top_p: 0.95
     top_k: 20
