@@ -126,9 +126,20 @@ VLLM_ARGS="$VLLM_ARGS --gpu-memory-utilization $GPU_MEMORY_UTIL"
 VLLM_ARGS="$VLLM_ARGS --trust-remote-code --enforce-eager"
 [ -n "$VLLM_MAX_LEN" ] && VLLM_ARGS="$VLLM_ARGS --max-model-len $VLLM_MAX_LEN"
 [ -n "$VLLM_TCP" ] && VLLM_ARGS="$VLLM_ARGS --enable-auto-tool-choice --tool-call-parser $VLLM_TCP"
+VLLM_RP="${EVAL_VLLM_REASONING_PARSER:-}"
+[ -n "$VLLM_RP" ] && VLLM_ARGS="$VLLM_ARGS --reasoning-parser $VLLM_RP"
+VLLM_EXTRA="${EVAL_VLLM_EXTRA_ARGS:-}"
+[ -n "$VLLM_EXTRA" ] && VLLM_ARGS="$VLLM_ARGS $VLLM_EXTRA"
 
 echo "Starting vLLM: $VLLM_ARGS"
 VLLM_LOG="$EVAL_ROOT/logs/vllm_${SLURM_JOB_ID}.log"
+
+# Kill any stale process on port 8000 (e.g. leftover vLLM from a prior job)
+if curl -s http://localhost:8000/v1/models > /dev/null 2>&1; then
+    echo "WARNING: port 8000 already in use — killing stale process"
+    fuser -k 8000/tcp 2>/dev/null || true
+    sleep 2
+fi
 
 env TORCHDYNAMO_DISABLE=1 \
     TMPDIR="/tmp" \
@@ -144,7 +155,7 @@ VLLM_PID=$!
 # Health check: wait up to 30 minutes
 VLLM_TIMEOUT=1800
 VLLM_START=$SECONDS
-while ! curl -s http://localhost:8000/v1/models > /dev/null 2>&1; do
+while ! curl -s http://localhost:8000/v1/models 2>/dev/null | grep -q "$MODEL"; do
     ELAPSED=$(( SECONDS - VLLM_START ))
     if [ $ELAPSED -ge $VLLM_TIMEOUT ]; then
         echo "ERROR: vLLM server failed to start after ${VLLM_TIMEOUT}s"
@@ -175,11 +186,21 @@ fi
 echo "Dataset: $DATASET_PATH ($(ls -d "$DATASET_PATH"/*/instruction.md 2>/dev/null | wc -l) tasks)"
 
 # ==============================================================================
-# Run Harbor — config-only, no CLI overrides
+# Run Harbor — start or resume
 # ==============================================================================
 set +e
-echo "Starting Harbor eval..."
-$VENV_DIR/bin/harbor jobs start --config "$HARBOR_CONFIG"
+if [ -n "${EVAL_RESUME_JOB_PATH:-}" ]; then
+    RESUME_FILTERS=""
+    for etype in ${EVAL_RESUME_FILTER_ERRORS:-}; do
+        RESUME_FILTERS="$RESUME_FILTERS -f $etype"
+    done
+    echo "Resuming Harbor job: $EVAL_RESUME_JOB_PATH"
+    echo "Filtering error types: ${EVAL_RESUME_FILTER_ERRORS:-none}"
+    $VENV_DIR/bin/harbor jobs resume -p "$EVAL_RESUME_JOB_PATH" $RESUME_FILTERS
+else
+    echo "Starting Harbor eval..."
+    $VENV_DIR/bin/harbor jobs start --config "$HARBOR_CONFIG"
+fi
 SB_EXIT=$?
 set -e
 
