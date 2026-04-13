@@ -241,9 +241,10 @@ def extract_json_from_content(content: str) -> Optional[Dict[str, Any]]:
     if last_marker_end_pos != -1:
         content = content[last_marker_end_pos:].strip()
 
-    # Try to find JSON object (use rfind to get the last JSON object in case
-    # there are curly braces in preceding text)
-    start = content.rfind("{")
+    # Find the first JSON object after </think> tags.
+    # Using find (not rfind) because rfind would match a nested brace
+    # inside the JSON (e.g. a keystrokes object) instead of the root object.
+    start = content.find("{")
     if start == -1:
         return None
 
