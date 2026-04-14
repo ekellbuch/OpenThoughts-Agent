@@ -118,8 +118,9 @@ VLLM_TP="${EVAL_VLLM_TENSOR_PARALLEL_SIZE:-1}"
 VLLM_MAX_LEN="${EVAL_VLLM_MAX_MODEL_LEN:-}"
 VLLM_TCP="${EVAL_VLLM_TOOL_CALL_PARSER:-}"
 GPU_MEMORY_UTIL="${EVAL_GPU_MEMORY_UTIL:-0.95}"
+VLLM_PORT="${EVAL_VLLM_PORT:-8000}"
 
-VLLM_ARGS="--model $MODEL --host 0.0.0.0 --port 8000"
+VLLM_ARGS="--model $MODEL --host 0.0.0.0 --port $VLLM_PORT"
 VLLM_ARGS="$VLLM_ARGS --served-model-name $MODEL"
 VLLM_ARGS="$VLLM_ARGS --tensor-parallel-size $VLLM_TP"
 VLLM_ARGS="$VLLM_ARGS --gpu-memory-utilization $GPU_MEMORY_UTIL"
@@ -134,10 +135,10 @@ VLLM_EXTRA="${EVAL_VLLM_EXTRA_ARGS:-}"
 echo "Starting vLLM: $VLLM_ARGS"
 VLLM_LOG="$EVAL_ROOT/logs/vllm_${SLURM_JOB_ID}.log"
 
-# Kill any stale process on port 8000 (e.g. leftover vLLM from a prior job)
-if curl -s http://localhost:8000/v1/models > /dev/null 2>&1; then
-    echo "WARNING: port 8000 already in use — killing stale process"
-    fuser -k 8000/tcp 2>/dev/null || true
+# Kill any stale process on the chosen vLLM port (e.g. leftover vLLM from a prior job)
+if curl -s http://localhost:$VLLM_PORT/v1/models > /dev/null 2>&1; then
+    echo "WARNING: port $VLLM_PORT already in use — killing stale process"
+    fuser -k $VLLM_PORT/tcp 2>/dev/null || true
     sleep 2
 fi
 
@@ -155,7 +156,7 @@ VLLM_PID=$!
 # Health check: wait up to 30 minutes
 VLLM_TIMEOUT=1800
 VLLM_START=$SECONDS
-while ! curl -s http://localhost:8000/v1/models 2>/dev/null | grep -q "$MODEL"; do
+while ! curl -s http://localhost:$VLLM_PORT/v1/models 2>/dev/null | grep -q "$MODEL"; do
     ELAPSED=$(( SECONDS - VLLM_START ))
     if [ $ELAPSED -ge $VLLM_TIMEOUT ]; then
         echo "ERROR: vLLM server failed to start after ${VLLM_TIMEOUT}s"
