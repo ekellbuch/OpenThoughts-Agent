@@ -408,9 +408,10 @@ Note: `GIT_TERMINAL_PROMPT=0` prevents interactive auth prompts from blocking th
 
 **Key paths**:
 - Code: `/e/scratch/jureap59/feuer1/OpenThoughts-Agent`
-- Shared data: `/e/data1/datasets/playground/ot`
-- Personal data: `/e/data1/datasets/playground/ot-baf`
-- SFT checkpoints: `/e/data1/datasets/playground/ot/checkpoints/`
+- Personal data root (`$DCFT_DATA`): `/e/data1/datasets/playground/ot-baf` ← USE THIS
+- HF cache (`$HF_HUB_CACHE`, `$HF_HOME`): `/e/data1/datasets/playground/ot-baf/hf_hub`
+- SFT/RL checkpoints (`$CHECKPOINTS_DIR`): `/e/data1/datasets/playground/ot-baf/checkpoints/`
+- Legacy shared data (avoid for new writes): `/e/data1/datasets/playground/ot` — owned by `nezhurina1`; its xet/datasets cache subdirs were created by other users (`guha1`, etc.) with `0755` perms, causing `Permission denied` on HF Xet uploads and dataset lock files. Read-only references to existing artifacts in `/ot` are fine.
 - Harbor: `/e/scratch/jureap59/feuer1/harbor`
 
 **Job management** (SLURM):
