@@ -1,7 +1,7 @@
 engine:
   type: vllm_local
   model: Qwen/Qwen3-8B
-  max_output_tokens: 8192
+  max_output_tokens: 16384
   healthcheck_interval: 300
   vllm_local: {}
 backend:

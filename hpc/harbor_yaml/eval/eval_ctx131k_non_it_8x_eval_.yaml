@@ -83,7 +83,7 @@ agents:
       raw_content: true
       linear_history: true
     enable_summarize: true
-    proactive_summarization_threshold: 16384
+    proactive_summarization_threshold: 4096
     interleaved_thinking: false
     parser_name: json
     tmux_pane_width: 160
