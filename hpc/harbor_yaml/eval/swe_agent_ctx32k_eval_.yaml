@@ -68,12 +68,14 @@ agents:
   model_name: hosted_vllm/placeholder-override-at-runtime
   max_timeout_sec:
   kwargs:
-    # NOTE: parse_function: function_calling looks attractive but harbor's
-    # swe_agent.py flattens it to --agent.model.parse_function=... while
-    # SWE-agent expects --agent.model.parse_function.type=... (parse_function
-    # is a nested config object). Until harbor is patched, omit the override
-    # and rely on SWE-agent's default (function_calling from default.yaml,
-    # which is what SERA was trained against).
+    # SERA / Sera-4.6-Lite-T2-v4 axolotl SFTs emit tool calls as raw text
+    # markers (<tool_call>{...}</tool_call>) in `content`, not via OpenAI
+    # structured tool_calls. Match the format SERA-8B's reference eval uses
+    # (32.3% on swebench-verified-random-100): parse the text with
+    # thought_action, and keep vLLM's tool_call_parser + auto_tool_choice
+    # DISABLED in the matching datagen_yaml. Requires the harbor
+    # nested-parse_function CLI fix (swe_agent.py, commit b9b86fc4).
+    parse_function: thought_action
     model_info:
       max_input_tokens: 32768
       max_output_tokens: 8192
