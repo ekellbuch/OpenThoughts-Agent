@@ -68,16 +68,12 @@ agents:
   model_name: hosted_vllm/placeholder-override-at-runtime
   max_timeout_sec:
   kwargs:
-    # Force function-calling parse mode. Without this, SWE-agent defers to
-    # litellm.supports_function_calling("hosted_vllm/<id>"), which always
-    # returns False because litellm has no hosted_vllm/* entries in its
-    # model_cost table. That does NOT disable tool use on the canonical
-    # path (vLLM still parses hermes tool_calls regardless), but it can
-    # trip downstream litellm-gated code paths and produces a noisy WARN.
-    # We know our vLLM is always set up with
-    # enable_auto_tool_choice + tool_call_parser=hermes, so forcing
-    # function_calling here is safe for every model served this way.
-    parse_function: function_calling
+    # NOTE: parse_function: function_calling looks attractive but harbor's
+    # swe_agent.py flattens it to --agent.model.parse_function=... while
+    # SWE-agent expects --agent.model.parse_function.type=... (parse_function
+    # is a nested config object). Until harbor is patched, omit the override
+    # and rely on SWE-agent's default (function_calling from default.yaml,
+    # which is what SERA was trained against).
     model_info:
       max_input_tokens: 32768
       max_output_tokens: 8192
