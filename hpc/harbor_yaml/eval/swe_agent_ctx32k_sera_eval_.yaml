@@ -1,8 +1,21 @@
-# Harbor eval configuration for SWE-Agent with hosted vLLM (16 concurrency, 32k context).
-# For use with Pinggy tunnels to expose vLLM endpoints to installed agents.
-# This is the full SWE-agent scaffold that SERA was trained on.
+# Harbor eval configuration for SERA-family models via SWE-Agent harness.
+# (16 concurrency, 32k context, hosted vLLM through Pinggy tunnel.)
+#
+# SERA-family SFTs emit tool calls as raw text inside content
+# (<think>...</think><tool_call>{...}</tool_call>), not via OpenAI-style
+# structured tool_calls. Reference
+# DCAgent2/swebench_verified_random_100_folders_SERA_8B_20260422_175644
+# confirms the trained format — messages have keys=['content','role']
+# only, no structured tool_calls field.
+#
+# This config pairs with hpc/datagen_yaml/qwen3_8b_vllm_serve_32k_4xGH200_sera.yaml
+# (vLLM tool_call_parser + reasoning_parser DISABLED) and sets SWE-agent's
+# parse_function to thought_action so the harness parses the raw text for
+# actions instead of expecting structured tool_calls.
+#
+# Requires harbor swe_agent.py nested parse_function CLI fix (commit b9b86fc4).
 
-job_name: swe-agent-eval-job
+job_name: swe-agent-sera-eval-job
 jobs_dir: trace_jobs
 n_attempts: 3
 timeout_multiplier: 8.0
@@ -68,6 +81,10 @@ agents:
   model_name: hosted_vllm/placeholder-override-at-runtime
   max_timeout_sec:
   kwargs:
+    # SERA models were trained on raw-text tool-call markers, not OpenAI
+    # structured tool_calls. Parse the text with thought_action instead of
+    # the swe-agent default (function_calling).
+    parse_function: thought_action
     model_info:
       max_input_tokens: 32768
       max_output_tokens: 8192

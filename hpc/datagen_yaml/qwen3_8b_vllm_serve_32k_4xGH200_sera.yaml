@@ -1,0 +1,49 @@
+# vLLM serving config for SERA-format 8B axolotl SFTs on 4xGH200.
+#
+# SERA-family models (laion/Sera-4.6-Lite-T2-v4-*-axolotl__Qwen3-8B and
+# similar axolotl SFTs on allenai/Sera-4.6-Lite-T2) are trained to emit
+# tool calls as raw text inside `content` using
+#   <think>...</think>
+#   <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+# markers — NOT via OpenAI-style structured `tool_calls`. Reference:
+# DCAgent2/swebench_verified_random_100_folders_SERA_8B_20260422_175644
+# has message keys=['content','role'] only — no structured tool_calls.
+#
+# For these models we disable vLLM's tool-call / reasoning parsers so
+# raw `<tool_call>` / `<think>` text flows back to the agent verbatim.
+# SWE-agent should run with parse_function=thought_action (see the
+# matching harbor config swe_agent_ctx32k_sera_eval_.yaml).
+#
+# Do NOT use this config for Hermes-format models — use the sibling
+# qwen3_8b_vllm_serve_32k_4xGH200.yaml instead.
+engine:
+  type: vllm_local
+  model: Qwen/Qwen3-8B
+  max_output_tokens: 16384
+  healthcheck_interval: 300
+  vllm_local: {}
+backend:
+  type: ray
+  wait_for_endpoint: true
+vllm_server:
+  model_path: Qwen/Qwen3-8B
+  num_replicas: 4
+  tensor_parallel_size: 1
+  pipeline_parallel_size: 1
+  data_parallel_size: 1
+  time_limit: '11:59:00'
+  max_model_len: 32768
+  max_num_seqs: 32
+  gpu_memory_utilization: 0.9
+  swap_space: 12
+  enable_expert_parallel: false
+  enable_auto_tool_choice: false
+  extra_args:
+  - --dtype
+  - bfloat16
+  - --block-size
+  - '16'
+  - --enable-chunked-prefill
+  - --max-num-partial-prefills
+  - '1'
+  - --enable-prefix-caching

@@ -19,16 +19,9 @@ vllm_server:
   gpu_memory_utilization: 0.9
   swap_space: 12
   enable_expert_parallel: false
-  # SERA-style models (axolotl SFT on Sera-4.6-Lite-T2) are trained to emit
-  # tool calls as raw text inside `content` using <tool_call>{...}</tool_call>
-  # markers — NOT via OpenAI structured tool_calls. vLLM's tool_call_parser
-  # would strip those markers into a structured `tool_calls` field on the
-  # response, which then gets re-rendered by the chat template differently
-  # from what the model saw in training → model goes OOD after a couple of
-  # turns. SERA's reference 8B eval (32.3% on swebench-verified-random-100)
-  # does NOT enable these parsers. Keep them off; let SWE-agent parse raw
-  # text with parse_function=thought_action instead.
-  enable_auto_tool_choice: false
+  enable_auto_tool_choice: true
+  tool_call_parser: hermes
+  reasoning_parser: qwen3
   extra_args:
   - --dtype
   - bfloat16
