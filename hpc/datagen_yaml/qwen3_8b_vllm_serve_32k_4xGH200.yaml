@@ -9,10 +9,10 @@ backend:
   wait_for_endpoint: true
 vllm_server:
   model_path: Qwen/Qwen3-8B
-  num_replicas: 1
+  num_replicas: 4
   tensor_parallel_size: 1
   pipeline_parallel_size: 1
-  data_parallel_size: 4
+  data_parallel_size: 1
   time_limit: '11:59:00'
   max_model_len: 32768
   max_num_seqs: 32
@@ -31,5 +31,3 @@ vllm_server:
   - --max-num-partial-prefills
   - '1'
   - --enable-prefix-caching
-  - --all2all-backend
-  - pplx
