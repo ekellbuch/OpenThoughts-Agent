@@ -104,10 +104,12 @@ def prebuild_daytona_snapshots(
     total_existing = existing.total
     new_needed = stats.unique_hashes
     if total_existing + new_needed > max_org_snapshots:
-        raise ValueError(
-            f"Org has {total_existing} snapshots; adding {new_needed} would "
-            f"exceed the limit of {max_org_snapshots}. Delete unused snapshots first."
+        print(
+            f"WARNING: Org has {total_existing} snapshots; adding {new_needed} would "
+            f"exceed the limit of {max_org_snapshots}. Skipping pre-build — "
+            f"RL workers will build snapshots on-demand during rollouts."
         )
+        return
 
     # 6. Build missing snapshots
     built = 0
