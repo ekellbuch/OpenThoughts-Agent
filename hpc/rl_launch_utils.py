@@ -674,7 +674,7 @@ def construct_rl_sbatch_script(exp_args: dict, hpc) -> str:
         if (os.environ.get("DAYTONA_API_KEY")
                 and harbor_env == "daytona"
                 and resolved_train_data):
-            prebuild_daytona_snapshots(resolved_train_data)
+            prebuild_daytona_snapshots(resolved_train_data, max_new_snapshots=10000)
 
     # Resolve val_data similarly (eval datasets may also be HF repos)
     # Check CLI first, then fall back to YAML config default
