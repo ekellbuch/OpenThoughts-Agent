@@ -73,8 +73,12 @@ agents:
     metrics_endpoint: https://replace-with-vllm-host/metrics
     metrics_timeout_sec: 10
     model_info:
-      max_input_tokens: 23808
-      max_output_tokens: 8192
+      # OpenHands tokenizer undercounts — at 23808/8192 vLLM rejected with
+      # "24577 input + 8192 output > 32768 max_model_len", then OpenHands looped
+      # retrying the same oversized prompt (eval 389639: 0 completions in 2.5h).
+      # 20000/4096 leaves ~8k headroom for tool-schema prepends + tokenizer drift.
+      max_input_tokens: 20000
+      max_output_tokens: 4096
       input_cost_per_token: 0
       output_cost_per_token: 0
 
