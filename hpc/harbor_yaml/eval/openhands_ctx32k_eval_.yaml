@@ -64,7 +64,10 @@ agents:
 - name: openhands
   import_path:
   model_name: placeholder/override-at-runtime
-  max_timeout_sec:
+  # 1800s base × timeout_multiplier=1.0 = 30min cap per trial. Without this
+  # explicit cap, timeout_multiplier has no base to multiply and OpenHands
+  # runs until max_iterations=250 (many hours/trial). See 390317 debug.
+  max_timeout_sec: 1800
   override_setup_timeout_sec: 600
   kwargs:
     disable_tool_calls: true
