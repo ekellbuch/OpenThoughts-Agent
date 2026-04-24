@@ -104,12 +104,10 @@ def prebuild_daytona_snapshots(
     total_existing = existing.total
     new_needed = stats.unique_hashes
     if total_existing + new_needed > max_org_snapshots:
-        print(
-            f"WARNING: Org has {total_existing} snapshots; adding {new_needed} would "
-            f"exceed the limit of {max_org_snapshots}. Skipping pre-build — "
-            f"RL workers will build snapshots on-demand during rollouts."
+        raise ValueError(
+            f"Org has {total_existing} snapshots; adding {new_needed} would "
+            f"exceed the limit of {max_org_snapshots}. Delete unused snapshots first."
         )
-        return
 
     # 6. Build missing snapshots
     built = 0
@@ -676,7 +674,7 @@ def construct_rl_sbatch_script(exp_args: dict, hpc) -> str:
         if (os.environ.get("DAYTONA_API_KEY")
                 and harbor_env == "daytona"
                 and resolved_train_data):
-            prebuild_daytona_snapshots(resolved_train_data, max_new_snapshots=10000)
+            prebuild_daytona_snapshots(resolved_train_data)
 
     # Resolve val_data similarly (eval datasets may also be HF repos)
     # Check CLI first, then fall back to YAML config default
