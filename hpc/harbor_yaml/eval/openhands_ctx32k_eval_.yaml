@@ -3,7 +3,7 @@
 job_name: default-eval-job
 jobs_dir: trace_jobs
 n_attempts: 3
-timeout_multiplier: 8.0
+timeout_multiplier: 1.0
 debug: false
 
 orchestrator:
