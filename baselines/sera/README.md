@@ -346,6 +346,105 @@ rm -rf $SRC   # pre-convert checkpoint; DST is what we uploaded. Frees ~16 GB pe
 
 ---
 
+## Evaluation
+
+SERA was trained on **SWE-agent JSON tool-calling format**:
+`<think>...</think>...<tool_call>{"name":"<tool>","arguments":{...}}</tool_call>`. Pair it with the matching harbor harness (`swe_agent_ctx32k_eval_.yaml`) and the SERA team's SWE-agent scaffold config — DO NOT use the OpenHands harness for SERA.
+
+### Pinggy and Daytona
+
+Both clusters route the vLLM endpoint through pinggy. URL+token pairs are catalogued in `/Users/benjaminfeuer/Documents/notes/ot-agent/pinggy_bank.md`. Pairs 1–7 are reserved for sibling experiments; 8–10 are the rotating slots for ad-hoc evals (8 may be in use by a labmate — confirm first).
+
+Daytona key MUST be `$DAYTONA_BASE_API_KEY` — `DAYTONA_API_KEY` is the RL-org key and blocks declarative builds (failure mode: `DaytonaValidationError`).
+
+### Critical: bump `agent.max_requeries`
+
+SWE-agent's default is `agent.max_requeries: 3`. After 3 consecutive `FormatError` / `_BlockedActionError` / `BashIncorrectSyntaxError`, the agent emits **"Exit due to repeated format/blocklist/bash syntax errors"** and forfeits — even if it was making real progress. Sera-trained 8B models hit this floor often, so we override the SWE-agent config via the `SWEAGENT_CONFIG` env var pointing to a patched gist of SERA's [e2e.yaml](https://github.com/allenai/SERA/blob/main/sera/configs/sweagent/e2e.yaml) with `max_requeries: 50`:
+
+```
+SWEAGENT_CONFIG=https://gist.githubusercontent.com/penfever/f327eabde26934630ee2aea1a59bb511/raw/sera_e2e_patched.yaml
+```
+
+Harbor's `swe_agent.py` reads `os.environ["SWEAGENT_CONFIG"]` — if it's a URL, harbor curls it into the daytona container. If it's a path, it's read directly inside the container. The URL form is portable across clusters.
+
+To inject the env var into a launcher-generated sbatch:
+```bash
+SB=experiments/<run_dir>/sbatch/<job_name>__eval.sbatch
+sed -i '/^set -eo pipefail$/a export SWEAGENT_CONFIG="https://gist.githubusercontent.com/penfever/f327eabde26934630ee2aea1a59bb511/raw/sera_e2e_patched.yaml"' "$SB"
+sbatch "$SB"
+```
+
+If you need a different override, edit the gist (or fork it) and update the URL.
+
+### Launch — Perlmutter (A100, has internet)
+
+```bash
+ssh perlmutter
+source ~/.bashrc; source ~/secrets.env; module load conda; conda activate dcagent
+cd $SCRATCH/OpenThoughts-Agent && git pull
+source hpc/dotenv/perlmutter.env
+git submodule update --init --remote sft/llamafactory
+cd $SCRATCH/SkyRL && git pull && cd $SCRATCH/harbor && git pull
+cd $SCRATCH/OpenThoughts-Agent
+
+python -m hpc.launch \
+  --job_type eval \
+  --model_path laion/<sera_v7_hub_id> \
+  --tasks_input_path DCAgent2/swebench-verified-random-100-folders \
+  --trace_harbor_config hpc/harbor_yaml/eval/swe_agent_ctx32k_eval_.yaml \
+  --datagen_config hpc/datagen_yaml/qwen3_8b_vllm_serve_32k_4xA100.yaml \
+  --trace_agent_name swe-agent \
+  --daytona_api_key "$DAYTONA_BASE_API_KEY" \
+  --pinggy_persistent_url <pair-N URL> --pinggy_token <pair-N token> \
+  --time_limit 11:59:00 \
+  --num_nodes 1 --gpus_per_node 4 \
+  --trace_n_concurrent 16
+
+# After hpc.launch prints the SLURM job id, patch the sbatch with SWEAGENT_CONFIG
+# (see above) and re-sbatch — the launcher submits without the override by default.
+```
+
+`--datagen_config` MUST be the A100 variant on Perlmutter; the GH200 yaml uses `--all2all-backend pplx` which crashes on A100.
+
+### Launch — Jupiter (GH200, no internet on compute)
+
+Replace `qwen3_8b_vllm_serve_32k_4xA100.yaml` → `qwen3_8b_vllm_serve_32k_4xGH200.yaml`. Otherwise identical. Login node has direct HF Hub access; the launcher pre-downloads the model into `$HF_HUB_CACHE` before submitting.
+
+### Health check (15 min after submit)
+
+Per `feedback_eval_15min_infra_check.md`, every active eval gets a 15-minute infra cadence:
+- vLLM endpoint responds (check `vllm_endpoint.json` → `endpoint_url`).
+- Pinggy tunnel alive (`curl -sSL https://<pair>.a.pinggy.link/health`).
+- Daytona reachable (look for `DaytonaValidationError` or `Bearer token is invalid` in trial logs).
+- Trial throughput accumulating (`find $TRIALS -maxdepth 2 -name result.json | wc -l` rising).
+
+### Aggregating results
+
+```bash
+P=experiments/<run_dir>/trace_jobs/<run_tag>
+find $P -maxdepth 1 -mindepth 1 -type d | wc -l        # total trials launched
+find $P -maxdepth 2 -name result.json | wc -l           # trials completed
+python3 -c "
+import json, glob
+n = ok = 0
+for r in glob.glob('$P/*/result.json'):
+    d = json.load(open(r))
+    n += 1
+    if (d.get('verifier_result') or {}).get('rewards', {}).get('reward', 0) > 0: ok += 1
+print(f'pass: {ok}/{n} = {100*ok/max(n,1):.1f}%')
+"
+```
+
+### Failure-mode notes (from prior iterations)
+
+- **Wrong harness (OpenHands instead of SWE-agent)** → 0% pass; the model emits `<tool_call>{...}</tool_call>` JSON, but the OpenHands harness expects `<function=NAME>...</function>` XML and parses nothing.
+- **Default `max_requeries: 3`** → trials forfeit prematurely with the format/blocklist/bash exit even though the agent was producing valid actions on most turns.
+- **`DaytonaValidationError` flood** → wrong daytona key; switch to `DAYTONA_BASE_API_KEY`.
+- **`SummarizationTimeoutError` on every trial** → wrong harness (`terminus-2` instead of `swe-agent`).
+- **Pinggy bank conflict** → if the same persistent URL is in use by another concurrent eval, vLLM endpoint binds but the agent can't reach it. Use a free pair (verify with `find experiments -name vllm_endpoint.json | xargs grep pinggy`).
+
+---
+
 ## Files in this directory
 
 - `README.md` — this doc.

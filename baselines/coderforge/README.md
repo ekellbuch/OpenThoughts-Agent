@@ -131,8 +131,72 @@ See `/Users/benjaminfeuer/Documents/OpenThoughts-Agent/CLAUDE.md` for the canoni
 
 1. Axolotl's FSDP wrapper leaves `_checkpoint_wrapped_module.` prefixes in state_dict keys. vLLM / sglang can't load these.
 2. Use upstream's `convert_axolotl_checkpoint.py` (lives at `/e/scratch/jureap59/feuer1/code/axolotl/convert_axolotl_checkpoint.py`) to strip them.
-3. `huggingface-cli upload-large-folder` the cleaned checkpoint.
-4. `manual_db_push.py` to register in Supabase.
+3. **Restore stock Qwen3-8B tokenizer files** (overwrite `tokenizer_config.json`, `tokenizer.json`, `vocab.json`, `merges.txt`) AND **delete `chat_template.jinja`** before upload. See `feedback_axolotl_restore_tokenizer.md`.
+4. **Patch the auto-generated `README.md`** before upload — axolotl writes the local jsonl file path into `datasets:` frontmatter, which HF rejects as `Invalid metadata`. Replace with the real HF dataset id (e.g. `datasets:\n- laion/CoderForge-Preview-v6-1000`).
+5. `huggingface-cli upload-large-folder` the cleaned checkpoint.
+6. **HOLD `manual_db_push.py` until the eval shows non-zero reward** (see `feedback_db_register_after_eval.md`). The DB is a permanent registry; don't seed it with broken-at-eval-time models.
+
+---
+
+## Evaluation
+
+CoderForge v6+ data was generated to match the **OpenHands XML tool-call format**:
+`<think>...</think>...<function=NAME><parameter=K>V</parameter></function>`. Pair it with the matching harbor harness (`openhands_ctx32k_eval_.yaml`) and `--trace_agent_name openhands` — DO NOT use the SWE-agent harness.
+
+Mismatched harness is a leading 0% failure mode: the SWE-agent harness expects JSON-in-`<tool_call>` blocks, sees `<function=...>` instead, parses nothing, and every trial forfeits.
+
+### Why CF needs the OpenHands harness specifically
+
+- v3 (pre-tokenized) and v5 (wrapper-stripped, no `<think>`) both produced **garbage output** at eval time. Stock Qwen3-8B assigns ~100% prior to `<think>` as the first token after `<|im_start|>assistant`; CF's pre-tokenized v3 data trained the model to skip `<think>` → catastrophic forgetting at inference.
+- v6 (subset_coderforge_v6.py) regenerates training data with `<think>...</think>` injected and tool calls rendered as native OpenHands XML, so the model emits OpenHands format AND keeps Qwen3's `<think>` prior intact.
+- The OpenHands harness's `disable_tool_calls: true` setting tells the agent framework to expect XML-parsed function calls, not Hermes-style JSON-wrapped ones. Wrong harness → no parsed actions → AgentTimeoutError on every trial.
+
+### Pinggy and Daytona
+
+See `baselines/sera/README.md` for the shared notes. TL;DR:
+- Use `$DAYTONA_BASE_API_KEY` (NOT `DAYTONA_API_KEY` — that's the RL-org key, blocks declarative builds).
+- Pinggy URL+token pairs in `/Users/benjaminfeuer/Documents/notes/ot-agent/pinggy_bank.md`. Default to free pairs from 8/9/10.
+
+### Launch — Perlmutter (A100, has internet)
+
+```bash
+ssh perlmutter
+source ~/.bashrc; source ~/secrets.env; module load conda; conda activate dcagent
+cd $SCRATCH/OpenThoughts-Agent && git pull
+source hpc/dotenv/perlmutter.env
+git submodule update --init --remote sft/llamafactory
+cd $SCRATCH/SkyRL && git pull && cd $SCRATCH/harbor && git pull
+cd $SCRATCH/OpenThoughts-Agent
+
+python -m hpc.launch \
+  --job_type eval \
+  --model_path laion/<cf_v6plus_hub_id> \
+  --tasks_input_path DCAgent2/swebench-verified-random-100-folders \
+  --trace_harbor_config hpc/harbor_yaml/eval/openhands_ctx32k_eval_.yaml \
+  --datagen_config hpc/datagen_yaml/qwen3_8b_vllm_serve_32k_4xA100.yaml \
+  --trace_agent_name openhands \
+  --daytona_api_key "$DAYTONA_BASE_API_KEY" \
+  --pinggy_persistent_url <pair-N URL> --pinggy_token <pair-N token> \
+  --time_limit 11:59:00 \
+  --num_nodes 1 --gpus_per_node 4 \
+  --trace_n_concurrent 16
+```
+
+### Launch — Jupiter (GH200, no internet on compute)
+
+Replace `qwen3_8b_vllm_serve_32k_4xA100.yaml` → `qwen3_8b_vllm_serve_32k_4xGH200.yaml`. Otherwise identical.
+
+### Health check + aggregating results
+
+Same protocol as Sera (see `baselines/sera/README.md` → "Health check" and "Aggregating results"). 15-min infra cadence per `feedback_eval_15min_infra_check.md` while any eval is RUNNING.
+
+### Failure modes seen so far
+
+- **Wrong harness (SWE-agent instead of OpenHands)** → 0% pass; CF model emits `<function=NAME>` XML but harness parses nothing.
+- **`chat_template.jinja` left in the HF repo** → vLLM uses axolotl's bare 292-byte template instead of stock Qwen3-8B's 4168-byte one → drops `tool_calls` + `role:tool` at serve time → corrupted prompts → garbage output. Always delete `chat_template.jinja` post-upload (see step 3 above).
+- **Long-context degeneracy** — even with the right harness + correct data, CF v7 (1000 × 6 epochs) produced clean short-context output but collapsed at the 8.5k+ token eval prompts. CF v8 (1000 × 12 epochs) is the parallel test of the under-training hypothesis (matches Sera v7).
+
+---
 
 ## Files in this directory
 
