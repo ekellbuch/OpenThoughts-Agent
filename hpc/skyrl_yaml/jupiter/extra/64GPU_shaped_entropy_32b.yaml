@@ -1,3 +1,7 @@
+# 64GPU shaped rewards + entropy regularization (coef=0.003) for 32B models.
+# Base: 64GPU_base_32b.yaml (32B-sized memory/placement/generator).
+# Adds composite reward shaping + entropy bonus from 24GPU_shaped_entropy.yaml.
+# Entropy bonus prevents distribution collapse without needing a ref model.
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
 # Hydra config groups (+ prefix in CLI)
@@ -59,13 +63,28 @@ terminal_bench:
       - RewardFileEmptyError
       - VerifierOutputParseError
 
-    n_concurrent_trials: 96
+    n_concurrent_trials: 256
 
     # Logging settings
     log_level: INFO
 
-    # Reward shaping (disabled - binary rewards)
-    enable_reward_shaping: false
+    # ==========================================================================
+    # Reward shaping: composite (verifier + trajectory signals)
+    # ==========================================================================
+    enable_reward_shaping: true
+    reward_parser: null            # Auto-detect (pytest, unittest, generic)
+    reward_shaper: composite
+    reward_shaping_fallback: true  # Fall back to original reward if parsing fails
+    composite_components:
+      verifier: 0.4
+      thinking_length: 0.2
+      format_quality: 0.2
+      command_quality: 0.2
+    composite_verifier_shaper: pass_ratio
+    thinking_target_tokens: 350
+    thinking_sigma_tokens: 100
+    thinking_min_turns_ratio: 0.5
+    command_quality_min_turns: 2
 
     # RLOO-N error classification
     enable_error_classification: true
@@ -106,6 +125,9 @@ trainer:
     advantage_estimator: rloo_n
     use_kl_loss: false
     kl_loss_coef: 0.0
+    # Entropy regularization: gentle anti-collapse without ref model
+    use_entropy_loss: true
+    entropy_loss_coef: 0.003
     eps_clip_low: 0.2
     eps_clip_high: 0.2
     loss_reduction: token_mean
@@ -155,7 +177,7 @@ trainer:
 
   policy:
     optimizer_config:
-      lr: 8e-6
+      lr: 9e-6
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
       max_grad_norm: 10.0
@@ -170,7 +192,6 @@ trainer:
       fsdp_size: 4
 
   # Model placement (async training) - 16 shared GPUs for policy/ref
-  # 48 GPUs total (12 nodes): 4 policy + 4 ref + 4 inference nodes
   placement:
     colocate_all: false
     policy_num_nodes: 4
@@ -180,7 +201,7 @@ trainer:
 
   fully_async:
     max_staleness_steps: 16
-    num_parallel_generation_workers: 192
+    num_parallel_generation_workers: 512
 
 generator:
   backend: vllm
@@ -188,17 +209,17 @@ generator:
   model_dtype: bfloat16
 
   inference_engine_tensor_parallel_size: 2
-  # 4 inference nodes × 4 GPUs / TP=2 = 8 engines
-  num_inference_engines: 8
+  # 24 inference engines (64 total GPUs: 24*2=48 engines + 16 policy/ref shared)
+  num_inference_engines: 24
 
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
 
   gpu_memory_utilization: 0.85
 
-  # 192 workers / 8 engines = 24 workers per engine.
+  # 512 workers / 24 engines = ~21.3 workers per engine.
   # max_num_seqs must exceed this to avoid request queuing.
-  max_num_seqs: 28
+  max_num_seqs: 24
   max_num_batched_tokens: 16384
 
   enable_prefix_caching: true
@@ -215,7 +236,7 @@ generator:
   max_turns: 999999
 
   sampling_params:
-    max_generate_length: 8192
+    max_generate_length: 16384
     temperature: 0.7
     top_p: 0.95
     top_k: 20

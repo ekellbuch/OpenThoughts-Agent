@@ -573,6 +573,10 @@ class DataGenArgs:
         default=None,
         metadata={"help": "Override Harbor orchestrator concurrency for trace generation"}
     )
+    trace_n_attempts: Optional[int] = field(
+        default=None,
+        metadata={"help": "Override Harbor n_attempts (samples per task) for trace generation. Falls back to harbor YAML's top-level n_attempts, then 1."}
+    )
     trace_env: Optional[str] = field(
         default=None,
         metadata={"help": "Override Harbor environment type for trace generation (e.g. docker, daytona)"}

@@ -264,6 +264,18 @@ def _configure_output_and_logging(base_config: dict, exp_args: dict, checkpoints
     os.makedirs(output_dir, exist_ok=True)
     base_config["output_dir"] = output_dir
 
+    # Guard: --overwrite_output_dir + --max_restarts is destructive — each chain
+    # restart wipes the checkpoint dir, so training restarts from scratch every slot.
+    if base_config.get("overwrite_output_dir") and exp_args.get("max_restarts"):
+        max_restarts = int(exp_args["max_restarts"])
+        if max_restarts > 0:
+            raise SystemExit(
+                "\nERROR: --overwrite_output_dir and --max_restarts cannot be used together.\n"
+                "  overwrite_output_dir deletes checkpoints on each restart, so chain restarts\n"
+                "  always train from scratch instead of resuming. Remove --overwrite_output_dir\n"
+                "  to allow checkpoint resumption across chain restarts.\n"
+            )
+
     # Pre-flight check: detect completed or resumable runs in output_dir
     if os.path.isdir(output_dir) and not base_config.get("overwrite_output_dir"):
         completed_files = [f for f in _COMPLETED_MODEL_FILES if os.path.isfile(os.path.join(output_dir, f))]

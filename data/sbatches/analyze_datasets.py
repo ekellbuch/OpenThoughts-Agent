@@ -27,7 +27,7 @@ from harbor.utils.container_cache import analyze_task_dockerfiles
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPORT_PATH = SCRIPT_DIR / "dataset_analysis_report.jsonl"
 
-MAX_UNIQUE_ENVS = 5
+MAX_UNIQUE_ENVS = 8
 
 DATASETS = [
     "DCAgent/exp_rpt_stack-bash",

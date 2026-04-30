@@ -75,10 +75,11 @@ if [ -n "$DAYTONA_API_KEY_OVERRIDE" ]; then
   export DAYTONA_API_KEY="$DAYTONA_API_KEY_OVERRIDE"
 fi
 
-# --- Daytona target (tells Harbor this is an RL job) ---
-if [ "{harbor_env}" = "daytona" ]; then
-  export DAYTONA_TARGET="RL"
-fi
+# --- Daytona target ---
+# Intentionally NOT setting DAYTONA_TARGET. Harbor's daytona.py treats unset
+# DAYTONA_TARGET as "no region" — snapshot names omit the region segment and
+# region_id is left None when creating snapshots. This must stay aligned with
+# prebuild_daytona_snapshots() in hpc/rl_launch_utils.py, which is also region-less.
 
 # --- RL Environment Activation ---
 # The RL environment is separate from datagen due to dependency conflicts.
