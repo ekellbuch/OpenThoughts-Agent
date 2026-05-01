@@ -31,13 +31,12 @@ def prebuild_daytona_snapshots(
     max_new_snapshots: int = 10,
     max_org_snapshots: int = 60,
     build_region: str = "us",
-    target_region: str = "RL",
+    target_region: str = "",
     build_timeout: float = 600.0,
 ) -> None:
-    """Pre-build Daytona snapshots for RL region from the login node.
+    """Pre-build Daytona snapshots from the login node.
 
-    The RL region lacks build runners, so snapshots must be built using the
-    ``us`` region's build infrastructure and registered for the RL region.
+    Snapshots must be built using a region with build runners (default ``us``).
     This function:
     1. Discovers task directories from resolved train_data paths
     2. Analyzes unique Dockerfile environments
@@ -48,7 +47,10 @@ def prebuild_daytona_snapshots(
         max_new_snapshots: Max unique snapshots allowed per launch (safety gate).
         max_org_snapshots: Max total snapshots allowed in the org.
         build_region: Region with build runners (used to init Daytona client).
-        target_region: Region where snapshots should be registered.
+        target_region: Region where snapshots should be registered. Empty string
+            (default) omits region from the snapshot name and from the
+            ``region_id`` arg, which mirrors Harbor's behaviour when
+            ``DAYTONA_TARGET`` is unset and is the regionless build path.
         build_timeout: Timeout in seconds for each snapshot build.
     """
     from scripts.harbor.count_snapshots_from_tasks import (
@@ -113,7 +115,10 @@ def prebuild_daytona_snapshots(
     built = 0
     skipped = 0
     for hash_val, env_dir in hash_to_env_dir.items():
-        snapshot_name = f"harbor__{hash_val}__{target_region}__snapshot"
+        if target_region:
+            snapshot_name = f"harbor__{hash_val}__{target_region}__snapshot"
+        else:
+            snapshot_name = f"harbor__{hash_val}__snapshot"
         # Check if snapshot already exists and is usable
         try:
             snap = daytona.snapshot.get(snapshot_name)
@@ -140,12 +145,14 @@ def prebuild_daytona_snapshots(
             continue
 
         print(f"  {snapshot_name}: building from {dockerfile_path} ...")
+        create_kwargs = {
+            "name": snapshot_name,
+            "image": Image.from_dockerfile(str(dockerfile_path)),
+        }
+        if target_region:
+            create_kwargs["region_id"] = target_region
         daytona.snapshot.create(
-            CreateSnapshotParams(
-                name=snapshot_name,
-                image=Image.from_dockerfile(str(dockerfile_path)),
-                region_id=target_region,
-            ),
+            CreateSnapshotParams(**create_kwargs),
             on_logs=print,
             timeout=build_timeout,
         )

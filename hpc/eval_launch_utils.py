@@ -501,11 +501,22 @@ class EvalJobRunner:
                     # (vLLM may bind to a specific IP, not localhost)
                     local_host, local_port = parse_endpoint_host_port(vllm_server.endpoint)
                     print(f"[EvalJobRunner] Starting Pinggy tunnel: {local_host}:{local_port} -> {self.config.pinggy_persistent_url}")
+                    # On no-internet clusters (e.g., JSC Jupiter) the ssh to
+                    # pro.pinggy.io:443 must go through proxychains or it fails
+                    # with "Network is unreachable" and the tunnel never comes up.
+                    proxychains_wrapper = None
+                    pc_bin = getattr(self, "_proxychains_binary", "")
+                    pc_conf = os.environ.get("PROXYCHAINS_CONF_FILE", "") if pc_bin else ""
+                    if pc_bin and pc_conf:
+                        proxychains_wrapper = f"{pc_bin} -f {pc_conf}"
+                    elif pc_bin:
+                        proxychains_wrapper = pc_bin
                     pinggy_cfg = PinggyConfig(
                         persistent_url=self.config.pinggy_persistent_url,
                         token=self.config.pinggy_token,
                         local_port=local_port,
                         local_host=local_host,
+                        proxychains_wrapper=proxychains_wrapper,
                     )
                     pinggy_log = log_dir / f"{self.config.job_name}_pinggy.log"
                     pinggy_tunnel = PinggyTunnel(pinggy_cfg, log_path=pinggy_log)

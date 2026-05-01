@@ -408,9 +408,10 @@ Note: `GIT_TERMINAL_PROMPT=0` prevents interactive auth prompts from blocking th
 
 **Key paths**:
 - Code: `/e/scratch/jureap59/feuer1/OpenThoughts-Agent`
-- Shared data: `/e/data1/datasets/playground/ot`
-- Personal data: `/e/data1/datasets/playground/ot-baf`
-- SFT checkpoints: `/e/data1/datasets/playground/ot/checkpoints/`
+- Personal data root (`$DCFT_DATA`): `/e/data1/datasets/playground/ot-baf` ← USE THIS
+- HF cache (`$HF_HUB_CACHE`, `$HF_HOME`): `/e/data1/datasets/playground/ot-baf/hf_hub`
+- SFT/RL checkpoints (`$CHECKPOINTS_DIR`): `/e/data1/datasets/playground/ot-baf/checkpoints/`
+- Legacy shared data (avoid for new writes): `/e/data1/datasets/playground/ot` — owned by `nezhurina1`; its xet/datasets cache subdirs were created by other users (`guha1`, etc.) with `0755` perms, causing `Permission denied` on HF Xet uploads and dataset lock files. Read-only references to existing artifacts in `/ot` are fine.
 - Harbor: `/e/scratch/jureap59/feuer1/harbor`
 
 **Job management** (SLURM):
@@ -887,6 +888,101 @@ Do NOT rsync or manually copy files — use the git submodule workflow. The edit
 - **RL experiments**: `/Users/benjaminfeuer/Documents/notes/ot-agent/rl_experiments.md`
 
 When resubmitting cancelled jobs, look up the original launch command in these files first.
+
+## Axolotl SFT on Jupiter (GH200 aarch64, CUDA 13, torch 2.9)
+
+Used for the `/baselines/sera` and `/baselines/coderforge` v3 reference-reproduction runs. LLaMA-Factory is our default for SFT scaling sweeps; axolotl is used when the upstream paper's data pipeline requires it (e.g. SERA's OpenAI-native `messages` layout with `tool_calls` + `train` fields, or CoderForge's pre-tokenized `input_ids`/`labels`).
+
+### Install recipe (`sera-axolotl` conda env)
+
+Assumes `sera-axolotl` env has torch `2.9.1+cu130` preinstalled (Jupiter-safe build).
+
+```bash
+# Clone axolotl at v0.16.1
+mkdir -p /e/scratch/jureap59/feuer1/code && cd /e/scratch/jureap59/feuer1/code
+git clone https://github.com/axolotl-ai-cloud/axolotl.git && cd axolotl
+git checkout v0.16.1
+
+# Install axolotl from source (--no-build-isolation so setup.py sees torch 2.9.1
+# and axolotl's aarch64 filter excludes torchao/fla-core/flash-linear-attention)
+conda activate sera-axolotl
+uv pip install "setuptools>=64" wheel "setuptools_scm>=8" "packaging==26.0"
+uv pip install -e . --no-build-isolation
+
+# deepspeed (excluded from axolotl requirements as "extra"; compiles cpu_adam)
+export CUDA_HOME=/e/software/default/stages/2026/software/CUDA/13
+export PATH=$CUDA_HOME/bin:$PATH
+uv pip install "deepspeed>=0.18.6,<0.19.0" --no-build-isolation
+
+# flash-attn — use mjun0812's prebuilt wheels for aarch64+cu13+torch2.9
+WHL=flash_attn-2.8.3+cu130torch2.9-cp312-cp312-manylinux_2_34_aarch64.whl
+wget -q "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/$WHL" -O /tmp/$WHL
+uv pip install --no-deps /tmp/$WHL
+
+# axolotl-ai-cloud's cut-cross-entropy fork (required even though we disable
+# the plugin in config — import chains still reference it on some paths)
+uv pip install "cut-cross-entropy[transformers] @ git+https://github.com/axolotl-ai-cloud/ml-cross-entropy.git@63b15e6" --no-build-isolation
+```
+
+### Mandatory env patches (before first run)
+
+1. **`axolotl/utils/callbacks/qat.py`** — guard torchao imports. `setup.py` filters torchao on aarch64 but the QAT callback unconditionally imports it at module load, breaking `from axolotl.core.builders import ...`. Patch the two imports in a `try/except ImportError:` block, assigning unreachable stub classes so `isinstance()` checks in `toggle_fake_quant` return False.
+
+2. **`convert_axolotl_checkpoint.py`** — axolotl (with gradient checkpointing) writes state_dict keys like `model.layers.N._checkpoint_wrapped_module.<param>`. vLLM / sglang can't load these. Use the helper from SERA's repo (`sera/datagen/train/convert_axolotl_checkpoint.py`) which strips the prefix. Lives at `/e/scratch/jureap59/feuer1/code/axolotl/convert_axolotl_checkpoint.py` on Jupiter and a local copy at `/baselines/sera/convert_axolotl_checkpoint.py`.
+
+### sbatch env must include (on Jupiter compute nodes)
+
+```bash
+export CUDA_HOME=/e/software/default/stages/2026/software/CUDA/13
+export GCC_HOME=/e/software/default/stages/2026/software/GCCcore/14.3.0
+export CC=$GCC_HOME/bin/gcc
+export CXX=$GCC_HOME/bin/g++              # Triton JIT kernels need these; compute nodes don't have gcc on PATH by default
+export PATH=$CUDA_HOME/bin:$GCC_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$GCC_HOME/lib64:${LD_LIBRARY_PATH:-}
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export HF_HUB_OFFLINE=1                   # compute has no internet
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export WANDB_MODE=offline
+export AXOLOTL_DO_NOT_TRACK=1
+export DO_NOT_TRACK=1
+export HF_HUB_DISABLE_TELEMETRY=1
+```
+
+### Config gotchas (axolotl YAML)
+
+- **Omit `hub_model_id` / `hub_strategy`**: transformers' `init_hf_repo` runs at train start and calls `create_repo` → HF API → `OfflineModeIsEnabled` crash. Push manually after training.
+- **Disable `CutCrossEntropyPlugin`**: on aarch64+torch2.9+FA2, CCE causes bf16 grad explosion (grad_norm 9.8e+11) → loss → NaN → masked as 0. Comment out the entry under `plugins:`.
+- **Set `max_grad_norm: 1.0` explicitly** as belt-and-suspenders.
+- **Use `zero3_bf16.json` deepspeed config** (not zero1 — OOM without CCE) AND avoid the default `zero2.json` / `zero3.json` which offload optimizer to CPU → DeepSpeedCPUAdam JIT compile → `Error: unrecognized option -march=armv9-a+...+nossbs+nopauth` on GCC 14.3. `zero3_bf16.json` keeps Adam on GPU and shards everything (params + grads + moments).
+
+### End-to-end post-training flow
+
+```bash
+conda activate otagent   # or sera-axolotl — either works for the CLI
+source /e/scratch/jureap59/feuer1/OpenThoughts-Agent/hpc/dotenv/jupiter.env
+source ~/secrets.env
+cd /e/scratch/jureap59/feuer1/OpenThoughts-Agent
+
+IN=$CHECKPOINTS_DIR/<jobname>__Qwen3-8B
+OUT=$CHECKPOINTS_DIR/<jobname>__Qwen3-8B-converted
+
+# 1. Strip _checkpoint_wrapped_module prefixes (required for vLLM/sglang)
+python /e/scratch/jureap59/feuer1/code/axolotl/convert_axolotl_checkpoint.py "$IN" "$OUT"
+
+# 2. Secret scan before upload
+grep -rIE '(sk-[a-zA-Z0-9]{20,}|AKIA[0-9A-Z]{16}|ghp_[a-zA-Z0-9]{36}|hf_[a-zA-Z0-9]{34})' "$OUT"
+
+# 3. Upload to HF (axolotl's `hub_strategy: end` is disabled per above)
+huggingface-cli upload-large-folder laion/<hub_model_id> "$OUT" --repo-type=model
+
+# 4. Register in Supabase
+python scripts/database/manual_db_push.py \
+  --hf-model-id laion/<hub_model_id> \
+  --base-model Qwen/Qwen3-8B \
+  --dataset-name <dataset_repo>
+```
 
 ## Manual Eval Upload (when auto-upload fails)
 
