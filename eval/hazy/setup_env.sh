@@ -11,10 +11,13 @@
 #
 set -euo pipefail
 
-EVAL_ROOT="/data/home/macs/eval"
-VENV_DIR="$EVAL_ROOT/venv"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+# Eval artifacts root. Required — set HARBOR_EVAL_ROOT in your shell before
+# running this script. On Hazy: export HARBOR_EVAL_ROOT=/data/home/macs/eval
+# (or any other path you want venv/jobs/logs/cache to live).
+EVAL_ROOT="${HARBOR_EVAL_ROOT:?HARBOR_EVAL_ROOT not set — export it first (e.g. export HARBOR_EVAL_ROOT=/data/home/macs/eval on Hazy)}"
+VENV_DIR="$EVAL_ROOT/venv"
 LOCK_FILE="$SCRIPT_DIR/requirements.lock.txt"
 
 if [ ! -f "$LOCK_FILE" ]; then
