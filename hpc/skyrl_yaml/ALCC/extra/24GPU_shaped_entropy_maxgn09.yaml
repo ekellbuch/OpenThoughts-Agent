@@ -1,3 +1,5 @@
+# 24GPU shaped rewards + entropy regularization (coef=0.003) — ALCC variant
+# Identical to 24GPU_shaped.yaml except use_entropy_loss=true.
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
 # Hydra config groups (+ prefix in CLI)
@@ -62,9 +64,16 @@ terminal_bench:
 
     n_concurrent_trials: 300
 
+    # Logging settings
+    log_level: INFO
+
+    # ==========================================================================
     # Reward shaping: composite (verifier + trajectory signals)
+    # ==========================================================================
     enable_reward_shaping: true
+    reward_parser: null            # Auto-detect (pytest, unittest, generic)
     reward_shaper: composite
+    reward_shaping_fallback: true  # Fall back to original reward if parsing fails
     composite_components:
       verifier: 0.4
       thinking_length: 0.2
@@ -75,9 +84,6 @@ terminal_bench:
     thinking_sigma_tokens: 250
     thinking_min_turns_ratio: 0.5
     command_quality_min_turns: 2
-
-    # Logging settings
-    log_level: INFO
 
     # RLOO-N error classification
     enable_error_classification: true
@@ -93,19 +99,6 @@ terminal_bench:
     passthrough_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError
-
-  # PRM: mid-trial teacher hints via GPT-5-mini
-  # NOTE: Must be at terminal_bench level (not under harbor) —
-  # SkyRL's _build_prm_turn_callback reads from terminal_bench_cfg.prm
-  prm:
-    name: teacher_hint
-    engine_type: openai
-    engine_kwargs:
-      model: gpt-5-mini-2025-08-07
-      max_tokens: 8192
-    check_interval: 8
-    min_turns: 8
-    k: 8
 
   # Model info for Harbor's hosted_vllm validation
   model_info:
@@ -130,6 +123,8 @@ trainer:
     advantage_estimator: rloo_n
     use_kl_loss: false
     kl_loss_coef: 0.0
+    use_entropy_loss: true
+    entropy_loss_coef: 0.003
     eps_clip_low: 0.2
     eps_clip_high: 0.2
     loss_reduction: token_mean
@@ -178,12 +173,21 @@ trainer:
   export_path: null
 
   # Policy optimizer
+  # NOTE: max_grad_norm set to 0.9 (vs null in 24GPU_shaped_entropy.yaml).
+  # Rationale: in healthy phases of recent runs on this dataset+base, ‖g‖
+  # peaked at 0.81 (mean ≈ 0.32, std ≈ 0.24). 0.9 is just above the natural
+  # healthy peak. Above this is correlation-mode-collapse territory:
+  # 52435048 (r2egym): grad_norm 0.81 → 1.96 (step 17, first pathological)
+  #                  → 8.70 (step 22, peak of collapse).
+  # 52435057 (GLM-4.7-swesm): grad_norm 0.63 → 1.41 → 3.39 (collapse).
+  # This bound prefers longer convergence over instability — accepts that
+  # max-advantage rollouts on long sequences may also be clipped.
   policy:
     optimizer_config:
       lr: 8e-6
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
-      max_grad_norm: null
+      max_grad_norm: 0.9
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
