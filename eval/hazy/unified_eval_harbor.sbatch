@@ -47,6 +47,13 @@ if [ ! -f "$VENV_DIR/bin/python" ]; then
 fi
 
 PYTHON_BIN="$VENV_DIR/bin/python"
+
+# Put venv bin on PATH so subprocesses (e.g. flashinfer JIT calling ninja
+# for the Gated DeltaNet prefill kernel on hybrid Qwen3.5 models) can find
+# venv-installed binaries. Without this, --enable-prefix-caching would
+# crash at vLLM startup with FileNotFoundError: ninja. Latent until prefix
+# caching surfaced the GDN JIT path.
+export PATH="$VENV_DIR/bin:$PATH"
 HARBOR_CONFIG="${EVAL_HARBOR_CONFIG:?ERROR: EVAL_HARBOR_CONFIG not set}"
 VLLM_CONFIG="${EVAL_VLLM_CONFIG:?ERROR: EVAL_VLLM_CONFIG not set}"
 
