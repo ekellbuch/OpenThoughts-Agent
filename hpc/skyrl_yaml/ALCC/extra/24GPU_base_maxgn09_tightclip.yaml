@@ -107,18 +107,17 @@ trainer:
     use_kl_loss: false
     kl_loss_coef: 0.0
     eps_clip_low: 0.2
-    # NOTE: eps_clip_high tightened from 0.2 to 0.1 (asymmetric) so the PPO
-    # surrogate clip engages SOONER on upward ratio drift (πnew/πold > 1.1
-    # instead of > 1.2). Rationale: prior runs with eps_clip_high=0.2 +
-    # lr=8e-6 + update_epochs=1 had ppo_clip_ratio ≈ 5e-5, i.e. clip never
-    # bit, so trust-region had no enforcement. Pre-collapse runs (gn09,
-    # shaped_entropy_maxgn09) all showed gradient direction stay coherent
-    # for 4-6 consecutive steps before reward degraded — exactly the
-    # regime where a biting clip would have stopped the drift. Lowering
-    # only the high side keeps the asymmetric assumption that downward
-    # ratios (πnew/πold < 0.8) are usually less catastrophic than runaway
-    # increases (the policy doubling down on a bad mode).
-    eps_clip_high: 0.1
+    # NOTE: eps_clip_high aggressively tightened from 0.2 → 0.1 → 0.01.
+    # 52760067 (eps_clip_high=0.1) still collapsed at step ~19; ppo_clip_ratio
+    # was essentially zero (~5e-5) the whole run. Working back from observed
+    # |policy_loss|≈1e-3 and advantage scale ~0.93, mean |log_r|≈0.002 in
+    # healthy phase and ~0.009 at collapse. For clipping to engage during
+    # collapse but not healthy:
+    #   eps_clip_high=0.01 → healthy clip ~0.7%, collapse-onset ~33%
+    # This should provide real trust-region enforcement during direction
+    # drift. Asymmetric — only tightening upper bound (runaway upward ratios
+    # are the dangerous mode).
+    eps_clip_high: 0.01
     loss_reduction: token_mean
 
   # Training loop settings
