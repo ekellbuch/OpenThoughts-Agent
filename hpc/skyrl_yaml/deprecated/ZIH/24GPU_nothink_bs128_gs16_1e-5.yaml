@@ -1,10 +1,5 @@
-# SkyRL Configuration: Qwen3 8B on 24 GPUs (6 nodes x 4 GPUs) - RLOO-N + Strict JSON + Shaped Rewards
-# Based on: 24GPU_nothink_bs128_1e-5.yaml
-#
-# SHAPED REWARD VARIANT:
-#   - enable_reward_shaping: true (partial credit based on test pass ratios)
-#   - reward_shaper: pass_ratio (passed_tests / total_tests)
-#   - reward_shaping_fallback: true (fall back to binary reward if parsing fails)
+# SkyRL Configuration: Qwen3 8B on 24 GPUs (6 nodes x 4 GPUs) - RLOO-N + Strict JSON + Auto Snapshot
+# Based on: qwen3_8b_20GPU_thinking_bs64_group8_async_rloo_n_noct_strict_micro1x4_autosnap_noreg.yaml
 #
 # 24 GPU VARIANT:
 #   - Total GPUs: 24 (6 nodes x 4 GPUs)
@@ -13,11 +8,20 @@
 #   - micro_train_batch_size_per_gpu: 1 (from base micro1x4 config)
 #   - micro_forward_batch_size_per_gpu: 4
 #
+# Inference settings from v2_maxconcurrent variant:
+#   - num_parallel_generation_workers: 768 (increased from 256)
+#   - max_staleness_steps: 12 (increased from 8)
+#   - num_inference_engines: 16 (for 24 total GPUs)
+#
+# AUTO SNAPSHOT: Uses Daytona auto_snapshot feature to reduce rate limits
+#   - auto_snapshot: true (automatically create/reuse snapshots based on Dockerfile hash)
+#   - Snapshot naming: harbor__<hash[:12]>__snapshot
+#
 # Usage:
 #   python -m hpc.launch \
 #       --job_type rl \
-#       --rl_config ALCC_ZIH/24GPU_nothink_bs128_1e-5_shaped.yaml \
-#       --job_name qwen3_8b_24gpu_shaped \
+#       --rl_config qwen3_8b_24GPU_thinking_bs64_group8_async_rloo_n_noct_strict_micro1x4_autosnap_noreg.yaml \
+#       --job_name qwen3_8b_agentic_async_rloo_n_strict_autosnap_24gpu \
 #       --train_data '["mlfoundations-dev/your-dataset"]' \
 #       --model_path Qwen/Qwen3-8B \
 #       --num_nodes 6
@@ -65,6 +69,9 @@ terminal_bench:
     # ==========================================================================
     # AUTO SNAPSHOT: Reduce Daytona rate limits with hash-based snapshot caching
     # ==========================================================================
+    # When true, automatically creates a snapshot from the Dockerfile on first use,
+    # then reuses it for all subsequent sandboxes with the same Dockerfile content.
+    # Snapshots are named: harbor__<sha256[:12]>__snapshot
     auto_snapshot: true
 
     # Verifier settings
@@ -88,13 +95,8 @@ terminal_bench:
     # Logging settings
     log_level: INFO
 
-    # ==========================================================================
-    # Reward shaping (shaped - partial credit based on test pass ratios)
-    # ==========================================================================
-    enable_reward_shaping: true
-    reward_parser: null            # Auto-detect (pytest, unittest, generic)
-    reward_shaper: pass_ratio      # Simple mean: passed_tests / total_tests
-    reward_shaping_fallback: true  # Fall back to original reward if parsing fails
+    # Reward shaping (disabled - binary rewards)
+    enable_reward_shaping: false
 
     # RLOO-N error classification
     enable_error_classification: true
@@ -151,7 +153,7 @@ trainer:
   eval_interval: 999999
   eval_before_train: false
   # Resumable checkpointing
-  ckpt_interval: 999999
+  ckpt_interval: 3
   resume_mode: latest
   # HF upload-ready checkpoints
   hf_save_interval: 5
@@ -161,6 +163,7 @@ trainer:
   hf_hub_revision: main
 
   # Database registration (auto-registers trained model to Supabase)
+  # Requires KEYS env var pointing to Supabase credentials file
   enable_db_registration: true
 
   # Logging
@@ -214,8 +217,8 @@ generator:
   # 16 inference engines (24 total GPUs: 16 engines + 8 policy/ref shared)
   num_inference_engines: 16
 
-  n_samples_per_prompt: 8
-  eval_n_samples_per_prompt: 8
+  n_samples_per_prompt: 16
+  eval_n_samples_per_prompt: 16
 
   gpu_memory_utilization: 0.90
 

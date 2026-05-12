@@ -1,11 +1,12 @@
 # SkyRL Configuration: Qwen3 8B on 20 GPUs (5 nodes x 4 GPUs) - RLOO-N + Strict JSON + Auto Snapshot
 # Based on: qwen3_8b_20GPU_thinking_bs64_group8_async_rloo_n_noct_strict_micro1x4_autosnap.yaml
 #
-# BS128 GROUP16 VARIANT:
+# BS128 GROUP16 NPFG VARIANT:
 #   - train_batch_size: 128 (2x effective batch size)
 #   - policy_mini_batch_size: 128
 #   - n_samples_per_prompt: 16 (2x group size for better RLOO-N variance reduction)
 #   - With micro_train_batch_size_per_gpu: 1, accumulation_steps = 128 / (1 × 8) = 16
+#   - NPFG settings from bs64 npfg variant (longer timeout, smaller gen length, KL reg)
 #
 # 20 GPU VARIANT:
 #   - Total GPUs: 20 (5 nodes x 4 GPUs)
@@ -52,9 +53,8 @@ terminal_bench:
     extra_body:
       chat_template_kwargs:
         enable_thinking: true
-      response_prefix: "<think>\n\n</think>\n\n{\n  \"analysis\": \""
-    # Timeout settings
-    override_timeout_sec: 900
+    # Long timeout for thinking models
+    override_timeout_sec: 1800
 
     # Environment settings
     override_cpus: 1
@@ -85,7 +85,7 @@ terminal_bench:
       - VerifierOutputParseError
 
     # Orchestrator settings
-    n_concurrent_trials: 384
+    n_concurrent_trials: 256
 
     # Logging settings
     log_level: INFO
@@ -102,6 +102,7 @@ terminal_bench:
       - ConnectionError
       - RewardFileNotFoundError
       - RewardFileEmptyError
+      - AgentEnvironmentTimeoutError
     zero_exceptions:
     default_error_treatment: zero
     passthrough_exceptions:
@@ -111,7 +112,7 @@ terminal_bench:
   # Model info for Harbor's hosted_vllm validation
   model_info:
     max_input_tokens: 32768
-    max_output_tokens: 8192
+    max_output_tokens: 2048
 
   archiving:
     # Enable trial archiving callback
@@ -122,8 +123,9 @@ trainer:
   strategy: fsdp2
   algorithm:
     advantage_estimator: rloo_n
-    use_kl_loss: true
-    kl_loss_coef: 0.03
+    use_kl_loss: false
+    # 10x KL penalty (key change for reward hacking prevention)
+    kl_loss_coef: 0.0
     eps_clip_low: 0.2
     eps_clip_high: 0.2
     loss_reduction: token_mean
@@ -146,7 +148,7 @@ trainer:
   eval_interval: 999999
   eval_before_train: false
   # Resumable checkpointing
-  ckpt_interval: 999999
+  ckpt_interval: 3
   resume_mode: latest
   # HF upload-ready checkpoints
   hf_save_interval: 5
@@ -173,9 +175,9 @@ trainer:
   policy:
     optimizer_config:
       lr: 1e-6
-      weight_decay: 0.0001
+      weight_decay: 0.0
       adam_betas: [0.9, 0.999]
-      max_grad_norm: 1.0e-3
+      max_grad_norm: null
     fsdp_config:
       cpu_offload: false
       reshard_after_forward: false
@@ -216,7 +218,7 @@ generator:
   gpu_memory_utilization: 0.90
 
   max_num_seqs: 32
-  max_num_batched_tokens: 32768
+  max_num_batched_tokens: 65536
 
   enable_prefix_caching: true
   enable_chunked_prefill: true
@@ -232,7 +234,7 @@ generator:
   max_turns: 999999
 
   sampling_params:
-    max_generate_length: 8192
+    max_generate_length: 2048
     temperature: 1.0
     top_p: 0.95
     top_k: -1

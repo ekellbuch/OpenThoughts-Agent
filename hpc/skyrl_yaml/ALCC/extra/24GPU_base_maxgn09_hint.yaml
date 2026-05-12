@@ -60,6 +60,16 @@ terminal_bench:
       - VerifierOutputParseError
       - VerifierRuntimeError
 
+    prm:
+      name: teacher_hint
+      engine_type: openai
+      engine_kwargs:
+        model: gpt-5.5-2026-04-23
+        max_tokens: 16384
+      check_interval: 8
+      min_turns: 4
+      k: 8
+
     n_concurrent_trials: 300
 
     # Logging settings
@@ -154,12 +164,21 @@ trainer:
   export_path: null
 
   # Policy optimizer
+  # NOTE: max_grad_norm set to 0.9 (vs null in 24GPU_base.yaml).
+  # Rationale: in healthy phases of recent runs on this dataset+base, ‖g‖
+  # peaked at 0.81 (mean ≈ 0.32, std ≈ 0.24). 0.9 is just above the natural
+  # healthy peak. Above this is correlation-mode-collapse territory:
+  # 52435048 (r2egym): grad_norm 0.81 → 1.96 (step 17, first pathological)
+  #                  → 8.70 (step 22, peak of collapse).
+  # 52435057 (GLM-4.7-swesm): grad_norm 0.63 → 1.41 → 3.39 (collapse).
+  # This bound prefers longer convergence over instability — accepts that
+  # max-advantage rollouts on long sequences may also be clipped.
   policy:
     optimizer_config:
       lr: 8e-6
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
-      max_grad_norm: null
+      max_grad_norm: 0.9
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true

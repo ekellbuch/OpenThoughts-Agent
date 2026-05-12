@@ -1,23 +1,27 @@
 # SkyRL Configuration: Qwen3 8B on 20 GPUs (5 nodes x 4 GPUs) - RLOO-N + Strict JSON + Auto Snapshot
-# Based on: qwen3_8b_20GPU_thinking_bs64_group8_async_rloo_n_noct_strict_micro1x4_autosnap.yaml
-#
-# BS128 GROUP16 NOREG VARIANT:
-#   - train_batch_size: 128 (2x effective batch size)
-#   - policy_mini_batch_size: 128
-#   - n_samples_per_prompt: 16 (2x group size for better RLOO-N variance reduction)
-#   - With micro_train_batch_size_per_gpu: 1, accumulation_steps = 128 / (1 × 8) = 16
-#   - No regularization: KL loss disabled, weight_decay=0, no grad clipping
+# Based on: qwen3_8b_16x80GB_thinking_bs64_group8_async_rloo_n_noct_strict_micro1x4_autosnap.yaml
 #
 # 20 GPU VARIANT:
 #   - Total GPUs: 20 (5 nodes x 4 GPUs)
 #   - Inference engines: 12 (dedicated GPUs)
 #   - Policy/Reference: 8 shared GPUs (colocated via async RLOO-N)
+#   - micro_train_batch_size_per_gpu: 1 (from base micro1x4 config)
+#   - micro_forward_batch_size_per_gpu: 4
+#
+# Inference settings from v2_maxconcurrent variant:
+#   - num_parallel_generation_workers: 768 (increased from 256)
+#   - max_staleness_steps: 12 (increased from 8)
+#   - num_inference_engines: 12 (for 20 total GPUs)
+#
+# AUTO SNAPSHOT: Uses Daytona auto_snapshot feature to reduce rate limits
+#   - auto_snapshot: true (automatically create/reuse snapshots based on Dockerfile hash)
+#   - Snapshot naming: harbor__<hash[:12]>__snapshot
 #
 # Usage:
 #   python -m hpc.launch \
 #       --job_type rl \
-#       --rl_config qwen3_8b_20GPU_thinking_bs128_group16_async_rloo_n_noct_strict_micro1x4_autosnap.yaml \
-#       --job_name qwen3_8b_bs128_group16_20gpu \
+#       --rl_config qwen3_8b_20GPU_thinking_bs64_group8_async_rloo_n_noct_strict_micro1x4_autosnap.yaml \
+#       --job_name qwen3_8b_agentic_async_rloo_n_strict_autosnap_20gpu \
 #       --train_data '["mlfoundations-dev/your-dataset"]' \
 #       --model_path Qwen/Qwen3-8B \
 #       --num_nodes 5
@@ -53,9 +57,8 @@ terminal_bench:
     extra_body:
       chat_template_kwargs:
         enable_thinking: true
-      response_prefix: "<think>\n\n</think>\n\n{\n  \"analysis\": \""
     # Timeout settings
-    override_timeout_sec: 1500
+    override_timeout_sec: 900
 
     # Environment settings
     override_cpus: 1
@@ -85,7 +88,6 @@ terminal_bench:
       - RewardFileEmptyError
       - VerifierOutputParseError
 
-    # Orchestrator settings
     n_concurrent_trials: 384
 
     # Logging settings
@@ -103,7 +105,6 @@ terminal_bench:
       - ConnectionError
       - RewardFileNotFoundError
       - RewardFileEmptyError
-      - AgentEnvironmentTimeoutError
     zero_exceptions:
     default_error_treatment: zero
     passthrough_exceptions:
@@ -124,8 +125,9 @@ trainer:
   strategy: fsdp2
   algorithm:
     advantage_estimator: rloo_n
-    use_kl_loss: false
-    kl_loss_coef: 0.0
+    use_kl_loss: true
+    # 10x KL penalty (key change for reward hacking prevention)
+    kl_loss_coef: 0.01
     eps_clip_low: 0.2
     eps_clip_high: 0.2
     loss_reduction: token_mean
@@ -134,12 +136,13 @@ trainer:
   epochs: 2
   update_epochs_per_batch: 1
 
-  # Batch sizes (BS128 variant)
-  train_batch_size: 128
-  policy_mini_batch_size: 128
-  eval_batch_size: 128
+  # Batch sizes
+  train_batch_size: 64
+  policy_mini_batch_size: 64
+  eval_batch_size: 64
 
-  micro_forward_batch_size_per_gpu: 2
+  # Micro batch sizes (micro1x4 variant)
+  micro_forward_batch_size_per_gpu: 4
   micro_train_batch_size_per_gpu: 1
 
   max_prompt_length: 999999
@@ -148,7 +151,7 @@ trainer:
   eval_interval: 999999
   eval_before_train: false
   # Resumable checkpointing
-  ckpt_interval: 999999
+  ckpt_interval: 3
   resume_mode: latest
   # HF upload-ready checkpoints
   hf_save_interval: 5
@@ -175,9 +178,9 @@ trainer:
   policy:
     optimizer_config:
       lr: 1e-6
-      weight_decay: 0.0
+      weight_decay: 0.01
       adam_betas: [0.9, 0.999]
-      max_grad_norm: null
+      max_grad_norm: 1.0
     fsdp_config:
       cpu_offload: false
       reshard_after_forward: false
@@ -212,13 +215,13 @@ generator:
   # 12 inference engines (20 total GPUs: 12 engines + 8 policy/ref shared)
   num_inference_engines: 12
 
-  n_samples_per_prompt: 16
-  eval_n_samples_per_prompt: 16
+  n_samples_per_prompt: 8
+  eval_n_samples_per_prompt: 8
 
   gpu_memory_utilization: 0.90
 
   max_num_seqs: 32
-  max_num_batched_tokens: 65536
+  max_num_batched_tokens: 32768
 
   enable_prefix_caching: true
   enable_chunked_prefill: true

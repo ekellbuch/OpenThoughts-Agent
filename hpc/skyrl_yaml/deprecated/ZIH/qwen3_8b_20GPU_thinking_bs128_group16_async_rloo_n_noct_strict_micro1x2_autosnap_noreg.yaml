@@ -148,7 +148,7 @@ trainer:
   eval_interval: 999999
   eval_before_train: false
   # Resumable checkpointing
-  ckpt_interval: 999999
+  ckpt_interval: 3
   resume_mode: latest
   # HF upload-ready checkpoints
   hf_save_interval: 5
@@ -212,8 +212,8 @@ generator:
   # 12 inference engines (20 total GPUs: 12 engines + 8 policy/ref shared)
   num_inference_engines: 12
 
-  n_samples_per_prompt: 8
-  eval_n_samples_per_prompt: 8
+  n_samples_per_prompt: 16
+  eval_n_samples_per_prompt: 16
 
   gpu_memory_utilization: 0.90
 

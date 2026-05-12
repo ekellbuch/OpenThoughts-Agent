@@ -53,12 +53,20 @@ terminal_bench:
     max_wait_sec: 600.0
     wait_multiplier: 2.0
 
+    # NOTE: AgentTimeoutError + ContextLengthExceededError moved from
+    # passthrough_exceptions → exclude_exceptions vs 24GPU_base.yaml.
+    # Hypothesis: dropping (rather than zero-rewarding) timeout / context-length
+    # trials prevents the trainer from learning to short-circuit into degenerate
+    # policies that maximize avoiding-timeout. Same dataset (pymethods2test-large)
+    # produced 95% trial timeout on the cancelled 52435057 run.
     exclude_exceptions:
       - VerifierTimeoutError
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - VerifierOutputParseError
       - VerifierRuntimeError
+      - AgentTimeoutError
+      - ContextLengthExceededError
 
     n_concurrent_trials: 300
 
@@ -79,9 +87,7 @@ terminal_bench:
       - RewardFileEmptyError
       - AgentEnvironmentTimeoutError
     default_error_treatment: zero
-    passthrough_exceptions:
-      - AgentTimeoutError
-      - ContextLengthExceededError
+    passthrough_exceptions: []
 
   # Model info for Harbor's hosted_vllm validation
   model_info:

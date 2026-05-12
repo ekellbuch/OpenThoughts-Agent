@@ -1,3 +1,11 @@
+# SkyRL Configuration: 20x GPUs on ZIH (Capella/Alpha) - with teacher_hint PRM
+# Based on: 20GPU_base.yaml
+#
+# VARIANT: Adds teacher_hint PRM to test on internet-enabled cluster.
+#   - Every 8 turns (after min 8 turns), calls GPT-5-mini to inspect last 8 exchanges
+#   - Injects a concise hint into the student's next observation
+#   - Never terminates the agent — only provides guidance
+
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
 # Hydra config groups (+ prefix in CLI)
@@ -20,8 +28,8 @@ terminal_bench:
     record_terminal_session: false
     enable_pane_logging: false
 
-    # Strict JSON parser
-    strict_json_parser: true
+    # Strict JSON parser (false to match Jupiter teacher_hint config)
+    strict_json_parser: false
 
     # Interleaved Thinking Settings
     interleaved_thinking: true
@@ -39,9 +47,6 @@ terminal_bench:
     # ==========================================================================
     # AUTO SNAPSHOT: Reduce Daytona rate limits with hash-based snapshot caching
     # ==========================================================================
-    # When true, automatically creates a snapshot from the Dockerfile on first use,
-    # then reuses it for all subsequent sandboxes with the same Dockerfile content.
-    # Snapshots are named: harbor__<sha256[:12]>__snapshot
     auto_snapshot: true
 
     # Verifier settings
@@ -58,9 +63,8 @@ terminal_bench:
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - VerifierOutputParseError
-      - VerifierRuntimeError
 
-    n_concurrent_trials: 300
+    n_concurrent_trials: 320
 
     # Logging settings
     log_level: INFO
@@ -78,26 +82,31 @@ terminal_bench:
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - AgentEnvironmentTimeoutError
+    zero_exceptions:
     default_error_treatment: zero
     passthrough_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError
 
+  # PRM: mid-trial teacher hints via GPT-5-mini
+  prm:
+    name: teacher_hint
+    engine_type: openai
+    engine_kwargs:
+      model: gpt-5-mini-2025-08-07
+      max_tokens: 2048
+    check_interval: 8
+    min_turns: 8
+    k: 8
+
   # Model info for Harbor's hosted_vllm validation
   model_info:
     max_input_tokens: 32768
-    max_output_tokens: 4096
+    max_output_tokens: 8192
 
   archiving:
     # Enable trial archiving callback
     enabled: false
-
-  # Post-training trace upload to HuggingFace
-  trace_upload:
-    enabled: true
-    repo_org: DCAgent
-    episodes: last
-    dataset_type: SFT
 
 # Trainer configuration
 trainer:
@@ -112,7 +121,6 @@ trainer:
 
   # Training loop settings
   epochs: 2
-  max_steps: 80
   update_epochs_per_batch: 1
 
   # Batch sizes
@@ -161,13 +169,13 @@ trainer:
       adam_betas: [0.9, 0.999]
       max_grad_norm: null
     fsdp_config:
-      cpu_offload: true
+      cpu_offload: false
       reshard_after_forward: true
       fsdp_size: 4
   # Reference model
   ref:
     fsdp_config:
-      cpu_offload: true
+      cpu_offload: false
       reshard_after_forward: true
       fsdp_size: 4
 
@@ -181,7 +189,7 @@ trainer:
 
   # Fully async generation (settings from v2_maxconcurrent)
   fully_async:
-    max_staleness_steps: 16
+    max_staleness_steps: 12
     num_parallel_generation_workers: 768
 
 # Generator configuration
@@ -191,14 +199,15 @@ generator:
   model_dtype: bfloat16
 
   inference_engine_tensor_parallel_size: 1
+  # 16 inference engines (24 total GPUs: 16 engines + 8 policy/ref shared)
   num_inference_engines: 16
 
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
 
-  gpu_memory_utilization: 0.85
+  gpu_memory_utilization: 0.90
 
-  max_num_seqs: 24
+  max_num_seqs: 32
   max_num_batched_tokens: 16384
 
   enable_prefix_caching: true
@@ -210,7 +219,7 @@ generator:
   batched: false
   enable_http_endpoint: true
   enable_ray_prometheus_stats: false
-  vllm_stats_interval: 1
+
   append_eos_token_after_stop_str_in_multi_turn: true
   max_turns: 999999
 
@@ -222,9 +231,6 @@ generator:
 
   engine_init_kwargs:
     max_model_len: 32768
-    # Interleaved thinking chat template: preserves <think> blocks on ALL
-    # historical assistant turns (stock Qwen3 template strips them).
-    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
 
 # Data paths
 data:

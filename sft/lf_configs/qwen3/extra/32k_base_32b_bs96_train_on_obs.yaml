@@ -24,6 +24,12 @@ preprocessing_num_workers: 16
 dataloader_persistent_workers: true
 dataloader_pin_memory: true
 dataloader_num_workers: 4
+# Train on assistant turns AND observation/tool-output turns (and the user/system
+# prompts — see CLAUDE.md "How loss masking works in LF"). Use this variant when
+# you want the model to learn the agent's interaction patterns *and* the tool
+# I/O distribution. For assistant-only loss (the default), use the sibling
+# 32k_base_32b_bs96.yaml which omits this flag.
+train_on_prompt: true
 
 ### output
 logging_steps: 5
