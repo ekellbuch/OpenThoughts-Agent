@@ -10,7 +10,7 @@ enable_liger_kernel: true
 packing: true
 neat_packing: true
 
-attn: fa3
+attn: fa2
 
 ### dataset
 template: qwen #used to be qwen25
