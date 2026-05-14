@@ -47,6 +47,17 @@ vllm_server:
   - bfloat16
   - --kv-cache-dtype
   - fp8
+  # FlashInfer autotune: drives a `_dummy_run` at max_num_batched_tokens during
+  # kernel_warmup, which JIT-compiles the FlashInfer sampling kernels (e.g.
+  # top_k_mask_logits) across batch sizes ≤ max. Without this, the first real
+  # request triggers Triton JIT mid-inference; on cross-node TP=16 that compile
+  # exceeds the 60s shm_broadcast watchdog → EngineDeadError → every subsequent
+  # request returns HTTP 500. See bug_c_serving_connect_error_448337 in
+  # /Users/benjaminfeuer/Documents/vllm_v2_bugs/.
+  # Known-risk: flashinfer-ai/flashinfer#3197 (some kernels have correctness
+  # issues under autotune); accept it for now since we have no good alternative
+  # short of patching the serving wrapper to send warmup requests.
+  - --enable-flashinfer-autotune
   # MTP speculative decoding was tried but enables async scheduling, which on
   # the new vLLM wheel disables NCCL DP sync and falls back to a broken
   # local-device-enumeration path → IndexError in
