@@ -65,15 +65,22 @@ _BOOLEAN_FLAGS = {
     "enable_chunked_prefill",
     "enable_prefix_caching",
     "enable_auto_tool_choice",
+    "enable_expert_parallel",
     "trust_remote_code",
     "disable_log_requests",
     "enable_reasoning",
 }
 
-# Fields that are environment variables, not CLI args
+# Fields that are environment variables, not CLI args.
+# When the YAML sets a value for one of these keys, we write the env var
+# explicitly as "1" or "0" so the user can FORCE-disable a flag whose
+# vLLM default is True (e.g. VLLM_USE_DEEP_GEMM, VLLM_USE_FLASHINFER_SAMPLER
+# both default to True in vllm/envs.py). Omitting the key entirely from
+# the YAML leaves the env var unset → vLLM uses its built-in default.
 _ENV_VAR_FIELDS = {
-    "enable_expert_parallel": "VLLM_ENABLE_EXPERT_PARALLEL",
     "use_deep_gemm": "VLLM_USE_DEEP_GEMM",
+    "use_flashinfer_sampler": "VLLM_USE_FLASHINFER_SAMPLER",
+    "use_flashinfer_moe_fp16": "VLLM_USE_FLASHINFER_MOE_FP16",
 }
 
 
@@ -101,10 +108,12 @@ def _build_vllm_cli_args(server_config: dict) -> tuple[list[str], dict[str, str]
                 cli_args.extend(str(v) for v in value)
             continue
 
-        # Handle env var fields
+        # Handle env var fields. We write "1" or "0" explicitly when the
+        # YAML key is present so callers can FORCE-disable env-vars that
+        # default to True in vLLM (e.g. VLLM_USE_DEEP_GEMM). The earlier
+        # "skip on falsy" behavior couldn't disable those defaults.
         if key in _ENV_VAR_FIELDS:
-            if value:  # Only set if truthy
-                env_vars[_ENV_VAR_FIELDS[key]] = "1"
+            env_vars[_ENV_VAR_FIELDS[key]] = "1" if value else "0"
             continue
 
         # Rename field if needed
