@@ -6,7 +6,7 @@
 # Hardware: 4 nodes × 4x GH200 96GB = 16 GPUs (~1.5TB VRAM total)
 #   - AWQ 4-bit weights (~300GB) → TP=4 within node (~75GB/GPU)
 #   - 96GB - 75GB ≈ 21GB per GPU for KV cache + activations
-#   - GH200 unified memory: fp8 KV cache + swap_space=32 give host-RAM headroom
+#   - fp8 KV cache halves KV footprint to fit the tight headroom
 #   - DP=4 (one replica per node)
 
 engine:
@@ -34,7 +34,6 @@ vllm_server:
   max_model_len: 32768
   max_num_seqs: 32
   gpu_memory_utilization: 0.9
-  swap_space: 32
   enable_expert_parallel: true
   enable_auto_tool_choice: true
   tool_call_parser: glm47
