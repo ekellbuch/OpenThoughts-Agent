@@ -44,9 +44,13 @@ vllm_server:
   - bfloat16
   - --kv-cache-dtype
   - fp8
-  # MTP speculative decoding (1 draft token — low overhead, ~30% speedup)
-  - --speculative-config
-  - '{"method":"mtp","num_speculative_tokens":1}'
+  # MTP speculative decoding was tried but enables async scheduling, which on
+  # the new vLLM wheel disables NCCL DP sync and falls back to a broken
+  # local-device-enumeration path → IndexError in
+  # vllm/v1/engine/utils.py:get_device_indices on cross-node DP layouts.
+  # Disabled until vLLM fixes the DP-coordinator device-enumeration logic.
+  # - --speculative-config
+  # - '{"method":"mtp","num_speculative_tokens":1}'
   # Prefill / caching optimizations
   - --enable-chunked-prefill
   - --max-num-partial-prefills
