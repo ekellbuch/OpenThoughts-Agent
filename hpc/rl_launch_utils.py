@@ -1100,6 +1100,9 @@ class RLJobRunner:
             os.environ["SKYRL_EXPORT_PATH"] = self.config.export_path
 
         # vLLM settings
+        # RL uses its own conda env (dcagent-rl/otagent-rl) pinned to an older
+        # vLLM wheel that still uses the V1 engine. The eval/datagen path
+        # (hpc/vllm_utils.py) uses the newer wheel and opts into V2.
         os.environ["VLLM_USE_V1"] = "1"
 
         # Ensure WandB directory is writable
