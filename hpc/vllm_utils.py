@@ -273,9 +273,14 @@ class VLLMServer:
         env = os.environ.copy()
         env["VLLM_MODEL_PATH"] = self.config.model_path
         env["PYTHONUNBUFFERED"] = "1"  # Ensure real-time log output
-        # Opt into the new V2 model runner (default for our latest vLLM wheel).
-        # Replaces the older VLLM_USE_V1=1 toggle.
-        env["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+        # NOTE: VLLM_USE_V2_MODEL_RUNNER=1 was attempted but the new wheel's V1
+        # engine crashes during cross-node DP placement with
+        #   Exception: Error setting CUDA_VISIBLE_DEVICES: local range: [4, 8)
+        #   base value: "0,1,2,3"
+        # in vllm/v1/engine/utils.py:get_device_indices — it computes global GPU
+        # indices for replica i*TP..(i+1)*TP but each compute node only exposes
+        # CUDA_VISIBLE_DEVICES=0,1,2,3. Keep the env unset until vLLM's V2 model
+        # runner / V1 engine supports multi-node DP correctly.
         # Set VLLM_HOST_IP so vLLM's internal get_ip() returns the real node IP.
         # This is used for Ray placement group node constraints and NCCL communication,
         # NOT for the API server bind address (that's --host above).
