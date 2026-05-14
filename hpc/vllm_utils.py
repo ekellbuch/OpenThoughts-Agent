@@ -273,6 +273,16 @@ class VLLMServer:
         env = os.environ.copy()
         env["VLLM_MODEL_PATH"] = self.config.model_path
         env["PYTHONUNBUFFERED"] = "1"  # Ensure real-time log output
+        # VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS controls the collective_rpc
+        # deadline for execute_model + sample_tokens (multiproc_executor.py
+        # lines 314, 326). Default is 300s; on cross-node TP=16 with our
+        # GLM-5.1-AWQ config, the first inference-time Triton JIT compile
+        # for _topk_topp_kernel / _build_prefill_chunk_metadata_kernel
+        # exceeds that, tripping the watchdog → "RPC call to sample_tokens
+        # timed out" → EngineDeadError → every subsequent request 500s.
+        # Bump to 30 min so first-request JIT has room to complete.
+        # See vllm_v2_bugs/OVERVIEW.md (Bug C) for the full trace.
+        env.setdefault("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "1800")
         # Opt into the new V2 model runner — intended setting for this wheel.
         # NOTE: the multi-node datagen launch path is currently blocked by a
         # separate, NOT-V2-gated bug in vllm/v1/executor/ray_executor_v2.py
