@@ -787,12 +787,19 @@ jupiter = HPC(
         # but that commit post-dates torch 2.9.1. Flash SDP and math backends
         # still work fine. Only affects SFT (RL uses vLLM, not SDPA).
         "TORCH_CUDNN_SDPA_ENABLED": "0",
+        # Dump a Python traceback on fatal signals (SIGABRT/SIGSEGV/SIGFPE/etc).
+        # Catches C-level aborts from extensions (DeepSpeed CPU Adam, Liger Triton)
+        # that otherwise exit with code 1 and no Python stack.
+        "PYTHONFAULTHANDLER": "1",
+        # Promote async NCCL errors (e.g. failed allreduce on one rank) to a
+        # raised exception instead of a silent hang, so we get a real traceback.
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
     },
     # NOTE: Do NOT use master_addr_suffix="i" - the "i" suffixed hostname is not DNS-resolvable
     # InfiniBand routing is handled by NCCL_SOCKET_IFNAME=ib0 instead
     # NCCL/networking settings for SFT training (InfiniBand NDR)
     nccl_settings={
-        "NCCL_DEBUG": "INFO",
+        "NCCL_DEBUG": "WARN",
         "NCCL_NET_GDR_LEVEL": "0",
         "NCCL_SOCKET_IFNAME": "ib0",
         "NCCL_IB_TIMEOUT": "60",
