@@ -295,11 +295,16 @@ def _import_harbor_components():
             AgentConfig,
             EnvironmentConfig,
             JobConfig,
-            LocalDatasetConfig,
             RetryConfig,
             VerifierConfig,
         )
-        from harbor.orchestrators.base import OrchestratorEvent
+        from scripts.harbor._harbor_compat import (
+            LocalDatasetConfig,
+            OrchestratorEvent,
+            add_trial_completed_hook,
+            create_job,
+            set_orchestrator_field,
+        )
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise SystemExit(
             "Harbor is required for stage 2 validation. Install it (e.g. pip install -e ../harbor) "
@@ -317,6 +322,9 @@ def _import_harbor_components():
         "RetryConfig": RetryConfig,
         "VerifierConfig": VerifierConfig,
         "OrchestratorEvent": OrchestratorEvent,
+        "add_trial_completed_hook": add_trial_completed_hook,
+        "set_orchestrator_field": set_orchestrator_field,
+        "create_job": create_job,
     }
 
 
@@ -369,6 +377,9 @@ def _run_harbor_smoke_test(
     LocalDatasetConfig = components["LocalDatasetConfig"]
     VerifierConfig = components["VerifierConfig"]
     OrchestratorEvent = components["OrchestratorEvent"]
+    add_trial_completed_hook = components["add_trial_completed_hook"]
+    set_orchestrator_field = components["set_orchestrator_field"]
+    create_job = components["create_job"]
 
     name_to_path: Dict[str, Path] = {task.name: task for task in tasks}
     jobs_root = Path(tempfile.mkdtemp(prefix="harbor_jobs_"))
@@ -380,9 +391,9 @@ def _run_harbor_smoke_test(
     effective_concurrency = (
         len(tasks) if concurrency is None or concurrency <= 0 else min(concurrency, len(tasks))
     )
-    job_config.orchestrator.n_concurrent_trials = max(1, effective_concurrency)
-    job_config.orchestrator.quiet = True
-    job_config.orchestrator.retry = _make_retry_config(components)
+    set_orchestrator_field(job_config, "n_concurrent_trials", max(1, effective_concurrency))
+    set_orchestrator_field(job_config, "quiet", True)
+    set_orchestrator_field(job_config, "retry", _make_retry_config(components))
     agent_model = "gpt-5-codex" if filter_successful else "gpt-5-nano"
     agent_kwargs = {"max_episodes": 160} if filter_successful else {"max_episodes": 1}
     agent_kwargs.setdefault("reasoning_effort", "medium")
@@ -405,7 +416,7 @@ def _run_harbor_smoke_test(
     job_config.verifier = VerifierConfig(override_timeout_sec=verifier_timeout)
     job_config.datasets = [LocalDatasetConfig(path=dataset_root)]
 
-    job = Job(job_config)
+    job = create_job(Job, job_config)
     job_dir = job.job_dir
 
     job_label = "Harbor filter" if filter_successful else "Harbor smoke test"
@@ -475,7 +486,7 @@ def _run_harbor_smoke_test(
                 rate=rate,
             )
 
-        job._orchestrator.add_hook(OrchestratorEvent.TRIAL_COMPLETED, _progress_hook)
+        add_trial_completed_hook(job, _progress_hook)
 
         try:
             asyncio.run(job.run())
@@ -522,6 +533,9 @@ def _run_oracle_solution_check(
     LocalDatasetConfig = components["LocalDatasetConfig"]
     VerifierConfig = components["VerifierConfig"]
     OrchestratorEvent = components["OrchestratorEvent"]
+    add_trial_completed_hook = components["add_trial_completed_hook"]
+    set_orchestrator_field = components["set_orchestrator_field"]
+    create_job = components["create_job"]
 
     missing_solution: List[Path] = []
     candidates: List[Path] = []
@@ -544,9 +558,9 @@ def _run_oracle_solution_check(
     effective_concurrency = (
         len(candidates) if concurrency is None or concurrency <= 0 else min(concurrency, len(candidates))
     )
-    job_config.orchestrator.n_concurrent_trials = max(1, effective_concurrency)
-    job_config.orchestrator.quiet = True
-    job_config.orchestrator.retry = _make_retry_config(components)
+    set_orchestrator_field(job_config, "n_concurrent_trials", max(1, effective_concurrency))
+    set_orchestrator_field(job_config, "quiet", True)
+    set_orchestrator_field(job_config, "retry", _make_retry_config(components))
     job_config.agents = [
         AgentConfig(
             name=AgentName.ORACLE.value,
@@ -569,7 +583,7 @@ def _run_oracle_solution_check(
         )
     ]
 
-    job = Job(job_config)
+    job = create_job(Job, job_config)
     job_dir = job.job_dir
 
     CONSOLE.print(
@@ -634,7 +648,7 @@ def _run_oracle_solution_check(
                 rate=rate,
             )
 
-        job._orchestrator.add_hook(OrchestratorEvent.TRIAL_COMPLETED, _progress_hook)
+        add_trial_completed_hook(job, _progress_hook)
 
         try:
             asyncio.run(job.run())
