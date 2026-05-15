@@ -56,6 +56,17 @@ vllm_server:
   - bfloat16
   - --kv-cache-dtype
   - fp8
+  # NUCLEAR OPTION (iteration 4 of Bug C unblock chain). 449287 showed that
+  # _build_prefill_chunk_metadata_kernel JITs mid-inference even with BOTH
+  # --enable-chunked-prefill AND --enable-prefix-caching disabled — meaning
+  # the kernel is reached through a third code path we haven't identified
+  # (likely the base scheduler when computing block metadata for any prompt
+  # longer than max_num_batched_tokens or just routine prefill bookkeeping).
+  # --enforce-eager disables CUDA graphs AND Inductor compilation entirely;
+  # all kernels run in eager (PyTorch-dispatch) mode → no Triton JIT.
+  # Cost: ~2x slower per-token; acceptable since the engine has been at
+  # zero useful throughput for 4 iterations now.
+  - --enforce-eager
   # Force string-form content rendering through the chat template; zai-org's
   # official vLLM recipe sets this — GLM-5.1's template doesn't handle the
   # OpenAI list-of-dict content form that vLLM's `auto` mode may auto-select.
