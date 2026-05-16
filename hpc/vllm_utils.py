@@ -71,6 +71,23 @@ _BOOLEAN_FLAGS = {
     "enable_reasoning",
 }
 
+# Boolean flags whose vLLM internal default is True but that OT-Agent
+# defaults to OFF unless explicitly enabled by the YAML. Setting the YAML
+# key to False (or omitting it) emits `--no-<flag>`; setting it True emits
+# `--<flag>`. Also, if neither form appears anywhere in the final CLI args
+# (including extra_args), `--no-<flag>` is injected at the end as a
+# belt-and-suspenders opt-out.
+#
+# Reason: with default-True flags, mid-inference Triton JIT compilation of
+# their kernels (chunked-prefill metadata + sampling) overruns the vLLM
+# shm_broadcast 60 s wait, fires `TimeoutError: RPC call to sample_tokens
+# timed out`, and kills the engine with EngineDeadError. See
+# `vllm_v2_bugs/bug_c_iter_4_to_8_jit_progression/SUMMARY.md`.
+_DEFAULT_OFF_BOOLEAN_FLAGS = {
+    "enable_chunked_prefill",
+    "enable_prefix_caching",
+}
+
 # Fields that are environment variables, not CLI args.
 # When the YAML sets a value for one of these keys, we write the env var
 # explicitly as "1" or "0" so the user can FORCE-disable a flag whose
@@ -124,8 +141,14 @@ def _build_vllm_cli_args(server_config: dict) -> tuple[list[str], dict[str, str]
 
         # Handle boolean flags
         if key in _BOOLEAN_FLAGS:
-            if value:  # Only add flag if True
+            if value:
                 cli_args.append(f"--{arg_name}")
+            elif key in _DEFAULT_OFF_BOOLEAN_FLAGS:
+                # Explicit opt-out: emit `--no-<flag>` so vLLM's default
+                # True is actually overridden. Without this branch, the
+                # old behavior was to emit nothing on False, which let
+                # vLLM's internal default win.
+                cli_args.append(f"--no-{arg_name}")
             continue
 
         # Handle regular key-value args
@@ -137,6 +160,19 @@ def _build_vllm_cli_args(server_config: dict) -> tuple[list[str], dict[str, str]
             cli_args.extend([f"--{arg_name}", json.dumps(value)])
         else:
             cli_args.extend([f"--{arg_name}", str(value)])
+
+    # For default-OFF flags whose vLLM internal default is True, inject the
+    # `--no-<flag>` form when neither the affirmative nor negative form has
+    # appeared yet (e.g. YAML omitted the top-level key AND extra_args did
+    # not include either `--enable-X` or `--no-enable-X`). This preserves
+    # opt-in via either the top-level YAML key (`enable_X: true`) or an
+    # explicit `--enable-X` in `extra_args`.
+    for key in _DEFAULT_OFF_BOOLEAN_FLAGS:
+        arg_name = key.replace("_", "-")
+        pos_flag = f"--{arg_name}"
+        neg_flag = f"--no-{arg_name}"
+        if pos_flag not in cli_args and neg_flag not in cli_args:
+            cli_args.append(neg_flag)
 
     return cli_args, env_vars
 

@@ -78,14 +78,14 @@ vllm_server:
   # Disabled until vLLM fixes the DP-coordinator device-enumeration logic.
   # - --speculative-config
   # - '{"method":"mtp","num_speculative_tokens":1}'
-  # Prefill / caching optimizations. Both were re-enabled explicitly after
-  # discovering they were ACTUALLY ON in 449354's engine config even though
-  # we had commented out the CLI flags — vLLM V1 defaults to enable_prefix_caching=True
-  # and enable_chunked_prefill=True. Setting them explicitly matches the
-  # canonical recipe and prevents future confusion.
-  - --enable-chunked-prefill
-  - --max-num-partial-prefills
-  - '1'
-  - --enable-prefix-caching
+  # Prefill / caching: BOTH default-OFF now via hpc/vllm_utils.py's
+  # `_DEFAULT_OFF_BOOLEAN_FLAGS`. The launcher injects `--no-enable-chunked-prefill`
+  # and `--no-enable-prefix-caching` automatically when neither form is present
+  # here. Reason: vLLM V1's default-True for these flags adds chunked-prefill
+  # metadata + prefix-cache lookups to the first-traffic kernel set, which
+  # JIT-compile mid-inference and stall the sample_tokens RPC → EngineDeadError
+  # (Bug C iter 4-8). To re-enable for this YAML, add the flag back here OR set
+  # `enable_chunked_prefill: true` / `enable_prefix_caching: true` at the top
+  # level — both opt-in paths suppress the auto-injected `--no-...`.
   - --max-num-batched-tokens
   - '16384'
