@@ -122,6 +122,8 @@ export PYTHONPATH="$WORKDIR:${PYTHONPATH:-}"
 {ray_env_exports}
 
 # --- vLLM/Ray settings ---
+# RL uses its own conda env pinned to an older vLLM wheel that requires the
+# V1 engine. The eval/datagen path uses the newer wheel and runs V2 instead.
 export VLLM_USE_V1=1
 export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
 

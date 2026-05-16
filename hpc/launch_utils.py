@@ -459,6 +459,52 @@ def get_daytona_api_key_override(exp_args: Dict[str, Any]) -> str:
     return exp_args.get("daytona_api_key") or os.environ.get("DAYTONA_API_KEY", "")
 
 
+def maybe_prebuild_daytona_snapshots(
+    resolved_data_paths,
+    *,
+    harbor_env,
+    orgs,
+    **passthrough,
+):
+    """Single hook used by RL/datagen/eval to pre-build Daytona snapshots.
+
+    Gates:
+      - harbor_env != "daytona"      -> return None
+      - empty resolved_data_paths    -> return None
+      - empty orgs                   -> return None
+    Otherwise delegates to ``hpc.snapshot_manager.ensure_snapshots``.
+
+    Callers compute their own ``harbor_env`` and ``orgs`` and pass them
+    explicitly — this hook does not introspect job_type or env-var
+    conventions on its own (per the unified-design decision in
+    ``~/.claude/plans/starry-percolating-journal.md``).
+
+    ``**passthrough`` is forwarded to ``ensure_snapshots`` so callers can
+    set ``max_new_snapshots``, ``target_region``, ``build_timeout``, etc.
+
+    Args:
+        resolved_data_paths: List of local task-dataset root directories.
+        harbor_env: The resolved Harbor environment string (``"daytona"``,
+            ``"docker"``, ``"modal"``, ...). The hook is a no-op when not
+            ``"daytona"``.
+        orgs: Pre-constructed list of ``OrgConfig`` objects. If empty, the
+            hook returns None (caller chose to skip Daytona pre-build).
+
+    Returns:
+        ``SnapshotPlanResult`` on success, ``None`` when gated out.
+    """
+    if harbor_env != "daytona":
+        return None
+    if not resolved_data_paths:
+        return None
+    if not orgs:
+        return None
+    # Import lazily so test environments without the daytona SDK can still
+    # import hpc.launch_utils.
+    from hpc.snapshot_manager import ensure_snapshots
+    return ensure_snapshots(resolved_data_paths, orgs, **passthrough)
+
+
 # =============================================================================
 # Dict Utilities
 # =============================================================================
@@ -537,6 +583,7 @@ def setup_experiments_dir(
     job_name: Optional[str] = None,
     create_dirs: bool = True,
     sbatch_subdir: str = "sbatch",
+    disable_dedup: bool = False,
 ) -> ExperimentsPaths:
     """Resolve experiments directory and create standard subdirectories.
 
@@ -551,6 +598,11 @@ def setup_experiments_dir(
         create_dirs: Whether to create directories (default True).
         sbatch_subdir: Name of sbatch subdirectory (default "sbatch",
                        use "sbatch_scripts" for backwards compat where needed).
+        disable_dedup: If True, skip the ``experiments/<job_name>_2`` collision
+                       dedup logic and target the original path even when prior
+                       config artifacts exist. Set by the resume manager when
+                       it has decided to engage (clean resume, post-mutate
+                       resume, or post-wipe fresh start).
 
     Returns:
         ExperimentsPaths with root, sbatch, configs, and logs paths.
@@ -570,7 +622,10 @@ def setup_experiments_dir(
     # Deduplicate: if experiments dir already exists with configs from a different
     # run, append a numeric suffix to avoid collisions. This prevents a new job
     # from silently reusing (and potentially overwriting) an existing experiment.
-    if create_dirs and experiments_abs.exists() and (experiments_abs / "configs").exists():
+    # Skipped when ``disable_dedup`` is set (the resume manager has already
+    # decided how to handle the existing dir and wants the launcher to land
+    # at the same path).
+    if create_dirs and not disable_dedup and experiments_abs.exists() and (experiments_abs / "configs").exists():
         existing_configs = list((experiments_abs / "configs").glob("*.json")) + list(
             (experiments_abs / "configs").glob("*.yaml")
         )
@@ -642,7 +697,30 @@ def resolve_job_and_paths(
         else:
             raise ValueError(f"{job_type_label} jobs require a --job_name.")
 
-    paths = setup_experiments_dir(exp_args, job_name=job_name, sbatch_subdir=sbatch_subdir)
+    # Harbor-backed job types (datagen, eval) go through the resume manager
+    # before path resolution. The manager decides whether to (a) clean-resume
+    # at the original path, (b) mutate the prior dir in place, (c) wipe it,
+    # or (d) bail with a diff for the operator. When it engages, dedup is
+    # suppressed so the launcher lands at the same path the manager prepared.
+    disable_dedup = False
+    job_type = exp_args.get("job_type")
+    if str(job_type or "").lower() in {"datagen", "eval"}:
+        try:
+            from hpc.resume_manager import resolve_resume_policy_for_launch
+            policy = resolve_resume_policy_for_launch(exp_args, job_name=job_name)
+            if policy is not None:
+                disable_dedup = True
+        except Exception:
+            # ResumeBail is intentionally allowed to propagate so the
+            # top-level launcher can render the operator message and exit.
+            raise
+
+    paths = setup_experiments_dir(
+        exp_args,
+        job_name=job_name,
+        sbatch_subdir=sbatch_subdir,
+        disable_dedup=disable_dedup,
+    )
 
     return JobSetupResult(job_name=job_name, paths=paths)
 

@@ -65,15 +65,39 @@ _BOOLEAN_FLAGS = {
     "enable_chunked_prefill",
     "enable_prefix_caching",
     "enable_auto_tool_choice",
+    "enable_expert_parallel",
     "trust_remote_code",
     "disable_log_requests",
     "enable_reasoning",
 }
 
-# Fields that are environment variables, not CLI args
+# Boolean flags whose vLLM internal default is True but that OT-Agent
+# defaults to OFF unless explicitly enabled by the YAML. Setting the YAML
+# key to False (or omitting it) emits `--no-<flag>`; setting it True emits
+# `--<flag>`. Also, if neither form appears anywhere in the final CLI args
+# (including extra_args), `--no-<flag>` is injected at the end as a
+# belt-and-suspenders opt-out.
+#
+# Reason: with default-True flags, mid-inference Triton JIT compilation of
+# their kernels (chunked-prefill metadata + sampling) overruns the vLLM
+# shm_broadcast 60 s wait, fires `TimeoutError: RPC call to sample_tokens
+# timed out`, and kills the engine with EngineDeadError. See
+# `vllm_v2_bugs/bug_c_iter_4_to_8_jit_progression/SUMMARY.md`.
+_DEFAULT_OFF_BOOLEAN_FLAGS = {
+    "enable_chunked_prefill",
+    "enable_prefix_caching",
+}
+
+# Fields that are environment variables, not CLI args.
+# When the YAML sets a value for one of these keys, we write the env var
+# explicitly as "1" or "0" so the user can FORCE-disable a flag whose
+# vLLM default is True (e.g. VLLM_USE_DEEP_GEMM, VLLM_USE_FLASHINFER_SAMPLER
+# both default to True in vllm/envs.py). Omitting the key entirely from
+# the YAML leaves the env var unset → vLLM uses its built-in default.
 _ENV_VAR_FIELDS = {
-    "enable_expert_parallel": "VLLM_ENABLE_EXPERT_PARALLEL",
     "use_deep_gemm": "VLLM_USE_DEEP_GEMM",
+    "use_flashinfer_sampler": "VLLM_USE_FLASHINFER_SAMPLER",
+    "use_flashinfer_moe_fp16": "VLLM_USE_FLASHINFER_MOE_FP16",
 }
 
 
@@ -101,10 +125,12 @@ def _build_vllm_cli_args(server_config: dict) -> tuple[list[str], dict[str, str]
                 cli_args.extend(str(v) for v in value)
             continue
 
-        # Handle env var fields
+        # Handle env var fields. We write "1" or "0" explicitly when the
+        # YAML key is present so callers can FORCE-disable env-vars that
+        # default to True in vLLM (e.g. VLLM_USE_DEEP_GEMM). The earlier
+        # "skip on falsy" behavior couldn't disable those defaults.
         if key in _ENV_VAR_FIELDS:
-            if value:  # Only set if truthy
-                env_vars[_ENV_VAR_FIELDS[key]] = "1"
+            env_vars[_ENV_VAR_FIELDS[key]] = "1" if value else "0"
             continue
 
         # Rename field if needed
@@ -115,8 +141,14 @@ def _build_vllm_cli_args(server_config: dict) -> tuple[list[str], dict[str, str]
 
         # Handle boolean flags
         if key in _BOOLEAN_FLAGS:
-            if value:  # Only add flag if True
+            if value:
                 cli_args.append(f"--{arg_name}")
+            elif key in _DEFAULT_OFF_BOOLEAN_FLAGS:
+                # Explicit opt-out: emit `--no-<flag>` so vLLM's default
+                # True is actually overridden. Without this branch, the
+                # old behavior was to emit nothing on False, which let
+                # vLLM's internal default win.
+                cli_args.append(f"--no-{arg_name}")
             continue
 
         # Handle regular key-value args
@@ -128,6 +160,19 @@ def _build_vllm_cli_args(server_config: dict) -> tuple[list[str], dict[str, str]
             cli_args.extend([f"--{arg_name}", json.dumps(value)])
         else:
             cli_args.extend([f"--{arg_name}", str(value)])
+
+    # For default-OFF flags whose vLLM internal default is True, inject the
+    # `--no-<flag>` form when neither the affirmative nor negative form has
+    # appeared yet (e.g. YAML omitted the top-level key AND extra_args did
+    # not include either `--enable-X` or `--no-enable-X`). This preserves
+    # opt-in via either the top-level YAML key (`enable_X: true`) or an
+    # explicit `--enable-X` in `extra_args`.
+    for key in _DEFAULT_OFF_BOOLEAN_FLAGS:
+        arg_name = key.replace("_", "-")
+        pos_flag = f"--{arg_name}"
+        neg_flag = f"--no-{arg_name}"
+        if pos_flag not in cli_args and neg_flag not in cli_args:
+            cli_args.append(neg_flag)
 
     return cli_args, env_vars
 
@@ -273,6 +318,26 @@ class VLLMServer:
         env = os.environ.copy()
         env["VLLM_MODEL_PATH"] = self.config.model_path
         env["PYTHONUNBUFFERED"] = "1"  # Ensure real-time log output
+        # VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS controls the collective_rpc
+        # deadline for execute_model + sample_tokens (multiproc_executor.py
+        # lines 314, 326). Default is 300s; on cross-node TP=16 with our
+        # GLM-5.1-AWQ config, the first inference-time Triton JIT compile
+        # for _topk_topp_kernel / _build_prefill_chunk_metadata_kernel
+        # exceeds that, tripping the watchdog → "RPC call to sample_tokens
+        # timed out" → EngineDeadError → every subsequent request 500s.
+        # Bump to 30 min so first-request JIT has room to complete.
+        # See vllm_v2_bugs/OVERVIEW.md (Bug C) for the full trace.
+        env.setdefault("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "1800")
+        # Opt into the new V2 model runner — intended setting for this wheel.
+        # NOTE: the multi-node datagen launch path is currently blocked by a
+        # separate, NOT-V2-gated bug in vllm/v1/executor/ray_executor_v2.py
+        # (cross-session ActorHandle: job 03000000 → job 04000000 after an
+        # internal ray.shutdown()/ray.init()). That bug reproduces with
+        # VLLM_USE_V2_MODEL_RUNNER both set AND unset (see Jupiter 447712,
+        # 447741, 447750), so there's no reason to leave V2 off on its
+        # account. Awaiting a vLLM patch to ray_executor_v2 before relaunching
+        # cross-node datagen.
+        env["VLLM_USE_V2_MODEL_RUNNER"] = "1"
         # Set VLLM_HOST_IP so vLLM's internal get_ip() returns the real node IP.
         # This is used for Ray placement group node constraints and NCCL communication,
         # NOT for the API server bind address (that's --host above).
@@ -321,12 +386,106 @@ class VLLMServer:
         # Wait for server to be healthy
         self._wait_for_healthy()
 
+        # Send a few pre-Harbor warmup requests to JIT-compile vLLM-native
+        # Triton kernels not covered by FlashInfer autotune. Skipping this
+        # would lead to first-request JIT during inference; on cross-node
+        # TP=16, that JIT exceeds vLLM's 60s shm_broadcast watchdog and
+        # kills the engine (see job 448672 logs). Failures here don't abort
+        # the server — best-effort.
+        try:
+            self._warmup_serving()
+        except Exception as e:
+            print(f"  [warmup] non-fatal exception during warmup: {e!r}")
+
         print(f"=== vLLM Server Ready ===")
         print(f"  Endpoint: {self.endpoint}")
         print(f"  Metrics: {self.metrics_endpoint}")
         print(f"=========================")
 
         return self.endpoint
+
+    def _warmup_serving(self) -> None:
+        """Drive 8 sequential warmup chat-completion requests at production
+        sampling params (top_k=20, top_p=0.95) and varying prompt lengths to
+        pre-JIT the vLLM-native Triton kernels:
+
+          - _topk_topp_kernel (vllm/v1/sample/ops/topk_topp_triton.py)
+              specialized per (top_k, top_p, vocab, dtype) tuple
+          - _build_prefill_chunk_metadata_kernel
+              specialized per chunk-shape distribution
+
+        FlashInfer autotune covers FlashInfer-side kernels but neither of
+        these. Each warmup request stays small (max_tokens=32) so the total
+        warmup wall time is modest (~30-60s at cross-node TP=16, vs. the
+        ~5+ min JIT-then-die cycle we hit at first real serving request).
+
+        Failures bubble up to the caller wrapped in try/except — a partial
+        warmup is acceptable; we still JIT what we can.
+        """
+        import urllib.request
+        import urllib.error
+        import json as _json
+
+        # First, fetch the served model name (auto-generated when
+        # custom_model_name is None).
+        try:
+            with urllib.request.urlopen(
+                f"{self.base_url}/v1/models", timeout=10
+            ) as r:
+                model_name = _json.loads(r.read().decode())["data"][0]["id"]
+        except Exception as e:
+            print(f"  [warmup] could not fetch /v1/models ({e!r}); skipping")
+            return
+
+        # Varied prompt lengths so the prefill-chunk metadata kernel sees
+        # several distinct chunk patterns. Short-ish prompts only — we
+        # don't want warmup to eat real GPU time.
+        prompts = [
+            "Hello world.",
+            "Write a short Python function that adds two numbers.",
+            "Once upon a time, in a faraway land, there lived a curious cat. "
+            * 8,
+            "Solve: x^2 + 3x - 4 = 0. Walk through it step by step.",
+            "Describe a sunset in 2 sentences.",
+            "What is the capital of France?",
+            "Compute the integral of x dx from 0 to 1.",
+            "List 10 random English words: " + " ".join(f"word{i}" for i in range(48)),
+        ]
+
+        print(f"  [warmup] driving {len(prompts)} sequential requests against {model_name}...")
+        ok = 0
+        for i, prompt in enumerate(prompts, 1):
+            body = _json.dumps({
+                "model": model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 32,
+                # Sampling params chosen to match the most common production
+                # config (Harbor terminus-2 + Qwen3/GLM-family). If your
+                # serving uses different params, JIT for THOSE specializations
+                # will still happen on the first real request — but at least
+                # the most common path is covered.
+                "top_k": 20,
+                "top_p": 0.95,
+                "temperature": 0.7,
+            }).encode()
+            try:
+                req = urllib.request.Request(
+                    f"{self.base_url}/v1/chat/completions",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                t0 = time.time()
+                with urllib.request.urlopen(req, timeout=180) as r:
+                    _ = r.read()
+                dt = time.time() - t0
+                ok += 1
+                print(f"  [warmup] {i}/{len(prompts)} OK ({dt:.1f}s, {len(prompt.split())} words)")
+            except Exception as e:
+                # Don't bail — partial warmup still helps. JIT errors here
+                # are the load-bearing thing we WANT to pay during warmup.
+                print(f"  [warmup] {i}/{len(prompts)} FAILED: {e!r}")
+        print(f"  [warmup] complete ({ok}/{len(prompts)} succeeded)")
 
     def stop(self) -> None:
         """Stop the vLLM server."""

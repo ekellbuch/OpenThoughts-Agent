@@ -60,24 +60,14 @@ terminal_bench:
       - VerifierOutputParseError
       - VerifierRuntimeError
 
-    n_concurrent_trials: 300
-
-    # Reward shaping: composite (verifier + trajectory signals)
-    enable_reward_shaping: true
-    reward_shaper: composite
-    composite_components:
-      verifier: 0.4
-      thinking_length: 0.2
-      format_quality: 0.2
-      command_quality: 0.2
-    composite_verifier_shaper: pass_ratio
-    thinking_target_tokens: 750
-    thinking_sigma_tokens: 250
-    thinking_min_turns_ratio: 0.5
-    command_quality_min_turns: 2
+    # 3x base (300 → 900): triple Daytona concurrency for higher throughput.
+    n_concurrent_trials: 900
 
     # Logging settings
     log_level: INFO
+
+    # Reward shaping (disabled - binary rewards)
+    enable_reward_shaping: false
 
     # RLOO-N error classification
     enable_error_classification: true
@@ -93,19 +83,6 @@ terminal_bench:
     passthrough_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError
-
-  # PRM: mid-trial teacher hints via GPT-5-mini
-  # NOTE: Must be at terminal_bench level (not under harbor) —
-  # SkyRL's _build_prm_turn_callback reads from terminal_bench_cfg.prm
-  prm:
-    name: teacher_hint
-    engine_type: openai
-    engine_kwargs:
-      model: gpt-5-mini-2025-08-07
-      max_tokens: 8192
-    check_interval: 8
-    min_turns: 8
-    k: 8
 
   # Model info for Harbor's hosted_vllm validation
   model_info:
@@ -131,8 +108,16 @@ trainer:
     use_kl_loss: false
     kl_loss_coef: 0.0
     eps_clip_low: 0.2
-    eps_clip_high: 0.2
+    # eps_clip_high=0.05 mirrors 24GPU_base — midpoint between 0.2 default and
+    # 0.01 tight. Engages on collapse-onset ratios without over-clamping
+    # healthy updates. Asymmetric — only tightening upper bound.
+    eps_clip_high: 0.05
     loss_reduction: token_mean
+
+    # ZClip ablation: reactive grad-norm spike clipping via EMA z-score.
+    # All other params use the defaults from ppo_base_config.yaml.
+    z_clip:
+      enabled: true
 
   # Training loop settings
   epochs: 2
@@ -178,12 +163,15 @@ trainer:
   export_path: null
 
   # Policy optimizer
+  # max_grad_norm=0.9 mirrors 24GPU_base — guardrail against grad-norm spikes
+  # entering correlation-mode-collapse territory (>1.0). 0.9 is just above the
+  # natural healthy peak observed on this dataset+base (‖g‖ peak ~0.81).
   policy:
     optimizer_config:
       lr: 8e-6
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
-      max_grad_norm: null
+      max_grad_norm: 0.9
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
@@ -206,7 +194,10 @@ trainer:
   # Fully async generation (settings from v2_maxconcurrent)
   fully_async:
     max_staleness_steps: 16
-    num_parallel_generation_workers: 768
+    # 3x base (768 → 2304): triple SkyRL workers to keep Harbor's 900 cap saturated.
+    # With actual_global_step patch (Harbor pickup-time capture), the cohort
+    # plateau is no longer a function of worker count, so going bigger is safe.
+    num_parallel_generation_workers: 2304
 
 # Generator configuration
 generator:
@@ -215,7 +206,10 @@ generator:
   model_dtype: bfloat16
 
   inference_engine_tensor_parallel_size: 1
-  num_inference_engines: 16
+  # 3x base (16 → 48): triple vLLM engines to lift gen throughput above training rate.
+  # Goal: build a real surplus of completed groups so the trainer never waits on gen.
+  # Layout: 48 engines × TP=1 + 8 GPUs for policy/ref = 56 GPUs total = 14 nodes.
+  num_inference_engines: 48
 
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8

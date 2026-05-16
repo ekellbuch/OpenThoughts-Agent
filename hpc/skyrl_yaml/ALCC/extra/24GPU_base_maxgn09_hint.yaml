@@ -117,7 +117,9 @@ trainer:
     use_kl_loss: false
     kl_loss_coef: 0.0
     eps_clip_low: 0.2
-    eps_clip_high: 0.2
+    # eps_clip_high=0.05: midpoint between 0.2 default and 0.01 tight.
+    # Engages on collapse-onset ratios without over-clamping healthy updates.
+    eps_clip_high: 0.05
     loss_reduction: token_mean
 
   # Training loop settings

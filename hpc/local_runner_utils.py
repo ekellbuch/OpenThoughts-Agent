@@ -708,7 +708,9 @@ class LocalHarborRunner:
 
         # Apply n_concurrent from harbor config if CLI didn't override
         # (CLI default is set in add_model_compute_args, check if it's still at that default)
-        config_n_concurrent = harbor_job.orchestrator.n_concurrent_trials if harbor_job.orchestrator else None
+        # Compat with both legacy Harbor (nested orchestrator) and unified Harbor (top-level field).
+        from scripts.harbor._harbor_compat import get_orchestrator_field
+        config_n_concurrent = get_orchestrator_field(harbor_job, "n_concurrent_trials")
         if config_n_concurrent is not None and config_n_concurrent > 0:
             # Only override if args.n_concurrent is at the class default
             if getattr(args, "n_concurrent", None) == self.DEFAULT_N_CONCURRENT:

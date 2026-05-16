@@ -5,7 +5,9 @@ from typing import Any, Iterable
 
 import yaml
 
-from harbor.models.job.config import JobConfig, LocalDatasetConfig
+from harbor.models.job.config import JobConfig
+
+from scripts.harbor._harbor_compat import LocalDatasetConfig, is_local_dataset
 
 
 def load_job_config(config_path: Path | str) -> JobConfig:
@@ -72,7 +74,7 @@ def ensure_trailing_dataset(config: JobConfig) -> Path:
     """Extract the first local dataset path from ``config``."""
 
     for dataset in config.datasets:
-        if isinstance(dataset, LocalDatasetConfig):
+        if is_local_dataset(dataset):
             return Path(dataset.path).expanduser().resolve()
     raise ValueError(
         "Harbor job config must include at least one local dataset with a `path` entry."
