@@ -558,7 +558,7 @@ def test_bail_message_marks_fatal_when_present(tmp_path):
 
 def test_job_type_gate_skips_sft(tmp_path):
     """SFT job_type should not engage the resume manager even when prior dir exists."""
-    job_dir = tmp_path / "experiments" / "test-job" / "trace_jobs" / "test-job"
+    job_dir = tmp_path / "experiments" / "test-job" / "trace_jobs" / "test-job_traces"
     _seed_prior(job_dir, top_level=_planned_config(), trials=[_trial_config()])
     exp_args = {
         "job_type": "sft",
@@ -591,7 +591,7 @@ def test_for_launch_declines_when_no_prior_dir(tmp_path):
 
 def test_for_launch_declines_when_planned_config_unavailable(tmp_path):
     """No harbor_config → can't materialize plan → manager declines."""
-    job_dir = tmp_path / "experiments" / "test-job" / "trace_jobs" / "test-job"
+    job_dir = tmp_path / "experiments" / "test-job" / "trace_jobs" / "test-job_traces"
     _seed_prior(job_dir, top_level=_planned_config(), trials=[_trial_config()])
     exp_args = {
         "job_type": "eval",
@@ -600,3 +600,21 @@ def test_for_launch_declines_when_planned_config_unavailable(tmp_path):
     }
     result = resolve_resume_policy_for_launch(exp_args, job_name="test-job")
     assert result is None
+
+
+def test_resolve_prior_job_dir_defaults_when_experiments_dir_missing():
+    """Without --experiments_dir, prior dir defaults to experiments/<job>/trace_jobs/<job>_traces."""
+    from hpc.launch_utils import PROJECT_ROOT
+    prior = rm._resolve_prior_job_dir({"job_type": "datagen"}, "demo")
+    assert prior is not None
+    assert prior.name == "demo_traces"
+    assert prior.parent.name == "trace_jobs"
+    assert prior.parent.parent.name == "demo"
+    assert prior.parent.parent.parent == (PROJECT_ROOT / "experiments").resolve()
+
+
+def test_resolve_prior_job_dir_honors_explicit_experiments_dir(tmp_path):
+    """Explicit --experiments_dir is used verbatim under a trace_jobs/<job>_traces leaf."""
+    explicit = tmp_path / "custom_exp"
+    prior = rm._resolve_prior_job_dir({"experiments_dir": str(explicit)}, "myjob")
+    assert prior == explicit / "trace_jobs" / "myjob_traces"

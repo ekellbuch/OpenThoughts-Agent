@@ -1039,12 +1039,27 @@ def _is_harbor_backed_job_type(job_type: Optional[str]) -> bool:
 
 
 def _resolve_prior_job_dir(exp_args: Dict[str, Any], job_name: str) -> Optional[Path]:
-    """Compute the path where Harbor would find a prior job, if any."""
-    experiments_dir = exp_args.get("experiments_dir")
-    if not experiments_dir:
+    """Compute the path where a prior job's Harbor artifacts would live.
+
+    On disk Harbor writes ``config.json`` + trial dirs under
+    ``<experiments_dir>/trace_jobs/<job_name>_traces/``. The ``<job_name>_traces``
+    suffix is added by ``hpc/datagen_launch_utils.py`` when it constructs the
+    chunk job name passed down to Harbor as the trace-job name.
+
+    ``experiments_dir`` mirrors ``hpc/launch_utils.py:setup_experiments_dir``:
+    explicit ``--experiments_dir`` is used verbatim; otherwise it defaults to
+    ``experiments/<job_name>`` (the un-deduped path the launcher lands at
+    before its ``_2`` suffix kicks in).
+    """
+    if not job_name:
         return None
-    candidate = Path(experiments_dir) / "trace_jobs" / job_name
-    return candidate
+    from hpc.launch_utils import resolve_workspace_path
+    experiments_dir = exp_args.get("experiments_dir")
+    if experiments_dir:
+        experiments_root = resolve_workspace_path(str(experiments_dir))
+    else:
+        experiments_root = resolve_workspace_path(f"experiments/{job_name}")
+    return experiments_root / "trace_jobs" / f"{job_name}_traces"
 
 
 def _materialize_planned_config(exp_args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
