@@ -190,7 +190,13 @@ class VLLMConfig:
     custom_model_name: Optional[str] = None
 
     # Health check settings
-    health_max_attempts: int = 120
+    # Default 480 × 15s = 7200s (2 hours). Long enough to cover slow
+    # post-load init paths (Qwen3.5-MoE Mamba page-size calibration on
+    # 4× GH200 single-node observed at 18+ min; cross-node TP weight
+    # quantization on 2-node observed at ~12 min). Override via
+    # `backend.healthcheck_max_attempts` in the datagen YAML if you
+    # want a tighter SLA for fast-failing experiments.
+    health_max_attempts: int = 480
     health_retry_delay: int = 15
     health_path: str = "v1/models"
 
@@ -325,9 +331,19 @@ class VLLMServer:
         # for _topk_topp_kernel / _build_prefill_chunk_metadata_kernel
         # exceeds that, tripping the watchdog → "RPC call to sample_tokens
         # timed out" → EngineDeadError → every subsequent request 500s.
-        # Bump to 30 min so first-request JIT has room to complete.
+        # Bumped 1800s → 7200s (2h) to also survive Qwen3.5-MoE Mamba
+        # post-load page-size calibration which has been observed at
+        # 18+ min of shm_broadcast wait on single-node TP=4.
         # See vllm_v2_bugs/OVERVIEW.md (Bug C) for the full trace.
-        env.setdefault("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "1800")
+        env.setdefault("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "7200")
+        # VLLM_RINGBUFFER_WARNING_INTERVAL controls how often shm_broadcast
+        # logs the "No available shared memory broadcast block found in
+        # N seconds" hint while a cross-rank wait is in flight. Default
+        # 60s — produces hundreds of redundant log lines while the engine
+        # is doing legitimately long work (model load, Mamba calibration,
+        # cross-node weight quantization). Bump to 600s (10min) so the
+        # logs stay legible without losing the warning entirely.
+        env.setdefault("VLLM_RINGBUFFER_WARNING_INTERVAL", "600")
         # Opt into the new V2 model runner — intended setting for this wheel.
         # NOTE: the multi-node datagen launch path is currently blocked by a
         # separate, NOT-V2-gated bug in vllm/v1/executor/ray_executor_v2.py
