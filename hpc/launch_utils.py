@@ -1183,7 +1183,11 @@ def derive_default_job_name(cli_args: Mapping[str, Any]) -> str:
                     continue
             except (TypeError, ValueError):
                 pass
-        value_str = _strip_yaml_ext(str(value).split("/")[-1])
+        # Strip JSON-list framing the same way the dataset loop does — keeps
+        # `val_data=["OpenThoughts-TB-dev"]` from leaving a stray leading `-`
+        # in the assembled name after sanitize.
+        cleaned = str(value).replace("[", "").replace("]", "").replace('"', "")
+        value_str = _strip_yaml_ext(cleaned.split("/")[-1])
         extras.append(value_str)
 
     # ---- assemble: config, dataset, model, extras ----------------------
