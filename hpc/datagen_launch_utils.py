@@ -393,7 +393,12 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
         served_model_id = None
         harbor_model_name = trace_model
         if requires_vllm:
-            served_model_id = generate_served_model_id()
+            # Deterministic per job_name so chain-restarts produce the same
+            # synthetic ID. Without this, every resume gets a fresh
+            # timestamp-based ID, the YAML diverges from the on-disk
+            # config.json, and Harbor's _maybe_init_existing_job fails
+            # with FileExistsError.
+            served_model_id = generate_served_model_id(job_name=job_name)
             harbor_model_name = hosted_vllm_alias(served_model_id)
             if not vllm_model_path:
                 vllm_model_path = trace_model or ""

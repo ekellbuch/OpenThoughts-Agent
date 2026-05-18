@@ -285,8 +285,29 @@ def validate_time_limit_for_nodes(
     return time_limit
 
 
-def generate_served_model_id() -> str:
-    """Return a unique identifier for a hosted vLLM model."""
+def generate_served_model_id(job_name: Optional[str] = None) -> str:
+    """Return a unique identifier for a hosted vLLM model.
+
+    When ``job_name`` is provided, returns a **deterministic** 16-digit ID
+    derived from ``sha256(job_name)`` — every launch of the same job produces
+    the same synthetic ID. This is essential for Harbor's auto-resume:
+    Harbor's ``_maybe_init_existing_job`` compares the freshly-loaded
+    ``JobConfig`` (which has ``model_name=hosted_vllm/<id>`` from the
+    materialized YAML) against the on-disk ``config.json``; if the two
+    synthetic IDs diverge, Harbor raises ``FileExistsError``. A
+    deterministic-per-job ID makes the YAML stable across launches so the
+    equality check passes on resume.
+
+    When ``job_name`` is omitted, falls back to a microsecond timestamp
+    (legacy behavior; used by ad-hoc paths like
+    ``hpc/local_runner_utils.py`` that don't have a job name in hand).
+    """
+    if job_name:
+        import hashlib
+        digest_hex = hashlib.sha256(job_name.encode("utf-8")).hexdigest()
+        # Take the top 64 bits, convert to decimal, truncate to 16 chars.
+        # 64 bits → up to 20 decimal digits; truncate for vLLM-friendly length.
+        return str(int(digest_hex[:16], 16))[:16]
     return str(int(time.time() * 1_000_000))
 
 

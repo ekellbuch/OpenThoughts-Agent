@@ -687,7 +687,10 @@ def launch_eval_job_v2(exp_args: dict, hpc) -> None:
     served_model_id = None
     harbor_model_name = model_name
     if requires_vllm:
-        served_model_id = generate_served_model_id()
+        # Deterministic per job_name so chain-restarts produce the same
+        # synthetic ID. See hpc.launch_utils.generate_served_model_id
+        # docstring for why this matters for Harbor's auto-resume.
+        served_model_id = generate_served_model_id(job_name=job_name)
         harbor_model_name = hosted_vllm_alias(served_model_id)
 
     # Build the job config

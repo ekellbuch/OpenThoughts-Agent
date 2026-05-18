@@ -270,6 +270,33 @@ def test_synthetic_vllm_old_to_canonical_new_is_mutable(tmp_path):
     assert report.state == ResumeState.MUTABLE_DRIFT
 
 
+def test_canonical_old_to_synthetic_new_is_mutable(tmp_path):
+    """OLD=canonical-repo-name + NEW=hosted_vllm/<id> is MUTABLE (symmetric).
+
+    Production failure mode that the directionality fix targets: a prior
+    ``resume_manager`` mutation rewrote on-disk ``config.json`` with the
+    resolved canonical HF name (the planned config at that time carried
+    the real name because ``_materialize_planned_config`` hadn't yet
+    started applying the synthetic alias). The next launch's YAML
+    contains a freshly-generated ``hosted_vllm/<id>`` — Harbor's strict
+    equality check then fails with ``FileExistsError``. The predicate
+    must accept either-side-synthetic so the resume_manager classifies
+    the drift as mutable and rewrites the on-disk JSON to match the
+    new YAML.
+    """
+    job_dir = tmp_path / "job"
+    prior_top = _planned_config(model_name="cyankiwi/MiniMax-M2.7-AWQ-4bit")
+    _seed_prior(
+        job_dir,
+        top_level=prior_top,
+        trials=[_trial_config(model_name="cyankiwi/MiniMax-M2.7-AWQ-4bit")],
+    )
+
+    new_plan = _planned_config(model_name="hosted_vllm/2855472115409990")
+    report = inspect_resume(job_dir, new_plan)
+    assert report.state == ResumeState.MUTABLE_DRIFT
+
+
 def test_real_to_real_model_swap_stays_fatal(tmp_path):
     """OLD=real-repo + NEW=different-real-repo is still FATAL.
 

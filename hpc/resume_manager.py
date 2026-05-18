@@ -186,24 +186,29 @@ _HOSTED_VLLM_PREFIX = "hosted_vllm/"
 
 
 def _is_synthetic_vllm_id_rotation(drift: ConfigFieldDrift) -> bool:
-    """A ``model_name`` drift is mutable when the OLD side is ``hosted_vllm/<digits>``.
+    """A ``model_name`` drift is mutable when EITHER side is ``hosted_vllm/<digits>``.
 
-    ``hpc.launch_utils.generate_served_model_id()`` emits a microsecond
-    timestamp on every launch; the resulting ``hosted_vllm/<digits>``
-    alias is a non-stable runtime identifier for the local-vLLM serving
-    endpoint. At Harbor trial time the served name is re-discovered from
-    the live vLLM endpoint, so any value we patch the trial config to
-    gets replaced again at runtime — the patch is structurally a no-op
-    for Harbor.
+    ``hpc.launch_utils.generate_served_model_id(job_name=...)`` emits a
+    deterministic-per-job ID (so chain-restarts produce the same synthetic
+    ID), but legacy artifacts from older launches contain the prior
+    timestamp-based IDs, AND prior resume_manager mutations may have
+    rewritten the on-disk ``config.json`` with the resolved canonical HF
+    name. Either directionality represents "same serving identity" since
+    Harbor resolves at runtime regardless of which form is on disk:
 
-    We require only that the OLD side matches ``hosted_vllm/<digits>``:
-    a previously-completed trial whose model_name field came from
-    auto-served vLLM. Whatever the NEW side is (a fresh synthetic ID,
-    the canonical HF repo name from the planned config, etc.) is safe
-    to patch since Harbor will overwrite it on resume.
+      - OLD=synthetic, NEW=synthetic: ID rotation across launches
+        (timestamp legacy) or noop after determinism land.
+      - OLD=real, NEW=synthetic: prior resume_manager mutation rewrote
+        config.json to the canonical HF name; the new launch's YAML has
+        the synthetic alias. This is the common failure mode the
+        deterministic-ID change fixes — keep the predicate symmetric so
+        legacy on-disk state still resolves cleanly.
+      - OLD=synthetic, NEW=real: planner falls back to the HF name (rare
+        — happens when ``requires_vllm`` is False at materialization
+        time).
 
-    A real model swap (OLD is a real HF repo name) doesn't match the
-    OLD-side check and stays fatal.
+    A real model swap (BOTH sides are real HF repo names) stays fatal —
+    that's an actual semantic change the user should acknowledge.
     """
     if not drift.path or drift.path[-1] != "model_name":
         return False
@@ -212,9 +217,13 @@ def _is_synthetic_vllm_id_rotation(drift: ConfigFieldDrift) -> bool:
     old, new = drift.old, drift.new
     if not (isinstance(old, str) and isinstance(new, str)):
         return False
-    if not old.startswith(_HOSTED_VLLM_PREFIX):
-        return False
-    return old[len(_HOSTED_VLLM_PREFIX):].isdigit()
+
+    def _is_synthetic(s: str) -> bool:
+        if not s.startswith(_HOSTED_VLLM_PREFIX):
+            return False
+        return s[len(_HOSTED_VLLM_PREFIX):].isdigit()
+
+    return _is_synthetic(old) or _is_synthetic(new)
 
 
 # Predicates that override the allowlist on a per-drift basis. Each returns
@@ -1162,6 +1171,31 @@ def _materialize_planned_config(exp_args: Dict[str, Any]) -> Optional[Dict[str, 
         or exp_args.get("datagen_model")
         or ""
     )
+    # Mirror the launcher's later `hosted_vllm_alias(generate_served_model_id(
+    # job_name=...))` substitution so the planned model_name we diff against
+    # the on-disk config.json matches what the launcher will write to
+    # merged_harbor_config.yaml. Without this overlay, planned has the raw HF
+    # repo name (e.g. ``cyankiwi/...``) and the on-disk JSON — rewritten by a
+    # prior mutation — has either the same HF name or a stale synthetic; in
+    # both cases the runtime YAML's deterministic ``hosted_vllm/<id>``
+    # diverges from JSON at Harbor's equality check.
+    job_name_for_alias = exp_args.get("job_name")
+    if job_name_for_alias and model_name and not str(model_name).startswith(_HOSTED_VLLM_PREFIX):
+        # Only rewrite when the launcher itself would (datagen/eval paths
+        # that need a vLLM server). Detect by checking whether the resolved
+        # exp_args carries a vllm-server config or the launcher has stashed
+        # a `_harbor_model_name` override (which would have already produced
+        # the alias and been caught by the fallback chain above).
+        from hpc.launch_utils import hosted_vllm_alias, generate_served_model_id
+        # Seed with the BARE job_name (not the ``_traces``-suffixed chunk
+        # name) to match the launcher's own call at
+        # ``hpc/datagen_launch_utils.py:_prepare_datagen_configuration``
+        # and ``hpc/eval_launch_utils.py``. The launcher generates a
+        # single synthetic per launch and reuses it across chunks; we
+        # mirror that here so resume_manager's planned config matches
+        # the YAML at the model_name field.
+        synthetic_id = generate_served_model_id(job_name=job_name_for_alias)
+        model_name = hosted_vllm_alias(synthetic_id)
     n_concurrent = exp_args.get("trace_n_concurrent") or exp_args.get("n_concurrent") or 4
     try:
         n_concurrent = int(n_concurrent)
