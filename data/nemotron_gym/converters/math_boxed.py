@@ -58,22 +58,34 @@ def convert_openmathreasoning(row: dict, row_idx: int) -> HarborTask | None:
 
 
 _ADVANCED_INSTRUCTION_HEADER = (
-    "You are solving a calculation task. Read the problem below, compute the "
-    "numeric answer, and write it (a single number) to `/app/answer.txt`. "
-    "The verifier extracts the last numeric token from your answer file and "
-    "compares it to the reference value within tolerance.\n\n"
+    "You are solving a calculation task. Read the problem below and write the "
+    "final numeric answer (a single number) to `/app/answer.txt`.\n\n"
+    "IMPORTANT: If the problem asks for **multiple** values (e.g. "
+    "\"Get me the values for X, Y, and Z\"), the verifier only grades the "
+    "LAST expression. Compute every expression if you wish, but write ONLY "
+    "the value of the LAST one to `/app/answer.txt`. The verifier extracts "
+    "the last numeric token from your answer file and compares it to the "
+    "reference value within tolerance.\n\n"
     "---\n\n"
 )
 
 
 @register("nvidia/Nemotron-RL-math-advanced_calculations")
 def convert_advanced_calculations(row: dict, row_idx: int) -> HarborTask | None:
-    """Different schema from OpenMathReasoning — uses `simplified_values` (list[float])."""
+    """Different schema from OpenMathReasoning — uses `simplified_values` (list[float]).
+
+    For multi-value prompts (e.g. "Get me the values for X, Y, and Z"), we
+    grade only the LAST value. This matches what the agent naturally does:
+    the verifier extracts the *last* numeric token from /app/answer.txt, so
+    the last `simplified_values` entry is the correct reference. (The
+    original v1 of this converter used `sv[0]`, which mismatched the agent's
+    answer on ~60% of rows and caused a 2.5% solve rate.)
+    """
     prompt = extract_prompt(row)
     sv = row.get("simplified_values")
     if not isinstance(sv, list) or not sv:
         return None
-    val = sv[0]
+    val = sv[-1]
     if not isinstance(val, (int, float)):
         return None
     val = float(val)

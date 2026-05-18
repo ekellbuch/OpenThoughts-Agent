@@ -13,6 +13,7 @@ import json
 
 from ..adapter import (
     HarborTask,
+    LLM_JUDGE_TASK_TOML,
     STANDARD_TEST_SH,
     SanitizationError,
     render_dockerfile,
@@ -107,6 +108,7 @@ def convert_adversarial(row: dict, row_idx: int) -> HarborTask | None:
         test_sh=STANDARD_TEST_SH,
         verifier_py=LLM_JUDGE_VERIFIER_PY,
         verifier_data=verifier_data,
+        task_toml=LLM_JUDGE_TASK_TOML,
         metadata=render_metadata(
             source_dataset="nvidia/Nemotron-RL-Instruction-Following-Adversarial-v1",
             source_uuid=uuid,

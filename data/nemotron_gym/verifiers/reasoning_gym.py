@@ -31,7 +31,12 @@ def _normalize(s: str) -> str:
 
 
 def _try_reasoning_gym(question: str, answer: str, entry: dict) -> int | None:
-    """Returns 1/0 on a verdict, or None if reasoning_gym lib isn't usable."""
+    """Returns 1/0 on a verdict, or None if reasoning_gym lib isn't usable.
+
+    Uses reasoning_gym's public factory API: `get_score_answer_fn(name)` returns
+    the dataset's `score_answer(answer, entry)` bound method, which yields a
+    float in [0.0, 1.0]. We threshold at 0.5 for the binary verdict.
+    """
     try:
         import reasoning_gym  # type: ignore
     except ImportError:
@@ -39,15 +44,32 @@ def _try_reasoning_gym(question: str, answer: str, entry: dict) -> int | None:
     source = entry.get("metadata", {}).get("source_dataset")
     if not source:
         return None
-    try:
-        scorer = reasoning_gym.get_scorer(source)  # API may vary by version
-    except Exception as e:
-        print(f"reasoning_gym.get_scorer({source!r}) failed: {e}")
+    # Prefer the v0.1.x factory API. Fall back to a legacy `get_scorer` shape
+    # for older/forked versions of the library that exposed a different name.
+    score_fn = None
+    if hasattr(reasoning_gym, "get_score_answer_fn"):
+        try:
+            score_fn = reasoning_gym.get_score_answer_fn(source)
+        except Exception as e:
+            print(f"reasoning_gym.get_score_answer_fn({source!r}) failed: {e}")
+            return None
+    elif hasattr(reasoning_gym, "get_scorer"):
+        try:
+            score_fn = reasoning_gym.get_scorer(source)
+        except Exception as e:
+            print(f"reasoning_gym.get_scorer({source!r}) failed: {e}")
+            return None
+    else:
+        print("reasoning_gym has neither get_score_answer_fn nor get_scorer")
         return None
+    # reasoning_gym >= 0.1.19 expects (answer, entry) positionally; the entry
+    # dict needs a top-level "metadata" passthrough (matches verifier_data.json
+    # produced by the converter) plus the gold "answer".
     try:
-        score = scorer(answer=answer, entry=entry)
+        rg_entry = {"answer": entry.get("answer", ""), "metadata": entry.get("metadata", {})}
+        score = score_fn(answer, rg_entry)
     except Exception as e:
-        print(f"scorer call failed: {e}")
+        print(f"score_fn call failed: {e}")
         return None
     if isinstance(score, (int, float)):
         return 1 if score >= 0.5 else 0

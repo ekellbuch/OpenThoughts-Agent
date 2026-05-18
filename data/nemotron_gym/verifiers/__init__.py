@@ -16,6 +16,7 @@ from .ifeval_constraints import VERIFIER_PY as IFEVAL_VERIFIER_PY
 from .json_schema import VERIFIER_PY as JSON_SCHEMA_VERIFIER_PY
 from .llm_judge import VERIFIER_PY as LLM_JUDGE_VERIFIER_PY
 from .math_boxed import VERIFIER_PY as MATH_BOXED_VERIFIER_PY
+from .safety_judge import VERIFIER_PY as SAFETY_JUDGE_VERIFIER_PY
 from .normalized_text import VERIFIER_PY as NORMALIZED_TEXT_VERIFIER_PY
 from .numeric_compare import VERIFIER_PY as NUMERIC_COMPARE_VERIFIER_PY
 from .reasoning_gym import VERIFIER_PY as REASONING_GYM_VERIFIER_PY
@@ -30,6 +31,7 @@ __all__ = [
     "JSON_SCHEMA_VERIFIER_PY",
     "LLM_JUDGE_VERIFIER_PY",
     "MATH_BOXED_VERIFIER_PY",
+    "SAFETY_JUDGE_VERIFIER_PY",
     "NORMALIZED_TEXT_VERIFIER_PY",
     "NUMERIC_COMPARE_VERIFIER_PY",
     "REASONING_GYM_VERIFIER_PY",

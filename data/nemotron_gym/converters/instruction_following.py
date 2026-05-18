@@ -30,9 +30,22 @@ from ._common import extract_prompt
 _BASE_IMAGE = "python:3.11-slim-bookworm"
 _MAX_KWARGS_BYTES = 64 * 1024
 _INSTRUCTION_HEADER = (
-    "Follow the instruction below precisely. Write your final answer to "
-    "`/app/answer.txt`. The verifier checks formal constraints (paragraph count, "
-    "forbidden words, letter frequency, ...) extracted from the original task.\n\n"
+    "You are running in a shell-based sandbox. Read the instruction below and "
+    "write your final, complete answer text to the file `/app/answer.txt`. "
+    "The verifier reads ONLY `/app/answer.txt` — anything you print to the "
+    "terminal or describe in chat is ignored. Your answer.txt must be the "
+    "raw answer prose itself (not a wrapper, not a summary, not commentary), "
+    "satisfying every formal constraint in the instruction (paragraph count, "
+    "forbidden words, letter frequency, formatting markers, ...).\n\n"
+    "Example of how to save your answer (run this in the shell after composing "
+    "your response):\n\n"
+    "```sh\n"
+    "cat > /app/answer.txt <<'EOF'\n"
+    "<your full answer text here>\n"
+    "EOF\n"
+    "```\n\n"
+    "Verify the file exists and contains your answer with `cat /app/answer.txt` "
+    "before finishing. If `/app/answer.txt` is missing or empty the task fails.\n\n"
     "---\n\n"
 )
 

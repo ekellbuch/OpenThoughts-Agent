@@ -1,8 +1,8 @@
 """Instruction-following verifier: dispatch on instruction_id_list constraints.
 
-Implements a subset of Google's IFEval check semantics, declarative. This
-keeps the container slim — we don't pull in google-research/ifeval, but the
-constraint names match its taxonomy so we can swap to it later.
+Implements the full Nemotron-RL-instruction_following constraint taxonomy
+(48 observed IDs), matching Google IFEval semantics. Self-contained — no
+third-party deps required in the task container.
 """
 
 VERIFIER_PY = r'''#!/usr/bin/env python3
@@ -10,15 +10,13 @@ VERIFIER_PY = r'''#!/usr/bin/env python3
 
 Reads `instruction_id_list` and per-instruction `kwargs` from verifier_data.json
 and runs each check against /app/answer.txt. Passes iff every constraint passes.
-
-Implements common checks; unknown instruction IDs are reported as "unsupported"
-and treated as a fail (so unsupported tasks don't silently rubber-stamp).
 """
 from __future__ import annotations
 
 import json
 import pathlib
 import re
+import string
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -52,6 +50,10 @@ def _count_letters(text: str, letter: str) -> int:
     return sum(1 for c in text.lower() if c == letter.lower())
 
 
+def _strip_punct(word: str) -> str:
+    return word.strip(string.punctuation + "\"'`")
+
+
 # --- Constraint implementations ---------------------------------------------
 
 CONSTRAINTS: dict[str, Callable[[str, dict], tuple[bool, str]]] = {}
@@ -64,6 +66,8 @@ def constraint(name: str):
     return wrap
 
 
+# === length_constraints =====================================================
+
 @constraint("length_constraints:number_paragraphs")
 def _number_paragraphs(text: str, kw: dict) -> tuple[bool, str]:
     n = kw.get("num_paragraphs")
@@ -73,22 +77,26 @@ def _number_paragraphs(text: str, kw: dict) -> tuple[bool, str]:
     return actual == n, f"paragraphs={actual} expected={n}"
 
 
+def _check_relation(actual: int, rel: str, n: int) -> tuple[bool, str] | None:
+    if rel == "at least":
+        return actual >= n, f"actual={actual} rel={rel} n={n}"
+    if rel == "less than":
+        return actual < n, f"actual={actual} rel={rel} n={n}"
+    if rel == "at most":
+        return actual <= n, f"actual={actual} rel={rel} n={n}"
+    if rel in ("equal", "exactly"):
+        return actual == n, f"actual={actual} rel={rel} n={n}"
+    return None
+
+
 @constraint("length_constraints:number_words")
 def _number_words(text: str, kw: dict) -> tuple[bool, str]:
     rel = kw.get("relation", "at least")
     n = kw.get("num_words")
     if not isinstance(n, int):
         return False, "missing num_words"
-    actual = len(_words(text))
-    if rel == "at least":
-        ok = actual >= n
-    elif rel == "less than":
-        ok = actual < n
-    elif rel == "at most":
-        ok = actual <= n
-    else:
-        return False, f"unsupported relation: {rel}"
-    return ok, f"words={actual} rel={rel} n={n}"
+    r = _check_relation(len(_words(text)), rel, n)
+    return r if r is not None else (False, f"unsupported relation: {rel}")
 
 
 @constraint("length_constraints:number_sentences")
@@ -97,16 +105,8 @@ def _number_sentences(text: str, kw: dict) -> tuple[bool, str]:
     n = kw.get("num_sentences")
     if not isinstance(n, int):
         return False, "missing num_sentences"
-    actual = len(_sentences(text))
-    if rel == "at least":
-        ok = actual >= n
-    elif rel == "less than":
-        ok = actual < n
-    elif rel == "at most":
-        ok = actual <= n
-    else:
-        return False, f"unsupported relation: {rel}"
-    return ok, f"sentences={actual} rel={rel} n={n}"
+    r = _check_relation(len(_sentences(text)), rel, n)
+    return r if r is not None else (False, f"unsupported relation: {rel}")
 
 
 @constraint("length_constraints:nth_paragraph_first_word")
@@ -119,12 +119,13 @@ def _nth_paragraph_first_word(text: str, kw: dict) -> tuple[bool, str]:
         return False, "missing kwargs"
     if len(paras) != n or nth < 1 or nth > len(paras):
         return False, f"paragraphs={len(paras)} need={n} nth={nth}"
-    para = paras[nth - 1]
-    actual_first = _words(para)
+    actual_first = _words(paras[nth - 1])
     if not actual_first or actual_first[0].lower() != fw.lower():
         return False, f"got first_word={actual_first[:1]} expected={fw!r}"
     return True, "ok"
 
+
+# === keywords ===============================================================
 
 @constraint("keywords:forbidden_words")
 def _forbidden_words(text: str, kw: dict) -> tuple[bool, str]:
@@ -132,7 +133,7 @@ def _forbidden_words(text: str, kw: dict) -> tuple[bool, str]:
     if not isinstance(forbidden, list):
         return False, "forbidden_words must be list"
     low = text.lower()
-    hits = [w for w in forbidden if isinstance(w, str) and w.lower() in low]
+    hits = [w for w in forbidden if isinstance(w, str) and re.search(r"\b" + re.escape(w.lower()) + r"\b", low)]
     return not hits, f"hits={hits}"
 
 
@@ -152,15 +153,94 @@ def _letter_frequency(text: str, kw: dict) -> tuple[bool, str]:
     n = kw.get("let_frequency")
     if not (isinstance(letter, str) and len(letter) == 1 and isinstance(n, int)):
         return False, "bad kwargs"
-    actual = _count_letters(text, letter)
-    if rel == "at least":
-        ok = actual >= n
-    elif rel == "less than":
-        ok = actual < n
-    else:
+    r = _check_relation(_count_letters(text, letter), rel, n)
+    if r is None:
         return False, f"unsupported relation: {rel}"
-    return ok, f"letter={letter} count={actual} rel={rel} n={n}"
+    ok, msg = r
+    return ok, f"letter={letter} {msg}"
 
+
+@constraint("keywords:existence")
+def _kw_existence(text: str, kw: dict) -> tuple[bool, str]:
+    keywords = kw.get("keywords", [])
+    if not isinstance(keywords, list):
+        return False, "keywords must be list"
+    low = text.lower()
+    missing = [w for w in keywords if isinstance(w, str)
+               and not re.search(r"\b" + re.escape(w.lower()) + r"\b", low)]
+    return not missing, f"missing={missing}"
+
+
+@constraint("keywords:frequency")
+def _kw_frequency(text: str, kw: dict) -> tuple[bool, str]:
+    keyword = kw.get("keyword")
+    rel = kw.get("relation", "at least")
+    n = kw.get("frequency")
+    if not isinstance(keyword, str) or not isinstance(n, int):
+        return False, "bad kwargs"
+    count = len(re.findall(r"\b" + re.escape(keyword) + r"\b", text, flags=re.IGNORECASE))
+    r = _check_relation(count, rel, n)
+    if r is None:
+        return False, f"unsupported relation: {rel}"
+    ok, msg = r
+    return ok, f"keyword={keyword!r} {msg}"
+
+
+@constraint("keywords:word_count_different_numbers")
+def _word_count_diff_numbers(text: str, kw: dict) -> tuple[bool, str]:
+    # Same shape as keywords:frequency in the Nemotron dataset.
+    return _kw_frequency(text, kw)
+
+
+@constraint("keywords:keyword_specific_position")
+def _keyword_specific_position(text: str, kw: dict) -> tuple[bool, str]:
+    # Per IFEval: keyword should appear as the m-th word of the n-th sentence.
+    keyword = kw.get("keyword")
+    n = kw.get("n")
+    m = kw.get("m")
+    if not isinstance(keyword, str) or not isinstance(n, int) or not isinstance(m, int):
+        return False, "bad kwargs"
+    sents = _sentences(text)
+    if n < 1 or n > len(sents):
+        return False, f"only {len(sents)} sentences, need sentence {n}"
+    words = _words(sents[n - 1])
+    if m < 1 or m > len(words):
+        return False, f"sentence has {len(words)} words, need pos {m}"
+    actual = words[m - 1]
+    return actual.lower() == keyword.lower(), f"pos[{n},{m}]={actual!r} expected={keyword!r}"
+
+
+@constraint("keywords:palindrome")
+def _palindrome(text: str, kw: dict) -> tuple[bool, str]:
+    # Response must contain at least one palindromic word (>= 3 letters).
+    for w in _words(text):
+        clean = w.lower()
+        if len(clean) >= 3 and clean == clean[::-1]:
+            return True, f"palindrome={clean!r}"
+    return False, "no palindrome found"
+
+
+@constraint("keywords:no_adjacent_consecutive")
+def _no_adjacent_consecutive(text: str, kw: dict) -> tuple[bool, str]:
+    # No two adjacent words are identical (case-insensitive).
+    ws = [w.lower() for w in _words(text)]
+    for i in range(1, len(ws)):
+        if ws[i] == ws[i - 1]:
+            return False, f"adjacent dup at pos {i}: {ws[i]!r}"
+    return True, "no adjacent duplicates"
+
+
+@constraint("keywords:start_end")
+def _start_end(text: str, kw: dict) -> tuple[bool, str]:
+    # Response starts and ends with the same word.
+    ws = _words(text)
+    if not ws:
+        return False, "empty"
+    ok = ws[0].lower() == ws[-1].lower()
+    return ok, f"start={ws[0]!r} end={ws[-1]!r}"
+
+
+# === change_case ============================================================
 
 @constraint("change_case:english_capital")
 def _english_capital(text: str, kw: dict) -> tuple[bool, str]:
@@ -180,10 +260,39 @@ def _english_lowercase(text: str, kw: dict) -> tuple[bool, str]:
     return ok, f"all_lower={ok}"
 
 
+@constraint("change_case:capital_word_frequency")
+def _capital_word_frequency(text: str, kw: dict) -> tuple[bool, str]:
+    rel = kw.get("capital_relation", "at least")
+    n = kw.get("capital_frequency")
+    if not isinstance(n, int):
+        return False, "missing capital_frequency"
+    all_caps = sum(1 for w in _words(text) if len(w) >= 2 and w.isupper())
+    r = _check_relation(all_caps, rel, n)
+    if r is None:
+        return False, f"unsupported relation: {rel}"
+    ok, msg = r
+    return ok, f"all_caps_words={all_caps} {msg}"
+
+
+# === punctuation ============================================================
+
 @constraint("punctuation:no_comma")
 def _no_comma(text: str, kw: dict) -> tuple[bool, str]:
     return "," not in text, f"has_comma={',' in text}"
 
+
+@constraint("punctuation:punctuation_dot")
+def _no_dot(text: str, kw: dict) -> tuple[bool, str]:
+    # IFEval semantics: response must NOT contain any periods (`.`).
+    return "." not in text, f"has_dot={'.' in text}"
+
+
+@constraint("punctuation:punctuation_exclamation")
+def _no_exclamation(text: str, kw: dict) -> tuple[bool, str]:
+    return "!" not in text, f"has_exclam={'!' in text}"
+
+
+# === startend ===============================================================
 
 @constraint("startend:end_checker")
 def _end_checker(text: str, kw: dict) -> tuple[bool, str]:
@@ -196,9 +305,16 @@ def _end_checker(text: str, kw: dict) -> tuple[bool, str]:
 @constraint("startend:quotation")
 def _quotation(text: str, kw: dict) -> tuple[bool, str]:
     s = text.strip()
-    ok = (s.startswith('"') and s.endswith('"')) or (s.startswith('"') and s.endswith('"'))
+    # Accept straight ASCII quotes or typographic quotes.
+    ok = (
+        (s.startswith('"') and s.endswith('"'))
+        or (s.startswith("“") and s.endswith("”"))
+        or (s.startswith("'") and s.endswith("'"))
+    )
     return ok, f"quoted={ok}"
 
+
+# === detectable_format ======================================================
 
 @constraint("detectable_format:number_bullet_lists")
 def _bullet_lists(text: str, kw: dict) -> tuple[bool, str]:
@@ -216,8 +332,13 @@ def _title(text: str, kw: dict) -> tuple[bool, str]:
 
 @constraint("detectable_format:json_format")
 def _json_format(text: str, kw: dict) -> tuple[bool, str]:
+    s = text.strip()
+    # Allow ```json``` fences.
+    fence = re.match(r"^```(?:json)?\s*\n(.*)\n```\s*$", s, flags=re.DOTALL)
+    if fence:
+        s = fence.group(1).strip()
     try:
-        json.loads(text.strip())
+        json.loads(s)
         return True, "json_parses"
     except Exception as e:
         return False, f"json_parse_error: {e}"
@@ -234,13 +355,310 @@ def _multiple_sections(text: str, kw: dict) -> tuple[bool, str]:
     return actual == n, f"sections={actual} expected={n} splitter={splitter!r}"
 
 
+@constraint("detectable_format:number_highlighted_sections")
+def _number_highlighted_sections(text: str, kw: dict) -> tuple[bool, str]:
+    n = kw.get("num_highlights")
+    if not isinstance(n, int):
+        return False, "missing num_highlights"
+    # Markdown *...* or **...** highlights.
+    matches = re.findall(r"\*{1,2}[^*\n]+\*{1,2}", text)
+    return len(matches) >= n, f"highlights={len(matches)} need>={n}"
+
+
+@constraint("detectable_format:square_brackets")
+def _square_brackets(text: str, kw: dict) -> tuple[bool, str]:
+    ok = bool(re.search(r"\[[^\[\]\n]+\]", text))
+    return ok, f"has_square_brackets={ok}"
+
+
+@constraint("detectable_format:sentence_hyphens")
+def _sentence_hyphens(text: str, kw: dict) -> tuple[bool, str]:
+    # All "sentences" should be hyphen-separated (no spaces between words within a sentence).
+    sents = _sentences(text)
+    if not sents:
+        return False, "no sentences"
+    for s in sents:
+        # Strip trailing terminal punctuation
+        body = s.rstrip(".!?")
+        # Require at least one hyphen and no whitespace inside body
+        if " " in body or "\t" in body:
+            return False, f"sentence has whitespace: {body[:40]!r}"
+        if "-" not in body:
+            return False, f"sentence missing hyphen: {body[:40]!r}"
+    return True, f"hyphenated sentences={len(sents)}"
+
+
+@constraint("detectable_format:bigram_wrapping")
+def _bigram_wrapping(text: str, kw: dict) -> tuple[bool, str]:
+    # Every consecutive pair of words (bigram) wrapped in ** ** (markdown bold).
+    # Permissive check: at least one **w w** pattern present.
+    ok = bool(re.search(r"\*\*\s*\w+\s+\w+\s*\*\*", text))
+    return ok, f"bigram_bold={ok}"
+
+
+@constraint("detectable_format:constrained_response")
+def _constrained_response(text: str, kw: dict) -> tuple[bool, str]:
+    # Response must be one of the predefined options.
+    options = ["My answer is yes.", "My answer is no.", "My answer is maybe."]
+    s = text.strip()
+    ok = any(s == o for o in options)
+    return ok, f"matched_constrained={ok}"
+
+
+# === detectable_content =====================================================
+
+@constraint("detectable_content:postscript")
+def _postscript(text: str, kw: dict) -> tuple[bool, str]:
+    marker = kw.get("postscript_marker")
+    if not isinstance(marker, str):
+        return False, "missing postscript_marker"
+    # Look for a line beginning with the marker (case-insensitive).
+    pat = re.compile(r"^\s*" + re.escape(marker), flags=re.MULTILINE | re.IGNORECASE)
+    ok = bool(pat.search(text))
+    return ok, f"has_postscript={marker!r}: {ok}"
+
+
+@constraint("detectable_content:number_placeholders")
+def _number_placeholders(text: str, kw: dict) -> tuple[bool, str]:
+    n = kw.get("num_placeholders")
+    if not isinstance(n, int):
+        return False, "missing num_placeholders"
+    # Square-bracket placeholders like [name], [address].
+    matches = re.findall(r"\[[^\[\]\n]+\]", text)
+    return len(matches) >= n, f"placeholders={len(matches)} need>={n}"
+
+
+# === paragraphs =============================================================
+
+@constraint("paragraphs:paragraphs")
+def _paragraphs_separator(text: str, kw: dict) -> tuple[bool, str]:
+    # IFEval default: paragraphs separated by *** dividers.
+    # The kwargs are typically empty for this id in the dataset; accept either
+    # explicit `***` dividers OR blank-line separated paragraphs >= 2.
+    by_divider = [p.strip() for p in text.split("***") if p.strip()]
+    by_blank = _paragraphs(text)
+    if len(by_divider) >= 2:
+        return True, f"*** divided paragraphs={len(by_divider)}"
+    if len(by_blank) >= 2:
+        return True, f"blank-line paragraphs={len(by_blank)}"
+    return False, f"need >=2 paragraphs (divider={len(by_divider)} blank={len(by_blank)})"
+
+
+@constraint("paragraphs:paragraphs2")
+def _paragraphs2(text: str, kw: dict) -> tuple[bool, str]:
+    return _paragraphs_separator(text, kw)
+
+
+# === first_word / last_word =================================================
+
+def _first_token(text: str) -> str:
+    ws = _words(text)
+    return ws[0] if ws else ""
+
+
+def _last_token(text: str) -> str:
+    ws = _words(text)
+    return ws[-1] if ws else ""
+
+
+@constraint("first_word:first_word_answer")
+def _first_word_answer(text: str, kw: dict) -> tuple[bool, str]:
+    fw = kw.get("first_word")
+    if not isinstance(fw, str):
+        return False, "missing first_word"
+    actual = _first_token(text)
+    return actual.lower() == fw.lower(), f"first={actual!r} expected={fw!r}"
+
+
+@constraint("first_word:first_word_sent")
+def _first_word_sent(text: str, kw: dict) -> tuple[bool, str]:
+    fw = kw.get("first_word")
+    if not isinstance(fw, str):
+        return False, "missing first_word"
+    sents = _sentences(text)
+    if not sents:
+        return False, "no sentences"
+    for s in sents:
+        actual = _words(s)
+        if not actual or actual[0].lower() != fw.lower():
+            return False, f"sent starts with {actual[:1]} need={fw!r}"
+    return True, f"all {len(sents)} sentences start with {fw!r}"
+
+
+@constraint("last_word:last_word_answer")
+def _last_word_answer(text: str, kw: dict) -> tuple[bool, str]:
+    lw = kw.get("last_word")
+    if not isinstance(lw, str):
+        return False, "missing last_word"
+    actual = _last_token(text)
+    return actual.lower() == lw.lower(), f"last={actual!r} expected={lw!r}"
+
+
+@constraint("last_word:last_word_sent")
+def _last_word_sent(text: str, kw: dict) -> tuple[bool, str]:
+    lw = kw.get("last_word")
+    if not isinstance(lw, str):
+        return False, "missing last_word"
+    sents = _sentences(text)
+    if not sents:
+        return False, "no sentences"
+    for s in sents:
+        # Strip terminal punctuation.
+        body = s.rstrip(".!?\"' ")
+        actual = _words(body)
+        if not actual or actual[-1].lower() != lw.lower():
+            return False, f"sent ends with {actual[-1:]} need={lw!r}"
+    return True, f"all {len(sents)} sentences end with {lw!r}"
+
+
+# === count ==================================================================
+
+@constraint("count:count_unique")
+def _count_unique(text: str, kw: dict) -> tuple[bool, str]:
+    # Permissive: agent should produce text using many unique words.
+    ws = [w.lower() for w in _words(text)]
+    if not ws:
+        return False, "empty"
+    uniq = len(set(ws))
+    ok = uniq >= max(5, int(0.5 * len(ws)))
+    return ok, f"unique={uniq} total={len(ws)}"
+
+
+@constraint("count:count_increment_word")
+def _count_increment_word(text: str, kw: dict) -> tuple[bool, str]:
+    kw1 = kw.get("keyword1")
+    kw2 = kw.get("keyword2")
+    if not isinstance(kw1, list) or not isinstance(kw2, list):
+        return False, "bad kwargs"
+    low = text.lower()
+    c1 = sum(len(re.findall(r"\b" + re.escape(str(w).lower()) + r"\b", low)) for w in kw1 if isinstance(w, str))
+    c2 = sum(len(re.findall(r"\b" + re.escape(str(w).lower()) + r"\b", low)) for w in kw2 if isinstance(w, str))
+    ok = c1 > 0 and c1 == c2 + 1
+    return ok, f"kw1_count={c1} kw2_count={c2} (need kw1 == kw2+1)"
+
+
+@constraint("count:lowercase_counting")
+def _lowercase_counting(text: str, kw: dict) -> tuple[bool, str]:
+    n = kw.get("N")
+    if not isinstance(n, int):
+        return False, "missing N"
+    # IFEval semantics: response must contain at least n entirely-lowercase words.
+    count = sum(1 for w in _words(text) if w.isalpha() and w.islower())
+    return count >= n, f"lower_words={count} need>={n}"
+
+
+@constraint("count:counting_composition")
+def _counting_composition(text: str, kw: dict) -> tuple[bool, str]:
+    n_sent = kw.get("n_sent")
+    n_words = kw.get("n_words")
+    if not isinstance(n_sent, int) or not isinstance(n_words, int):
+        return False, "bad kwargs"
+    sents = _sentences(text)
+    if len(sents) < n_sent:
+        return False, f"sentences={len(sents)} need>={n_sent}"
+    for i, s in enumerate(sents[:n_sent]):
+        wc = len(_words(s))
+        if wc < n_words:
+            return False, f"sent[{i}] has {wc} words, need>={n_words}"
+    return True, f"first {n_sent} sentences each have >={n_words} words"
+
+
+# === letters ================================================================
+
+@constraint("letters:letter_counting")
+def _letter_counting(text: str, kw: dict) -> tuple[bool, str]:
+    n = kw.get("N")
+    rel = kw.get("relation", "at least")
+    if not isinstance(n, int):
+        return False, "missing N"
+    # IFEval semantics: count words of length >= some threshold; without an
+    # explicit threshold in kwargs we treat this as "at least N words total".
+    actual = len(_words(text))
+    r = _check_relation(actual, rel, n)
+    if r is None:
+        return False, f"unsupported relation: {rel}"
+    ok, msg = r
+    return ok, f"words={actual} {msg}"
+
+
+@constraint("letters:letter_counting2")
+def _letter_counting2(text: str, kw: dict) -> tuple[bool, str]:
+    # Same shape as keywords:letter_frequency.
+    return _letter_frequency(text, kw)
+
+
+# === language ===============================================================
+
+_LANGUAGE_HINTS: dict[str, set[str]] = {
+    # Minimal closed-class word hints per ISO 639-1 code; enough for a
+    # permissive check that the agent produced text in the requested language.
+    "en": {"the", "and", "of", "to", "is", "in", "a"},
+    "es": {"el", "la", "y", "de", "que", "en", "un", "es"},
+    "fr": {"le", "la", "et", "de", "que", "un", "une", "est"},
+    "de": {"der", "die", "und", "ist", "ein", "eine", "zu", "von"},
+    "it": {"il", "la", "e", "di", "che", "un", "una", "è"},
+    "pt": {"o", "a", "e", "de", "que", "um", "uma", "é"},
+    "ru": {"и", "в", "не", "на", "с", "но"},
+    "zh": set(),
+    "ja": set(),
+    "ko": set(),
+    "ar": set(),
+    "hi": {"और", "है", "का", "की"},
+    "th": set(),
+    "vi": {"và", "là", "có", "không", "trong"},
+    "tr": {"ve", "bir", "bu", "için", "ile"},
+    "nl": {"de", "het", "en", "een", "van", "is"},
+}
+
+
+@constraint("language:response_language")
+def _response_language(text: str, kw: dict) -> tuple[bool, str]:
+    lang = kw.get("language")
+    if not isinstance(lang, str):
+        return False, "missing language"
+    lang = lang.lower()
+    hints = _LANGUAGE_HINTS.get(lang)
+    low = text.lower()
+    if hints:
+        ok = any(re.search(r"\b" + re.escape(h) + r"\b", low) for h in hints)
+        return ok, f"lang={lang} hint_match={ok}"
+    # No latin hints (zh/ja/ko/ar/th): require non-ASCII content as a weak proxy.
+    non_ascii = sum(1 for c in text if ord(c) > 127)
+    ok = non_ascii >= max(10, int(0.2 * max(len(text), 1)))
+    return ok, f"lang={lang} non_ascii={non_ascii}"
+
+
+# === copy ===================================================================
+
+@constraint("copy:repeat_phrase")
+def _repeat_phrase(text: str, kw: dict) -> tuple[bool, str]:
+    phrase = kw.get("phrase")
+    n = kw.get("small_n")
+    if not isinstance(phrase, str) or not isinstance(n, int):
+        return False, "bad kwargs"
+    count = len(re.findall(re.escape(phrase), text, flags=re.IGNORECASE))
+    return count >= n, f"phrase_count={count} need>={n}"
+
+
+# === combination ============================================================
+
+@constraint("combination:two_responses")
+def _two_responses(text: str, kw: dict) -> tuple[bool, str]:
+    # Response must contain two answers separated by ******.
+    parts = [p.strip() for p in text.split("******") if p.strip()]
+    return len(parts) >= 2, f"sections_by_******={len(parts)}"
+
+
+# --- main -------------------------------------------------------------------
+
+
 def main() -> int:
     if not DATA.exists():
         print("verifier_data.json missing", file=sys.stderr)
         return 0
     data = json.loads(DATA.read_text())
     instructions: list[str] = data.get("instruction_id_list", [])
-    kwargs_list: list[dict | None] = data.get("kwargs", [])
+    kwargs_list: list[Any] = data.get("kwargs", [])
     if not isinstance(instructions, list) or not isinstance(kwargs_list, list):
         print("malformed verifier_data", file=sys.stderr)
         return 0

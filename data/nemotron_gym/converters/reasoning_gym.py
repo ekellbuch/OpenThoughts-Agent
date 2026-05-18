@@ -73,6 +73,12 @@ def convert_reasoning_gym(row: dict, row_idx: int) -> HarborTask | None:
         instruction_md=_INSTRUCTION_HEADER + prompt,
         dockerfile=render_dockerfile(
             base=_BASE_IMAGE,
+            # `reasoning-gym==0.1.20` pulls in `pycosat==0.6.6` and
+            # `cellpylib==2.4.0` which are sdist-only on PyPI. pycosat is a C
+            # extension and needs gcc + Python headers to build; without them
+            # the sandbox build fails with "process pip install ... did not
+            # complete successfully: exit code: 1" (100% infra failure in v1).
+            apt_packages=("build-essential", "python3-dev"),
             pip_packages=("reasoning-gym==0.1.20",),
         ),
         test_sh=STANDARD_TEST_SH,

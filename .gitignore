@@ -419,3 +419,4 @@ hpc/dotenv/jupiter_eval_data_org.env
 # nemotron_gym converter outputs — large parquet artifacts (>100MB, up to 1.5GB).
 # Build outputs that don't belong in git; regenerate locally via the converters.
 data/nemotron_gym/output/*.parquet
+data/nemotron_gym/output_v2/

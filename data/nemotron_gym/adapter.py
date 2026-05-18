@@ -231,11 +231,22 @@ PINNED_DOCKERFILE_HEADER = (
 )
 
 
-def render_dockerfile(*, base: str, pip_packages: tuple[str, ...] = ()) -> str:
+def render_dockerfile(
+    *,
+    base: str,
+    pip_packages: tuple[str, ...] = (),
+    apt_packages: tuple[str, ...] = (),
+) -> str:
     """Build a Dockerfile pinned against the adapter's image registry.
 
     pip_packages must be a tuple of pre-validated package specs (no shell
     metacharacters). We re-validate here anyway as a belt-and-braces check.
+
+    apt_packages must be a tuple of Debian package names (alphanumeric, with
+    `+`, `-`, `.`, and `:` allowed for things like `g++` and `libfoo-dev:amd64`).
+    When non-empty, the rendered Dockerfile runs `apt-get update && apt-get
+    install -y --no-install-recommends ...` before the pip step so that pip can
+    build sdists that need compilers/headers (e.g. `pycosat`).
     """
     if base not in PINNED_BASE_IMAGES:
         raise SanitizationError(f"base image not pinned: {base!r}")
@@ -243,12 +254,23 @@ def render_dockerfile(*, base: str, pip_packages: tuple[str, ...] = ()) -> str:
     for pkg in pip_packages:
         if not pip_re.match(pkg):
             raise SanitizationError(f"unsafe pip package spec: {pkg!r}")
+    apt_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+\-:]*$")
+    for pkg in apt_packages:
+        if not apt_re.match(pkg):
+            raise SanitizationError(f"unsafe apt package spec: {pkg!r}")
     lines = [
         PINNED_DOCKERFILE_HEADER,
         f"FROM {base}",
         "ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1",
         "RUN mkdir -p /app /tests /logs/verifier && chmod 755 /app /tests",
     ]
+    if apt_packages:
+        joined_apt = " ".join(apt_packages)
+        lines.append(
+            "RUN apt-get update "
+            f"&& apt-get install -y --no-install-recommends {joined_apt} "
+            "&& rm -rf /var/lib/apt/lists/*"
+        )
     if pip_packages:
         joined = " ".join(pip_packages)
         lines.append(f"RUN pip install --no-cache-dir {joined}")
@@ -277,6 +299,38 @@ adapter = "nemotron_gym"
 
 [verifier]
 timeout_sec = 600.0
+
+[agent]
+timeout_sec = 900.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 4096
+storage_mb = 10240
+"""
+
+
+# Variant for LLM-judge tasks: same as DEFAULT_TASK_TOML, but with
+# `[verifier.env]` propagating OPENAI_API_KEY / JUDGE_MODEL / OPENAI_BASE_URL
+# from the Harbor host into the verifier container. Without this, the embedded
+# litellm-based judge inside the verifier sandbox has no credentials and every
+# call fails with "Missing credentials. Please pass an `api_key`...", causing a
+# universal 0.0 reward across every task. Matches the Harbor convention used
+# by adapters/strongreject/src/strongreject/task-template/task.toml.
+#
+# OPENAI_API_KEY is REQUIRED (no default) — if unset on the host, the trial
+# raises a clear ValueError at verify time instead of silently scoring 0.0.
+# JUDGE_MODEL / OPENAI_BASE_URL use empty `${VAR:-}` defaults so trials run
+# fine without them (the verifier falls back to gpt-4o-mini + default base).
+LLM_JUDGE_TASK_TOML = """version = "1.0"
+
+[metadata]
+adapter = "nemotron_gym"
+
+[verifier]
+timeout_sec = 600.0
+env = { OPENAI_API_KEY = "${OPENAI_API_KEY}", JUDGE_MODEL = "${JUDGE_MODEL:-}" }
 
 [agent]
 timeout_sec = 900.0
