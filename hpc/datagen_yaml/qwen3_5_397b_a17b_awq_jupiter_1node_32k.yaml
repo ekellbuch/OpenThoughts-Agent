@@ -72,6 +72,17 @@ vllm_server:
   # Disables CUDA graphs + Inductor; Triton kernels still JIT but in eager
   # dispatch, avoiding the cross-rank deadlock.
   - --enforce-eager
+  # Pre-empt the mamba post-load page-size calibration. The auto-compute
+  # message from prior runs was:
+  #   "Setting attention block size to 2096 tokens to ensure that
+  #    attention page size is >= mamba page size."
+  #   "Padding mamba page size by 0.58% ..."
+  # Setting --block-size 2096 explicitly skips the cross-rank coordination
+  # step that follows the auto-compute and was deadlocking on shm_broadcast.
+  # If 2096 isn't right for some other reason, vLLM will reject it at parse
+  # time (loud failure beats silent stall).
+  - --block-size
+  - '2096'
   # Prefill / caching are default-OFF via hpc/vllm_utils.py's
   # `_DEFAULT_OFF_BOOLEAN_FLAGS` — the launcher injects --no-enable-... .
   # With chunked prefill OFF, vLLM requires
