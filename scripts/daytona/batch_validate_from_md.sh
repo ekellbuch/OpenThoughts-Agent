@@ -41,6 +41,15 @@ SAMPLE_SIZE="${SAMPLE_SIZE:-200}"
 SAMPLE_SEED="${SAMPLE_SEED:-42}"
 PYTHON="${PYTHON:-/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python}"
 
+# HF rate-limit guard. The validator's load_dataset() under hf-transfer fans out
+# to ~8 parallel range-GETs per file plus per-chunk Xet /api resolves; on a 1+GB
+# parquet that single call can burst >500 API hits. Free-tier accounts hit the
+# 2500-req/5min cap mid-run. Set HF_HUB_ENABLE_HF_TRANSFER=0 to serialize the
+# download (slower walltime, ~8x lower API rate); user can override by exporting
+# HF_HUB_ENABLE_HF_TRANSFER=1 before invoking this script if they're on a paid
+# tier and want the speed back.
+export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-0}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALIDATE_PY="${VALIDATE_PY:-$SCRIPT_DIR/validate_and_upload_from_hf.py}"
 
@@ -98,17 +107,29 @@ echo "Found ${#REPOS[@]} dataset(s); sample_size=$SAMPLE_SIZE seed=$SAMPLE_SEED"
 echo "Target dir: $TARGET_DIR"
 echo
 
+EXTRACT_ROOT="$TARGET_DIR/.extract_cache"
+mkdir -p "$EXTRACT_ROOT"
+
 for REPO in "${REPOS[@]}"; do
     SAFE="${REPO//\//__}"
     DEST="$TARGET_DIR/$SAFE"
     mkdir -p "$DEST"
     LOG="$DEST/run.log"
 
+    # Reusing the same extract_dir across runs lets the validator's existing
+    # cache short-circuit (validate_and_upload_from_hf.py: `if existing_tasks:
+    # return base_dir`) fire — no second load_dataset() call, no HF API hits
+    # on re-runs of the same repo. Cache lives under TARGET_DIR/.extract_cache/
+    # so it sits next to the run logs and the user can wipe it with one rm -rf.
+    EXTRACT_DIR="$EXTRACT_ROOT/$SAFE"
+    mkdir -p "$EXTRACT_DIR"
+
     echo "=== $REPO ==="
 
     rc=0
     "$PYTHON" "$VALIDATE_PY" \
         --repo_id "$REPO" \
+        --extract_dir "$EXTRACT_DIR" \
         --stages harbor \
         --sample_size "$SAMPLE_SIZE" \
         --sample_seed "$SAMPLE_SEED" \
