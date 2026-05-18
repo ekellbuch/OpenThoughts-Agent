@@ -115,9 +115,17 @@ trainer:
     loss_reduction: token_mean
 
     # ZClip ablation: reactive grad-norm spike clipping via EMA z-score.
-    # All other params use the defaults from ppo_base_config.yaml.
+    # warmup_steps=3 overrides the SkyRL YAML default of 25: this is a 60-80
+    # step ablation, so a 25-step warmup leaves ZClip never engaging before
+    # the run ends. Matches the Python class docstring's recommended value
+    # (skyrl_train/utils/zclip.py:39 — "tuned to 3 for short RL ablations").
+    # ZClip state is now persisted across chain-restarts (SkyRL workers/worker.py
+    # save_checkpoint / load_checkpoint), so warmup completes exactly once
+    # at absolute global_step=3, regardless of how many restart segments the
+    # chain takes.
     z_clip:
       enabled: true
+      warmup_steps: 3
 
   # Training loop settings
   epochs: 2
