@@ -1153,7 +1153,7 @@ def _materialize_planned_config(exp_args: Dict[str, Any]) -> Optional[Dict[str, 
     except (TypeError, ValueError):
         n_concurrent = 4
 
-    return merge_harbor_config(
+    planned = merge_harbor_config(
         harbor_config_data,
         agent_name=exp_args.get("trace_agent_name") or exp_args.get("harbor_agent_name"),
         model_name=str(model_name),
@@ -1162,6 +1162,38 @@ def _materialize_planned_config(exp_args: Dict[str, Any]) -> Optional[Dict[str, 
         agent_kwarg_overrides=list(exp_args.get("agent_kwarg") or exp_args.get("agent_kwargs") or []),
         extra_agent_kwargs=exp_args.get("_harbor_extra_agent_kwargs"),
     )
+
+    # Overlay the CLI-resolved runtime values that merge_harbor_config doesn't
+    # know about. Without this, the planned config keeps the harbor-yaml
+    # placeholder strings (`/replace/with/tasks/path`, `default-trace-job`,
+    # `trace_jobs`) and every comparison against an on-disk config bails with
+    # spurious "fatal drifts" at these paths.
+    if not isinstance(planned, dict):
+        return planned
+    tasks_path = exp_args.get("tasks_input_path") or exp_args.get("trace_input_path")
+    if tasks_path:
+        datasets = planned.get("datasets")
+        if isinstance(datasets, list) and datasets and isinstance(datasets[0], dict):
+            if datasets[0].get("path") in (None, "", "/replace/with/tasks/path"):
+                datasets[0]["path"] = str(tasks_path)
+    # Resolve job_name to the trace-job-name shape the launcher actually
+    # passes to Harbor (chunk_job_name = "<base>_traces"; see
+    # hpc/datagen_launch_utils.py:476).
+    base_job_name = exp_args.get("job_name")
+    if base_job_name and planned.get("job_name") in (None, "", "default-trace-job"):
+        planned["job_name"] = f"{base_job_name}_traces"
+    # jobs_dir is computed by the launcher as <experiments_dir>/trace_jobs.
+    experiments_dir = exp_args.get("experiments_dir")
+    if planned.get("jobs_dir") in (None, "", "trace_jobs"):
+        if experiments_dir:
+            planned["jobs_dir"] = str(Path(str(experiments_dir)) / "trace_jobs")
+        elif base_job_name:
+            from hpc.launch_utils import resolve_workspace_path
+            planned["jobs_dir"] = str(
+                resolve_workspace_path(f"experiments/{base_job_name}") / "trace_jobs"
+            )
+
+    return planned
 
 
 def resolve_resume_policy_for_launch(
