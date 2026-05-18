@@ -186,13 +186,24 @@ _HOSTED_VLLM_PREFIX = "hosted_vllm/"
 
 
 def _is_synthetic_vllm_id_rotation(drift: ConfigFieldDrift) -> bool:
-    """A ``model_name`` drift is mutable iff both sides are ``hosted_vllm/<digits>``.
+    """A ``model_name`` drift is mutable when the OLD side is ``hosted_vllm/<digits>``.
 
     ``hpc.launch_utils.generate_served_model_id()`` emits a microsecond
     timestamp on every launch; the resulting ``hosted_vllm/<digits>``
-    alias is structurally non-stable across reruns but represents the
-    same local-vLLM serving identity. Any non-rotation ``model_name``
-    drift (real model swap) stays fatal.
+    alias is a non-stable runtime identifier for the local-vLLM serving
+    endpoint. At Harbor trial time the served name is re-discovered from
+    the live vLLM endpoint, so any value we patch the trial config to
+    gets replaced again at runtime — the patch is structurally a no-op
+    for Harbor.
+
+    We require only that the OLD side matches ``hosted_vllm/<digits>``:
+    a previously-completed trial whose model_name field came from
+    auto-served vLLM. Whatever the NEW side is (a fresh synthetic ID,
+    the canonical HF repo name from the planned config, etc.) is safe
+    to patch since Harbor will overwrite it on resume.
+
+    A real model swap (OLD is a real HF repo name) doesn't match the
+    OLD-side check and stays fatal.
     """
     if not drift.path or drift.path[-1] != "model_name":
         return False
@@ -201,12 +212,9 @@ def _is_synthetic_vllm_id_rotation(drift: ConfigFieldDrift) -> bool:
     old, new = drift.old, drift.new
     if not (isinstance(old, str) and isinstance(new, str)):
         return False
-    if not (old.startswith(_HOSTED_VLLM_PREFIX) and new.startswith(_HOSTED_VLLM_PREFIX)):
+    if not old.startswith(_HOSTED_VLLM_PREFIX):
         return False
-    return (
-        old[len(_HOSTED_VLLM_PREFIX):].isdigit()
-        and new[len(_HOSTED_VLLM_PREFIX):].isdigit()
-    )
+    return old[len(_HOSTED_VLLM_PREFIX):].isdigit()
 
 
 # Predicates that override the allowlist on a per-drift basis. Each returns
