@@ -266,6 +266,37 @@ def _is_mutable_trial_field(drift: ConfigFieldDrift) -> bool:
 # -----------------------------------------------------------------------------
 
 
+def _is_effectively_empty(v: Any) -> bool:
+    """True for values semantically equivalent to "key absent / default".
+
+    Used to suppress spurious diffs when one config has the key with a
+    falsy default (``None``, ``[]``, ``{}``, ``""``, ``False``) and the
+    other simply omits the key. These pairs are not real semantic
+    drifts and would otherwise dominate the bail message for
+    materialized-from-CLI vs. on-disk Harbor configs.
+    """
+    if v is None:
+        return True
+    if isinstance(v, (list, dict, str)) and len(v) == 0:
+        return True
+    return False
+
+
+# Top-level config paths whose list values should be compared as SETS, not
+# ordered sequences. Harbor's retry exception filters are membership-based —
+# their on-disk ordering is incidental and frequently differs from the
+# Pydantic enum order in the planned config.
+_ORDER_INSENSITIVE_LIST_PATHS: set[tuple[str, ...]] = {
+    ("orchestrator", "retry", "exclude_exceptions"),
+    ("orchestrator", "retry", "include_exceptions"),
+    ("orchestrator", "retry", "mask_exceptions"),
+    ("orchestrator", "retry", "passthrough_exceptions"),
+    # Legacy / flat shape (some configs have these at the root).
+    ("retry", "exclude_exceptions"),
+    ("retry", "include_exceptions"),
+}
+
+
 def _diff_dicts(
     old: Any,
     new: Any,
@@ -274,12 +305,17 @@ def _diff_dicts(
     """Recursive dict/list/scalar diff, emitting leaf-level drifts.
 
     Compares ``old`` against ``new`` and yields one :class:`ConfigFieldDrift`
-    per differing leaf. Lists are compared element-wise; length mismatches
-    are reported as a single drift at the list path.
+    per differing leaf. Lists are compared element-wise (or as sets if the
+    path is in ``_ORDER_INSENSITIVE_LIST_PATHS``); length mismatches are
+    reported as a single drift at the list path. Pairs where one side is
+    missing and the other is effectively empty (None/[]/{}/"") are
+    suppressed — they're not real semantic drifts.
     """
     drifts: List[ConfigFieldDrift] = []
     if type(old) is not type(new):
         if old != new:
+            if _is_effectively_empty(old) and _is_effectively_empty(new):
+                return drifts
             drifts.append(ConfigFieldDrift(path=path, old=old, new=new))
         return drifts
     if isinstance(old, dict):
@@ -288,6 +324,10 @@ def _diff_dicts(
             sub_old = old.get(key, _MISSING)
             sub_new = new.get(key, _MISSING)
             if sub_old is _MISSING or sub_new is _MISSING:
+                present = sub_new if sub_old is _MISSING else sub_old
+                # Suppress: key absent on one side, falsy default on the other.
+                if _is_effectively_empty(present):
+                    continue
                 drifts.append(
                     ConfigFieldDrift(
                         path=path + (key,),
@@ -299,6 +339,13 @@ def _diff_dicts(
                 drifts.extend(_diff_dicts(sub_old, sub_new, path + (key,)))
         return drifts
     if isinstance(old, list):
+        # Order-insensitive comparison for known set-semantics lists.
+        if path in _ORDER_INSENSITIVE_LIST_PATHS:
+            try:
+                if set(old) == set(new):
+                    return drifts
+            except TypeError:
+                pass  # unhashable elements — fall through to ordered diff
         if len(old) != len(new):
             drifts.append(ConfigFieldDrift(path=path, old=old, new=new))
             return drifts
