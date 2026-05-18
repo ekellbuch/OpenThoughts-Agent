@@ -328,6 +328,14 @@ def _diff_dicts(
                 # Suppress: key absent on one side, falsy default on the other.
                 if _is_effectively_empty(present):
                     continue
+                # Suppress: planned config omits the key entirely
+                # (sub_new is _MISSING) but on-disk has a value. Harbor
+                # preserves the on-disk value on resume; the planned config
+                # simply doesn't constrain it. Symmetric case
+                # (sub_old is _MISSING and sub_new has a value) is a real
+                # introduction and stays as a drift.
+                if sub_new is _MISSING:
+                    continue
                 drifts.append(
                     ConfigFieldDrift(
                         path=path + (key,),
@@ -339,10 +347,8 @@ def _diff_dicts(
                 # Special case: planned config explicitly omitted (None) a
                 # field that on-disk has set. The on-disk value is preserved
                 # at runtime (Harbor reads its own config), so this is a
-                # no-op semantically — emitting it as fatal blocks resumes
-                # whose YAMLs simply don't constrain every Pydantic-defaulted
-                # field. Only suppress when planned-is-None — None on disk
-                # vs a planned non-None is still a real drift.
+                # no-op semantically. Only suppress when planned-is-None —
+                # None on disk vs a planned non-None is still a real drift.
                 if sub_new is None and sub_old is not None:
                     continue
                 drifts.extend(_diff_dicts(sub_old, sub_new, path + (key,)))
