@@ -821,6 +821,10 @@ def build_harbor_command(
     if jobs_dir:
         config_json_path = Path(jobs_dir) / job_name / "config.json"
         if config_json_path.exists():
+            print(
+                f"[build_harbor_command] Syncing runtime fields into {config_json_path}",
+                flush=True,
+            )
             try:
                 _sync_runtime_fields_into_config_json(
                     config_json_path=config_json_path,
@@ -828,6 +832,15 @@ def build_harbor_command(
                     extra_args=extra_args,
                     n_concurrent=n_concurrent,
                     n_attempts=n_attempts,
+                )
+                # fsync to make sure the write is visible to the harbor
+                # subprocess we are about to spawn (NFS-style filesystems
+                # can return stale data on close-to-open).
+                with open(config_json_path, "rb") as _f:
+                    os.fsync(_f.fileno())
+                print(
+                    f"[build_harbor_command] Sync complete, fsync'd",
+                    flush=True,
                 )
             except (OSError, json.JSONDecodeError, ValueError) as exc:
                 # Best-effort: if this fails, Harbor's equality check will
@@ -837,7 +850,13 @@ def build_harbor_command(
                     f"[build_harbor_command] WARNING: could not sync runtime "
                     f"fields into {config_json_path}: {exc}",
                     file=sys.stderr,
+                    flush=True,
                 )
+        else:
+            print(
+                f"[build_harbor_command] No config.json at {config_json_path}; skip sync",
+                flush=True,
+            )
 
     return cmd
 
