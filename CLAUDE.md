@@ -548,6 +548,41 @@ python -m hpc.launch \
 
 Replace `--tasks_input_path` with the appropriate benchmark dataset (`DCAgent/dev_set_v2`, `DCAgent2/terminal_bench_2`, etc.).
 
+## Datagen Daytona Key (CRITICAL)
+
+**Every `hpc.launch --job_type datagen` invocation must pass
+`--daytona_api_key "$DAYTONA_DATA_API_KEY"`.** The default
+`DAYTONA_API_KEY` env var resolves to the **RL org**, which rejects
+declarative Dockerfile builds with
+`DaytonaValidationError: declarative builds are not allowed` — that's
+the every-trial-fails-instantly pattern that produced 9999/10000
+failures on job 470406 (MiniMax-M2.7 tezos datagen) before this rule
+landed. Use the data org key explicitly:
+
+```bash
+python -m hpc.launch \
+  --job_type datagen \
+  --datagen_config <vllm-config>.yaml \
+  --trace_harbor_config ./hpc/harbor_yaml/datagen/ctx32k.yaml \
+  --tasks_input_path <tasks-dir> \
+  --trace_target_repo <hf-repo> \
+  --daytona_api_key "$DAYTONA_DATA_API_KEY" \   # ← required
+  --time_limit 11:59:00 --num_nodes 1 --trace-n-concurrent 32
+```
+
+Even with the right org key, the harbor_config.yaml's
+`environment.kwargs.auto_snapshot: true` flag is also required so
+Harbor's daytona env attaches to the pre-built
+`harbor__<hash>__snapshot` instead of falling through to a slower
+declarative Dockerfile build. All `hpc/harbor_yaml/datagen/*.yaml`
+and `hpc/harbor_yaml/eval/*.yaml` files now ship with this enabled —
+preserve it if you author a new harbor_yaml.
+
+Do NOT export `DAYTONA_TARGET` anywhere — when set, Harbor appends it
+to the auto-snapshot name (`harbor__<hash>__<target>__snapshot`),
+which then misses the pre-built snapshot and falls through to the
+declarative-build path. The codebase no longer needs DAYTONA_TARGET.
+
 ## Eval Job Submission Defaults
 
 When submitting eval jobs via `unified_eval_listener.py`, always use these flags unless explicitly told otherwise:
