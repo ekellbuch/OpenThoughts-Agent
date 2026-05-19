@@ -807,7 +807,97 @@ def build_harbor_command(
     for extra in extra_args:
         cmd.append(extra)
 
+    # Sync the on-disk Harbor config.json (if any) with the YAML+CLI
+    # effective state, so Harbor's _maybe_init_existing_job equality check
+    # passes on resume. The on-disk JSON gets written by Harbor on first
+    # run (or rewritten by hpc.resume_manager), but runtime-derived fields
+    # — agent kwargs.api_base/metrics_endpoint that depend on the live
+    # vLLM IP, and orchestrator.retry.include_exceptions that depend on
+    # the CLI's --filter-error-type defaults — would otherwise diverge
+    # from the JobConfig Harbor builds at runtime. Without this sync, a
+    # second-pass launch crashes at job.py:_maybe_init_existing_job with
+    # FileExistsError despite the resume_manager having mutated the
+    # static fields correctly.
+    if jobs_dir:
+        config_json_path = Path(jobs_dir) / job_name / "config.json"
+        if config_json_path.exists():
+            try:
+                _sync_runtime_fields_into_config_json(
+                    config_json_path=config_json_path,
+                    modified_config=modified_config,
+                    extra_args=extra_args,
+                    n_concurrent=n_concurrent,
+                    n_attempts=n_attempts,
+                )
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                # Best-effort: if this fails, Harbor's equality check will
+                # surface the original drift with a clearer trace than
+                # whatever exception we'd add here.
+                print(
+                    f"[build_harbor_command] WARNING: could not sync runtime "
+                    f"fields into {config_json_path}: {exc}",
+                    file=sys.stderr,
+                )
+
     return cmd
+
+
+def _sync_runtime_fields_into_config_json(
+    *,
+    config_json_path: "Path",
+    modified_config: dict,
+    extra_args: List[str],
+    n_concurrent: int,
+    n_attempts: int,
+) -> None:
+    """Patch on-disk config.json so it matches the YAML+CLI effective state.
+
+    Only touches the fields known to be runtime-derived (and therefore
+    guaranteed to drift across launches against a static on-disk JSON):
+      - agents[*].kwargs.{api_base, api_key, base_url, metrics_endpoint}
+      - orchestrator.n_concurrent_trials  (from CLI)
+      - orchestrator.retry.include_exceptions  (from --filter-error-type)
+      - n_attempts  (from CLI)
+
+    Other fields are preserved as-is so trial-level matching logic (which
+    keys off agent.name etc.) is unaffected.
+    """
+    cj = json.loads(config_json_path.read_text())
+
+    yaml_agents = modified_config.get("agents") or []
+    cj_agents = cj.get("agents") or []
+    runtime_kwarg_keys = ("api_base", "api_key", "base_url", "metrics_endpoint")
+    for i, yaml_agent in enumerate(yaml_agents):
+        if i >= len(cj_agents):
+            break
+        if not isinstance(yaml_agent, dict) or not isinstance(cj_agents[i], dict):
+            continue
+        cj_agent = cj_agents[i]
+        yaml_kw = yaml_agent.get("kwargs") or {}
+        cj_kw = cj_agent.setdefault("kwargs", {})
+        for key in runtime_kwarg_keys:
+            if key in yaml_kw:
+                cj_kw[key] = yaml_kw[key]
+        if "model_name" in yaml_agent:
+            cj_agent["model_name"] = yaml_agent["model_name"]
+
+    # CLI-derived --filter-error-type → retry.include_exceptions
+    filters: List[str] = []
+    i = 0
+    while i < len(extra_args):
+        if extra_args[i] == "--filter-error-type" and i + 1 < len(extra_args):
+            filters.append(extra_args[i + 1])
+            i += 2
+        else:
+            i += 1
+    orchestrator = cj.setdefault("orchestrator", {})
+    if filters:
+        retry = orchestrator.setdefault("retry", {})
+        retry["include_exceptions"] = filters
+    orchestrator["n_concurrent_trials"] = n_concurrent
+    cj["n_attempts"] = n_attempts
+
+    config_json_path.write_text(json.dumps(cj, indent=2))
 
 
 def run_harbor_cli(cmd: List[str], log_path: Optional[Path] = None) -> int:
