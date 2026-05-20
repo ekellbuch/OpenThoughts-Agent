@@ -837,7 +837,8 @@ jupiter = HPC(
     # Also exclude jpbo-038-38, jpbo-065-17, jpbo-074-22, jpbo-048-41, jpbo-011-[01-48] - recurring NCCL socket/heartbeat failures
     # jpbo-091-05 added 2026-04-15: repeated SIGABRT on 32B training (hung the 32B-5ds superset job chain twice)
     # jpbo-044-0[1-5] added 2026-04-22: repeated NCCL TCPStore broken-pipe stalls on Qwen3.5-9B chain (4 consecutive failures)
-    node_exclusion_list="jpbo-031-[01-48],jpbo-011-[01-48],jpbo-038-38,jpbo-004-46,jpbo-065-17,jpbo-074-22,jpbo-048-41,jpbo-091-05,jpbo-044-0[1-5]",
+    # jpbo-074-40 added 2026-05-20: SSH tunnel to login jpbl-s01-01 "No route to host" — proxychains setup fails at job start (exit 127 in 29s, job 475717)
+    node_exclusion_list="jpbo-031-[01-48],jpbo-011-[01-48],jpbo-038-38,jpbo-004-46,jpbo-065-17,jpbo-074-22,jpbo-074-40,jpbo-048-41,jpbo-091-05,jpbo-044-0[1-5]",
 )
 
 juwels = HPC(
