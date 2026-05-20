@@ -71,20 +71,16 @@ vllm_server:
   - string
   - --max-num-batched-tokens
   - '32768'
-  # DP coordinator must use Ray (not the default `mp` torch.distributed
-  # TCP-store path). Without this, vLLM's DPLBAsyncMPClient hits
-  # `socket.cpp:764: [c10d] The client socket cannot be initialized to
-  # connect to [localhost]:N (errno: 97 - Address family not supported
-  # by protocol)` — torch's c10d resolves "localhost" to IPv6 ::1 even
-  # though GLOO_USE_IPV6=0 + NCCL_SOCKET_FAMILY=AF_INET are exported on
-  # the node. Routing DP through Ray actors sidesteps the c10d socket
-  # entirely; Ray is already up (start_vllm_ray_controller.py started
-  # it) so this is a zero-cost re-route.
-  - --data-parallel-backend
-  - ray
-  # NOTE: do NOT hardcode `--data-parallel-address` here. The Ray DP
-  # backend's create_dp_placement_groups asserts the master IP is a key
-  # in Ray's known-nodes dict, which contains the head node's real IPv4
-  # (set via `--node-ip-address` in ray_utils.py) — not localhost /
-  # 127.0.0.1. vllm_utils.VLLMServer.start() now auto-injects the head
-  # IP when data_parallel_size > 1, so we just leave the flag off.
+  # NOTE on DP backend choice: we tried `--data-parallel-backend ray`
+  # first (job 476971) — vLLM's DPMoEEngineCoreActor failed at init
+  # with `RuntimeError: Ray returned no GPU ids for this actor` even
+  # though `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES` was unset and
+  # Ray reported 4× GH200 in cluster resources. That's an upstream
+  # vLLM Ray-DP regression on this wheel/aarch64. Falling back to the
+  # default `mp` torch.distributed coordinator. The original c10d
+  # IPv6-on-"localhost" socket bind (errno 97) is avoided by
+  # vllm_utils.VLLMServer.start() auto-injecting
+  # `--data-parallel-address <ray_cluster.head_ip>` (a real IPv4) when
+  # data_parallel_size > 1, so c10d resolves to AF_INET cleanly.
+  # If `mp` also fails for a new reason, do NOT toggle ray back —
+  # diagnose the new failure and consider pinning a different vLLM.
