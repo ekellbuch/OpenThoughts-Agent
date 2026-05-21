@@ -399,6 +399,19 @@ class IrisLauncher:
         # cloudpickle/py-spy/memray) lands in /app/.venv, not the image's
         # preinstalled venv at /opt/openthoughts/.venv.
         env_vars.setdefault("VIRTUAL_ENV", "/app/.venv")
+        # Force uv to materialize wheel contents into the venv instead of
+        # symlinking them from /root/.cache/uv/archive-v0/... . On iris
+        # workers, the uv cache lives in a tmpfs / different mount than the
+        # venv: `uv sync` builds the symlinks during sync, but when the user
+        # command runs the cache target is unreadable, so Python sees e.g.
+        # /app/.venv/.../pydantic/__init__.py as a broken symlink and falls
+        # back to namespace-package resolution — `from pydantic import
+        # BaseModel` then raises "cannot import name BaseModel from
+        # 'pydantic' (unknown location)". Copy mode avoids the symlink path
+        # entirely. Confirmed via _iris_diag.py: pydantic/__init__.py was a
+        # symlink to /root/.cache/uv/archive-v0/BYLjs1LAJOgakDOL/... which
+        # didn't exist at runtime.
+        env_vars.setdefault("UV_LINK_MODE", "copy")
 
         vm_count = parse_tpu_vm_count(args.tpu)
 
