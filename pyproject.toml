@@ -19,7 +19,7 @@ dependencies = [
     "datasets>=2.0.0",
     "supabase>=2.22.3",
     "python-dotenv>=1.0.0",
-    "harbor[daytona] @ git+https://github.com/laude-institute/harbor.git@penfever/temp-override",
+    "harbor[daytona] @ git+https://github.com/laude-institute/harbor.git@penfever/otagent-latest",
     "dynamic-semaphore @ git+https://github.com/penfever/dynamic-semaphore",
     "google-cloud-storage",
     "h5py",
@@ -69,6 +69,43 @@ datagen-rocm = [
 ]
 datagen-swesmith = [
     "swesmith",
+]
+# TPU variant for datagen + eval (Harbor + vLLM-TPU + Daytona sandbox backend).
+# Eval uses the same Harbor + vLLM path as datagen, so this single extra covers both.
+# Mirrors marin's lib/marin/pyproject.toml [vllm] extra (which targets the marin
+# TPU stack) but bumped to vllm-tpu 0.20.0 / tpu-inference 0.20.0.
+#
+# Install (run from a TPU worker via scripts/iris/dev_tpu.py, or from CI):
+#   uv pip install -e ".[datagen-tpu,cloud,harbor-all]"
+#
+# torch + torchvision are routed to the CPU index via [tool.uv.sources] below
+# so they coexist with the cu128 extra-index-url that [datagen] needs.
+datagen-tpu = [
+    # API-based datagen (mirrors datagen-cpu — works regardless of accelerator)
+    "google-cloud-aiplatform>=1.67.0",
+    "google-genai>=0.1.0",
+    "accelerate==1.12.0",
+    "trufflehog>=2.2.0",
+    # Local-model inference engine: vLLM TPU backend (PyPI; not built from source).
+    # vllm-tpu and tpu-inference must match versions — they're released together.
+    "vllm-tpu==0.20.0",
+    "tpu-inference==0.20.0",
+    # jax / jaxlib / libtpu are intentionally not pinned here — let vllm-tpu's
+    # transitive resolves pick a compatible TPU runtime cluster. If a future
+    # build needs a stricter floor, add it after dev_tpu.py confirms what
+    # versions actually land.
+    # vllm-tpu uses Triton's CPU dispatch path on the TPU host; Linux x86_64 only.
+    "triton==3.6.0; platform_system == 'Linux' and platform_machine == 'x86_64'",
+    # CPU torch (torch_xla path); see [tool.uv.sources] for index routing.
+    "torch==2.10.0",
+    "torchvision==0.25.0+cpu; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchvision==0.25.0+cpu; sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "torchvision==0.25.0; (sys_platform == 'linux' and platform_machine == 'aarch64') or (sys_platform == 'darwin' and platform_machine == 'arm64')",
+    # Datagen orchestration. transformers >= 5.3.0 for Qwen 3.5 hybrid GDN
+    # support (matches sft-qwen35 floor); vllm-tpu 0.20.0 may need adjustment
+    # if it pins an older transformers — dev_tpu.py will surface that.
+    "ray[default]>=2.50.0",
+    "transformers>=5.3.0",
 ]
 cloud = [
     "skypilot>=0.6.1",
@@ -197,6 +234,25 @@ extra-index-url = ["https://download.pytorch.org/whl/cu128"]
 
 [tool.uv]
 index-strategy = "unsafe-best-match"
+
+# Named PyTorch index for the TPU extra. `explicit = true` means it is ONLY
+# consulted when something is mapped to it in [tool.uv.sources], so the global
+# cu128 extra-index-url above continues to serve the [datagen]/[rl] extras.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+# Route torch + torchvision to the CPU index when resolving the datagen-tpu
+# extra (vllm-tpu uses the torch_xla path, not CUDA torch). Other extras keep
+# pulling from the cu128 index via the global extra-index-url.
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "datagen-tpu" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "datagen-tpu" },
+]
 
 # =============================================================================
 # ROCm Installation Notes (for AMD GPUs like Frontier MI250X)
