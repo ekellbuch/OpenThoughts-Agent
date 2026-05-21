@@ -523,10 +523,18 @@ class IrisLauncher:
                 extras_flags = " ".join(
                     f"--extra {shlex.quote(e.split(':', 1)[-1])}" for e in extras
                 )
+                # Use --reinstall to force uv to rewrite every package into
+                # the venv as copies, replacing the broken symlinks iris's
+                # build phase produced. Without --reinstall uv sees the
+                # existing .dist-info entries, declares "already installed",
+                # and skips — the broken symlinks stay broken.
+                # IRIS_DEBUG_UV_SYNC=1 turns this on; defaults to quiet so
+                # the run-phase resync logs don't drown the user output.
+                quiet = "" if os.environ.get("IRIS_DEBUG_UV_RESYNC") else "--quiet"
                 resync_cmd = (
                     "cd /app && "
-                    "uv sync --quiet --frozen --link-mode=copy --all-packages "
-                    f"--no-group dev {extras_flags}".rstrip()
+                    f"uv sync {quiet} --frozen --reinstall --link-mode=copy "
+                    f"--all-packages --no-group dev {extras_flags}".rstrip()
                 )
                 # Quote the python -c body and script argv for the bash -c
                 # invocation. We use a single shlex.join for the python
