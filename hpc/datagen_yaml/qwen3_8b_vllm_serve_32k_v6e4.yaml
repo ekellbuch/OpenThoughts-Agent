@@ -33,12 +33,6 @@ vllm_server:
   enable_auto_tool_choice: true
   tool_call_parser: hermes
   reasoning_parser: qwen3
-  # Qwen3.5-4B is a multimodal model (image-text-to-text architecture);
-  # vllm-tpu refuses to compile MM tower kernels on TPU unless we cap MM
-  # inputs to zero. The harbor eval (terminus-2 on openthoughts-tblite)
-  # is text-only so zero is correct. Harmless for text-only models like
-  # Qwen3-8B since they ignore the limit.
-  limit_mm_per_prompt: '{"image":0,"video":0}'
   extra_args:
   - --dtype
   - bfloat16
@@ -47,6 +41,14 @@ vllm_server:
   - '64'
   - --max-num-partial-prefills
   - '1'
+  # Qwen3.5-4B is a multimodal model (image-text-to-text architecture);
+  # vllm-tpu refuses to compile MM tower kernels on TPU unless we cap MM
+  # inputs to zero. The harbor eval (terminus-2 on openthoughts-tblite)
+  # is text-only so zero is correct. Harmless for text-only models like
+  # Qwen3-8B since they ignore the limit. Lives in extra_args because
+  # VLLMServerConfig doesn't model this knob.
+  - --limit-mm-per-prompt
+  - '{"image":0,"video":0}'
   # Notes vs the deleted _1xH200.yaml:
   # * --enable-chunked-prefill omitted — vllm-tpu force-disables it on TPU
   #   (Multimodal models also reject chunked MM input on TPU).
