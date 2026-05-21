@@ -372,19 +372,33 @@ class IrisLauncher:
             env_vars.setdefault("OT_AGENT_SKIP_SFT_SYNC", "1")
 
         # OT-Agent uses setuptools with [tool.setuptools.packages.find]
-        # listing multiple top-level dirs (hpc, eval, data, ...) rather than
-        # a single src-layout package. uv sync's editable install for this
-        # layout doesn't reliably expose those top-level dirs on sys.path
-        # inside the iris worker (the PEP 660 finder file isn't generated,
-        # and the legacy `.pth` file's path isn't picked up when the user
-        # runs `python eval/local/run_eval.py` — sys.path[0] becomes
-        # /app/eval/local, not /app). Force the workspace root onto
-        # PYTHONPATH so all top-level packages are importable regardless
-        # of which file is the entry point.
-        existing_pythonpath = env_vars.get("PYTHONPATH", "")
-        env_vars["PYTHONPATH"] = (
-            f"/app:{existing_pythonpath}" if existing_pythonpath else "/app"
-        )
+        # listing several top-level dirs (hpc, eval, data, ...). When iris's
+        # entrypoint runs `python eval/local/run_eval.py`, Python sets
+        # sys.path[0] to /app/eval/local, not /app — so `from hpc.* import
+        # ...` raises ModuleNotFoundError. Setting PYTHONPATH=/app at boot
+        # exposes the top-level dirs but in iris workers ALSO triggers
+        # "unknown location" namespace-package resolution for some real
+        # wheels (e.g. pydantic), so we can't use that. Instead we rewrite
+        # the user command into a tiny python -c bootstrap that appends
+        # /app to sys.path AFTER the venv has been activated and the
+        # interpreter has built its initial path — namespace package
+        # machinery has already cached real packages, so appending /app at
+        # the end is safe.
+
+        # The :tpu image sets ENV VIRTUAL_ENV=/opt/openthoughts/.venv so its
+        # own preinstalled wheels are visible at container start. iris's
+        # entrypoint runs `uv sync ...` from /app, then `source .venv/bin/
+        # activate`, expecting `.venv` to live under /app. uv honors the
+        # existing VIRTUAL_ENV unless told otherwise, so without this it
+        # installs deps into /opt/openthoughts/.venv and then activates an
+        # empty /app/.venv at run time — every `import pydantic` fails.
+        # Force uv to use /app/.venv via UV_PROJECT_ENVIRONMENT, which has
+        # higher precedence than VIRTUAL_ENV.
+        env_vars.setdefault("UV_PROJECT_ENVIRONMENT", "/app/.venv")
+        # Also clear VIRTUAL_ENV so `uv pip install` (used by iris for
+        # cloudpickle/py-spy/memray) lands in /app/.venv, not the image's
+        # preinstalled venv at /opt/openthoughts/.venv.
+        env_vars.setdefault("VIRTUAL_ENV", "/app/.venv")
 
         vm_count = parse_tpu_vm_count(args.tpu)
 
@@ -458,7 +472,29 @@ class IrisLauncher:
                 priority_band = _PRIO.get(args.priority, priority_band)
 
             client = IrisClient.remote(controller_url, workspace=self.repo_root)
-            entrypoint = Entrypoint.from_command(*command)
+
+            # Wrap the user command in a python -c bootstrap that appends
+            # /app to sys.path. See block above for why we can't just set
+            # PYTHONPATH=/app. The first command arg is the entrypoint
+            # script (e.g. eval/local/run_eval.py); the rest are passed
+            # through as argv[1:]. `python -c '<bootstrap>' <script> args...`
+            # makes sys.argv = ['-c', <script>, *args], so the bootstrap
+            # rewrites sys.argv to drop the '-c' and run the script via
+            # runpy.run_path with __name__ == '__main__'.
+            if command and command[0] == "python" and len(command) >= 2:
+                script_path = command[1]
+                script_argv = command[2:]
+                bootstrap = (
+                    "import sys; "
+                    "sys.path.append('/app'); "
+                    "sys.argv = sys.argv[1:]; "
+                    "import runpy; "
+                    "runpy.run_path(sys.argv[0], run_name='__main__')"
+                )
+                wrapped = ["python", "-c", bootstrap, script_path, *script_argv]
+                entrypoint = Entrypoint.from_command(*wrapped)
+            else:
+                entrypoint = Entrypoint.from_command(*command)
 
             job = client.submit(
                 entrypoint=entrypoint,
