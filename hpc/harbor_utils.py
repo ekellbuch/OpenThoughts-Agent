@@ -785,10 +785,14 @@ def build_harbor_command(
     def _flag_present(flag: str) -> bool:
         return any(arg == flag or arg.startswith(f"{flag}=") for arg in extra_args)
 
-    # Auto-resume on transient Daytona infrastructure errors so that flaky
-    # sandbox creation / rate limits don't permanently fail tasks.
-    if not _flag_present("--auto-resume"):
-        extra_args.append("--auto-resume")
+    # NOTE: --auto-resume was an older-harbor CLI flag (<=0.6.x) that retried
+    # on transient Daytona errors. harbor 0.7.0 (penfever/otagent-latest)
+    # removed the option entirely; retry behavior moved into the trial layer
+    # and is now driven by --filter-error-type / job-config defaults.
+    # Auto-injecting --auto-resume now causes `harbor jobs start` to exit 2
+    # with "Error: No such option '--auto-resume'." Removed 2026-05-21.
+    # If pinning to an older harbor again, re-add the auto-inject guarded
+    # on harbor version.
     if not _flag_present("--filter-error-type"):
         for err_type in (
             "DaytonaRateLimitError",
