@@ -13,7 +13,19 @@ _DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful teaching assistant. A student is working on a software engineering "
     "task inside a sandboxed terminal environment. The student appears to be struggling. "
     "Your job is to provide a single, concise hint that helps the student make progress "
-    "without giving away the full solution. Focus on the most impactful next step."
+    "without giving away the full solution. Focus on the most impactful next step.\n\n"
+    "STRICT OUTPUT CONSTRAINTS (a hint that violates these is worse than no hint):\n"
+    "- Your response is hard-capped at 2048 tokens by the inference engine. Stay well "
+    "under this — aim for 1-3 sentences plus at most one short code snippet.\n"
+    "- The student already has the full chat history (task instructions, prior commands, "
+    "file contents, error messages, their own thoughts). Do NOT restate or summarize "
+    "anything they can already see. Jump straight to the new information or course "
+    "correction.\n"
+    "- If you must show code, use only minimal snippets (a few lines, not whole files) "
+    "wrapped in fenced code blocks. Reference filenames and line numbers when applicable "
+    "instead of pasting large regions.\n"
+    "- Do not narrate your reasoning, do not say 'I see that...', do not apologize, do "
+    "not preface. Open with the hint itself."
 )
 
 _DEFAULT_USER_PROMPT_TEMPLATE = (
@@ -59,13 +71,14 @@ class TeacherHint(ProcessRewardModel):
         k: int = 6,
         teacher_system_prompt: str | None = None,
         teacher_user_prompt_template: str | None = None,
-        # max_hint_tokens doubled from 2048 → 4096 (2026-05-18): the
-        # teacher_hint trace analysis found gpt-5.5 hints mean 70 tokens,
-        # max 119 — well under 2048 — but doubling gives the teacher
-        # headroom to be more thorough on long-trajectory diagnoses where
-        # the student has already taken a wrong turn and needs a multi-step
-        # nudge to recover.
-        max_hint_tokens: int = 4096,
+        # max_hint_tokens reset to 2048 (2026-05-21): job 53102590
+        # (maxgn09_hint) produced 1,412 context-overflow errors in 8h
+        # because the teacher's 16384-token headroom let it write
+        # multi-page hints that pushed the student's next prompt past
+        # the 32K model_len cap. With the updated system prompt
+        # (concise mandate + 'student has chat history' anchor), the
+        # teacher should fit comfortably under 2048 tokens.
+        max_hint_tokens: int = 2048,
         # Per-message content cap quadrupled 2000 → 8000 chars in
         # _format_recent_turns (2026-05-18): long-trajectory trials
         # routinely had message bodies > 2000 chars (stack traces, file

@@ -65,7 +65,17 @@ terminal_bench:
       engine_type: openai
       engine_kwargs:
         model: gpt-5.5-2026-04-23
-        max_tokens: 16384
+        # max_tokens dropped 16384 → 2048 (2026-05-21): with the prior
+        # 16384 ceiling the teacher routinely wrote multi-page hints
+        # that, once injected into the student's next observation,
+        # pushed the prompt past the 32K model_len limit — 1,412
+        # ContextLengthExceeded events in 8h on job 53102590 → most
+        # samples got default-zero reward → policy reward collapsed
+        # from 0.43 → 0.28 over 3 steps. The teacher_hint PRM's
+        # default system prompt also now contains a hard 2048-token
+        # mandate and a 'student already sees chat history' anchor;
+        # the two changes are paired.
+        max_tokens: 2048
       check_interval: 8
       min_turns: 4
       k: 8
