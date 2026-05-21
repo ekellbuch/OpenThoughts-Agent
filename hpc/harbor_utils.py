@@ -793,20 +793,24 @@ def build_harbor_command(
     # with "Error: No such option '--auto-resume'." Removed 2026-05-21.
     # If pinning to an older harbor again, re-add the auto-inject guarded
     # on harbor version.
-    if not _flag_present("--filter-error-type"):
-        for err_type in (
-            "DaytonaRateLimitError",
-            "EnvironmentStartTimeoutError",
-            "DaytonaError",
-        ):
-            extra_args.extend(["--filter-error-type", err_type])
+    # NOTE: --filter-error-type was a <=0.6.x harbor CLI flag for
+    # auto-resume's error-type allowlist. harbor 0.7.0 replaced this with
+    # --retry-include / --retry-exclude exposed on `jobs start`, but the new
+    # retry model is driven primarily by --max-retries + job-config-level
+    # filter settings. Auto-injecting --filter-error-type now causes
+    # `harbor jobs start` to exit 2 with "No such option '--filter-error-type'".
+    # Dropped 2026-05-21 along with --auto-resume above; if pinning to an
+    # older harbor, re-add behind a version gate.
 
-    if not (_flag_present("--export-traces") or _flag_present("--no-export-traces")):
-        extra_args.append("--export-traces")
-    if not (_flag_present("--export-verifier-metadata") or _flag_present("--no-export-verifier-metadata")):
-        extra_args.append("--export-verifier-metadata")
-    if not _flag_present("--export-episodes"):
-        extra_args.extend(["--export-episodes", "last"])
+    # NOTE: --export-traces / --export-verifier-metadata / --export-episodes
+    # all lived on `harbor jobs start` in <=0.6.x. harbor 0.7.0 removed them
+    # from the `jobs start` subcommand — export now happens through the
+    # post-run pipeline (separate harbor subcommand) and/or via job-config
+    # `export:` fields. Auto-injecting any of these into `jobs start` causes
+    # click to exit 2 with "No such option '--export-XYZ'". Dropped
+    # 2026-05-21 along with --auto-resume and --filter-error-type. If you
+    # need exports, configure them in the harbor YAML's `export:` block or
+    # run the new export subcommand after the job completes.
 
     for extra in extra_args:
         cmd.append(extra)
