@@ -1,8 +1,8 @@
 engine:
   type: vllm_local
   model: Qwen/Qwen3-8B
-  max_output_tokens: 8192
-  healthcheck_interval: 300
+  max_output_tokens: 1024
+  healthcheck_interval: 600
   vllm_local: {}
 backend:
   type: ray
@@ -15,31 +15,42 @@ vllm_server:
   pipeline_parallel_size: 1
   data_parallel_size: 1
   time_limit: '48:00:00'
-  max_model_len: 32768
-  # vllm-tpu defaults are serving-shaped (KV cache claims all leftover HBM).
-  # Keep concurrent sequences modest on a single v6e-4 to leave compile
-  # scratch + room for hybrid-arch state (Qwen3.5 has mamba layers; Qwen3-8B
-  # is text-only attention, but small max_num_seqs is a safe default).
-  max_num_seqs: 16
-  # gpu_memory_utilization is silently ignored by vllm-tpu — kept for schema
-  # compatibility with the GPU configs.
-  gpu_memory_utilization: 0.9
+  # Tracks the dev_tpu-validated smoke config (see pyproject.toml's
+  # datagen-tpu comment block). Hybrid Qwen3.5 GDN needs a tight memory
+  # envelope; 32k context blows past TPU HBM during XLA compile on a 4-chip
+  # slice. 1024-token max keeps the eval smoke under the documented cold-init
+  # budget of ~360s.
+  max_model_len: 1024
+  max_num_seqs: 2
+  # vllm-tpu honors this for KV-cache sizing (confirmed via Stage-C smoke,
+  # despite earlier launcher comments claiming otherwise). 0.70 leaves
+  # headroom for the XLA compile scratch space + per-step state of
+  # hybrid mamba layers.
+  gpu_memory_utilization: 0.70
   # TPU doesn't use host-RAM swap the way CUDA vLLM does.
   swap_space: 0
   enable_expert_parallel: false
   enable_auto_tool_choice: true
   tool_call_parser: hermes
   reasoning_parser: qwen3
+  # Qwen3.5-4B is a multimodal model (image-text-to-text architecture);
+  # vllm-tpu refuses to compile MM tower kernels on TPU unless we cap MM
+  # inputs to zero. The harbor eval (terminus-2 on openthoughts-tblite)
+  # is text-only so zero is correct. Harmless for text-only models like
+  # Qwen3-8B since they ignore the limit.
+  limit_mm_per_prompt: '{"image":0,"video":0}'
   extra_args:
   - --dtype
   - bfloat16
   # vllm-tpu prefers larger KV blocks than the CUDA backend's default-16.
   - --block-size
   - '64'
-  - --enable-prefix-caching
   - --max-num-partial-prefills
   - '1'
   # Notes vs the deleted _1xH200.yaml:
   # * --enable-chunked-prefill omitted — vllm-tpu force-disables it on TPU
   #   (Multimodal models also reject chunked MM input on TPU).
+  # * --enable-prefix-caching omitted — incompatible with hybrid GDN
+  #   architectures on the TPU compile path (caches attention KV but not
+  #   the mamba SSM state, which corrupts decode).
   # * --all2all-backend pplx removed — pplx is CUDA/NCCL only.

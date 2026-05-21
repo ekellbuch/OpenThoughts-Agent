@@ -420,6 +420,19 @@ class IrisLauncher:
         # and the actual stacktrace is only in the per-task workdir
         # ``logs/vllm_controller.log``, which rsync hasn't picked up yet.
         env_vars.setdefault("OT_AGENT_INHERIT_SUBPROC_LOGS", "1")
+        # Skip the vLLM --help flag-discovery probe in start_vllm_ray_controller.
+        # On vllm-tpu (0.20.0) the import path of vllm.entrypoints.openai
+        # cold-bootstraps libtpu inside a subprocess.run, which can hang for
+        # multi-minute stretches and deadlock the parent controller with no
+        # diagnostic output. The launcher emits a stable known-good set of
+        # flags so skipping discovery is safe.
+        env_vars.setdefault("VLLM_SKIP_FLAG_DISCOVERY", "1")
+        # Skip the pre-Popen Ray probe in start_vllm_ray_controller. The probe
+        # calls ray.init/cluster_resources/shutdown to print diagnostics, but
+        # on the v6e-4 TPU runtime this sequence has been observed to hang
+        # silently right after "Connected to Ray cluster". The probe isn't
+        # load-bearing — vLLM does its own ray.init internally.
+        env_vars.setdefault("VLLM_SKIP_RAY_PROBE", "1")
 
         vm_count = parse_tpu_vm_count(args.tpu)
 

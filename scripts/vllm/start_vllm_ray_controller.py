@@ -66,9 +66,18 @@ def _release_torch_memory() -> None:
 def _discover_cli_flags() -> set[str]:
     cmd = [sys.executable, "-m", "vllm.entrypoints.openai.api_server", "--help"]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        # Subprocess timeout: vllm-tpu's --help import path triggers libtpu /
+        # XLA bring-up which can hang for minutes on a cold worker. 60s is
+        # generous for the GPU vLLM (~5-10s warm) and lets us fall back to
+        # the assume-supported path before the TPU import deadlocks the
+        # whole controller.
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
     except Exception as exc:  # pragma: no cover - best effort
-        print(f"[start_vllm_ray_controller] Warning: unable to inspect vLLM CLI flags: {exc}")
+        print(
+            f"[start_vllm_ray_controller] Warning: unable to inspect vLLM CLI flags ({exc}); "
+            "falling back to assume-supported for all flags we emit.",
+            flush=True,
+        )
         return set()
 
     flags = set(_CLI_FLAG_PATTERN.findall(result.stdout or ""))
@@ -78,10 +87,24 @@ def _discover_cli_flags() -> set[str]:
 
 @functools.lru_cache(maxsize=1)
 def _supported_flags() -> set[str]:
+    # ``VLLM_SKIP_FLAG_DISCOVERY=1`` short-circuits the ``vllm --help`` probe.
+    # The iris+TPU path sets this because importing vllm-tpu cold-bootstraps
+    # libtpu inside a subprocess.run, which can hang for >5 min on the first
+    # invocation and (worse) deadlock the parent controller with no diagnostic
+    # output. The fallback "empty set" means our launcher assumes every flag
+    # is supported and emits it unconditionally. That's the right behavior
+    # for vLLM 0.20.0 (TPU) and current GPU builds — every flag the launcher
+    # emits has been in the OpenAI API server for many releases.
+    if os.environ.get("VLLM_SKIP_FLAG_DISCOVERY") == "1":
+        return set()
     return _discover_cli_flags()
 
 
 def _flag_supported(flag: str) -> bool:
+    if os.environ.get("VLLM_SKIP_FLAG_DISCOVERY") == "1":
+        # Assume yes: every flag the launcher emits has been a stable vLLM
+        # API for several releases. See _supported_flags() docstring.
+        return True
     return flag in _supported_flags()
 
 
@@ -253,24 +276,39 @@ def main() -> None:
     sys.stdout.flush()
 
     ray_address = env.get("RAY_ADDRESS") or args.ray_address
-    if ray is not None and ray_address:
+    # Skip the Ray-probe sanity check when running in iris/TPU mode — every
+    # ray.init / ray.shutdown roundtrip costs ~3-5s and isn't load-bearing
+    # (vLLM connects to Ray itself with its own ray.init). Set
+    # VLLM_SKIP_RAY_PROBE=1 (iris launcher sets it automatically) to skip.
+    if (
+        ray is not None
+        and ray_address
+        and os.environ.get("VLLM_SKIP_RAY_PROBE") != "1"
+    ):
         try:
-            print(f"[start_vllm_ray_controller] Inspecting Ray resources at {ray_address} before placement.")
+            print(f"[start_vllm_ray_controller] Inspecting Ray resources at {ray_address} before placement.", flush=True)
             ray.init(address=ray_address, ignore_reinit_error=True)
             cluster_resources = ray.cluster_resources()
             nodes = ray.nodes()
-            print(f"[start_vllm_ray_controller] Ray cluster resources: {cluster_resources}")
+            print(f"[start_vllm_ray_controller] Ray cluster resources: {cluster_resources}", flush=True)
             print(
                 f"[start_vllm_ray_controller] Ray nodes ({len(nodes)}): "
-                f"{[node.get('NodeID') for node in nodes]}"
+                f"{[node.get('NodeID') for node in nodes]}",
+                flush=True,
             )
         except Exception as exc:  # pragma: no cover - best effort logging
-            print(f"[start_vllm_ray_controller] Warning: unable to query Ray cluster resources: {exc}")
+            print(f"[start_vllm_ray_controller] Warning: unable to query Ray cluster resources: {exc}", flush=True)
         finally:
             try:
                 ray.shutdown()
             except Exception:
                 pass
+    else:
+        print(
+            f"[start_vllm_ray_controller] Skipping Ray probe (ray_address={ray_address!r}, "
+            f"VLLM_SKIP_RAY_PROBE={os.environ.get('VLLM_SKIP_RAY_PROBE')!r}).",
+            flush=True,
+        )
 
     cmd = build_vllm_command(args, extra_args)
     print("Launching vLLM controller:")
