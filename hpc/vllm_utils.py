@@ -331,6 +331,41 @@ class VLLMServer:
         if self.config.data_parallel_size > 1 and "--data-parallel-address" not in cmd:
             cmd.extend(["--data-parallel-address", self.ray_cluster.head_ip])
 
+        # --data-parallel-size-local tells vLLM how many DP ranks live on
+        # each node. Without it, vLLM defaults local_world_size to
+        # data_parallel_size and tries to pack ALL DP ranks on the head
+        # node's local GPUs, failing with:
+        #   Exception: Error setting CUDA_VISIBLE_DEVICES:
+        #     local range: [N*TP, (N+1)*TP)  base value: "0,1,2,3"
+        # (e.g. local range [4,8) for DP rank 1 with TP=4, but the node only
+        # exposes GPUs 0-3). Observed on Jupiter 491271 and Perlmutter
+        # 53299838 on 2026-05-22 with the multi-node DP=4 TP=4 EP=true
+        # GLM-4.7-AWQ config — the bug is launcher-side and fires on BOTH
+        # the current Jupiter wheel and the older Perlmutter wheel, so it
+        # is independent of the V1/V2 executor + shm_broadcast question.
+        #
+        # Layout: each DP rank consumes TP GPUs, so DP-ranks-per-node =
+        # gpus_per_node // tensor_parallel_size, clamped to data_parallel_size.
+        # This also handles the cross-node-TP case (TP > gpus_per_node): the
+        # max(1, ...) clamp produces size_local=1, which still requires
+        # data_parallel_size <= num_nodes for vLLM to accept the layout.
+        if self.config.data_parallel_size > 1 and "--data-parallel-size-local" not in cmd:
+            gpus_per_node = self.ray_cluster.config.gpus_per_node
+            dp_per_node = max(1, gpus_per_node // self.config.tensor_parallel_size)
+            dp_per_node = min(dp_per_node, self.config.data_parallel_size)
+            cmd.extend(["--data-parallel-size-local", str(dp_per_node)])
+
+        # --data-parallel-backend=ray is distinct from
+        # --distributed-executor-backend=ray (the latter controls TP/PP
+        # execution; the former controls DP rank PLACEMENT). With DP>1
+        # cross-node the Ray DP backend is required; the default tries to
+        # spawn worker procs locally and re-hits the CUDA_VISIBLE_DEVICES
+        # error. Pair with VLLM_RAY_DP_PACK_STRATEGY=span (set in env
+        # below) for the single-launch multi-node DP pattern documented at
+        # https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/.
+        if self.config.data_parallel_size > 1 and "--data-parallel-backend" not in cmd:
+            cmd.extend(["--data-parallel-backend", "ray"])
+
         # Set environment
         env = os.environ.copy()
         env["VLLM_MODEL_PATH"] = self.config.model_path
@@ -379,6 +414,16 @@ class VLLMServer:
         # tested fine on V1 too. Revisit if a vLLM patch lands that
         # fixes RayExecutorV2's multi-node DP coordination.
         env["VLLM_USE_V2_MODEL_RUNNER"] = "0"
+        # VLLM_RAY_DP_PACK_STRATEGY=span enables automatic cross-node
+        # placement of DP ranks (one rank per node, spanning the whole
+        # Ray cluster) when --data-parallel-backend=ray is set. Without
+        # this, vLLM's default packing tries to fit all DP ranks on the
+        # head node and re-trips the CUDA_VISIBLE_DEVICES local-range
+        # assertion. Required complement to the --data-parallel-size-local
+        # + --data-parallel-backend=ray flags added above. Companion to
+        # the documented multi-node DP recipe.
+        if self.config.data_parallel_size > 1:
+            env.setdefault("VLLM_RAY_DP_PACK_STRATEGY", "span")
         # Set VLLM_HOST_IP so vLLM's internal get_ip() returns the real node IP.
         # This is used for Ray placement group node constraints and NCCL communication,
         # NOT for the API server bind address (that's --host above).
