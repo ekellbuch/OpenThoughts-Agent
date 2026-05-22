@@ -859,7 +859,8 @@ jupiter = HPC(
     # jpbo-091-05 added 2026-04-15: repeated SIGABRT on 32B training (hung the 32B-5ds superset job chain twice)
     # jpbo-044-0[1-5] added 2026-04-22: repeated NCCL TCPStore broken-pipe stalls on Qwen3.5-9B chain (4 consecutive failures)
     # jpbo-074-40 added 2026-05-20: SSH tunnel to login jpbl-s01-01 "No route to host" — proxychains setup fails at job start (exit 127 in 29s, job 475717)
-    node_exclusion_list="jpbo-031-[01-48],jpbo-011-[01-48],jpbo-038-38,jpbo-004-46,jpbo-065-17,jpbo-074-22,jpbo-074-40,jpbo-048-41,jpbo-091-05,jpbo-044-0[1-5]",
+    # jpbo-063-40, jpbo-063-36 added 2026-05-22: GLM-4.7 datagen v6 (job 493343, 4-node DP=4 TP=4 EP=true) saw late-game shm_broadcast cascade after ~55 min of healthy serving. Of 6 shm_broadcast warnings, 5 originated from DPMoEEngineCoreActor on 10.128.40.136 (jpbo-063-40) and 1 from 10.128.40.132 (jpbo-063-36). MiniMax dp=2 on jpbo-001-[23,32] in the same Jupiter session served clean throughout — suggests interconnect flake localized to these two nodes, not a wheel-level cross-node bug. Re-run with these excluded is the discriminator test.
+    node_exclusion_list="jpbo-031-[01-48],jpbo-011-[01-48],jpbo-038-38,jpbo-004-46,jpbo-065-17,jpbo-074-22,jpbo-074-40,jpbo-048-41,jpbo-091-05,jpbo-044-0[1-5],jpbo-063-36,jpbo-063-40",
 )
 
 juwels = HPC(
