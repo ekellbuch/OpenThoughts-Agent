@@ -58,22 +58,24 @@ vllm_server:
   max_model_len: 32768
   max_num_seqs: 32
   gpu_memory_utilization: 0.9
-  # enable_expert_parallel: false (intentional, was true) — 2026-05-22:
-  # On 2-node DP=2 with TP=4, EP=true makes vLLM build an 8-rank EP
-  # fleet ACROSS NODES for every MoE layer's forward pass, using the
-  # naive all2all backend (pplx/deepep not available on Jupiter
-  # aarch64 + CUDA 13). Job 483664 evidence: vllm.log showed 9 ×
-  # "shm_broadcast: No available block in 600 seconds" warnings ramping
-  # up over 2h, then "TimeoutError: RPC call to sample_tokens timed
-  # out" once VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=7200s elapsed. Trial
-  # throughput dropped to 8/hr vs dp=1's 148/hr (~18× slower).
-  # With EP disabled, each replica TP-splits the experts within its
-  # own node — no cross-node all2all per token. Memory still fits
-  # (~29 GB/GPU at TP=4 on 96 GB GH200). If the experts-per-rank size
-  # becomes a memory issue, the right fallback is to bring back EP
-  # with a TP-scoped grouping (would need vLLM's --ep-size flag set
-  # explicitly to TP=4 instead of the default DP×TP=8).
-  enable_expert_parallel: false
+  # enable_expert_parallel: true — 2026-05-22 (revised): matches the
+  # GLM-4.7 4-node config that we just proved healthy under load on the
+  # current Jupiter wheel (job 493343: 4 engines × ~32 tok/s sustained,
+  # 21 trials in 32 min, ZERO shm_broadcast / TCPStore warnings).
+  #
+  # Earlier (prior comment, pre-2026-05-22) we had EP=false here to avoid
+  # the apparent cross-node all2all hang in job 483664. The v6 GLM-4.7
+  # run showed that hang was a confound: the actual cross-node fragility
+  # on the current Jupiter wheel is CUDA-graph capture + MoE all-to-all
+  # inside FULL_AND_PIECEWISE cudagraph_mode (gpu_model_runner.py:6098 →
+  # "CUDA error: an illegal memory access" in profile_cudagraph_memory).
+  # --enforce-eager (already in extra_args below) skips graph capture
+  # entirely and the all-to-all then runs cleanly cross-node.
+  #
+  # Memory: AWQ 4-bit experts ~115 GB / 8 EP ranks = ~14 GB/GPU experts,
+  # well within 96 GB GH200 even at 0.9 utilization. Same memory math as
+  # GLM-4.7 worked at.
+  enable_expert_parallel: true
   enable_auto_tool_choice: true
   tool_call_parser: minimax_m2
   reasoning_parser: minimax_m2
