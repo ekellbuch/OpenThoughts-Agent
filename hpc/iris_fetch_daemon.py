@@ -169,8 +169,56 @@ def _user_prefix_of(job_id: str) -> str:
 # Fetch implementation
 # ---------------------------------------------------------------------
 
+# Filename for iris's centralized stdout/stderr capture, written into
+# the same per-job dir as the GCS-fetched harbor artifacts. Picked a
+# dotted prefix so a `ls` of the run dir leads with harbor's files.
+IRIS_LOG_FILENAME = ".iris-job.log"
+
+
+def _dump_iris_logs(record: JobRecord, local_dest: Path) -> Optional[int]:
+    """Save iris's centralized stdout/stderr for the job to ``.iris-job.log``.
+
+    Runs *regardless* of whether the GCS fetch succeeded — iris's
+    finelog capture is the most reliable artifact (it survives worker
+    eviction, container teardown, and any workload-side filesystem
+    bugs). Returns the byte count on success, or None on any error
+    (logged but never raised — the daemon's primary job is the GCS
+    fetch, this is a best-effort companion step).
+    """
+    log_path = local_dest / IRIS_LOG_FILENAME
+    cmd = [
+        IRIS_CLI, "--config", record.cluster_config,
+        "job", "logs", record.job_id, "--max-lines", "100000",
+    ]
+    try:
+        with log_path.open("w") as f:
+            result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE,
+                                    text=True, timeout=300)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        _log(f"iris-log dump failed for {record.job_id}: {e}", err=True)
+        return None
+    if result.returncode != 0:
+        _log(
+            f"iris-log dump rc={result.returncode} for {record.job_id}: "
+            f"{(result.stderr or '').strip()[:200]}",
+            err=True,
+        )
+        # Non-zero return; keep whatever bytes did stream through.
+    try:
+        size = log_path.stat().st_size
+    except OSError:
+        return None
+    _log(f"iris-log saved {size} bytes -> {log_path}")
+    return size
+
+
 def fetch_record(record: JobRecord) -> bool:
     """Run ``gcloud storage rsync -r <gcs>/ <local>/`` for a single job.
+
+    Always also captures iris's stdout/stderr via ``iris job logs`` into
+    ``<local_dest>/.iris-job.log`` (best-effort, regardless of fetch
+    outcome — iris's centralized capture is the most durable artifact
+    we have).
 
     On success: marks status=fetched, stamps fetched_at + bytes_fetched.
     On failure: marks status=fetch_failed with error_msg.
@@ -181,6 +229,10 @@ def fetch_record(record: JobRecord) -> bool:
     local_dest = Path(record.local_dest)
     ensure_local_paths(PATHS.runs)
     local_dest.mkdir(parents=True, exist_ok=True)
+
+    # Iris log dump first so the file exists even if the GCS rsync hangs
+    # or errors. _dump_iris_logs handles its own errors.
+    _dump_iris_logs(record, local_dest)
 
     gcs_src = record.gcs_output_dir.rstrip("/") + "/"
     cmd = [GCLOUD_CLI, "storage", "rsync", "-r", gcs_src, str(local_dest)]

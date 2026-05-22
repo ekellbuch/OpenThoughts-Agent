@@ -176,6 +176,13 @@ class EvalIrisLauncher(IrisLauncher):
 
         for kwarg in args.agent_kwarg:
             cmd.extend(["--agent_kwarg", kwarg])
+        # Auto-inject --jobs-dir so harbor writes outputs to the same GCS
+        # prefix the workload's --experiments_dir points at. With harbor's
+        # UPath patch (penfever/otagent-latest @ dc41d295a4) this routes
+        # all per-job/per-trial writes through fsspec to GCS instead of
+        # local /app/trace_jobs/. User --harbor_extra_arg entries follow
+        # below so an explicit --harbor_extra_arg=--jobs-dir=... wins.
+        cmd.append(f"--harbor_extra_arg=--jobs-dir={remote_output_dir}")
         for extra in args.harbor_extra_arg:
             # Use the `=` form so argparse on the worker side accepts values
             # that start with `-` (e.g. --harbor_extra_arg=--n-tasks). The

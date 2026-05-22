@@ -748,18 +748,29 @@ def build_harbor_command(
             yaml.safe_dump(modified_config, f)
         cmd.extend(["--dataset", dataset_slug])
     elif dataset_path:
-        # Replace YAML datasets path with the provided path, preserving
-        # other dataset-level fields like n_tasks from the original config.
-        yaml_datasets = modified_config.get("datasets") or [{}]
-        base_dataset = yaml_datasets[0] if yaml_datasets else {}
-        if isinstance(base_dataset, dict):
-            base_dataset["path"] = dataset_path
-        else:
-            base_dataset = {"path": dataset_path}
-        modified_config["datasets"] = [base_dataset]
+        # ``dataset_path`` is overloaded: it can be a local FS path, a
+        # HuggingFace dataset id (``org/name`` format), or a harbor
+        # registry slug. Harbor 0.7.0 requires the source flag on the CLI
+        # (``--path`` for local dirs, ``--dataset`` for slugs / HF refs)
+        # — YAML datasets without a CLI flag now error out with
+        # "Cannot specify --registry-url ... without also specifying
+        # --dataset, --task, or --path" whenever any registry-* field is
+        # populated by the merge.
+        #
+        # Heuristic: actually-existing FS path -> ``--path``; otherwise
+        # treat as a remote reference and use ``--dataset`` (harbor's
+        # ``--dataset`` accepts both slugs and HF org/name refs — see
+        # harbor/src/harbor/cli/jobs.py:1226).
+        modified_config.pop("datasets", None)
         modified_config.pop("tasks", None)
         with open(merged_config_path, "w") as f:
             yaml.safe_dump(modified_config, f)
+        # gs://, s3:// etc. are remote schemes; never local.
+        looks_local = not dataset_path.startswith(("gs://", "s3://", "http://", "https://"))
+        if looks_local and Path(dataset_path).expanduser().exists():
+            cmd.extend(["--path", str(Path(dataset_path).expanduser().resolve())])
+        else:
+            cmd.extend(["--dataset", dataset_path])
     else:
         # Neither dataset_slug nor dataset_path provided.  Strip the YAML
         # placeholder (if any) so we fail fast with a clear message rather

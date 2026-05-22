@@ -76,8 +76,14 @@ class TracegenIrisLauncher(IrisLauncher):
 
         args.harbor_config = repo_relative(args.harbor_config, self.repo_root)
         args.datagen_config = repo_relative(args.datagen_config, self.repo_root)
+        # --tasks_input_path is overloaded: local FS path | HF dataset id | harbor slug.
+        # Only run it through repo_relative when it's actually a local FS path that
+        # exists under the repo. HF ids like ``mlfoundations-dev/foo`` would otherwise
+        # be resolved against CWD and either rewritten into a bogus repo-relative
+        # path or raise ValueError if CWD escapes the repo.
         if not args.tasks_input_path.startswith("/"):
-            args.tasks_input_path = repo_relative(args.tasks_input_path, self.repo_root)
+            if (self.repo_root / args.tasks_input_path).exists():
+                args.tasks_input_path = repo_relative(args.tasks_input_path, self.repo_root)
 
         infer_harbor_env_from_config(args, args.harbor_config, log_prefix="[tracegen-iris]")
 
@@ -118,6 +124,8 @@ class TracegenIrisLauncher(IrisLauncher):
 
         for kwarg in args.agent_kwarg:
             cmd.extend(["--agent_kwarg", kwarg])
+        # Auto-inject --jobs-dir — see comment in eval/cloud/launch_eval_iris.py.
+        cmd.append(f"--harbor_extra_arg=--jobs-dir={remote_output_dir}")
         for extra in args.harbor_extra_arg:
             # `=` form for argparse accept of `-`-prefixed values; see
             # the same comment in eval/cloud/launch_eval_iris.py.
