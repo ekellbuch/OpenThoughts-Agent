@@ -15,12 +15,16 @@ vllm_server:
   pipeline_parallel_size: 1
   data_parallel_size: 1
   time_limit: '48:00:00'
-  # Tracks the dev_tpu-validated smoke config (see pyproject.toml's
-  # datagen-tpu comment block). Hybrid Qwen3.5 GDN needs a tight memory
-  # envelope; 32k context blows past TPU HBM during XLA compile on a 4-chip
-  # slice. 1024-token max keeps the eval smoke under the documented cold-init
-  # budget of ~360s.
-  max_model_len: 1024
+  # Bumped to 4096 2026-05-21: 1024 caused harbor's terminus-2 agent to
+  # immediately fail every trial with
+  #   VLLMValidationError: This model's maximum context length is 1024
+  #   tokens. However, ... your prompt contains at least 1025 input tokens
+  # because the agent's multi-step instruction + tool-call prompt already
+  # exceeds 1K on turn 1. 4096 is the smallest power-of-two that fits real
+  # terminus-2 prompts while still respecting the TPU HBM envelope on a
+  # 4-chip v6e slice (gpu_memory_utilization=0.7, max_num_seqs=2). Bump
+  # further if downstream eval logs show prompts hitting the new cap.
+  max_model_len: 4096
   max_num_seqs: 2
   # vllm-tpu honors this for KV-cache sizing (confirmed via Stage-C smoke,
   # despite earlier launcher comments claiming otherwise). 0.70 leaves
