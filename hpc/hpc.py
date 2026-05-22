@@ -778,6 +778,18 @@ jupiter = HPC(
         # but IPv6 transport is dead). Job 479619 / Bug F. The monkey
         # patch lives in vllm/env_override.py and is gated on this var.
         "VLLM_FORCE_IPV4": "1",
+        # Skip the `vllm --help` flag-discovery probe in
+        # scripts/vllm/start_vllm_ray_controller.py. The probe parses
+        # `vllm --help` output to check whether each launcher flag is
+        # supported; when the probe transiently fails to capture the
+        # full help text (intermittent: cold-cache, slow imports,
+        # buffering), `_flag_supported("--data-parallel-size")` returns
+        # False → controller WARN's and DROPS the flag → vLLM defaults
+        # to data_parallel_size=1 → DP master assert (Bug D recurrence
+        # on job 487389, 2026-05-22). All flags the launcher emits have
+        # been stable in vLLM for many releases so this short-circuit
+        # is safe.
+        "VLLM_SKIP_FLAG_DISCOVERY": "1",
         # NOTE: Do NOT set GLOO_SOCKET_IFNAME=ib0 - it causes Gloo to use the IB hostname
         # which resolves to IPv6. Let Gloo auto-detect the interface.
         # GH200 NUMA affinity: bind each GPU worker to its local CPU NUMA node
