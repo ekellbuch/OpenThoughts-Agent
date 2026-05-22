@@ -10,45 +10,35 @@ modules is cheaper to reason about.
 Backend-agnostic helpers under ``hpc/`` (e.g. ``arg_groups``,
 ``harbor_utils``, ``datagen_config_utils``) are reused as-is.
 
-Output handling — two modes, default ``rsync``:
+Output handling — GCS only. The workload writes directly to
+``--gcs-output-dir/<job-name>/`` (default
+``gs://marin-eu-west4/ot-agent/``; override with ``$OT_AGENT_GCS_OUTPUT_ROOT``
+or the flag). A local fetch daemon (``hpc.iris_fetch_daemon``, planned)
+polls the iris controller and pulls completed jobs into
+``~/.ot-agent/runs/<job-name>/``. The previous "rsync from worker
+workdir" mode was removed on 2026-05-22: the worker workdir is on
+ephemeral tmpfs and iris GCs it at task end, so any laptop-side rsync
+loop is fragile by construction; see
+``notes/marin/flows/iris-outputs-redesign.md`` for the post-mortem.
 
-* ``rsync``: periodically pull the task's host-side workdir back to
-  ``--local-sync-dir`` via ``gcloud compute tpus tpu-vm ssh ... rsync``.
-  Matches the SkyPilot ``PeriodicRemoteSync`` UX for downstream tools that
-  expect local files. Iris-internal coupling: derives ``workdir_host_path``
-  from ``JobName.to_safe_token()`` — if iris changes that convention we
-  update one constant here.
-
-* ``gcs``: workload writes directly to ``--gcs-output-dir/<job-name>/``.
-  More resilient to preemption and multi-host scatter; no laptop sync.
-
-Multi-host slices (TPU vm_count > 1) are scaffolded but **untested**. The
-periodic-sync loop already fans out across worker indices; coordination of
-JAX cross-host init and rsync race conditions across hosts need real
-verification before relying on this for v6e-8+ jobs. See block at
-``_periodic_rsync_loop``.
-
-TODO(coordinator): right now the launcher runs from the user's laptop and
-holds the tunnel + sync threads for the duration of the job. For long jobs
-this is fragile (laptop sleep, network hiccup, etc.). The durable answer
-is to wrap the launcher in a tiny CPU coordinator job on the cluster
-itself, so the sync threads live on a controller-class VM. Not done in v1.
+Multi-host slices (TPU vm_count > 1) are scaffolded but only validated
+on v6e-8. Confirm cross-host JAX init + coscheduling before relying on
+larger slices.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import os
 import shlex
-import subprocess
 import sys
-import threading
 import time
-from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import List, Optional
+
+from hpc.local_paths import PATHS as LOCAL_PATHS, ensure as ensure_local_paths
+from hpc.iris_job_registry import register_submission
 
 # Default chips per TPU host VM on every family currently exposed by marin
 # (ct5lp-hightpu-4t, ct6e-standard-4t, ct5p-hightpu-4t, ct4p-hightpu-4t).
@@ -57,33 +47,13 @@ CHIPS_PER_TPU_HOST = 4
 
 DEFAULT_TASK_IMAGE = "ghcr.io/open-thoughts/openthoughts-agent:tpu"
 DEFAULT_CLUSTER_CONFIG = "lib/iris/config/marin.yaml"
-DEFAULT_OUTPUT_SUBDIR = "cloud_runs"
-DEFAULT_SYNC_INTERVAL_SECONDS = 60
 DEFAULT_PRIORITY = "interactive"
 
-# Where iris workers stage per-task workdirs on the host VM. Tracks
-# ``self._cache_dir / "workdirs"`` in lib/iris/.../worker/task_attempt.py;
-# the iris docker image creates ``/var/cache/iris`` directly. If iris
-# changes this convention rsync stops finding outputs — single constant
-# to update.
-IRIS_WORKER_WORKDIR_ROOT = "/var/cache/iris/workdirs"
-
-
-def derive_safe_task_token(task_id: str, user: str) -> str:
-    """Replicate ``iris.cluster.types.JobName.to_safe_token`` client-side.
-
-    Returns ``<user>-<sha256(task_id)>`` — used to compose the on-host
-    workdir path. Coupled to iris internals; see module docstring.
-    """
-    digest = hashlib.sha256(task_id.encode()).hexdigest()
-    return f"{user}-{digest}"
-
-
-def compute_workdir_host_path(job_name: str, user: str, task_index: int, attempt_id: int = 0) -> str:
-    """Reconstruct ``self.workdir`` from task_attempt.py:614 without an RPC."""
-    task_id = f"{job_name}/{task_index}"
-    safe = derive_safe_task_token(task_id, user)
-    return f"{IRIS_WORKER_WORKDIR_ROOT}/{safe}_attempt_{attempt_id}"
+# Default GCS prefix for workload outputs. EU-region matches where most
+# of our v6e-preemptible TPU slices land; us-region jobs incur small
+# cross-region writes (eval outputs are ~MB-scale, so this is fine).
+# Override with $OT_AGENT_GCS_OUTPUT_ROOT or the --gcs-output-dir flag.
+DEFAULT_GCS_OUTPUT_ROOT = "gs://marin-eu-west4/ot-agent"
 
 
 def parse_tpu_vm_count(tpu_spec: Optional[str]) -> int:
@@ -102,100 +72,6 @@ def parse_tpu_vm_count(tpu_spec: Optional[str]) -> int:
     return max(1, chips // CHIPS_PER_TPU_HOST)
 
 
-@dataclass
-class WorkerHandle:
-    """Identifies a single GCP TPU VM hosting one task of an iris job."""
-
-    vm_name: str
-    zone: str
-    project: str
-    worker_index: int  # which worker in the multi-host gang (0-based)
-
-
-class PeriodicWorkerSync:
-    """Background thread that rsyncs a per-task host-side workdir to the laptop.
-
-    Mirrors the shape of ``CloudLauncher.PeriodicRemoteSync`` but goes
-    through ``gcloud compute tpus tpu-vm ssh ... rsync`` because iris
-    workers don't accept direct ``rsync`` over a stable SSH alias the
-    way SkyPilot clusters do.
-
-    Single-worker only in v1. Multi-host fan-out lives in IrisLauncher.
-    """
-
-    def __init__(
-        self,
-        worker: WorkerHandle,
-        remote_path: str,
-        local_dir: str,
-        interval_seconds: int = DEFAULT_SYNC_INTERVAL_SECONDS,
-        log_prefix: str = "[iris-sync]",
-    ):
-        self.worker = worker
-        self.remote_path = remote_path.rstrip("/")
-        self.local_dir = local_dir
-        self.interval = interval_seconds
-        self.log_prefix = log_prefix
-        self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-
-    def _rsync_once(self) -> None:
-        try:
-            Path(self.local_dir).mkdir(parents=True, exist_ok=True)
-            # rsync over gcloud's IAP/SSH tunnel. ``--rsync-path=sudo rsync``
-            # because workdir is created by the worker process (often root)
-            # and the user's gcloud SSH lands as a non-root account.
-            cmd = [
-                "gcloud", "compute", "tpus", "tpu-vm", "scp",
-                "--zone", self.worker.zone,
-                "--project", self.worker.project,
-                f"--worker={self.worker.worker_index}",
-                "--quiet", "--recurse",
-                f"{self.worker.vm_name}:{self.remote_path}/",
-                self.local_dir,
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            if result.returncode == 0:
-                return
-            stderr_lc = (result.stderr or "").lower()
-            # Benign during early job: workdir doesn't exist yet on the worker.
-            if "no such file" in stderr_lc or "does not exist" in stderr_lc:
-                return
-            print(
-                f"{self.log_prefix} scp from {self.worker.vm_name} returned "
-                f"{result.returncode}: {result.stderr.strip()[:200]}",
-                file=sys.stderr,
-                flush=True,
-            )
-        except subprocess.TimeoutExpired:
-            print(f"{self.log_prefix} scp timed out (will retry)", file=sys.stderr, flush=True)
-        except Exception as e:
-            print(f"{self.log_prefix} scp failed: {e}", file=sys.stderr, flush=True)
-
-    def _run(self) -> None:
-        # Brief delay so the worker has a chance to create the workdir.
-        time.sleep(10)
-        while not self._stop_event.is_set():
-            self._rsync_once()
-            self._stop_event.wait(self.interval)
-
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def stop_and_final_sync(self) -> None:
-        """Signal stop, do one last sync attempt before the workdir is GC'd."""
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-        # Iris cleans up the workdir on task end (task_attempt.py:1074), so
-        # this final pull races with that. Best-effort; GCS mode if you
-        # can't tolerate the race.
-        self._rsync_once()
-
-
 class IrisLauncher:
     """Base class for OT-Agent launchers targeting Marin Iris.
 
@@ -208,7 +84,6 @@ class IrisLauncher:
 
     task_name: str = "ot-iris"
     job_name_prefix: str = "iris"
-    default_output_subdir: str = DEFAULT_OUTPUT_SUBDIR
     default_n_concurrent: int = 16
     default_tpu: str = "v6e-4"
 
@@ -269,22 +144,13 @@ class IrisLauncher:
                             "intended dep set). Pass --extras '' to install no extras.")
 
         og = parser.add_argument_group("outputs")
-        og.add_argument("--output-mode", "--output_mode",
-                        choices=["rsync", "gcs"], default="rsync",
-                        help="rsync: periodically pull /var/cache/iris/workdirs/.../outputs back "
-                             "to --local-sync-dir via gcloud SSH. "
-                             "gcs: workload writes directly to --gcs-output-dir, nothing pulled "
-                             "back. Default: rsync.")
-        og.add_argument("--local-sync-dir", "--local_sync_dir",
-                        default=str(Path.home() / self.default_output_subdir),
-                        help="Local destination for --output-mode rsync (default ~/cloud_runs).")
         og.add_argument("--gcs-output-dir", "--gcs_output_dir",
-                        default=None,
-                        help="GCS prefix for --output-mode gcs (e.g. gs://my-bucket/ot-agent). "
-                             "Required when --output-mode=gcs.")
-        og.add_argument("--sync-interval", "--sync_interval", type=int,
-                        default=DEFAULT_SYNC_INTERVAL_SECONDS,
-                        help="Seconds between rsync polls (default 60).")
+                        default=os.environ.get("OT_AGENT_GCS_OUTPUT_ROOT", DEFAULT_GCS_OUTPUT_ROOT),
+                        help=f"GCS prefix for workload outputs; workload writes to "
+                             f"<this>/<job-name>/. Defaults to $OT_AGENT_GCS_OUTPUT_ROOT or "
+                             f"{DEFAULT_GCS_OUTPUT_ROOT}. The fetch daemon "
+                             f"(hpc.iris_fetch_daemon) pulls completed jobs from here into "
+                             f"{LOCAL_PATHS.runs}/<job-name>/.")
 
         sg = parser.add_argument_group("secrets")
         sg.add_argument("--secrets-env", "--secrets_env", default=None,
@@ -348,19 +214,23 @@ class IrisLauncher:
     def run(self, args: argparse.Namespace) -> int:
         self.normalize_paths(args)
 
-        if args.output_mode == "gcs" and not args.gcs_output_dir:
-            raise SystemExit("--gcs-output-dir is required when --output-mode=gcs")
+        if not args.gcs_output_dir:
+            raise SystemExit(
+                "--gcs-output-dir is required (set OT_AGENT_GCS_OUTPUT_ROOT or pass the flag)."
+            )
 
         job_name = self._derive_job_name(args)
         user = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
 
-        # Where the workload should write outputs inside the container.
-        # rsync mode → /app/outputs/<job-name>/ (lives under workdir; rsync'd back)
-        # gcs mode   → gs://.../<job-name>/    (workload writes directly)
-        if args.output_mode == "gcs":
-            remote_output_dir = f"{args.gcs_output_dir.rstrip('/')}/{job_name}"
-        else:
-            remote_output_dir = f"/app/outputs/{job_name}"
+        # The workload writes outputs directly to GCS; the fetch daemon
+        # pulls them back to LOCAL_PATHS.runs/<job-name>/ on completion.
+        remote_output_dir = f"{args.gcs_output_dir.rstrip('/')}/{job_name}"
+
+        # Make sure the local managed tree exists so the daemon (and any
+        # downstream consumers) find LOCAL_PATHS.runs/ on first run.
+        ensure_local_paths(
+            LOCAL_PATHS.home, LOCAL_PATHS.state, LOCAL_PATHS.runs, LOCAL_PATHS.logs,
+        )
 
         command = self.build_task_command(args, remote_output_dir)
         env_vars = self.build_env(args)
@@ -510,15 +380,16 @@ class IrisLauncher:
 
         vm_count = parse_tpu_vm_count(args.tpu)
 
+        local_dest = LOCAL_PATHS.runs / job_name
+
         print(f"[iris] Job:        /{user}/{job_name}", flush=True)
         print(f"[iris] Cluster:    {args.cluster_config}", flush=True)
         print(f"[iris] Image:      {args.task_image}", flush=True)
         print(f"[iris] TPU:        {args.tpu}  (vm_count={vm_count})", flush=True)
         print(f"[iris] Priority:   {args.priority}", flush=True)
         print(f"[iris] Extras:     {extras or '(none)'}", flush=True)
-        print(f"[iris] Output:     mode={args.output_mode} dest={remote_output_dir}", flush=True)
-        if args.output_mode == "rsync":
-            print(f"[iris] Local sync: {args.local_sync_dir}/{job_name}/  (every {args.sync_interval}s)", flush=True)
+        print(f"[iris] Output:     {remote_output_dir}", flush=True)
+        print(f"[iris] Fetch dest: {local_dest}/  (via hpc.iris_fetch_daemon)", flush=True)
         print(f"[iris] Command:    {shlex.join(command)}", flush=True)
 
         if args.dry_run:
@@ -527,9 +398,8 @@ class IrisLauncher:
 
         if vm_count > 1:
             print(
-                "[iris] WARNING: multi-host TPU slice (vm_count > 1) is scaffolded but UNTESTED. "
-                "Expect rough edges in: (1) cross-host JAX init / vLLM-TPU sharding, "
-                "(2) rsync fan-out timing, (3) coscheduling. Validate single-host first.",
+                "[iris] NOTE: multi-host TPU slice (vm_count > 1). Validated on v6e-8 "
+                "(2026-05-22 smoke #10); larger slices need their own validation pass.",
                 file=sys.stderr, flush=True,
             )
 
@@ -660,11 +530,22 @@ class IrisLauncher:
             full_job_id = str(job.job_id)
             print(f"[iris] Submitted: {full_job_id}", flush=True)
 
-            sync_threads: List[PeriodicWorkerSync] = []
-            if args.output_mode == "rsync" and not args.no_wait:
-                sync_threads = self._start_rsync_threads(
-                    args, job_name, user, vm_count, client, job, full_job_id,
+            # Record the job in the local registry so the fetch daemon
+            # knows where to pull outputs from on completion. Failures
+            # here are non-fatal — the job is already submitted, and the
+            # user can re-register later via `python -m hpc.iris_fetch_daemon
+            # fetch <job-id>` once that module lands.
+            try:
+                register_submission(
+                    job_id=full_job_id,
+                    job_name=job_name,
+                    submitted_at_iso=datetime.now(timezone.utc).isoformat(),
+                    gcs_output_dir=remote_output_dir,
+                    local_dest=local_dest,
+                    cluster_config=str(args.cluster_config),
                 )
+            except Exception as e:
+                print(f"[iris] WARN: could not register job locally: {e}", file=sys.stderr, flush=True)
 
             if args.no_wait:
                 return 0
@@ -676,141 +557,9 @@ class IrisLauncher:
                 print(f"[iris] Terminating job {full_job_id}...", file=sys.stderr, flush=True)
                 client.terminate_job(job.job_id)
                 exit_code = 130
-            finally:
-                for st in sync_threads:
-                    st.stop_and_final_sync()
 
             print(f"[iris] Job exit: {exit_code}", flush=True)
             return exit_code
-
-    # ------------------------------------------------------------------
-    # Rsync fan-out (single-host today, multi-host scaffold)
-    # ------------------------------------------------------------------
-
-    def _start_rsync_threads(
-        self,
-        args: argparse.Namespace,
-        job_name: str,
-        user: str,
-        vm_count: int,
-        client,  # IrisClient
-        job,     # iris.client.Job
-        full_job_id: str,
-    ) -> List[PeriodicWorkerSync]:
-        """Resolve worker VMs for each replica and spawn one rsync thread each.
-
-        Multi-host note: vm_count > 1 is wired but UNTESTED. The hard parts
-        we haven't validated: (a) all replicas' workdirs may not exist at
-        the same wall-clock instant (worker scheduling latency), so early
-        rsyncs will return "no such file" benignly; (b) the gcloud TPU SCP
-        path may need ``--worker=<idx>`` per host rather than per VM name —
-        on multi-VM TPU slices the workers share a TPU pod name and differ
-        only by worker index. The code below uses worker_index; verify on
-        a v6e-8 smoke before relying on this for v6e-16+.
-        """
-        local_root = Path(args.local_sync_dir) / job_name
-        threads: List[PeriodicWorkerSync] = []
-
-        for task_index in range(vm_count):
-            workdir_remote = compute_workdir_host_path(
-                f"/{user}/{job_name}", user, task_index=task_index,
-            )
-            # Workload writes to /app/outputs/<job-name>/; on host this is
-            # <workdir_remote>/outputs/<job-name>/.
-            remote_outputs = f"{workdir_remote}/outputs/{job_name}"
-            local_dir = str(local_root / f"worker-{task_index}")
-
-            try:
-                worker = self._resolve_worker_handle(client, job, task_index)
-            except Exception as e:
-                print(
-                    f"[iris-sync] Could not resolve worker {task_index} yet "
-                    f"({type(e).__name__}: {e}). Will retry inside the sync thread.",
-                    file=sys.stderr, flush=True,
-                )
-                # The thread will retry resolution implicitly on each scp attempt
-                # by re-querying iris if needed. For v1 keep it simple: skip
-                # this replica's sync and warn.
-                continue
-
-            print(
-                f"[iris-sync] worker {task_index}: {worker.vm_name} ({worker.zone}) "
-                f"→ {local_dir}",
-                flush=True,
-            )
-            t = PeriodicWorkerSync(
-                worker=worker,
-                remote_path=remote_outputs,
-                local_dir=local_dir,
-                interval_seconds=args.sync_interval,
-            )
-            t.start()
-            threads.append(t)
-
-        return threads
-
-    def _resolve_worker_handle(
-        self,
-        client,  # IrisClient
-        job,     # iris.client.Job
-        task_index: int,
-    ) -> WorkerHandle:
-        """Look up which GCP VM is hosting a specific task replica.
-
-        Polls iris briefly until the task is assigned. Pulls VM metadata
-        (name, zone, project) from the iris worker registry.
-        """
-        deadline = time.time() + 120
-        last_err: Optional[Exception] = None
-        while time.time() < deadline:
-            try:
-                tasks = job.tasks()
-            except Exception as e:
-                last_err = e
-                time.sleep(2)
-                continue
-
-            for t in tasks:
-                if t.task_index == task_index:
-                    status = t.status()
-                    worker_id = getattr(status, "worker_id", "") or ""
-                    if not worker_id:
-                        break  # assignment not done yet
-                    return self._worker_id_to_handle(client, worker_id, task_index)
-            time.sleep(2)
-        raise TimeoutError(
-            f"Worker for task {task_index} of {job.job_id} not assigned within 120s "
-            f"(last error: {last_err})"
-        )
-
-    def _worker_id_to_handle(self, client, worker_id: str, task_index: int) -> WorkerHandle:
-        """Map iris worker_id → (gcp_vm_name, zone, project).
-
-        Workers register with the controller along with metadata that
-        includes their GCP zone and instance name. We pull that off the
-        worker health list. `list_workers` lives on the lower-level
-        cluster client; reach through `IrisClient._cluster`.
-        """
-        workers = client._cluster_client.list_workers()
-        for w in workers:
-            if w.worker_id == worker_id:
-                # iris worker metadata uses these keys (see
-                # lib/iris/.../providers/gcp/worker.py). If keys change,
-                # the dict.get defaults keep this from KeyError'ing out.
-                meta = dict(getattr(w, "metadata", {}) or {})
-                vm = meta.get("gcp_instance_name") or meta.get("instance") or worker_id
-                zone = meta.get("gcp_zone") or meta.get("zone") or ""
-                project = meta.get("gcp_project") or "hai-gcp-models"
-                if not zone:
-                    raise RuntimeError(
-                        f"Worker {worker_id} reports no GCP zone in metadata; "
-                        "rsync needs zone for gcloud SSH. Check iris worker registration."
-                    )
-                return WorkerHandle(
-                    vm_name=vm, zone=zone, project=project, worker_index=task_index,
-                )
-        raise RuntimeError(f"Worker {worker_id} not found in cluster's worker list")
-
 
 # Imported lazily inside .run() to keep CLI startup fast, but tiny enough
 # to define here.

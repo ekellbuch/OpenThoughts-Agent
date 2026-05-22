@@ -242,4 +242,4 @@ generator:
 # Data paths
 data:
   train_data: []
-  val_data: ["open-thoughts/OpenThoughts-TB-dev"]
+  val_data: []
