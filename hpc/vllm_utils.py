@@ -355,16 +355,22 @@ class VLLMServer:
         # cross-node weight quantization). Bump to 600s (10min) so the
         # logs stay legible without losing the warning entirely.
         env.setdefault("VLLM_RINGBUFFER_WARNING_INTERVAL", "600")
-        # Opt into the new V2 model runner — intended setting for this wheel.
-        # NOTE: the multi-node datagen launch path is currently blocked by a
-        # separate, NOT-V2-gated bug in vllm/v1/executor/ray_executor_v2.py
-        # (cross-session ActorHandle: job 03000000 → job 04000000 after an
-        # internal ray.shutdown()/ray.init()). That bug reproduces with
-        # VLLM_USE_V2_MODEL_RUNNER both set AND unset (see Jupiter 447712,
-        # 447741, 447750), so there's no reason to leave V2 off on its
-        # account. Awaiting a vLLM patch to ray_executor_v2 before relaunching
-        # cross-node datagen.
-        env["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+        # V2 model runner DISABLED (2026-05-22): RayExecutorV2 (new in
+        # 2026-05-13 vLLM bump from upstream/main) inherits from
+        # MultiprocExecutor and uses shm_broadcast for inter-rank
+        # communication — shared memory is single-host by definition, so
+        # cross-node DP hits Gloo TCP fallback timeouts
+        # (gloo/transport/tcp/unbound_buffer.cc Timed out 1800000ms).
+        # Evidence: job 487456 (dp=2 MiniMax-M2.7 with EP off) STILL hung
+        # at shm_broadcast/sample_tokens with this env=1; the v0.16.0
+        # known-good vllm branch (penfever/debug-layer-split-v0.16.0,
+        # 2026-04-03) doesn't have RayExecutorV2 at all and uses pure-Ray
+        # ray_executor.py which handles cross-node natively via Ray RPC.
+        # Flipping to 0 forces fallback to ray_executor.py on this wheel
+        # to validate the hypothesis. Single-node dp=1 paths were known
+        # working with V2=1, so single-node may need V2=1 restored if
+        # this regresses them; for now, test cross-node DP recovery.
+        env["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         # Set VLLM_HOST_IP so vLLM's internal get_ip() returns the real node IP.
         # This is used for Ray placement group node constraints and NCCL communication,
         # NOT for the API server bind address (that's --host above).
