@@ -819,15 +819,19 @@ def build_harbor_command(
     # Dropped 2026-05-21 along with --auto-resume above; if pinning to an
     # older harbor, re-add behind a version gate.
 
-    # NOTE: --export-traces / --export-verifier-metadata / --export-episodes
-    # all lived on `harbor jobs start` in <=0.6.x. harbor 0.7.0 removed them
-    # from the `jobs start` subcommand — export now happens through the
-    # post-run pipeline (separate harbor subcommand) and/or via job-config
-    # `export:` fields. Auto-injecting any of these into `jobs start` causes
-    # click to exit 2 with "No such option '--export-XYZ'". Dropped
-    # 2026-05-21 along with --auto-resume and --filter-error-type. If you
-    # need exports, configure them in the harbor YAML's `export:` block or
-    # run the new export subcommand after the job completes.
+    # Restored 2026-05-21 (initial removal was wrong). The --export-traces /
+    # --export-verifier-metadata / --export-episodes flags ARE still consumed
+    # by `harbor jobs start` in 0.7.0 (penfever/otagent-latest) — they're
+    # declared in src/harbor/cli/jobs.py:902-953 with `hidden=True`, so
+    # `--help` doesn't list them but click/typer still parses them.
+    # OT-Agent needs both traces and verifier metadata; without these flags
+    # the post-run pipeline that uploads to Supabase / HF gets no inputs.
+    if not (_flag_present("--export-traces") or _flag_present("--no-export-traces")):
+        extra_args.append("--export-traces")
+    if not (_flag_present("--export-verifier-metadata") or _flag_present("--no-export-verifier-metadata")):
+        extra_args.append("--export-verifier-metadata")
+    if not _flag_present("--export-episodes"):
+        extra_args.extend(["--export-episodes", "last"])
 
     for extra in extra_args:
         cmd.append(extra)
