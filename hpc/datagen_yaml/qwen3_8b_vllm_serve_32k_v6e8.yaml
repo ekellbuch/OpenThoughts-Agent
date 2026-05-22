@@ -26,11 +26,14 @@ vllm_server:
   # per-request prompt-length cap. The KV stays sized for ~64k attn tokens
   # across all sequences regardless of this value.
   #
-  # If long-context evals (eval_ctx131k.yaml) bump prompts above 16k,
-  # raise this further. For prompts above ~24k a v6e-8 (2-host) slice is
-  # probably needed — single-host v6e-4 program-graph activations grow
-  # quadratically in seq_len during XLA compile.
-  max_model_len: 16384
+  # On the v6e-8 smoke at max_model_len=16384, the first agent inference
+  # succeeded (HTTP 200) but the second turn's prompt overflowed because
+  # terminus-2's conversation context grows across turns. v6e-8 has
+  # 250 GB total HBM (vs 125 GB on v6e-4), so 32768 fits comfortably and
+  # matches the eval_ctx32k.yaml harness's named context length. For
+  # eval_ctx131k.yaml or very long openhands trajectories, raise further
+  # or move to a larger slice.
+  max_model_len: 32768
   max_num_seqs: 2
   # vllm-tpu honors this for KV-cache sizing (confirmed via Stage-C smoke,
   # despite earlier launcher comments claiming otherwise). 0.70 leaves
