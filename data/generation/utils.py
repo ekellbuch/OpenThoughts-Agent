@@ -102,6 +102,9 @@ class VLLMServerConfig:
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
     logging_level: Optional[str] = None
+    # Periodic pynccl trace-buffer flush interval (seconds). 0/None disables.
+    # See vllm_utils._NUMERIC_ENV_VAR_FIELDS for the env var plumbing.
+    pynccl_trace_flush_interval_sec: Optional[int] = None
     extra_args: Any = None
 
 
@@ -112,6 +115,12 @@ class DataGenerationConfig:
     extra_agent_kwargs: Dict[str, Any] = field(default_factory=dict)
     chunk_array_max: Optional[int] = None
     vllm_server: Optional[VLLMServerConfig] = None
+    # Optional per-config env var overrides — lifted by launchers (e.g.
+    # data/cloud/launch_tracegen_iris.py:TracegenIrisLauncher.build_env) and
+    # injected into the iris task's env_vars BEFORE the launcher-wide
+    # setdefaults run, so per-config values win. Ignored on the worker
+    # side (the env vars are already in the process environment by then).
+    env_vars: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
