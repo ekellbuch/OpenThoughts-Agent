@@ -835,26 +835,6 @@ jupiter = HPC(
         # dump at watchdog time to tell us WHICH reader is stuck.
         # Experiment 494030+ on 2026-05-23.
         "VLLM_MQ_MAX_CHUNKS": "240",
-        # Redirect Ray startup logs away from /e/scratch — that mount is
-        # under project-shared inode EDQUOT pressure (jureap59 project hits
-        # 8.0M soft / 8.8M hard, and other members keep filling). Without
-        # this override, ray_utils.py:515 hardcodes the log path to
-        # $DCFT/experiments/logs/ on /e/scratch, blocking new datagen jobs
-        # even when --experiments_dir is pointed at /e/data1.
-        # See reference_jupiter_inode_quota.md.
-        "OT_AGENT_RAY_LOG_DIR": "/e/data1/datasets/playground/ot-baf/experiments/_ray_logs",
-        # FlashInfer JIT cache defaults to ~/.cache/flashinfer on /e/home,
-        # which has a tight 82k inode hard limit (vs many TB headroom on
-        # /e/data1). v4g (495106) died at vLLM init with:
-        #   OSError [Errno 122] Disk quota exceeded:
-        #     '/e/home/jusers/feuer1/jupiter/.cache/flashinfer'
-        # FLASHINFER_WORKSPACE_BASE redirects the cache root; FlashInfer
-        # uses os.getenv("FLASHINFER_WORKSPACE_BASE", Path.home()) at
-        # init in flashinfer/jit/env.py. Even when our yaml sets
-        # use_flashinfer_sampler=false, vLLM still imports flashinfer
-        # (for allreduce-rms fusion), and the import itself does
-        # makedirs on the workspace path.
-        "FLASHINFER_WORKSPACE_BASE": "/e/data1/datasets/playground/ot-baf",
     },
     # NOTE: Do NOT use master_addr_suffix="i" - the "i" suffixed hostname is not DNS-resolvable
     # InfiniBand routing is handled by NCCL_SOCKET_IFNAME=ib0 instead
