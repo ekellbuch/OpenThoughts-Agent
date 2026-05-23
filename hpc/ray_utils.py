@@ -512,7 +512,19 @@ class RayCluster:
 
         # Log Ray startup command and output for debugging
         role = "head" if is_head else "worker"
-        log_dir = Path(os.environ.get("DCFT", ".")) / "experiments" / "logs"
+        # Allow OT_AGENT_RAY_LOG_DIR override to redirect ray_<role>_<node>.log
+        # away from the default $DCFT/experiments/logs/. Used on Jupiter when
+        # the jureap59 project-shared /e/scratch inode quota is tight — we
+        # can't reliably create new files there even after local cleanup
+        # because the cap is shared across all project members.
+        # 2026-05-23 v4e/v4f deaths: hardcoded path here blocked launches
+        # already using --experiments_dir /e/data1/... because Ray log path
+        # didn't follow.
+        ray_log_override = os.environ.get("OT_AGENT_RAY_LOG_DIR")
+        if ray_log_override:
+            log_dir = Path(ray_log_override)
+        else:
+            log_dir = Path(os.environ.get("DCFT", ".")) / "experiments" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         ray_log_path = log_dir / f"ray_{role}_{node}.log"
 
