@@ -55,10 +55,7 @@ vllm_server:
   pipeline_parallel_size: 1
   data_parallel_size: 2
   time_limit: '11:59:00'
-  # max_model_len 4096 to satisfy vLLM SchedulerConfig invariant
-  # max_num_batched_tokens >= max_model_len; mnbt is capped at 4096 by
-  # the EP-buffer 32 GiB cap (see comment near extra_args below).
-  max_model_len: 4096
+  max_model_len: 32768
   max_num_seqs: 32
   gpu_memory_utilization: 0.9
   # enable_expert_parallel: true — 2026-05-22 (revised): matches the
@@ -94,11 +91,12 @@ vllm_server:
   - --enforce-eager
   - --chat-template-content-format
   - string
-  # max-num-batched-tokens 4096 (matches max_model_len, satisfies vLLM
-  # SchedulerConfig). NIXL itself uses size_t internally (no INT_MAX cap),
-  # but the Buffer.get_rdma_size_hint() shape matches DeepEP and 4096 is
-  # known-safe for that hint; can revisit if NIXL succeeds and we want
-  # higher throughput.
+  # max-num-batched-tokens 4096 vs the default 32768: NIXL itself uses
+  # size_t internally (no INT_MAX cap), but Buffer.get_rdma_size_hint()
+  # has the same shape as DeepEP — 4096 is known-safe per the deepepll
+  # variant. mnbt < max_model_len is OK with chunked prefill enabled
+  # (the OT-Agent _DEFAULT_OFF_BOOLEAN_FLAGS removal lets vLLM's per-
+  # model default win, and MiniMax-M2 wants chunked prefill on).
   - --max-num-batched-tokens
   - '4096'
   - --all2all-backend

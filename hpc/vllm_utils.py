@@ -78,13 +78,21 @@ _BOOLEAN_FLAGS = {
 # (including extra_args), `--no-<flag>` is injected at the end as a
 # belt-and-suspenders opt-out.
 #
-# Reason: with default-True flags, mid-inference Triton JIT compilation of
-# their kernels (chunked-prefill metadata + sampling) overruns the vLLM
-# shm_broadcast 60 s wait, fires `TimeoutError: RPC call to sample_tokens
-# timed out`, and kills the engine with EngineDeadError. See
-# `vllm_v2_bugs/bug_c_iter_4_to_8_jit_progression/SUMMARY.md`.
+# 2026-05-23: enable_chunked_prefill REMOVED from this set. Original
+# rationale was that mid-inference Triton JIT compilation of chunked-
+# prefill kernels overran the vLLM shm_broadcast 60 s wait and killed
+# the engine with EngineDeadError (see
+# `vllm_v2_bugs/bug_c_iter_4_to_8_jit_progression/SUMMARY.md`). We now
+# know the shm_broadcast 600s warning is purely informational
+# (`feedback_shm_broadcast_warning_non_fatal` memory + vLLM source
+# review). The real engine deaths were NCCL collective timeouts upstream.
+# Forcing chunked-prefill OFF on MoE models like MiniMax-M2 triggers a
+# different problem: vLLM warns the model "does not officially support
+# disabling chunked prefill" AND blocks any config with
+# max_num_batched_tokens < max_model_len (the SchedulerConfig validator
+# at config/scheduler.py:259 conditions on `not enable_chunked_prefill`).
+# Letting vLLM's per-model default win is the right move now.
 _DEFAULT_OFF_BOOLEAN_FLAGS = {
-    "enable_chunked_prefill",
     "enable_prefix_caching",
 }
 
