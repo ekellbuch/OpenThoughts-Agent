@@ -335,6 +335,7 @@ class VLLMServer:
             cmd.extend(["--served-model-name", self.config.custom_model_name])
 
         # Build CLI args and env vars from server_config (pass-through from YAML)
+        extra_env_vars: dict[str, str] = {}
         if self.config.server_config:
             extra_cli_args, extra_env_vars = _build_vllm_cli_args(self.config.server_config)
             cmd.extend(extra_cli_args)
@@ -391,6 +392,13 @@ class VLLMServer:
         env = os.environ.copy()
         env["VLLM_MODEL_PATH"] = self.config.model_path
         env["PYTHONUNBUFFERED"] = "1"  # Ensure real-time log output
+        # Apply env vars derived from server_config YAML (e.g.
+        # VLLM_USE_DEEP_GEMM, VLLM_PYNCCL_TRACE_FLUSH_INTERVAL_SEC) — these
+        # were computed by _build_vllm_cli_args alongside the CLI args.
+        # Previously the env_vars dict was unpacked but silently discarded.
+        if extra_env_vars:
+            env.update(extra_env_vars)
+            print(f"  Extra vLLM env: {', '.join(f'{k}={v}' for k, v in extra_env_vars.items())}")
         # VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS controls the collective_rpc
         # deadline for execute_model + sample_tokens (multiproc_executor.py
         # lines 314, 326). Default is 300s; on cross-node TP=16 with our
