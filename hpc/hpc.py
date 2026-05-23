@@ -852,6 +852,11 @@ jupiter = HPC(
         "TORCH_NCCL_TRACE_BUFFER_SIZE": "10000",
         "TORCH_NCCL_DESYNC_DEBUG": "1",
         "TORCH_NCCL_DEBUG_INFO_TEMP_FILE": "/e/data1/datasets/playground/ot-baf/experiments/_nccl_dumps/nccl_trace",
+        # vLLM's ray_env.py default whitelist (VLLM_/LMCACHE_/NCCL_/UCX_/HF_/HUGGING_FACE_)
+        # doesn't include TORCH_NCCL_ — so without this override, the env vars above
+        # only exist on the launcher shell, not inside DPMoEEngineCoreActor or
+        # RayWorkerProc where PyTorch reads them. Additive prefix override:
+        "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY": "TORCH_NCCL_",
     },
     # NOTE: Do NOT use master_addr_suffix="i" - the "i" suffixed hostname is not DNS-resolvable
     # InfiniBand routing is handled by NCCL_SOCKET_IFNAME=ib0 instead
