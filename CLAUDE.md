@@ -1380,6 +1380,31 @@ After an RL job terminates (early or completed), follow these steps to preserve 
      --episodes last
    ```
 
+   **After upload completes, add a link to the trace dataset in the model
+   repo's README.** The model and trace datasets are separate HF repos
+   that the cleanup pipeline does not otherwise cross-reference; the
+   link makes the lineage discoverable from the model page. Insert a
+   "Training Traces" section into `<UPLOAD_DIR>/README.md` (create the
+   README if it doesn't already exist) before the `hf upload` in step 9
+   so it gets carried along with the additive upload. Template:
+
+   ```markdown
+   ## Training Traces
+
+   Training-time Daytona/Harbor rollouts for this run are uploaded as
+   a companion dataset:
+   **[penfever/<job_name>](https://huggingface.co/datasets/penfever/<job_name>)**
+
+   The dataset contains the `last` episode of each trial (per
+   `make_and_upload_trace_dataset --episodes last`) — the same rollouts
+   the policy was trained on after rollback / truncation.
+   ```
+
+   If `<UPLOAD_DIR>/README.md` exists already (e.g. an
+   auto-generated HF model card from the trainer), append the section
+   rather than overwriting. Use plain `cat >>` or an `Edit` tool call;
+   never `hf upload-large-folder` (still deprecated).
+
 9. **Parse metrics and preserve training logs**: Run the metrics parser to generate tables and plots, then upload the logs and analysis alongside the model on HF. This is especially important on Jupiter where W&B is unavailable.
    ```bash
    # Generate metrics CSV, markdown report, and reward plot
