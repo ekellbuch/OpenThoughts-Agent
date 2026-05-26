@@ -646,6 +646,7 @@ def setup_experiments_dir(
     # Skipped when ``disable_dedup`` is set (the resume manager has already
     # decided how to handle the existing dir and wants the launcher to land
     # at the same path).
+    renamed_for_collision = False
     if create_dirs and not disable_dedup and experiments_abs.exists() and (experiments_abs / "configs").exists():
         existing_configs = list((experiments_abs / "configs").glob("*.json")) + list(
             (experiments_abs / "configs").glob("*.yaml")
@@ -660,7 +661,26 @@ def setup_experiments_dir(
             ):
                 experiments_abs = base.parent / f"{base.name}_{suffix}"
                 suffix += 1
-            print(f"[launch_utils] Experiment dir collision detected. Using {experiments_abs} instead of {base}")
+            renamed_for_collision = experiments_abs != base
+            if renamed_for_collision:
+                print(f"[launch_utils] Experiment dir collision detected. Using {experiments_abs} instead of {base}")
+
+    # Propagate the (possibly renamed) experiments_dir back into exp_args so
+    # downstream consumers that derive auxiliary paths from
+    # ``exp_args["experiments_dir"]`` (trials_dir, ckpt_path, export_path,
+    # wandb_dir, etc. — see hpc/rl_config_utils.py and hpc/launch.py)
+    # observe the collision-suffixed value instead of the un-suffixed
+    # canonical path. Without this update, concurrent collision-renamed
+    # chains all wrote inner trainer artifacts (trials_dir, checkpoints,
+    # exports) to the same un-suffixed directory, causing data-corruption
+    # / write-race hazards. See
+    # ``notes/ot-agent/agent_logs/2026-05-26_launcher_trials_dir_collision_bug.md``.
+    #
+    # Always write back so callers can rely on
+    # ``exp_args["experiments_dir"]`` being canonical-form (absolute, with
+    # any collision suffix applied). In the non-collision case this is a
+    # no-op rewrite of the same path.
+    exp_args["experiments_dir"] = str(experiments_abs)
 
     paths = ExperimentsPaths(
         root=experiments_abs,

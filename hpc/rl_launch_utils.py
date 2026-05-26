@@ -632,6 +632,23 @@ def construct_rl_sbatch_script(exp_args: dict, hpc) -> str:
     elif model_path:
         exp_args["model_path"] = model_path
 
+    # Resolve job_name and paths (job_name already set by get_job_name() in launch.py)
+    # IMPORTANT: this must run BEFORE build_skyrl_hydra_args, because the
+    # collision-rename logic inside setup_experiments_dir updates
+    # exp_args["experiments_dir"] in place. build_skyrl_hydra_args reads
+    # that value to derive trainer.trials_dir, trainer.ckpt_path, and
+    # trainer.export_path; if it ran first it would use the un-suffixed
+    # canonical path while the sbatch/configs/logs went to the renamed dir
+    # — that's the bug in
+    # ``notes/ot-agent/agent_logs/2026-05-26_launcher_trials_dir_collision_bug.md``.
+    job_setup = resolve_job_and_paths(
+        exp_args,
+        job_type_label="RL",
+    )
+    job_name = job_setup.job_name
+    exp_paths = job_setup.paths
+    experiments_subdir = str(exp_paths.root)
+
     # Build Hydra args from YAML + CLI overrides
     hydra_args = build_skyrl_hydra_args(parsed, exp_args, hpc)
 
@@ -640,15 +657,6 @@ def construct_rl_sbatch_script(exp_args: dict, hpc) -> str:
     if skyrl_overrides:
         hydra_args.extend(skyrl_overrides)
         print(f"Applied {len(skyrl_overrides)} CLI overrides")
-
-    # Resolve job_name and paths (job_name already set by get_job_name() in launch.py)
-    job_setup = resolve_job_and_paths(
-        exp_args,
-        job_type_label="RL",
-    )
-    job_name = job_setup.job_name
-    exp_paths = job_setup.paths
-    experiments_subdir = str(exp_paths.root)
 
     # Extract config values
     num_nodes = int(exp_args.get("num_nodes") or 1)
