@@ -769,6 +769,27 @@ jupiter = HPC(
         # Force GLOO and NCCL to use IPv4 (IPv6 doesn't work on Jupiter compute nodes)
         "GLOO_USE_IPV6": "0",
         "NCCL_SOCKET_FAMILY": "AF_INET",
+        # Force vLLM's process-wide socket.getaddrinfo to return AF_INET only.
+        # GLOO_USE_IPV6/NCCL_SOCKET_FAMILY above only gate Gloo+NCCL; the
+        # c10d TCPStore bootstrap (used by vLLM's mp DP backend) consults
+        # getaddrinfo directly and tries the IPv6 entry first, hitting
+        # `errno 97 - Address family not supported by protocol` on Jupiter
+        # compute nodes (their hostnames have both A and AAAA records,
+        # but IPv6 transport is dead). Job 479619 / Bug F. The monkey
+        # patch lives in vllm/env_override.py and is gated on this var.
+        "VLLM_FORCE_IPV4": "1",
+        # Skip the `vllm --help` flag-discovery probe in
+        # scripts/vllm/start_vllm_ray_controller.py. The probe parses
+        # `vllm --help` output to check whether each launcher flag is
+        # supported; when the probe transiently fails to capture the
+        # full help text (intermittent: cold-cache, slow imports,
+        # buffering), `_flag_supported("--data-parallel-size")` returns
+        # False → controller WARN's and DROPS the flag → vLLM defaults
+        # to data_parallel_size=1 → DP master assert (Bug D recurrence
+        # on job 487389, 2026-05-22). All flags the launcher emits have
+        # been stable in vLLM for many releases so this short-circuit
+        # is safe.
+        "VLLM_SKIP_FLAG_DISCOVERY": "1",
         # NOTE: Do NOT set GLOO_SOCKET_IFNAME=ib0 - it causes Gloo to use the IB hostname
         # which resolves to IPv6. Let Gloo auto-detect the interface.
         # GH200 NUMA affinity: bind each GPU worker to its local CPU NUMA node
@@ -787,12 +808,72 @@ jupiter = HPC(
         # but that commit post-dates torch 2.9.1. Flash SDP and math backends
         # still work fine. Only affects SFT (RL uses vLLM, not SDPA).
         "TORCH_CUDNN_SDPA_ENABLED": "0",
+        # Dump a Python traceback on fatal signals (SIGABRT/SIGSEGV/SIGFPE/etc).
+        # Catches C-level aborts from extensions (DeepSpeed CPU Adam, Liger Triton)
+        # that otherwise exit with code 1 and no Python stack.
+        "PYTHONFAULTHANDLER": "1",
+        # Promote async NCCL errors (e.g. failed allreduce on one rank) to a
+        # raised exception instead of a silent hang, so we get a real traceback.
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
+        # Extend the NCCL watchdog timeout from the 10-min default to 30 min.
+        # 12-node FA3 SFT 445090 died at 2h44m with WorkNCCL reduce_scatter
+        # hanging 600.077s before the watchdog SIGABRT'd. Training was healthy
+        # right up to the hang (loss 0.35, grad 0.13) — at 48-rank scale on
+        # Jupiter IB, one rank occasionally straggles past 10 min on a single
+        # collective. 30 min lets the run survive transient stragglers without
+        # masking permanent hangs (those still die, just 20 min later).
+        "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC": "1800",
+        "TORCH_NCCL_BLOCKING_WAIT_TIMEOUT_MS": "1800000",
+        # Bump shm_broadcast ring slot count 10 → 240 to widen the buffer
+        # for the cross-node DP+MoE+EP coordination bus. Hardcoded default
+        # in MessageQueue is 10 slots; with our patches it's overridable
+        # via this env var. 240 slots × 16 MiB chunk size = ~3.8 GB per
+        # MessageQueue (trivial against Jupiter's 239 GB /dev/shm cap).
+        # If the late-game shm_broadcast hang is "chronic-slow reader",
+        # 24× more chunks gives ~24× more pre-stuck headroom; if it's
+        # "stuck reader", we still get the new diagnostic slot-state
+        # dump at watchdog time to tell us WHICH reader is stuck.
+        # Experiment 494030+ on 2026-05-23.
+        "VLLM_MQ_MAX_CHUNKS": "240",
+        # Redirect Ray cluster startup logs to /e/data1 — /e/scratch jureap59
+        # project-shared inode quota is chronically over-soft (8.20M / 8.0M)
+        # and any new file creation under $DCFT/experiments/logs/ EDQUOTs.
+        # Symlink fix isn't viable because creating the symlink itself needs
+        # a new inode. See reference_jupiter_inode_quota.md.
+        "OT_AGENT_RAY_LOG_DIR": "/e/data1/datasets/playground/ot-baf/experiments/_ray_logs",
+        # NCCL flight recorder for v4i and beyond — keeps last 10000 collective
+        # ops per rank in a ring buffer, dumped to disk on timeout. v4h told us
+        # _ALLGATHER_BASE on TP group hangs at seq 14157; the flight recorder
+        # gives us each peer rank's last-completed seq so we can see if peer is
+        # behind (slow workload), at same point but not enqueued (GIL/JIT), or
+        # already past (out-of-order issue). DESYNC_DEBUG=1 adds extra state
+        # logging at timeout. Dump path is /e/data1 (no quota issues vs /tmp
+        # tmpfs which gets cleaned up).
+        # v4k dumps printed a deprecation warning recommending the new name
+        # TORCH_FR_BUFFER_SIZE. Set both for forward compat across PyTorch
+        # 2.x versions — both still honored in 2.11 but the legacy name is
+        # going away in a future release.
+        "TORCH_NCCL_TRACE_BUFFER_SIZE": "10000",
+        "TORCH_FR_BUFFER_SIZE": "10000",
+        "TORCH_NCCL_DESYNC_DEBUG": "1",
+        "TORCH_NCCL_DEBUG_INFO_TEMP_FILE": "/e/data1/datasets/playground/ot-baf/experiments/_nccl_dumps/nccl_trace",
+        # vLLM's pynccl bypasses ProcessGroupNCCL — PyTorch flight recorder
+        # is blind to it. Our local instrumentation in pynccl.py records the
+        # same shape/seq info for pynccl-driven collectives (MoE all-to-all
+        # etc.). Dump triggers: SIGUSR1, atexit. Same dir as TORCH_NCCL_DEBUG_INFO_TEMP_FILE.
+        "VLLM_PYNCCL_TRACE_BUFFER_SIZE": "10000",
+        "VLLM_PYNCCL_TRACE_DUMP_DIR": "/e/data1/datasets/playground/ot-baf/experiments/_nccl_dumps/nccl_trace",
+        # vLLM's ray_env.py default whitelist (VLLM_/LMCACHE_/NCCL_/UCX_/HF_/HUGGING_FACE_)
+        # doesn't include TORCH_NCCL_ — so without this override, the env vars above
+        # only exist on the launcher shell, not inside DPMoEEngineCoreActor or
+        # RayWorkerProc where PyTorch reads them. Additive prefix override:
+        "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY": "TORCH_NCCL_,TORCH_FR_,VLLM_PYNCCL_",
     },
     # NOTE: Do NOT use master_addr_suffix="i" - the "i" suffixed hostname is not DNS-resolvable
     # InfiniBand routing is handled by NCCL_SOCKET_IFNAME=ib0 instead
     # NCCL/networking settings for SFT training (InfiniBand NDR)
     nccl_settings={
-        "NCCL_DEBUG": "INFO",
+        "NCCL_DEBUG": "WARN",
         "NCCL_NET_GDR_LEVEL": "0",
         "NCCL_SOCKET_IFNAME": "ib0",
         "NCCL_IB_TIMEOUT": "60",
@@ -821,7 +902,9 @@ jupiter = HPC(
     # Also exclude jpbo-038-38, jpbo-065-17, jpbo-074-22, jpbo-048-41, jpbo-011-[01-48] - recurring NCCL socket/heartbeat failures
     # jpbo-091-05 added 2026-04-15: repeated SIGABRT on 32B training (hung the 32B-5ds superset job chain twice)
     # jpbo-044-0[1-5] added 2026-04-22: repeated NCCL TCPStore broken-pipe stalls on Qwen3.5-9B chain (4 consecutive failures)
-    node_exclusion_list="jpbo-031-[01-48],jpbo-011-[01-48],jpbo-038-38,jpbo-004-46,jpbo-065-17,jpbo-074-22,jpbo-048-41,jpbo-091-05,jpbo-044-0[1-5]",
+    # jpbo-074-40 added 2026-05-20: SSH tunnel to login jpbl-s01-01 "No route to host" — proxychains setup fails at job start (exit 127 in 29s, job 475717)
+    # 2026-05-22: briefly excluded jpbo-063-40 + jpbo-063-36 after GLM-4.7 v6 (493343) shm_broadcast cascade was heavily attributed to those nodes. Rolled back after MiniMax (493421) on disjoint nodes jpbo-001-[23,32] hit the same hang at a comparable serving-time mark (~55min) with jpbo-001-32 as the primary offender (5/7 warnings). Two disjoint node sets, two distinct configs, same failure mode → the issue is a wheel-level cross-node sustained-load bug, not a per-node interconnect flake. Don't add per-incident -063 / -001 exclusions to mask it.
+    node_exclusion_list="jpbo-031-[01-48],jpbo-011-[01-48],jpbo-038-38,jpbo-004-46,jpbo-065-17,jpbo-074-22,jpbo-074-40,jpbo-048-41,jpbo-091-05,jpbo-044-0[1-5]",
 )
 
 juwels = HPC(

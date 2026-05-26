@@ -541,12 +541,50 @@ python -m hpc.launch \
   `DAYTONA_API_KEY` (RL), `DAYTONA_B_API_KEY`, `DAYTONA_BASE_API_KEY` (evals),
   `DAYTONA_DATA_API_KEY`.
 - **`--datagen_config qwen3_8b_vllm_serve_32k_4xA100.yaml`** — use the A100
-  variant, NOT the GH200 one. The GH200 config has `--all2all-backend pplx`
-  which crashes on A100 (PPLX library not available). A100 variants:
-  `qwen3_8b_vllm_serve_32k_4xA100.yaml` (8B) and
+  variant, NOT the GH200 one. The GH200 config historically used
+  `--all2all-backend pplx` which previously crashed on A100 (PPLX library
+  not available). Note that `pplx` is now a dead name in current vLLM
+  (commit `eb19955c3` removed it; the parser silently rewrites it to
+  `allgather_reducescatter` with a warning). Either way, stick to the A100
+  variants on A100 hardware: `qwen3_8b_vllm_serve_32k_4xA100.yaml` (8B) and
   `qwen3_32b_vllm_serve_32k_4xA100.yaml` (32B).
 
 Replace `--tasks_input_path` with the appropriate benchmark dataset (`DCAgent/dev_set_v2`, `DCAgent2/terminal_bench_2`, etc.).
+
+## Datagen Daytona Key (CRITICAL)
+
+**Every `hpc.launch --job_type datagen` invocation must pass
+`--daytona_api_key "$DAYTONA_DATA_API_KEY"`.** The default
+`DAYTONA_API_KEY` env var resolves to the **RL org**, which rejects
+declarative Dockerfile builds with
+`DaytonaValidationError: declarative builds are not allowed` — that's
+the every-trial-fails-instantly pattern that produced 9999/10000
+failures on job 470406 (MiniMax-M2.7 tezos datagen) before this rule
+landed. Use the data org key explicitly:
+
+```bash
+python -m hpc.launch \
+  --job_type datagen \
+  --datagen_config <vllm-config>.yaml \
+  --trace_harbor_config ./hpc/harbor_yaml/datagen/ctx32k.yaml \
+  --tasks_input_path <tasks-dir> \
+  --trace_target_repo <hf-repo> \
+  --daytona_api_key "$DAYTONA_DATA_API_KEY" \   # ← required
+  --time_limit 11:59:00 --num_nodes 1 --trace-n-concurrent 32
+```
+
+Even with the right org key, the harbor_config.yaml's
+`environment.kwargs.auto_snapshot: true` flag is also required so
+Harbor's daytona env attaches to the pre-built
+`harbor__<hash>__snapshot` instead of falling through to a slower
+declarative Dockerfile build. All `hpc/harbor_yaml/datagen/*.yaml`
+and `hpc/harbor_yaml/eval/*.yaml` files now ship with this enabled —
+preserve it if you author a new harbor_yaml.
+
+Do NOT export `DAYTONA_TARGET` anywhere — when set, Harbor appends it
+to the auto-snapshot name (`harbor__<hash>__<target>__snapshot`),
+which then misses the pre-built snapshot and falls through to the
+declarative-build path. The codebase no longer needs DAYTONA_TARGET.
 
 ## Eval Job Submission Defaults
 
@@ -975,7 +1013,7 @@ python /e/scratch/jureap59/feuer1/code/axolotl/convert_axolotl_checkpoint.py "$I
 grep -rIE '(sk-[a-zA-Z0-9]{20,}|AKIA[0-9A-Z]{16}|ghp_[a-zA-Z0-9]{36}|hf_[a-zA-Z0-9]{34})' "$OUT"
 
 # 3. Upload to HF (axolotl's `hub_strategy: end` is disabled per above)
-huggingface-cli upload-large-folder laion/<hub_model_id> "$OUT" --repo-type=model
+hf upload laion/<hub_model_id> "$OUT" . --repo-type=model
 
 # 4. Register in Supabase
 python scripts/database/manual_db_push.py \
@@ -1095,6 +1133,100 @@ A run is at meaningful collapse risk when ≥2 of the following fire in the same
 
 A single metric crossing a threshold is suggestive but not actionable; two-of-the-above firing simultaneously is the threshold for cancel + salvage per the RL Job Cleanup Checklist below.
 
+### Inspecting spike-mitigation engagement (StaleClip / ZClip)
+
+`parse_skyrl_metrics.py` covers the broad reward/grad/entropy view, but it
+doesn't tell you whether the **experimental knob** (StaleClip's predictive LR
+damp, or ZClip's adaptive grad-norm clip) actually engaged on this run. When
+running a spike-mitigation ablation — especially when wandb is unavailable
+(Jupiter) and the only signal source is the `.out` log — also run:
+
+```bash
+python scripts/analysis/parse_spike_mitigation.py \
+  experiments/<job_name>
+
+# or, when chain-restarts ran in a dedup'd "_2" / "-0" dir alongside the
+# primary, point at the parent so it picks up all .out logs:
+python scripts/analysis/parse_spike_mitigation.py \
+  experiments/  # matches all rl__*/logs/*.out
+```
+
+The script:
+1. Auto-detects whether `stale_clip` or `z_clip` is in play from the WANDB_MIRROR
+   payloads (looks for `policy/stale_clip/triggered` vs `policy/z_clip/triggered`).
+2. Aggregates per-step metrics across **every** `.out` in the experiment dir,
+   deduplicating by step number with later writes winning — so a chain
+   that ran across 5 SLURM submissions reads as one trajectory.
+3. Prints a side-by-side trajectory table (reward, grad, entropy, log-ratio
+   stats, and the spike-mitigation engagement columns).
+4. Reports a one-paragraph engagement summary: how many steps triggered,
+   the distribution of `scale` (StaleClip) / `warmup_remaining` (ZClip),
+   the first step the mechanism actually fired.
+5. Re-runs the CLAUDE.md collapse-signal scan (grad>1.0 ×2, log_ratio_max>0.5,
+   n_tokens_dp_gt_50pct>50) and lists which steps had ≥2 firing
+   simultaneously. Empty list = healthy run.
+
+When wandb access lands, this script becomes the second-pass companion to
+`parse_skyrl_metrics.py` in the RL Cleanup Checklist (step 9). Reading
+`stale_clip/triggered` and `stale_clip/scale` from the wandb UI directly is
+fine; the script is mainly for the no-wandb path and for grepping cross-job
+trajectories without clicking through panels.
+
+## HF Uploads + Long-Running Login-Node Commands
+
+Two cross-cluster rules apply to any cleanup-step upload (RL, 8B SFT, 32B SFT, datagen, eval) and to anything else that detaches from your shell on a login node.
+
+### Always `hf upload`, never `hf upload-large-folder`
+
+`hf upload-large-folder` looks like the right tool on paper (parallel pre-upload workers, resumable cache, no-bars mode), but in practice it does not play nicely with our clusters' network paths or with HF Hub's LFS rate-limiting. Observed failure mode on Jupiter for a 131 GB 32B model:
+
+- 42/42 files hashed locally in ~15 min ✓
+- 0/28 pre-uploaded after 8h 17m of elapsed wall time
+- Stuck in a `HTTP 429 → "Rate limited. Waiting 286.0s before retry [Retry 1/5]"` loop on `.git/info/lfs/objects/batch`. 28 pre-upload workers all hit 429 in parallel; the per-file retry budget cycles forever without ever committing a single LFS object.
+
+`hf upload` (sequential, 3-arg form) does commit. Use it for every upload step:
+
+```bash
+# Folder-to-repo-root upload pattern (replaces `huggingface-cli upload-large-folder`)
+hf upload <repo> <local-folder> . --repo-type=model
+
+# Single-file pattern
+hf upload <repo> <local-file> <path-in-repo> --repo-type=model
+```
+
+The old `huggingface-cli upload-large-folder` is now a deprecation stub on
+recent huggingface_hub — it prints a hint and exits without uploading. Mentally
+translate `huggingface-cli upload-large-folder REPO DIR --repo-type=model` →
+`hf upload REPO DIR . --repo-type=model` everywhere in the checklists below.
+
+### Always `tmux`, never `nohup` / `disown`
+
+For any long-running command launched on a login node (HF uploads, eval listeners, datagen pipelines that run on the login node before sbatch submit, anything that needs to outlive an SSH session), wrap it in a detached `tmux` session — not `nohup ... &` / `disown`.
+
+`tmux` advantages over `nohup`:
+- Survives SSH disconnects more robustly (Leonardo's login-node killer takes down `nohup`/`disown` processes at ~100 s; tmux survives much longer).
+- You can `tmux attach -t <session>` later to see live state.
+- Output preserved in tmux scrollback even if you don't redirect to a log.
+- Restartable from a single named anchor (`tmux kill-session -t <name>`; `tmux new-session -d -s <name> "<cmd>"`).
+
+Pattern:
+
+```bash
+# Detached, named, output mirrored to a log via tee
+tmux new-session -d -s <session_name> \
+    "source ~/secrets.env && <command> 2>&1 | tee -a <log_path>"
+
+# Inspect live:
+ssh <cluster>
+tmux attach -t <session_name>     # Ctrl-b d to detach
+tmux ls | grep <session_name>     # liveness check
+
+# Kill:
+tmux kill-session -t <session_name>
+```
+
+On **Leonardo** the login-node killer makes `tmux` strictly required; on **Jupiter / Perlmutter / NYU Torch** the killer is more lenient but `tmux` is still preferred because the inspectability and restart story is cleaner.
+
 ## RL Job Cleanup Checklist
 
 After an RL job terminates (early or completed), follow these steps to preserve and publish the checkpoint:
@@ -1105,13 +1237,63 @@ After an RL job terminates (early or completed), follow these steps to preserve 
    scancel <retry_job_ids>
    ```
 
-1. **Locate the best checkpoint** (by reward) in the exports folder:
+1. **Locate the best checkpoint** (by EMA of reward) in the exports folder:
    ```bash
    # NOTE: There is an empty exports/ dir at the base level — ignore it.
    # The real HF-exportable checkpoints are in the nested subdir:
    ls -lt $EXPERIMENTS_DIR/<job_name>/<job_name>/exports/ | head -10
    ```
-   Check `trainer_log.jsonl` for `reward/avg_raw_reward` at each step to identify the checkpoint with the highest reward. Upload that one, not necessarily the last one (reward can degrade in later steps).
+
+   **Use the EMA of `reward/avg_raw_reward` over the trailing 5-step
+   window, NOT the single-step max.** Single-step max overfits to one
+   noisy lucky step; EMA picks the checkpoint sitting in the most
+   sustained-good region of the trajectory.
+
+   Rules:
+   - **EMA must be computed across ALL steps in chronological order,
+     regardless of chain restarts.** If the chain restarted mid-training,
+     reconstruct the full step sequence by collecting `step` lines from
+     EVERY `.out` file (or `trainer_log.jsonl` if present, but `.out` is
+     the canonical source per `feedback_sft_status_via_out_not_jsonl`)
+     and sorting by `trainer/global_step`. Do NOT compute per-chain-link
+     EMA — chain boundaries are not training-meaningful, and naive
+     per-link averaging will under-weight or over-weight the steps near
+     a resume point.
+   - Use the standard 5-period EMA formula: `α = 2/(5+1) = 1/3`.
+     `EMA_n = α · reward_n + (1−α) · EMA_{n−1}`, with `EMA_1 = reward_1`.
+   - **Never select the first saved checkpoint** (typically `global_step_5`
+     with `hf_save_interval: 5`). The EMA is not warmed up yet — it
+     mostly reflects step 5 itself. Start checkpoint selection from the
+     second-saved-step onward (typically step 10).
+   - Of the saved-and-aligned checkpoints (multiples of
+     `hf_save_interval`, excluding the first), upload the one whose EMA
+     at that step is highest.
+
+   Quick Python snippet:
+   ```python
+   import json, glob, re
+   rewards = {}  # step -> avg_raw_reward
+   for fn in glob.glob(f"{EXP_DIR}/logs/*.out"):
+       for line in open(fn):
+           m = re.search(r'trainer/global_step":\s*(\d+).*avg_raw_reward":\s*([\d.eE+-]+)', line)
+           if m:
+               step, r = int(m.group(1)), float(m.group(2))
+               rewards.setdefault(step, r)  # first-seen wins (chain links may overlap)
+   steps = sorted(rewards)
+   alpha = 1/3
+   ema = {}
+   prev = rewards[steps[0]]
+   for s in steps:
+       prev = alpha * rewards[s] + (1 - alpha) * prev
+       ema[s] = prev
+   # Exclude the first saved checkpoint (EMA not warmed up).
+   SAVE_EVERY = 5  # match hf_save_interval
+   aligned_eligible = [s for s in steps if s % SAVE_EVERY == 0 and s >= 2 * SAVE_EVERY]
+   best = max(aligned_eligible, key=ema.get)
+   print(f"best EMA={ema[best]:.4f} at step={best} (reward at that step={rewards[best]:.4f})")
+   ```
+
+   Then upload the checkpoint at `exports/global_step_<best>/`.
 
 2. **Locate the W&B run**: Check the job logs or `trainer_log.jsonl` for the wandb run URL. Format: `https://wandb.ai/dogml/OpenThoughts-Agent/runs/<run_id>`
 
@@ -1140,9 +1322,16 @@ After an RL job terminates (early or completed), follow these steps to preserve 
    ```
    If any secrets are found, remove or redact them before proceeding.
 
-6. **Upload to HuggingFace**: Use `huggingface-cli upload-large-folder` to push to `laion/<job_name>-<step>-<size>` (append the global step AND the base-model size suffix, e.g. `-20-32B` for step 20 of a 32B model, `-20-8B` for an 8B model). The size suffix is required:
+6. **Upload to HuggingFace**: Use `hf upload` (folder-to-root form; see "HF Uploads + Long-Running Login-Node Commands" above for why not `hf upload-large-folder`) to push to `laion/<job_name>-<step>-<size>` (append the global step AND the base-model size suffix, e.g. `-20-32B` for step 20 of a 32B model, `-20-8B` for an 8B model). The size suffix is required:
    ```bash
-   huggingface-cli upload-large-folder laion/<job_name>-<step>-<size> $UPLOAD_DIR
+   # Wrap in tmux for long uploads — see the general HF-upload section above.
+   # NOTE: `--private` is a no-value flag, NOT `--private false`. Per
+   # `feedback_hf_public_default`, default policy is public — so just OMIT
+   # the flag (the laion org is set to public-default these days). If you
+   # add `--private false` you'll get a CLI parse error and the upload
+   # won't run; this trapped two cleanup runs on 2026-05-25/26 before it
+   # was caught.
+   hf upload laion/<job_name>-<step>-<size> $UPLOAD_DIR . --repo-type=model
    ```
    **Naming convention:** the SkyRL trainer auto-pushes intermediates to a
    *canonical* repo `laion/<job_name>` with the wrong layout (weights nested
@@ -1150,14 +1339,44 @@ After an RL job terminates (early or completed), follow these steps to preserve 
    Supabase. We bypass that by uploading the manually-flattened export to
    the `-<step>-<size>` repo with weights at root.
 
-7. **Register in DB**: First, delete the trainer's auto-registered duplicate, then push the correct row.
+7. **Register in DB**: First, delete the trainer's auto-registered duplicate IF SAFE, then push the correct row.
 
-   - **Delete the trainer's auto-registered Supabase row** (it points to the wrong-layout canonical repo):
+   - **CRITICAL — cross-user FK safety:** Before deleting the auto-row,
+     check whether any **other-user** rows in `sandbox_jobs`,
+     `sandbox_trial_model_usage`, or any other table have a foreign-key
+     pointing to it. If yes — **STOP**. Do NOT delete and do NOT mutate
+     those rows. Surface the FK conflict to the user instead and skip
+     the auto-row deletion entirely. The cost of leaving a duplicate
+     `models` row is one row of DB noise; the cost of mutating another
+     user's eval-job records (changing their `model_id` to point at our
+     `-<step>-<size>` repo, then deleting the original HF repo) is real
+     downstream breakage of their evals. This happened on 2026-05-26 to
+     `zhuang1`'s eval jobs during the curriculum-easy cleanup — three
+     `sandbox_jobs` rows had their `model_id` repointed without
+     authorization. Per `feedback_supabase_filter_username`, restrict
+     ALL writes (delete AND update) to rows you own; if a foreign-key
+     constraint forces you to touch someone else's row, STOP and ask.
+
      ```python
-     # Find the row by name and delete it
-     c.table("models").delete().eq("name", "laion/<job_name>").execute()
+     # Safe pre-check before the delete
+     other_users_fk = (
+         c.table("sandbox_jobs")
+          .select("id,username,model_id")
+          .eq("model_id", auto_row_id)
+          .neq("username", os.environ.get("USER", "<your_user>"))
+          .execute()
+     )
+     if other_users_fk.data:
+         print(f"SKIPPING auto-row delete — {len(other_users_fk.data)} other-user rows FK'd. Leaving duplicate models row.")
+         # Do NOT delete the auto-row. Do NOT mutate the FK'd rows.
+         # Surface to the user via the cleanup report.
+     else:
+         c.table("models").delete().eq("name", "laion/<job_name>").execute()
      ```
-   - **Optionally also delete the trainer's auto-uploaded canonical HF repo**:
+
+   - **Optionally also delete the trainer's auto-uploaded canonical HF repo** —
+     ONLY if the safe pre-check above passed (no other-user FKs). Otherwise
+     the HF repo bytes may still be in use by another user's running evals:
      ```python
      from huggingface_hub import HfApi
      HfApi().delete_repo("laion/<job_name>", repo_type="model")
@@ -1191,11 +1410,42 @@ After an RL job terminates (early or completed), follow these steps to preserve 
 
 8. **Upload RL traces**: Upload the training traces from the job:
    ```bash
+   # IMPORTANT: run from the `otagent` conda env, NOT `dcagent-rl` /
+   # `rl`. The trace upload script depends on `google.cloud.storage` and
+   # matplotlib which only the otagent env has; the rl env will fail with
+   # `ModuleNotFoundError: google.cloud.storage`. Same applies to step 9's
+   # `parse_skyrl_metrics.py` (needs matplotlib). Both trapped on the
+   # 2026-05-26 nl2bash + curriculum-easy cleanups.
    python -m scripts.harbor.make_and_upload_trace_dataset \
      --job_dir "$EXPERIMENTS_DIR/<job_name>/<job_name>" \
      --repo_id penfever/<job_name> \
      --episodes last
    ```
+
+   **After upload completes, add a link to the trace dataset in the model
+   repo's README.** The model and trace datasets are separate HF repos
+   that the cleanup pipeline does not otherwise cross-reference; the
+   link makes the lineage discoverable from the model page. Insert a
+   "Training Traces" section into `<UPLOAD_DIR>/README.md` (create the
+   README if it doesn't already exist) before the `hf upload` in step 9
+   so it gets carried along with the additive upload. Template:
+
+   ```markdown
+   ## Training Traces
+
+   Training-time Daytona/Harbor rollouts for this run are uploaded as
+   a companion dataset:
+   **[penfever/<job_name>](https://huggingface.co/datasets/penfever/<job_name>)**
+
+   The dataset contains the `last` episode of each trial (per
+   `make_and_upload_trace_dataset --episodes last`) — the same rollouts
+   the policy was trained on after rollback / truncation.
+   ```
+
+   If `<UPLOAD_DIR>/README.md` exists already (e.g. an
+   auto-generated HF model card from the trainer), append the section
+   rather than overwriting. Use plain `cat >>` or an `Edit` tool call;
+   never `hf upload-large-folder` (still deprecated).
 
 9. **Parse metrics and preserve training logs**: Run the metrics parser to generate tables and plots, then upload the logs and analysis alongside the model on HF. This is especially important on Jupiter where W&B is unavailable.
    ```bash
@@ -1209,12 +1459,12 @@ After an RL job terminates (early or completed), follow these steps to preserve 
    cp $EXPERIMENTS_DIR/<job_name>/<job_name>/trainer_log.jsonl $UPLOAD_DIR/training_logs/
    cp $EXPERIMENTS_DIR/<job_name>/logs/<job_name>_*.out $UPLOAD_DIR/training_logs/
 
-   # Re-upload the model folder (now includes training_logs/)
-   huggingface-cli upload-large-folder laion/<job_name>-<step>-<size> $UPLOAD_DIR
+   # Re-upload the model folder (now includes training_logs/). Use `hf upload` (NOT `hf upload-large-folder`).
+   hf upload laion/<job_name>-<step>-<size> $UPLOAD_DIR . --repo-type=model
    ```
    This produces: `metrics.csv`, `vllm_metrics.csv`, `trial_stats.csv`, `report.md`, `reward_plot.png` in `training_logs/`.
 
-   **WARNING**: Do NOT use `huggingface_hub.upload_folder()` Python API to add files to an existing repo without setting `delete_patterns=[]`. By default it deletes files not present in the local folder, which will clobber existing model weights. Always use `huggingface-cli upload-large-folder` (which is additive) or pass `delete_patterns=[]` explicitly.
+   **WARNING**: Do NOT use `huggingface_hub.upload_folder()` Python API to add files to an existing repo without setting `delete_patterns=[]`. By default it deletes files not present in the local folder, which will clobber existing model weights. Always use `hf upload` (which is additive — does not delete missing files) or pass `delete_patterns=[]` explicitly.
 
 10. **Clean up experiments dir**: Only after all above steps succeed, remove the local job directory to free disk space.
 
@@ -1258,12 +1508,20 @@ After an 8B SFT job completes on a no-internet cluster (Jupiter, Leonardo), foll
      relaunch and let chain restarts auto-resume from the latest checkpoint.
 
    ```bash
-   # On the login node (has direct internet on Jupiter; use proxychains on Leonardo)
+   # On the login node (works on Jupiter — login has direct internet).
+   # On LEONARDO, this WILL be SIGKILLed at ~100s — use the sbatch template in
+   # "Leonardo HF Upload — Use sbatch, NOT the Login Node" below.
+   #
+   # Wrap in tmux for any non-trivial upload (see "HF Uploads + Long-Running
+   # Login-Node Commands" above for why tmux > nohup and `hf upload` > `hf upload-large-folder`).
    source ~/secrets.env
-   huggingface-cli upload-large-folder \
-     <hub_model_id> \
-     $CHECKPOINTS_DIR/<job_name> \
-     --repo-type=model
+   tmux new-session -d -s hf_upload_<short> \
+       "source ~/secrets.env && hf upload \
+            <hub_model_id> \
+            $CHECKPOINTS_DIR/<job_name> \
+            . \
+            --repo-type=model 2>&1 | tee $CHECKPOINTS_DIR/<job_name>/upload.log"
+   # Inspect: tmux attach -t hf_upload_<short>  (Ctrl-b d to detach)
    ```
    Wait for the upload to finish and verify the repo exists on HF Hub.
 
@@ -1338,11 +1596,21 @@ change.
      `laion/<job_name>-<step>-32B`.
 
    ```bash
+   # Works on Jupiter from the login node. On LEONARDO this WILL be SIGKILLed
+   # at ~100s — use the sbatch template in "Leonardo HF Upload — Use sbatch,
+   # NOT the Login Node" below. Verified 131GB → ~4 min via that path.
+   #
+   # Wrap in tmux for the duration of the upload; use `hf upload` (NOT
+   # `hf upload-large-folder` — see "HF Uploads + Long-Running Login-Node
+   # Commands" above for why).
    source ~/secrets.env
-   huggingface-cli upload-large-folder \
-     <hub_model_id> \
-     <consolidate_workdir>/<job_name>/final_repo \
-     --repo-type=model
+   tmux new-session -d -s hf_upload_<short> \
+       "source ~/secrets.env && hf upload \
+            <hub_model_id> \
+            <consolidate_workdir>/<job_name>/final_repo \
+            . \
+            --repo-type=model 2>&1 | tee <consolidate_workdir>/<job_name>/upload.log"
+   # Inspect: tmux attach -t hf_upload_<short>  (Ctrl-b d to detach)
    ```
 
 4. **Register in the unified DB** (same flow as 8B; SFT is the default
@@ -1370,6 +1638,100 @@ ls $CHECKPOINTS_DIR/<job_name>/ | grep -E 'safetensors|global_step'
 - `model-*.safetensors` at root → 8B path (or Qwen3.5 — no consolidate needed)
 - `global_stepN/` + `zero_to_fp32.py` at root, no safetensors → 32B path
   (this checklist)
+
+## Leonardo HF Upload — Use sbatch, NOT the Login Node
+
+Leonardo's login nodes SIGKILL any long-running user process after ~100 seconds,
+regardless of how it's detached. We've verified this kills:
+- `nohup hf upload ... &` / `nohup huggingface-cli ... &` (~80s)
+- `tmux new-session -d -s ... "hf upload ..."` (~2 min)
+- `systemd-run --user --unit=... hf upload ...` (also SIGKILLed at ~100s)
+
+(Tested with both the legacy `huggingface-cli` and the current `hf` CLI;
+the killer is process-agnostic, not command-specific.)
+
+The login node DOES have direct internet (no proxychains needed there) — the
+problem is purely the process killer, not network.
+
+**The reliable path is an sbatch job on a compute node with an SSH tunnel back
+to the login node.** Compute nodes have no direct internet, but the existing
+`eval/leonardo/start_proxy_tunnel.sh` opens a SOCKS5 forward from the compute
+node to login05 and prints a `proxychains4 -q -f <config>` command prefix
+that wraps any HF-bound command.
+
+### Pre-flight (from your local Mac)
+
+The intra-cluster SSH cert expires every ~12h. Refresh if stale:
+```bash
+step ssh certificate 'bfeuer00' --provisioner cineca-hpc \
+  ~/.ssh/leonardo_daytona --no-password --insecure
+ssh-keygen -R login.leonardo.cineca.it && \
+rsync -avz -e 'ssh -i ~/.ssh/leonardo_daytona -o IdentitiesOnly=yes -o StrictHostKeyChecking=no' \
+  ~/.ssh/leonardo_daytona ~/.ssh/leonardo_daytona.pub ~/.ssh/leonardo_daytona-cert.pub \
+  bfeuer00@login.leonardo.cineca.it:~/.ssh/
+```
+
+Verify with `ssh-keygen -L -f ~/.ssh/leonardo_daytona-cert.pub | grep Valid`.
+
+### sbatch template for HF upload
+
+```bash
+cat > /leonardo_work/AIFAC_5C0_290/bfeuer00/upload_<job_name>.sbatch <<'EOF'
+#!/bin/bash
+#SBATCH --job-name=hf_upload_<short>
+#SBATCH --output=<workdir>/upload_logs/upload_sbatch.log
+#SBATCH --time=00:30:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --partition=boost_usr_prod
+#SBATCH --account=AIFAC_5C0_290
+#SBATCH --gres=gpu:1
+#SBATCH --qos=boost_qos_dbg
+
+set -e
+source /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/etc/profile.d/conda.sh
+conda activate otagent
+source ~/secrets.env
+
+WD=<workdir>
+DCFT=/leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent
+
+unset LD_PRELOAD
+export PATH="/leonardo_work/AIFAC_5C0_290/bfeuer00/proxychains/bin:${PATH}"
+CMD_PREFIX=$(bash "$DCFT/eval/leonardo/start_proxy_tunnel.sh")
+
+cd $WD/final_repo   # or $CHECKPOINTS_DIR/<job_name> for 8B path
+$CMD_PREFIX /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/envs/otagent/bin/hf upload \
+    <hub_model_id> . . \
+    --repo-type=model
+EOF
+cd /leonardo_work/AIFAC_5C0_290/bfeuer00
+sbatch upload_<job_name>.sbatch
+```
+
+Then `squeue -j <jobid>` and `tail -f <workdir>/upload_logs/upload_sbatch.log`.
+
+### Numbers / sizing
+
+- 131GB consolidated 32B → ~4 min wall through the tunnel (sbatch + tunnel pattern)
+- 30 min wall fits `boost_qos_dbg` (debug QOS); longer jobs need a different QOS
+- `hf upload` is sequential (no `--num-workers` knob) — slower than the legacy
+  `huggingface-cli upload-large-folder` looked on paper, but the latter is now
+  a deprecation stub AND deadlocks against HF Hub LFS rate limits in practice.
+  See "HF Uploads + Long-Running Login-Node Commands" near the RL Cleanup
+  section for the full story.
+- Resume is automatic — `.cache/huggingface/` persists state; if the job is
+  requeued, `hf upload` picks up where it left off
+
+### Why this matters for the SFT checklists
+
+Both the 8B (step 2) and 32B (step 3) cleanup checklists invoke `hf upload`
+(in a `tmux` session). On Jupiter / Perlmutter / NYU Torch that works
+straight from the login node (login has direct internet, no kill policy).
+On Leonardo the same one-liner WILL die at ~100 s and leave a partial
+upload — use the sbatch template above instead.
 
 ## NYU Torch Access
 

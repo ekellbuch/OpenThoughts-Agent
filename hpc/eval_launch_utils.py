@@ -191,6 +191,25 @@ def prepare_eval_configuration(exp_args: dict) -> dict:
             eval_env = "daytona"
     exp_args["_eval_env"] = str(eval_env)
 
+    # Pre-build Daytona snapshots on the login node so trial-time
+    # `auto_snapshot=true` short-circuits to an existing ACTIVE snapshot
+    # instead of falling through to the declarative-build path. No-op on
+    # docker/modal backends or when no api_key is configured.
+    _eval_tasks = exp_args.get("_eval_dataset_path_resolved")
+    if _eval_tasks:
+        from hpc.launch_utils import (
+            get_daytona_api_key_override as _get_dt_key,
+            maybe_prebuild_daytona_snapshots,
+        )
+        from hpc.snapshot_manager import OrgConfig
+        _api_key = _get_dt_key(exp_args)
+        _orgs = [OrgConfig(name="cli", api_key=_api_key)] if _api_key else []
+        maybe_prebuild_daytona_snapshots(
+            [_eval_tasks],
+            harbor_env=str(eval_env),
+            orgs=_orgs,
+        )
+
     trace_backend_value = exp_args.get("trace_backend") or exp_args.get("datagen_backend")
     trace_backend = validate_trace_backend(
         trace_backend_value,
@@ -668,7 +687,10 @@ def launch_eval_job_v2(exp_args: dict, hpc) -> None:
     served_model_id = None
     harbor_model_name = model_name
     if requires_vllm:
-        served_model_id = generate_served_model_id()
+        # Deterministic per job_name so chain-restarts produce the same
+        # synthetic ID. See hpc.launch_utils.generate_served_model_id
+        # docstring for why this matters for Harbor's auto-resume.
+        served_model_id = generate_served_model_id(job_name=job_name)
         harbor_model_name = hosted_vllm_alias(served_model_id)
 
     # Build the job config

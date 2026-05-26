@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Batch-run validate_and_upload_from_hf.py (Harbor smoke-test stage only) over
-# every HF dataset URL listed in an input markdown file. For each dataset:
+# every HF dataset listed in an input markdown file. Each line in the file may
+# be either a huggingface.co/datasets/<org>/<name> URL or a bare <org>/<name>
+# (one repo per line, optionally prefixed with `- `/`* `/`+ `). For each dataset:
 #   - take a random sample of N tasks (default 500)
 #   - run the Harbor smoke test
 #   - skip the HF upload
@@ -11,7 +13,7 @@
 #   batch_validate_from_md.sh [INPUT_MD] [SECRETS_ENV] [TARGET_DIR]
 #
 # Defaults:
-#   INPUT_MD     /Users/benjaminfeuer/Documents/notes/task_repos/rl_to_check.md
+#   INPUT_MD     /Users/benjaminfeuer/Documents/notes/ot-agent/task_repos/rl_to_check.md
 #   SECRETS_ENV  /Users/benjaminfeuer/Documents/secrets.env
 #   TARGET_DIR   /Users/benjaminfeuer/Documents/agent-traces-analysis
 #
@@ -31,13 +33,22 @@
 
 set -euo pipefail
 
-INPUT_MD="${1:-/Users/benjaminfeuer/Documents/notes/task_repos/rl_to_check.md}"
+INPUT_MD="${1:-/Users/benjaminfeuer/Documents/notes/ot-agent/task_repos/rl_to_check.md}"
 SECRETS_ENV="${2:-/Users/benjaminfeuer/Documents/secrets.env}"
 TARGET_DIR="${3:-/Users/benjaminfeuer/Documents/agent-traces-analysis}"
 
 SAMPLE_SIZE="${SAMPLE_SIZE:-200}"
 SAMPLE_SEED="${SAMPLE_SEED:-42}"
 PYTHON="${PYTHON:-/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python}"
+
+# HF rate-limit guard. The validator's load_dataset() under hf-transfer fans out
+# to ~8 parallel range-GETs per file plus per-chunk Xet /api resolves; on a 1+GB
+# parquet that single call can burst >500 API hits. Free-tier accounts hit the
+# 2500-req/5min cap mid-run. Set HF_HUB_ENABLE_HF_TRANSFER=0 to serialize the
+# download (slower walltime, ~8x lower API rate); user can override by exporting
+# HF_HUB_ENABLE_HF_TRANSFER=1 before invoking this script if they're on a paid
+# tier and want the speed back.
+export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALIDATE_PY="${VALIDATE_PY:-$SCRIPT_DIR/validate_and_upload_from_hf.py}"
@@ -65,17 +76,30 @@ elif [[ "$(head -1 "$SUMMARY")" != "$EXPECTED_HEADER" ]]; then
     echo "Rotated stale-schema summary.tsv → ${SUMMARY%.tsv}.stale_$(date +%Y%m%d_%H%M%S).tsv"
 fi
 
+# Extract HF dataset repos from $INPUT_MD. Two branches feed into a dedup pass:
+#   1. huggingface.co/datasets/<org>/<name> URLs — sed strips the prefix.
+#   2. bare <org>/<name> lines, optionally prefixed with a markdown list bullet
+#      "- ", "* ", or "+ ". Anything containing "://", spaces, or extra "/"s
+#      is excluded so file paths and URLs do not leak in.
+# Each branch is `|| true`-wrapped: under `set -euo pipefail`, a grep with no
+# matches exits 1 and would otherwise abort the whole extraction.
+extract_repos() {
+    {
+        { grep -oE 'huggingface\.co/datasets/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' "$INPUT_MD" \
+            | sed 's|huggingface\.co/datasets/||'; } || true
+        { sed -E 's/^[[:space:]]*[-*+]?[[:space:]]*//; s/[[:space:]]*$//' "$INPUT_MD" \
+            | grep -E '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; } || true
+    } | awk '!seen[$0]++'
+}
+
 REPOS=()
 while IFS= read -r line; do
     [[ -n "$line" ]] && REPOS+=("$line")
-done < <(
-    grep -oE 'huggingface\.co/datasets/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' "$INPUT_MD" \
-        | sed 's|huggingface\.co/datasets/||' \
-        | awk '!seen[$0]++'
-)
+done < <(extract_repos)
 
 if [[ ${#REPOS[@]} -eq 0 ]]; then
-    echo "No HF dataset URLs found in $INPUT_MD" >&2
+    echo "No HF dataset repos found in $INPUT_MD" >&2
+    echo "Accepted formats per line: a huggingface.co/datasets/<org>/<name> URL, or a bare <org>/<name>." >&2
     exit 1
 fi
 
@@ -83,17 +107,29 @@ echo "Found ${#REPOS[@]} dataset(s); sample_size=$SAMPLE_SIZE seed=$SAMPLE_SEED"
 echo "Target dir: $TARGET_DIR"
 echo
 
+EXTRACT_ROOT="$TARGET_DIR/.extract_cache"
+mkdir -p "$EXTRACT_ROOT"
+
 for REPO in "${REPOS[@]}"; do
     SAFE="${REPO//\//__}"
     DEST="$TARGET_DIR/$SAFE"
     mkdir -p "$DEST"
     LOG="$DEST/run.log"
 
+    # Reusing the same extract_dir across runs lets the validator's existing
+    # cache short-circuit (validate_and_upload_from_hf.py: `if existing_tasks:
+    # return base_dir`) fire — no second load_dataset() call, no HF API hits
+    # on re-runs of the same repo. Cache lives under TARGET_DIR/.extract_cache/
+    # so it sits next to the run logs and the user can wipe it with one rm -rf.
+    EXTRACT_DIR="$EXTRACT_ROOT/$SAFE"
+    mkdir -p "$EXTRACT_DIR"
+
     echo "=== $REPO ==="
 
     rc=0
     "$PYTHON" "$VALIDATE_PY" \
         --repo_id "$REPO" \
+        --extract_dir "$EXTRACT_DIR" \
         --stages harbor \
         --sample_size "$SAMPLE_SIZE" \
         --sample_seed "$SAMPLE_SEED" \
@@ -118,7 +154,7 @@ for REPO in "${REPOS[@]}"; do
     # Sync Harbor's per-trial trace dir (agent/trajectory.json, verifier/, result.json, …)
     # into <DEST>/traces/. The validate.py prints the path on its `[harbor]` retention line;
     # we extract from the ANSI-stripped clean.log.
-    HARBOR_DIR=$(grep -oE '/(var/folders|tmp)/[^[:space:]]+/harbor_jobs_[A-Za-z0-9]+/harbor-validate-[0-9-]+' "$CLEAN" 2>/dev/null | tail -1 || true)
+    HARBOR_DIR=$(grep -oE '/(var/folders|tmp)/[^[:space:]]+/harbor_jobs_[A-Za-z0-9_]+/harbor-validate-[0-9-]+' "$CLEAN" 2>/dev/null | tail -1 || true)
     if [[ -n "$HARBOR_DIR" && -d "$HARBOR_DIR" ]]; then
         mkdir -p "$DEST/traces"
         # rsync is fast and handles large per-trial dirs well; --remove-source-files frees

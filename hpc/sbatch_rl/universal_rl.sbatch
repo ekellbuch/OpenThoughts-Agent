@@ -112,6 +112,19 @@ export TORCH_SHOW_CPP_STACKTRACES=1
 export CUDA_LAUNCH_BLOCKING=0
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
+# NCCL_BLOCKING_WAIT=1 makes the NCCL collective itself error out at the
+# call boundary rather than spinning while the watchdog races to abort.
+# Combined with TORCH_NCCL_ASYNC_ERROR_HANDLING above, this surfaces the
+# real failure point (often a peer-node HSN socket close on Perlmutter)
+# instead of a downstream SIGABRT in a NCCL destructor.
+export NCCL_BLOCKING_WAIT=1
+# TORCH_NCCL_TRACE_BUFFER_SIZE > 0 enables PyTorch's NCCL FlightRecorder,
+# which captures rank-by-rank stack traces of the most recent N collective
+# operations. On crash, ProcessGroupNCCL.cpp emits these traces — the
+# "Stack trace of the failed collective not found, potentially because
+# FlightRecorder is disabled" line in prior Perlmutter crashes goes away
+# and we get the actual offending collective + stack frames.
+export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
 export OMP_NUM_THREADS=1
 export PYTHONPATH="$WORKDIR:${PYTHONPATH:-}"
 
@@ -122,6 +135,8 @@ export PYTHONPATH="$WORKDIR:${PYTHONPATH:-}"
 {ray_env_exports}
 
 # --- vLLM/Ray settings ---
+# RL uses its own conda env pinned to an older vLLM wheel that requires the
+# V1 engine. The eval/datagen path uses the newer wheel and runs V2 instead.
 export VLLM_USE_V1=1
 export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
 

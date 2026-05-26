@@ -892,7 +892,7 @@ class SFTJobRunner:
             f"--machine_rank={slurm_nodeid}",
             f"--num_machines={num_nodes}",
             f"--num_processes={num_nodes * gpus_per_node}",
-            "--tee=3",
+            "--tee=1",
             "sft/llamafactory/src/train.py",
             self.config.train_config_path,
         ]

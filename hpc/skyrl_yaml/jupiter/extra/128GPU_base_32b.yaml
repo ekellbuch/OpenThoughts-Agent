@@ -84,7 +84,7 @@ terminal_bench:
 
   # Model info for Harbor's hosted_vllm validation
   model_info:
-    max_input_tokens: 32768
+    max_input_tokens: 32767
     max_output_tokens: 4096
 
   archiving:
@@ -139,7 +139,7 @@ trainer:
   hf_hub_revision: main
 
   # Database registration (auto-registers trained model to Supabase)
-  enable_db_registration: true
+  enable_db_registration: false
 
   # Logging
   project_name: OpenThoughts-Agent

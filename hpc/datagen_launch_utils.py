@@ -393,7 +393,12 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
         served_model_id = None
         harbor_model_name = trace_model
         if requires_vllm:
-            served_model_id = generate_served_model_id()
+            # Deterministic per job_name so chain-restarts produce the same
+            # synthetic ID. Without this, every resume gets a fresh
+            # timestamp-based ID, the YAML diverges from the on-disk
+            # config.json, and Harbor's _maybe_init_existing_job fails
+            # with FileExistsError.
+            served_model_id = generate_served_model_id(job_name=job_name)
             harbor_model_name = hosted_vllm_alias(served_model_id)
             if not vllm_model_path:
                 vllm_model_path = trace_model or ""
@@ -441,6 +446,26 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
         template_text = template_path.read_text()
         sbatch_directives = build_sbatch_directives(hpc, exp_args)
         harbor_env = exp_args.get("trace_env") or get_harbor_env_from_config(harbor_config_resolved)
+
+        # Pre-build Daytona snapshots on the login node so trial-time
+        # `auto_snapshot=true` short-circuits to an existing ACTIVE snapshot
+        # instead of falling through to the declarative-build path (which
+        # the RL key blocks with DaytonaValidationError, and other keys hit
+        # bearer-token rotation degradation on).
+        # No-op on docker/modal backends or when no api_key is configured.
+        if tasks_input_path:
+            from hpc.launch_utils import (
+                get_daytona_api_key_override as _get_dt_key,
+                maybe_prebuild_daytona_snapshots,
+            )
+            from hpc.snapshot_manager import OrgConfig
+            _api_key = _get_dt_key(exp_args)
+            _orgs = [OrgConfig(name="cli", api_key=_api_key)] if _api_key else []
+            maybe_prebuild_daytona_snapshots(
+                [tasks_input_path],
+                harbor_env=harbor_env,
+                orgs=_orgs,
+            )
 
         base_hf_repo_id = exp_args.get("upload_hf_repo") or trace_target_repo
 
