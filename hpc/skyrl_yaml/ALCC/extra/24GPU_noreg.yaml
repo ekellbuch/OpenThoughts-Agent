@@ -85,7 +85,7 @@ terminal_bench:
 
   # Model info for Harbor's hosted_vllm validation
   model_info:
-    max_input_tokens: 32768
+    max_input_tokens: 32767
     max_output_tokens: 4096
 
   archiving:
