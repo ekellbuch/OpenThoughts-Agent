@@ -108,7 +108,24 @@ terminal_bench:
 
   # Model info for Harbor's hosted_vllm validation
   model_info:
-    max_input_tokens: 32767
+    # Lowered 32767 -> 32000 (2026-05-27). Harbor's litellm token counter is
+    # +2 below vLLM's actual BPE tokenization on near-budget prompts (litellm
+    # +1 plus chat-template/special-token drift), so a 32767-capped prompt
+    # tokenizes to 32769 at the vLLM serving layer and is rejected with
+    # `VLLMValidationError: 32769 input tokens ... context length is only
+    # 32768`. vLLM returns this as an ErrorResponse (handled, not an engine
+    # crash), but harbor's litellm then retries the *deterministically*
+    # over-budget request (max_retries=3, exp backoff) across n_concurrent
+    # trials. On a boundary-heavy task distribution (e.g. nemotron-junit: 111+
+    # such overflows per chain link) the accumulating open sockets exhaust the
+    # skyrl_entrypoint actor's file descriptors -> libuv uv__epoll_ctl_prep
+    # aborts -> SIGABRT in the uvloop event loop -> ray.WorkerCrashedError kills
+    # the chain before training step 1 (job a3-rl ...nemotron-junit #11,
+    # chain 521442-448). A 768-token buffer below max_model_len=32768 ensures
+    # harbor truncates before vLLM ever rejects, eliminating the retry storm.
+    # Cost is ~2.3% usable context for all a3 chains; chains that don't hug the
+    # boundary (e2egit reached step 68 fine at 32767) are unaffected.
+    max_input_tokens: 32000
     max_output_tokens: 4096
 
   archiving:
