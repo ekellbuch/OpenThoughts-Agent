@@ -30,8 +30,17 @@ terminal_bench:
     extra_body:
       chat_template_kwargs:
         enable_thinking: true
-    # Long timeout for thinking models
-    override_timeout_sec: 1800
+    # 2026-05-27: 1800 → 900. The boundary-hugging a3 datasets (stack-junit,
+    # nemotron, methods2test) hit the 1800s agent-timeout wall on ~70-95% of
+    # trials (GLM-4_7-swesmith can't finish these in 1800s), so every group
+    # waited ~1800s for its slowest sample → generation buffer crawled (5/64
+    # in 4h19) and chains never reached training step 1. Halving to 900s
+    # ~2× the valid-group yield. Tradeoff: lower solve-rate on the hardest
+    # tasks (they fail faster) — acceptable vs. TIMEOUT-at-step-0. Fast-task
+    # chains (e2egit, median 7 turns / <900s) are unaffected. See
+    # agent_logs/2026-05-27_rl_chains_stuck_step0.md. AgentTimeoutError stays
+    # PASSTHROUGH (standing pref — partial trajectory+reward is meaningful).
+    override_timeout_sec: 900
 
     # Environment settings
     override_cpus: 1
