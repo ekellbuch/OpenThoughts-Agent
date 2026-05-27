@@ -113,6 +113,22 @@ class VLLMServerConfig:
     # In-process periodic Python stack dump for ALL threads — replacement
     # for py-spy on clusters where ptrace_scope=2 blocks external attach.
     pynccl_faulthandler_interval_sec: Optional[int] = None
+    # NCCL diagnostic / workaround env vars. All three propagate to the
+    # cross-node Ray DP actors via vLLM's NCCL_ copy-prefix
+    # (vllm/ray/ray_env.py DEFAULT_ENV_VAR_PREFIXES), so they reach the
+    # worker process where NCCL initializes its comms — not just the driver.
+    #   nccl_cumem_enable=false → NCCL_CUMEM_ENABLE=0. Disables NCCL's
+    #     cuMem-based buffer registration; candidate workaround for the
+    #     cudagraph-capture "illegal memory access" on the cross-node MoE
+    #     all-to-all (cuMem×graph-capture regression on the current Jupiter
+    #     wheel). See 2026-05-27_minimax_dp2_compiled_capture_crash.md.
+    #   nccl_debug="INFO" / nccl_debug_subsys="INIT,COLL,GRAPH" →
+    #     NCCL_DEBUG / NCCL_DEBUG_SUBSYS. Surfaces connection/channel setup
+    #     so we can tell whether it happens DURING the profile_cudagraph_memory
+    #     capture window (the lazy-connection-during-capture hypothesis).
+    nccl_cumem_enable: Optional[bool] = None
+    nccl_debug: Optional[str] = None
+    nccl_debug_subsys: Optional[str] = None
     extra_args: Any = None
 
 

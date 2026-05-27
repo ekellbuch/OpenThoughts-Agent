@@ -107,6 +107,11 @@ _ENV_VAR_FIELDS = {
     "use_flashinfer_sampler": "VLLM_USE_FLASHINFER_SAMPLER",
     "use_flashinfer_moe_fp16": "VLLM_USE_FLASHINFER_MOE_FP16",
     "pynccl_pyspy_on_sigusr1": "VLLM_PYNCCL_PYSPY_ON_SIGUSR1",
+    # NCCL_CUMEM_ENABLE: false → "0". Disables NCCL cuMem buffer
+    # registration; candidate workaround for the cudagraph-capture illegal
+    # memory access on the cross-node MoE all-to-all. Propagates to Ray DP
+    # actors via vLLM's NCCL_ copy-prefix (vllm/ray/ray_env.py).
+    "nccl_cumem_enable": "NCCL_CUMEM_ENABLE",
 }
 
 # Numeric env var fields. Same idea as _ENV_VAR_FIELDS but the value
@@ -116,6 +121,11 @@ _ENV_VAR_FIELDS = {
 _NUMERIC_ENV_VAR_FIELDS = {
     "pynccl_trace_flush_interval_sec": "VLLM_PYNCCL_TRACE_FLUSH_INTERVAL_SEC",
     "pynccl_faulthandler_interval_sec": "VLLM_PYNCCL_FAULTHANDLER_INTERVAL_SEC",
+    # String passthrough (despite the "numeric" name — value is str-coerced).
+    # NCCL_DEBUG / NCCL_DEBUG_SUBSYS surface connection/channel setup so we can
+    # tell whether it happens DURING the profile_cudagraph_memory capture.
+    "nccl_debug": "NCCL_DEBUG",
+    "nccl_debug_subsys": "NCCL_DEBUG_SUBSYS",
 }
 
 
