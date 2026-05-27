@@ -85,7 +85,20 @@ terminal_bench:
       - RewardFileEmptyError
       - AgentEnvironmentTimeoutError
     default_error_treatment: zero
-    passthrough_exceptions:
+    # NOTE (2026-05-27): AgentTimeoutError / ContextLengthExceededError moved
+    # OUT of passthrough_exceptions into zero_exceptions. Passthrough routed
+    # these soft-limit trials through the *normal* (live-trajectory) path in
+    # terminal_bench_generator._process_trial_result, keeping the trial's
+    # dangling vLLM ObjectRefs + orphaned litellm async-callback closures
+    # alive in the training batch. That fed Ray's distributed-refcount race
+    # (reference_count.cc:1619 → SIGABRT / WorkerCrashedError) that killed the
+    # nemotron-junit chain (litellm +1 32769 VLLMValidationError +
+    # ContextLengthExceeded on near-budget prompts). zero_exceptions takes the
+    # EARLY-RETURN path (response_ids=[0], reward=0, included in baseline)
+    # which never consumes rollout_details, so no dangling refs enter
+    # training. Matches harbor_config.py schema default.
+    passthrough_exceptions: []
+    zero_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError
 
