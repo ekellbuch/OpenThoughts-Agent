@@ -1,0 +1,81 @@
+# MiniMax-M2.7-AWQ-4bit — DP=2 PIECEWISE-only cudagraph (2026-05-27)
+# https://huggingface.co/cyankiwi/MiniMax-M2.7-AWQ-4bit
+#
+# 32K context — Jupiter GH200 2-node TP=4 / DP=2, cudagraph_mode=PIECEWISE.
+#
+# THE NEEDLE-THREADER. Two confirmed DP>1 failure modes for MiniMax, both on
+# the cross-node MoE all-to-all collective:
+#   (1) compiled (FULL_AND_PIECEWISE): capturing the all-to-all into a FULL
+#       cudagraph → "illegal memory access in profile_cudagraph_memory" (DP1
+#       worker). Crash is in the FULL-capture path only.
+#   (2) eager: the all-to-all runs, but its reduce_scatterv chunk sizes are
+#       the per-DP-rank token counts; WITHOUT padding they desync across ranks
+#       → recv≠send → Gloo timeout (the v6a-v11 hang).
+# PIECEWISE runs the all-to-all EAGER at a split boundary (→ never FULL-captured
+# → dodges mode 1) but STILL pads batches to capture-size buckets (→ per-rank
+# token counts quantize to matching values → dodges mode 2). The intersection
+# of both escape conditions.
+# RESIDUAL RISK: mode 2 also involved sync_dp_state phase drift; PIECEWISE's
+# padding may not align that independently — this run is the test.
+#
+# DELTA vs dp2_cudagraph.yaml: + --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
+# (default with cudagraphs on is FULL_AND_PIECEWISE, which crashes at capture).
+#
+# Required launch flags: --num_nodes 2 --gpus_per_node 4
+
+engine:
+  type: vllm_local
+  model: cyankiwi/MiniMax-M2.7-AWQ-4bit
+  max_output_tokens: 8192
+  healthcheck_interval: 300
+  request_params:
+    temperature: 0.7
+    top_p: 0.95
+  vllm_local: {}
+backend:
+  type: ray
+  wait_for_endpoint: true
+  ray_cgraph_max_inflight_executions: 16
+  healthcheck_max_attempts: 160
+  healthcheck_retry_delay: 15
+vllm_server:
+  model_path: cyankiwi/MiniMax-M2.7-AWQ-4bit
+  num_replicas: 1
+  tensor_parallel_size: 4
+  pipeline_parallel_size: 1
+  data_parallel_size: 2
+  time_limit: '11:59:00'
+  max_model_len: 32768
+  max_num_seqs: 32
+  gpu_memory_utilization: 0.9
+  enable_expert_parallel: true
+  enable_auto_tool_choice: true
+  tool_call_parser: minimax_m2
+  reasoning_parser: minimax_m2
+  trust_remote_code: true
+  use_deep_gemm: false
+  use_flashinfer_sampler: false
+  use_flashinfer_moe_fp16: true
+  pynccl_trace_flush_interval_sec: 300
+  pynccl_pyspy_on_sigusr1: true
+  pynccl_faulthandler_interval_sec: 0
+  extra_args:
+  - --dtype
+  - bfloat16
+  - --kv-cache-dtype
+  - fp8
+  # cudagraphs ON but forced to PIECEWISE-only (NOT FULL_AND_PIECEWISE) so the
+  # cross-node MoE all-to-all runs eager at a split boundary (no FULL capture)
+  # while batches still pad to capture-size buckets (aligns DP token counts).
+  - --compilation-config
+  - '{"cudagraph_mode":"PIECEWISE"}'
+  - --chat-template-content-format
+  - string
+  - --max-num-batched-tokens
+  - '32768'
+  - --all2all-backend
+  - allgather_reducescatter
+  - --data-parallel-backend
+  - ray
+  - --data-parallel-size-local
+  - '1'
