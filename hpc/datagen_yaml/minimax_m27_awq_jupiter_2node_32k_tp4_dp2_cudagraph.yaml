@@ -1,0 +1,75 @@
+# MiniMax-M2.7-AWQ-4bit — DP=2 COMPILED (cudagraphs) — THE CANDIDATE FIX (2026-05-27)
+# https://huggingface.co/cyankiwi/MiniMax-M2.7-AWQ-4bit
+#
+# 32K context — Jupiter GH200 2-node TP=4 / DP=2, cudagraphs ON.
+#
+# RATIONALE: the v6a-v11 saga proved the DP=2 HANG is an eager-mode per-DP-rank
+# token-count desync in agrs reduce_scatterv (GLM-4.7 ran DP=4 fine COMPILED;
+# MiniMax was forced enforce_eager and hung at DP>1). The DP=1 cudagraph-debug
+# run (job 521367) then proved MiniMax runs CLEAN COMPILED on the current wheel
+# (144 traces, 0 recompile, 0 capture crash) — the JIT/capture issue that
+# forced enforce_eager is wheel-fixed (or was DP>1-specific).
+#
+# HYPOTHESIS: with cudagraphs ON, batches pad to fixed capture-size buckets →
+# per-DP-rank token counts quantize to matching values → num_tokens_across_dp
+# stays aligned → reduce_scatterv matches → NO eager×DP hang. If capture also
+# succeeds at DP=2 (the one untested piece — capture crash may have been
+# DP>1-specific), this is the real fix: DP>1 throughput, no eager, no patch.
+#
+# DELTA vs minimax_m27_awq_jupiter_2node_32k_tp4_dp2_agrs.yaml: --enforce-eager
+# REMOVED (cudagraphs ON). Everything else identical.
+#
+# Required launch flags: --num_nodes 2 --gpus_per_node 4
+
+engine:
+  type: vllm_local
+  model: cyankiwi/MiniMax-M2.7-AWQ-4bit
+  max_output_tokens: 8192
+  healthcheck_interval: 300
+  request_params:
+    temperature: 0.7
+    top_p: 0.95
+  vllm_local: {}
+backend:
+  type: ray
+  wait_for_endpoint: true
+  ray_cgraph_max_inflight_executions: 16
+  healthcheck_max_attempts: 160
+  healthcheck_retry_delay: 15
+vllm_server:
+  model_path: cyankiwi/MiniMax-M2.7-AWQ-4bit
+  num_replicas: 1
+  tensor_parallel_size: 4
+  pipeline_parallel_size: 1
+  data_parallel_size: 2
+  time_limit: '11:59:00'
+  max_model_len: 32768
+  max_num_seqs: 32
+  gpu_memory_utilization: 0.9
+  enable_expert_parallel: true
+  enable_auto_tool_choice: true
+  tool_call_parser: minimax_m2
+  reasoning_parser: minimax_m2
+  trust_remote_code: true
+  use_deep_gemm: false
+  use_flashinfer_sampler: false
+  use_flashinfer_moe_fp16: true
+  pynccl_trace_flush_interval_sec: 300
+  pynccl_pyspy_on_sigusr1: true
+  pynccl_faulthandler_interval_sec: 0
+  extra_args:
+  - --dtype
+  - bfloat16
+  - --kv-cache-dtype
+  - fp8
+  # NO --enforce-eager — cudagraphs ON (this is the whole point of the variant).
+  - --chat-template-content-format
+  - string
+  - --max-num-batched-tokens
+  - '32768'
+  - --all2all-backend
+  - allgather_reducescatter
+  - --data-parallel-backend
+  - ray
+  - --data-parallel-size-local
+  - '1'
