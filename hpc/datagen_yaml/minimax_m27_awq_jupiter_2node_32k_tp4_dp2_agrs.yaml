@@ -103,7 +103,14 @@ vllm_server:
   - bfloat16
   - --kv-cache-dtype
   - fp8
-  - --enforce-eager
+  # 2026-05-27: --enforce-eager REPLACED by fuse_allreduce_rms=false. The DP>1
+  # capture crash root cause was flashinfer's MNNVL fused allreduce (the
+  # fuse_allreduce_rms compilation pass) illegal-accessing on Jupiter's cross-node
+  # InfiniBand — NOT graph capture per se. Disabling that pass lets COMPILED DP>1
+  # capture cleanly (validated job 524021). Compiled = cudagraph throughput, no
+  # capture crash, no eager token-count hang. See reference_minimax_dp_mnnvl_fix.
+  - --compilation-config
+  - '{"pass_config":{"fuse_allreduce_rms":false}}'
   - --chat-template-content-format
   - string
   - --max-num-batched-tokens

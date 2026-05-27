@@ -63,7 +63,12 @@ vllm_server:
   - bfloat16
   - --kv-cache-dtype
   - fp8
-  - --enforce-eager
+  # 2026-05-27: --enforce-eager REPLACED by fuse_allreduce_rms=false (compiled DP>1).
+  # DP>1 capture crash was flashinfer MNNVL fused allreduce on cross-node IB, not
+  # capture itself; disabling fuse_allreduce_rms lets compiled DP=4 capture cleanly.
+  # See reference_minimax_dp_mnnvl_fix (DP=2 validated job 524021; DP=4 confirming).
+  - --compilation-config
+  - '{"pass_config":{"fuse_allreduce_rms":false}}'
   - --chat-template-content-format
   - string
   - --max-num-batched-tokens

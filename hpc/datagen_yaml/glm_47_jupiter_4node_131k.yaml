@@ -45,7 +45,13 @@ vllm_server:
   reasoning_parser: deepseek_v3
   trust_remote_code: true
   extra_args:
-  - --enforce-eager
+  # 2026-05-27: --enforce-eager REPLACED by fuse_allreduce_rms=false (compiled DP>1).
+  # GLM-4.7 hit the same DP>1 capture crash as MiniMax — root cause was flashinfer's
+  # MNNVL fused allreduce (fuse_allreduce_rms pass) illegal-accessing on cross-node
+  # IB, NOT graph capture. Disabling the pass lets compiled DP>1 capture cleanly.
+  # See reference_minimax_dp_mnnvl_fix (validated on MiniMax DP=2 job 524021).
+  - --compilation-config
+  - '{"pass_config":{"fuse_allreduce_rms":false}}'
   - --dtype
   - bfloat16
   - --kv-cache-dtype
