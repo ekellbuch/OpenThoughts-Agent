@@ -10,6 +10,7 @@ docker-not-gated, multi-host TPU is scaffolded but untested).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -136,6 +137,53 @@ class TracegenIrisLauncher(IrisLauncher):
                 "do that by default. Job will likely fail. Use --harbor_env=daytona.",
                 file=sys.stderr,
             )
+
+        # Pre-build Daytona snapshots on the launch host so harbor's
+        # `auto_snapshot=true` short-circuits to an existing ACTIVE snapshot
+        # at trial time instead of falling through to the declarative-build
+        # path — which produces "Sandbox not found. Please build the
+        # environment first." on every trial. The SLURM datagen/eval launchers
+        # do this via hpc/{datagen,eval}_launch_utils.py + hpc/launch.py's
+        # convert_parquet_to_tasks step; the iris launcher was missing both
+        # (the silent prereq that took Q4-v8 out tonight).
+        # No-op when harbor_env != "daytona" or DAYTONA_API_KEY is unset.
+        if args.harbor_env == "daytona" and args.tasks_input_path:
+            from hpc.hf_utils import resolve_dataset_path
+            from hpc.launch_utils import (
+                convert_parquet_to_tasks,
+                get_daytona_api_key_override,
+                maybe_prebuild_daytona_snapshots,
+            )
+            from hpc.snapshot_manager import OrgConfig
+            api_key = get_daytona_api_key_override(vars(args))
+            orgs = [OrgConfig(name="cli", api_key=api_key)] if api_key else []
+            if not orgs:
+                print(
+                    "[tracegen-iris] WARNING: harbor_env=daytona but DAYTONA_API_KEY unset on "
+                    "launch host; skipping snapshot pre-build. Expect 'Sandbox not found' "
+                    "at trial time unless snapshots are already warm in Daytona.",
+                    file=sys.stderr, flush=True,
+                )
+            else:
+                from hpc.hf_utils import is_raw_tasks_directory
+                resolved_tasks = resolve_dataset_path(args.tasks_input_path, verbose=True)
+                # HF datasets ship a single tasks.parquet; explode into task
+                # directories so snapshot_manager can hash the environments.
+                # hpc/launch.py:232 + hpc/eval_launch_utils.py:108 do this.
+                if not is_raw_tasks_directory(resolved_tasks):
+                    resolved_tasks = convert_parquet_to_tasks(
+                        snapshot_dir=resolved_tasks,
+                        dataset_identifier=args.tasks_input_path,
+                    )
+                print(
+                    f"[tracegen-iris] Pre-building Daytona snapshots from {resolved_tasks} ...",
+                    flush=True,
+                )
+                maybe_prebuild_daytona_snapshots(
+                    [resolved_tasks],
+                    harbor_env=args.harbor_env,
+                    orgs=orgs,
+                )
 
     def build_task_command(self, args: argparse.Namespace, remote_output_dir: str) -> List[str]:
         cmd: List[str] = [

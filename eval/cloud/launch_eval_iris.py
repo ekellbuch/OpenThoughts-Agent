@@ -141,6 +141,48 @@ class EvalIrisLauncher(IrisLauncher):
                 file=sys.stderr,
             )
 
+        # Pre-build Daytona snapshots on the launch host so harbor's
+        # `auto_snapshot=true` short-circuits to an existing ACTIVE snapshot
+        # at trial time. Without this, every trial dies with "Sandbox not
+        # found. Please build the environment first." (See the matching hook
+        # in data/cloud/launch_tracegen_iris.py and SLURM's
+        # hpc/eval_launch_utils.py:195.) Only --dataset_path goes through
+        # this path; --dataset (harbor slug) is managed by harbor itself.
+        # No-op when harbor_env != "daytona" or DAYTONA_API_KEY is unset.
+        if args.harbor_env == "daytona" and args.dataset_path:
+            from hpc.hf_utils import is_raw_tasks_directory, resolve_dataset_path
+            from hpc.launch_utils import (
+                convert_parquet_to_tasks,
+                get_daytona_api_key_override,
+                maybe_prebuild_daytona_snapshots,
+            )
+            from hpc.snapshot_manager import OrgConfig
+            api_key = get_daytona_api_key_override(vars(args))
+            orgs = [OrgConfig(name="cli", api_key=api_key)] if api_key else []
+            if not orgs:
+                print(
+                    "[eval-iris] WARNING: harbor_env=daytona but DAYTONA_API_KEY unset on "
+                    "launch host; skipping snapshot pre-build. Expect 'Sandbox not found' "
+                    "at trial time unless snapshots are already warm in Daytona.",
+                    file=sys.stderr, flush=True,
+                )
+            else:
+                resolved_tasks = resolve_dataset_path(args.dataset_path, verbose=True)
+                if not is_raw_tasks_directory(resolved_tasks):
+                    resolved_tasks = convert_parquet_to_tasks(
+                        snapshot_dir=resolved_tasks,
+                        dataset_identifier=args.dataset_path,
+                    )
+                print(
+                    f"[eval-iris] Pre-building Daytona snapshots from {resolved_tasks} ...",
+                    flush=True,
+                )
+                maybe_prebuild_daytona_snapshots(
+                    [resolved_tasks],
+                    harbor_env=args.harbor_env,
+                    orgs=orgs,
+                )
+
     def build_task_command(self, args: argparse.Namespace, remote_output_dir: str) -> List[str]:
         cmd: List[str] = [
             "python", "eval/local/run_eval.py",
