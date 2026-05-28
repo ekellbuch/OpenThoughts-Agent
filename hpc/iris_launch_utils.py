@@ -184,14 +184,28 @@ class IrisLauncher:
                              "OT-Agent and harbor already validate compatibility on resume.")
 
         sg = parser.add_argument_group("secrets")
-        sg.add_argument("--secrets-env", "--secrets_env", default=None,
+        # Default to $OT_AGENT_SECRETS_ENV, then ~/Documents/secrets.env if it
+        # exists — the canonical location for the user's credentials file.
+        # File values override the os.environ passthrough below, so this is
+        # the safer-by-default path: without it, a stale shell-cached
+        # DAYTONA_API_KEY can ride into the iris worker and cause harbor's
+        # auto_snapshot path to fail with "Sandbox not found" even when the
+        # snapshot is ACTIVE on the right org.
+        _default_secrets = os.environ.get("OT_AGENT_SECRETS_ENV") or os.path.expanduser(
+            "~/Documents/secrets.env"
+        )
+        if not os.path.isfile(_default_secrets):
+            _default_secrets = None
+        sg.add_argument("--secrets-env", "--secrets_env", default=_default_secrets,
                         help="Path to a KEY=VALUE env file (~/Documents/secrets.env style). "
                              "Every entry is loaded into the iris task's env_vars at submit "
                              "time. Pairs with the hardcoded launcher passthrough list "
                              "(DAYTONA_API_KEY, OPENAI_API_KEY, etc.) — file values win on "
                              "conflict, explicit `-e` iris-CLI flags can't override since we "
                              "use IrisClient.submit() directly. Lines starting with '#' and "
-                             "blank lines are ignored; leading 'export ' is stripped.")
+                             "blank lines are ignored; leading 'export ' is stripped. "
+                             "Defaults to $OT_AGENT_SECRETS_ENV, else ~/Documents/secrets.env "
+                             "if it exists.")
         # NOTE: --dry-run / --dry_run is provided by hpc.arg_groups.add_model_compute_args
         # which subclass launchers call from add_task_specific_args. We don't redeclare
         # it here to avoid argparse conflicts.
@@ -214,6 +228,49 @@ class IrisLauncher:
 
     def add_task_specific_args(self, parser: argparse.ArgumentParser) -> None:
         raise NotImplementedError
+
+    @staticmethod
+    def load_secrets_env_into_os_environ(secrets_env: Optional[str]) -> int:
+        """Read ``secrets_env`` (KEY=VALUE) into ``os.environ`` on the launch host.
+
+        Called early in ``normalize_paths`` so launch-host hooks that read
+        ``os.environ`` directly (e.g., ``get_daytona_api_key_override`` in the
+        snapshot pre-build) see the file values, not the shell's possibly-stale
+        cache. The iris worker still gets the same values via the existing
+        ``--secrets-env`` parser in ``run()``.
+
+        Uses ``setdefault`` semantics: a value already in ``os.environ`` (e.g.
+        an explicit shell export by the user this session) wins. This matches
+        the SkyPilot precedent where the file just supplies missing entries.
+
+        Returns the number of keys loaded. Returns 0 silently when
+        ``secrets_env`` is None or the file is missing.
+        """
+        if not secrets_env:
+            return 0
+        path = Path(secrets_env).expanduser().resolve()
+        if not path.is_file():
+            return 0
+        loaded = 0
+        for raw_line in path.read_text().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            if "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                v = v[1:-1]
+            if not k:
+                continue
+            if k not in os.environ:
+                os.environ[k] = v
+                loaded += 1
+        return loaded
 
     def normalize_paths(self, args: argparse.Namespace) -> None:
         """Subclass hook: validate/normalize paths and infer defaults."""

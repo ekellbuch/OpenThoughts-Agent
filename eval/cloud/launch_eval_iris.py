@@ -141,6 +141,16 @@ class EvalIrisLauncher(IrisLauncher):
                 file=sys.stderr,
             )
 
+        # Load --secrets-env into os.environ on the launch host BEFORE
+        # the snapshot pre-build hook (see tracegen launcher for rationale).
+        loaded = self.load_secrets_env_into_os_environ(getattr(args, "secrets_env", None))
+        if loaded:
+            print(
+                f"[eval-iris] Secrets:    loaded {loaded} entries from "
+                f"{args.secrets_env} into os.environ for launch-host hooks",
+                flush=True,
+            )
+
         # Pre-build Daytona snapshots on the launch host so harbor's
         # `auto_snapshot=true` short-circuits to an existing ACTIVE snapshot
         # at trial time. Without this, every trial dies with "Sandbox not

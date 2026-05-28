@@ -138,6 +138,19 @@ class TracegenIrisLauncher(IrisLauncher):
                 file=sys.stderr,
             )
 
+        # Load --secrets-env into os.environ on the launch host BEFORE
+        # the snapshot pre-build hook (which reads os.environ via
+        # get_daytona_api_key_override). The same file is also parsed into
+        # the iris worker's env_vars later in run() so the worker sees the
+        # same values.
+        loaded = self.load_secrets_env_into_os_environ(getattr(args, "secrets_env", None))
+        if loaded:
+            print(
+                f"[tracegen-iris] Secrets:    loaded {loaded} entries from "
+                f"{args.secrets_env} into os.environ for launch-host hooks",
+                flush=True,
+            )
+
         # Pre-build Daytona snapshots on the launch host so harbor's
         # `auto_snapshot=true` short-circuits to an existing ACTIVE snapshot
         # at trial time instead of falling through to the declarative-build
