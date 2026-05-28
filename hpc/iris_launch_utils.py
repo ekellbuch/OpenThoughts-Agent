@@ -40,11 +40,6 @@ from typing import List, Optional
 from hpc.local_paths import PATHS as LOCAL_PATHS, ensure as ensure_local_paths
 from hpc.iris_job_registry import register_submission, get_latest_by_job_name
 
-# Default chips per TPU host VM on every family currently exposed by marin
-# (ct5lp-hightpu-4t, ct6e-standard-4t, ct5p-hightpu-4t, ct4p-hightpu-4t).
-# If marin ever provisions ``-8t`` host variants this needs revisiting.
-CHIPS_PER_TPU_HOST = 4
-
 DEFAULT_TASK_IMAGE = "ghcr.io/open-thoughts/openthoughts-agent:tpu"
 DEFAULT_CLUSTER_CONFIG = "lib/iris/config/marin.yaml"
 DEFAULT_PRIORITY = "interactive"
@@ -57,19 +52,22 @@ DEFAULT_GCS_OUTPUT_ROOT = "gs://marin-eu-west4/ot-agent"
 
 
 def parse_tpu_vm_count(tpu_spec: Optional[str]) -> int:
-    """Return the host-VM count implied by a TPU variant like ``v6e-16``.
+    """Return the host-VM count for a TPU variant via iris's topology table.
 
-    Chips per host is 4 on every family currently configured in marin's
-    cluster YAML, so ``vm_count = chips / 4``. Returns 1 when no TPU is
-    requested or the spec doesn't end in ``-<int>``.
+    Delegates to iris ``get_tpu_topology`` — the same source iris uses to
+    auto-set replicas — so the count matches reality across families. The
+    old ``chips / 4`` arithmetic was wrong on two axes: chips-per-host
+    varies (v6e-8 packs 8 chips on a single host, v5p hosts have 4), and
+    v5p suffixes count cores, not chips (``v5p-32`` = 32 cores = 16 chips =
+    4 hosts, not ``32 / 4 = 8``). Returns 1 when no TPU is requested; an
+    unrecognized variant raises ``ValueError`` from ``get_tpu_topology``
+    (fail fast rather than guess).
     """
     if not tpu_spec:
         return 1
-    try:
-        chips = int(tpu_spec.rsplit("-", 1)[-1])
-    except ValueError:
-        return 1
-    return max(1, chips // CHIPS_PER_TPU_HOST)
+    from iris.cli.job import get_tpu_topology
+
+    return get_tpu_topology(tpu_spec).vm_count
 
 
 class IrisLauncher:
@@ -114,9 +112,19 @@ class IrisLauncher:
                        default=DEFAULT_TASK_IMAGE,
                        help=f"Container image for the task (default: {DEFAULT_TASK_IMAGE}).")
         g.add_argument("--tpu", default=self.default_tpu,
-                       help=f"TPU variant (default: {self.default_tpu}). For multi-host slices "
-                            "(e.g. v6e-8, v6e-16) the launcher will gang-schedule replicas — "
-                            "**UNTESTED in v1**, see module docstring.")
+                       help=f"TPU variant (default: {self.default_tpu}).")
+        g.add_argument("--replicas", type=int, default=1,
+                       help="Replica count passed to iris submit (default 1). "
+                            "For a multi-host TPU slice iris REQUIRES one task "
+                            "per VM and auto-scales replicas=1 -> vm_count "
+                            "(iris adjust_tpu_replicas); those tasks form ONE "
+                            "JAX device mesh (jax.distributed.initialize) that a "
+                            "single engine spans — this is required, not "
+                            "duplication. Use N*vm_count to request N slices. "
+                            "NOTE: run_tracegen currently runs harbor on EVERY "
+                            "task; the per-host duplication is the harbor layer, "
+                            "not the replica count (fix = gate harbor to the "
+                            "driver rank, see #69).")
         g.add_argument("--cpu", type=float, default=8.0,
                        help="CPU cores for the entrypoint task (default 8).")
         g.add_argument("--memory", default="256GB",
@@ -289,6 +297,21 @@ class IrisLauncher:
 
         command = self.build_task_command(args, remote_output_dir)
         env_vars = self.build_env(args)
+
+        # iris-serve gating. iris runs the entrypoint on EVERY VM of the slice
+        # (one task/VM; adjust_tpu_replicas scales replicas=1 -> vm_count), so
+        # the worker's LocalHarborRunner.run() must (a) bring up ONE cross-host
+        # Ray cluster via scripts/vllm/start_vllm_iris_controller.py instead of
+        # the SLURM/single-host start_vllm_ray_controller.py, and (b) gate
+        # harbor to the driver rank (IRIS_TASK_ID==0). This env var is the
+        # signal — it is only ever set here, on the iris entrypoint path. The
+        # rendezvous dir is a shared gs:// location (under the job's GCS output
+        # prefix) where rank 0 publishes the Ray head IP for the worker ranks.
+        env_vars.setdefault("OT_AGENT_IRIS_SERVE", "1")
+        env_vars.setdefault(
+            "OT_AGENT_IRIS_RENDEZVOUS_DIR",
+            f"{remote_output_dir.rstrip('/')}/_ray_rendezvous",
+        )
 
         # Default extras = ["datagen-tpu"]; allow override via repeated --extras
         # or --extras '' (single empty) to install nothing extra.
@@ -590,7 +613,16 @@ class IrisLauncher:
             resources = build_resources(args.tpu, None, cpu=args.cpu, memory=args.memory, disk=args.disk)
             tpu_variants = build_tpu_alternatives(args.tpu)
             primary_tpu = tpu_variants[0] if tpu_variants else None
-            replicas, coscheduling = resolve_multinode_defaults(primary_tpu, None, None)
+            # --replicas defaults to 1; for a multi-host TPU iris's
+            # adjust_tpu_replicas (in client.submit) auto-scales 1 -> vm_count
+            # because every VM in the slice must run a task to join the one
+            # JAX device mesh. So this does NOT reduce the task count on a
+            # multi-host slice (that is required for the mesh) — pass N*vm_count
+            # to request N slices. The per-host *harbor* duplication is a
+            # separate run_tracegen issue (run harbor on the driver rank only).
+            replicas, coscheduling = resolve_multinode_defaults(
+                primary_tpu, None, args.replicas
+            )
             resources_proto = resources.to_proto()
             constraints = build_job_constraints(
                 resources_proto=resources_proto,

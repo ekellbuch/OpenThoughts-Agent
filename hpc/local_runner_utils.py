@@ -379,6 +379,66 @@ def start_vllm_controller(
     return process
 
 
+def start_vllm_iris_controller(
+    model: str,
+    host: str,
+    ray_port: int,
+    api_port: int,
+    tensor_parallel_size: int,
+    pipeline_parallel_size: int,
+    data_parallel_size: int,
+    endpoint_path: Path,
+    controller_script: Path,
+    log_path: Optional[Path] = None,
+    served_model_name: Optional[str] = None,
+    extra_cli_args: Optional[List[str]] = None,
+    extra_env_vars: Optional[dict] = None,
+) -> ManagedProcess:
+    """Start the iris multi-host vLLM controller (start_vllm_iris_controller.py).
+
+    Unlike :func:`start_vllm_controller`, the iris controller bootstraps the
+    cross-host Ray cluster itself (head on IRIS_TASK_ID==0, workers elsewhere),
+    discovers the head IP at runtime, and takes ``--ray-port`` rather than a
+    caller-supplied ``--ray-address``. The rendezvous dir is read from
+    ``OT_AGENT_IRIS_RENDEZVOUS_DIR`` (set by the iris launcher). On worker ranks
+    this process blocks as a Ray node and never writes the endpoint JSON.
+    """
+    env = os.environ.copy()
+    env["VLLM_MODEL_PATH"] = model
+    env["PYTHONUNBUFFERED"] = "1"
+    if extra_env_vars:
+        env.update(extra_env_vars)
+
+    cmd = [
+        sys.executable,
+        str(controller_script),
+        "--host",
+        host,
+        "--port",
+        str(api_port),
+        "--model",
+        model,
+        "--ray-port",
+        str(ray_port),
+        "--tensor-parallel-size",
+        str(tensor_parallel_size),
+        "--pipeline-parallel-size",
+        str(pipeline_parallel_size),
+        "--data-parallel-size",
+        str(data_parallel_size),
+        "--endpoint-json",
+        str(endpoint_path),
+    ]
+    if served_model_name:
+        cmd.extend(["--served-model-name", served_model_name])
+    if extra_cli_args:
+        cmd.extend(extra_cli_args)
+
+    stdout, stderr, log_file = _open_log_file(log_path)
+    popen = subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env=env)
+    return ManagedProcess(name="vllm_iris_controller", proc=popen, _log_handle=log_file)
+
+
 def wait_for_endpoint(
     endpoint_path: Path,
     controller: ManagedProcess,
@@ -778,15 +838,29 @@ class LocalHarborRunner:
             self._fd_monitor = None
 
         terminate_processes(self.processes[::-1])
-        # Only stop Ray if we started it (local vLLM engines)
+        # Only stop Ray if we started it (local vLLM engines). In iris-serve
+        # mode the iris controller owns the Ray cluster and runs its own
+        # `ray stop` on shutdown, so we must not race it here.
         needs_local_vllm = getattr(self.args, "_needs_local_vllm", True)
-        if needs_local_vllm:
+        iris_serve = os.environ.get("OT_AGENT_IRIS_SERVE") == "1"
+        if needs_local_vllm and not iris_serve:
             subprocess.run(["ray", "stop", "--force"], check=False)
 
     def run(self) -> None:
         """Main entry point - start services and run Harbor."""
         args = self.args
         needs_local_vllm = getattr(args, "_needs_local_vllm", True)
+
+        # iris-serve mode: iris.launch sets OT_AGENT_IRIS_SERVE=1 and runs this
+        # entrypoint on EVERY VM of the slice (one task/VM, IRIS_TASK_ID per
+        # task). In this mode the engine is brought up by ONE cross-host Ray
+        # cluster via start_vllm_iris_controller.py (which manages Ray itself —
+        # so we must NOT call start_ray()), and harbor runs on the driver rank
+        # only. Non-iris (SLURM/local) paths are unchanged.
+        iris_serve = needs_local_vllm and os.environ.get("OT_AGENT_IRIS_SERVE") == "1"
+        # IRIS_TASK_ID is the full task path (e.g. "/user/job/0"); the rank is
+        # the trailing path segment, not a leading "rank:..." token.
+        iris_rank = int(os.environ.get("IRIS_TASK_ID", "0").rsplit("/", 1)[-1])
 
         # Set up directories
         experiments_dir, logs_dir = self._setup_directories()
@@ -823,7 +897,29 @@ class LocalHarborRunner:
         apply_numa_affinity(gpu_id=0)
 
         # Start Ray and vLLM only if needed (local vLLM engine)
-        if needs_local_vllm:
+        if iris_serve:
+            # iris path: start_vllm_iris_controller.py bootstraps ONE cross-host
+            # Ray cluster (head on rank 0, workers on ranks 1..N) and runs the
+            # api_server on the head. It manages Ray itself, so we do NOT call
+            # start_ray() here. On non-0 ranks the controller blocks as a Ray
+            # worker until SIGTERM and never writes the endpoint JSON.
+            vllm_proc = start_vllm_iris_controller(
+                model=args.model,
+                host=args.host,
+                ray_port=args.ray_port,
+                api_port=args.api_port,
+                tensor_parallel_size=args.tensor_parallel_size,
+                pipeline_parallel_size=args.pipeline_parallel_size,
+                data_parallel_size=args.data_parallel_size,
+                endpoint_path=self._endpoint_json,
+                controller_script=self.repo_root / "scripts" / "vllm" / "start_vllm_iris_controller.py",
+                log_path=controller_log,
+                served_model_name=getattr(args, "_served_model_id", None),
+                extra_cli_args=getattr(args, "_vllm_cli_args", []),
+                extra_env_vars=getattr(args, "_vllm_env_vars", {}),
+            )
+            self.processes.append(vllm_proc)
+        elif needs_local_vllm:
             controller_script = self.repo_root / "scripts" / "vllm" / "start_vllm_ray_controller.py"
 
             # Convert memory from GB to bytes if provided
@@ -865,6 +961,21 @@ class LocalHarborRunner:
             print(f"[engine] Using {engine_type} API engine - skipping local Ray/vLLM startup")
 
         try:
+            # iris worker ranks (IRIS_TASK_ID != 0) are Ray worker nodes for
+            # the head's RayDistributedExecutor — the iris controller blocks
+            # them until SIGTERM. They must NOT wait for the endpoint or run
+            # harbor (only rank 0 serves the API and drives harbor). Block on
+            # the controller so the task stays alive while the head serves,
+            # then return.
+            if iris_serve and iris_rank != 0:
+                print(
+                    f"[iris] Worker rank {iris_rank}: acting as Ray worker node; "
+                    "skipping endpoint wait + harbor. Blocking on controller.",
+                    flush=True,
+                )
+                vllm_proc.proc.wait()
+                return
+
             # Wait for endpoint and run health check (only for local vLLM)
             if needs_local_vllm:
                 wait_for_endpoint(self._endpoint_json, vllm_proc)
@@ -927,6 +1038,7 @@ __all__ = [
     "ManagedProcess",
     "start_ray",
     "start_vllm_controller",
+    "start_vllm_iris_controller",
     "wait_for_endpoint",
     "terminate_processes",
     # File descriptor monitoring
