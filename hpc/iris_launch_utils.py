@@ -239,9 +239,14 @@ class IrisLauncher:
         cache. The iris worker still gets the same values via the existing
         ``--secrets-env`` parser in ``run()``.
 
-        Uses ``setdefault`` semantics: a value already in ``os.environ`` (e.g.
-        an explicit shell export by the user this session) wins. This matches
-        the SkyPilot precedent where the file just supplies missing entries.
+        **File values override existing os.environ entries.** An explicit
+        secrets file is more intentional than a shell-cached value, and the
+        common failure mode is a stale ``DAYTONA_API_KEY`` lingering in a
+        zsh shell that gets propagated to the iris worker — producing
+        "Sandbox not found" on every harbor trial because the snapshot
+        lives on a different Daytona org. This matches the existing
+        worker-side semantics at ``run()``'s ``--secrets-env`` parser
+        (``env_vars[k] = v  # file values override passthrough``).
 
         Returns the number of keys loaded. Returns 0 silently when
         ``secrets_env`` is None or the file is missing.
@@ -267,9 +272,8 @@ class IrisLauncher:
                 v = v[1:-1]
             if not k:
                 continue
-            if k not in os.environ:
-                os.environ[k] = v
-                loaded += 1
+            os.environ[k] = v  # file overrides shell — see docstring
+            loaded += 1
         return loaded
 
     def normalize_paths(self, args: argparse.Namespace) -> None:
