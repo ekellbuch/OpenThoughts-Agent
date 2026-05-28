@@ -2,17 +2,29 @@
 """
 Delete Daytona sandboxes in the RL org that have not had an event in over an hour.
 
-Uses the Daytona REST API directly to list all active sandboxes, then deletes
-any whose `updatedAt` timestamp is older than the configured threshold.
+Uses the official Daytona Python SDK (`daytona` package, v0.180+) to list all
+active sandboxes and delete any whose `lastActivityAt` (was: `updatedAt`)
+timestamp is older than the configured threshold.
 
-Migrated 2026-05-18 for the upcoming Daytona API breaking change (May 24,
-2026): switched from the deprecated GET /api/sandbox/paginated + offset
-pagination (`page=N`) to GET /api/sandbox + cursor pagination
-(`cursor=<token>`). The legacy /api/sandbox/paginated endpoint is being
-retired on 2026-06-10; the new /api/sandbox endpoint returns a paginated
-response object with `nextCursor` for forward iteration. The script
-auto-detects the response shape so it works against both pre- and post-
-cutover servers.
+History:
+    * 2026-05-18 — switched from the deprecated GET /api/sandbox/paginated
+      (offset pagination) to GET /api/sandbox (cursor pagination) ahead of
+      Daytona's 2026-05-24 breaking change.
+    * 2026-05-28 — migrated from raw `requests` to the `daytona` SDK after the
+      hand-rolled query string started returning HTTP 400. Three things had
+      changed server-side post-cutover:
+        1. `states` is now a *multi*-value query param (repeated
+           `?states=started`), not a single comma-separated string.
+        2. `sort=updatedAt` is no longer a valid value — the new enum is
+           `name | cpu | memoryGib | diskGib | lastActivityAt | createdAt`
+           (use `lastActivityAt` to get the old "most-recently-active first"
+           ordering).
+        3. The `updatedAt` response field still exists for backward
+           compatibility, but `lastActivityAt` is what the freshness check
+           should hang off of going forward. We prefer `last_activity_at` and
+           fall back to `updated_at` for any pre-cutover hosts.
+      Using the SDK insulates us from future server-side wire changes — the
+      SDK is regenerated from Daytona's OpenAPI spec and tracks the API.
 
 Usage:
     # Dry run (default) — shows what would be deleted
@@ -35,14 +47,21 @@ import sys
 import time
 from datetime import datetime, timezone
 
-import requests
 from dotenv import load_dotenv
+
+from daytona import (
+    Daytona,
+    DaytonaConfig,
+    ListSandboxesQuery,
+    SandboxListSortDirection,
+    SandboxListSortField,
+    SandboxState,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-API_BASE = "https://app.daytona.io/api"
-PAGE_LIMIT = 200  # max allowed by the paginated endpoint
+PAGE_LIMIT = 100  # per-page fetch size; SDK pages through automatically
 DEFAULT_THRESHOLD_MINUTES = 60
 
 # Try to load secrets.env from a few common locations
@@ -74,101 +93,68 @@ def get_api_key(env_var: str = "DAYTONA_API_KEY") -> str:
     return key
 
 
-def headers(api_key: str) -> dict:
-    return {"Authorization": f"Bearer {api_key}"}
-
-
 # ---------------------------------------------------------------------------
 # API helpers
 # ---------------------------------------------------------------------------
 
-def list_started_sandboxes(api_key: str) -> list[dict]:
-    """Fetch all sandboxes in 'started' state, sorted by updatedAt desc.
+def _last_seen_ts(sb) -> str | None:
+    """Pick the freshest activity timestamp available on a Sandbox object.
 
-    Uses cursor-based pagination on GET /api/sandbox (the post-2026-05-24
-    breaking-change endpoint). Falls back to interpreting a flat-list
-    response in case we hit a pre-cutover server — that path will be dead
-    after 2026-05-24 but keeps the script working through the cutover
-    window.
+    Prefers `last_activity_at` (post-cutover canonical), falls back to
+    `updated_at` (pre-cutover field still present on the response).
     """
-    sandboxes: list[dict] = []
-    cursor: str | None = None
-
-    while True:
-        params: dict[str, object] = {
-            "states": "started",
-            "sort": "updatedAt",
-            "order": "desc",
-            "limit": PAGE_LIMIT,
-        }
-        if cursor:
-            params["cursor"] = cursor
-
-        resp = requests.get(
-            f"{API_BASE}/sandbox",
-            headers=headers(api_key),
-            params=params,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-        # Post-2026-05-24 shape: paginated response object with `items` +
-        # `nextCursor`. Pre-cutover shape: bare list. Handle both.
-        if isinstance(data, list):
-            sandboxes.extend(data)
-            break  # flat list = no pagination available; one shot only
-
-        items = data.get("items", [])
-        if not items:
-            break
-        sandboxes.extend(items)
-
-        # Accept either `nextCursor` (per the migration doc) or a few
-        # plausible variants in case Daytona ships a slightly different
-        # field name. Stop when no cursor is returned.
-        cursor = (
-            data.get("nextCursor")
-            or data.get("next_cursor")
-            or data.get("cursor")
-        )
-        if not cursor:
-            break
-
-    return sandboxes
+    return getattr(sb, "last_activity_at", None) or getattr(sb, "updated_at", None)
 
 
-def delete_sandbox(api_key: str, sandbox_id: str) -> bool:
-    """Delete a single sandbox. Returns True on success."""
-    resp = requests.delete(
-        f"{API_BASE}/sandbox/{sandbox_id}",
-        headers=headers(api_key),
-        timeout=30,
+def list_started_sandboxes(client: Daytona) -> list:
+    """Fetch all sandboxes in 'started' state, sorted by last activity desc.
+
+    The SDK transparently handles cursor pagination; we just iterate the
+    generator.
+    """
+    query = ListSandboxesQuery(
+        states=[SandboxState.STARTED],
+        sort=SandboxListSortField.LASTACTIVITYAT,
+        order=SandboxListSortDirection.DESC,
+        limit=PAGE_LIMIT,
     )
-    return resp.status_code in (200, 204, 202)
+    return list(client.list(query))
+
+
+def delete_sandbox(sb) -> bool:
+    """Delete a single sandbox. Returns True on success."""
+    try:
+        sb.delete()
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"    error: {type(e).__name__}: {e}")
+        return False
 
 
 # ---------------------------------------------------------------------------
 # Core logic
 # ---------------------------------------------------------------------------
 
-def find_stale_sandboxes(
-    sandboxes: list[dict], threshold_minutes: int
-) -> list[dict]:
-    """Return sandboxes whose updatedAt is older than threshold_minutes ago."""
+def find_stale_sandboxes(sandboxes: list, threshold_minutes: int) -> list:
+    """Return sandboxes whose last-activity timestamp is older than threshold_minutes ago."""
     now = datetime.now(timezone.utc)
     stale = []
 
     for sb in sandboxes:
-        updated_str = sb.get("updatedAt")
+        updated_str = _last_seen_ts(sb)
         if not updated_str:
             continue
         # Parse ISO-8601 timestamp (with or without trailing Z)
         updated_str = updated_str.replace("Z", "+00:00")
-        updated_at = datetime.fromisoformat(updated_str)
+        try:
+            updated_at = datetime.fromisoformat(updated_str)
+        except ValueError:
+            continue
         age_minutes = (now - updated_at).total_seconds() / 60.0
         if age_minutes > threshold_minutes:
-            sb["_age_minutes"] = round(age_minutes, 1)
+            # Attach for the report; using a plain attribute since these are
+            # SDK Sandbox instances, not dicts.
+            sb._age_minutes = round(age_minutes, 1)
             stale.append(sb)
 
     return stale
@@ -198,10 +184,11 @@ def main():
     args = parser.parse_args()
 
     api_key = get_api_key(args.api_key_env)
+    client = Daytona(DaytonaConfig(api_key=api_key))
 
     # 1. List all active sandboxes
     print("Fetching all started sandboxes …")
-    sandboxes = list_started_sandboxes(api_key)
+    sandboxes = list_started_sandboxes(client)
     print(f"  Found {len(sandboxes)} started sandboxes.")
 
     # 2. Find stale ones
@@ -213,12 +200,14 @@ def main():
         return
 
     # 3. Print summary
-    print(f"{'ID':<40} {'Age (min)':>10}  {'Created':<26} {'Updated':<26}")
+    print(f"{'ID':<40} {'Age (min)':>10}  {'Created':<26} {'Last Activity':<26}")
     print("-" * 110)
     for sb in stale:
+        created = sb.created_at or "n/a"
+        last_seen = _last_seen_ts(sb) or "n/a"
         print(
-            f"{sb['id']:<40} {sb['_age_minutes']:>10.1f}  "
-            f"{sb['createdAt']:<26} {sb['updatedAt']:<26}"
+            f"{sb.id:<40} {sb._age_minutes:>10.1f}  "
+            f"{created:<26} {last_seen:<26}"
         )
 
     if not args.delete:
@@ -231,13 +220,12 @@ def main():
     failed = 0
 
     for i, sb in enumerate(stale, 1):
-        sid = sb["id"]
-        ok = delete_sandbox(api_key, sid)
+        ok = delete_sandbox(sb)
         if ok:
             success += 1
         else:
             failed += 1
-            print(f"  FAILED to delete {sid}")
+            print(f"  FAILED to delete {sb.id}")
 
         # Progress every 50
         if i % 50 == 0 or i == len(stale):
