@@ -313,6 +313,13 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             cpus_per_node=cpus_per_node,
             vllm_server_config=vllm_server_config,
             ray_object_store_gb=float(exp_args.get("ray_object_store_gb", 40.0)),
+            # 2026-05-28: thread the YAML `backend.healthcheck_max_attempts` /
+            # `healthcheck_retry_delay` through to the JobConfig so VLLMConfig
+            # receives the user-intended value instead of the previous 120-attempt
+            # default. _prepare_datagen_configuration stores the parsed values at
+            # exp_args["trace_health_{max_attempts,retry_delay}"] (line 191-192).
+            health_max_attempts=exp_args.get("trace_health_max_attempts"),
+            health_retry_delay=exp_args.get("trace_health_retry_delay"),
         )
 
         # Write task config JSON
@@ -532,6 +539,13 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
                 chunk_index=chunk_idx,
                 num_chunks=num_chunks if is_chunked else None,
                 ray_object_store_gb=float(exp_args.get("ray_object_store_gb", 40.0)),
+                # 2026-05-28: thread the YAML `backend.healthcheck_max_attempts` /
+                # `healthcheck_retry_delay` through to the JobConfig so VLLMConfig
+                # receives the user-intended value instead of the previous 120-attempt
+                # default. _prepare_datagen_configuration stores the parsed values at
+                # exp_args["trace_health_{max_attempts,retry_delay}"] (line 191-192).
+                health_max_attempts=exp_args.get("trace_health_max_attempts"),
+                health_retry_delay=exp_args.get("trace_health_retry_delay"),
             )
 
             trace_config_path = exp_paths.configs / f"{chunk_job_name}_tracegen_config.json"
@@ -610,8 +624,14 @@ class TaskgenJobConfig:
     vllm_server_config: Dict[str, Any] = field(default_factory=dict)  # Raw vllm_server config from YAML
 
     # Health check settings
-    health_max_attempts: int = 120
-    health_retry_delay: int = 15
+    # 2026-05-28: was `int = 120` (a hardcoded ~30-min cap that silently overrode
+    # YAML `backend.healthcheck_max_attempts`). Changed to Optional[int] = None so
+    # the value from the datagen YAML (threaded via exp_args["trace_health_max_attempts"]
+    # at the construction site) flows through to VLLMConfig. When None, VLLMConfig's
+    # own default (currently 480 = 2h budget) wins. See
+    # /Users/benjaminfeuer/Documents/notes/ot-agent/agent_logs/2026-05-28_glm51_cross_node_tp_proxy_failure.md
+    health_max_attempts: Optional[int] = None
+    health_retry_delay: Optional[int] = None
     healthcheck_interval: int = 300
 
     # Extra args
@@ -731,17 +751,25 @@ class TaskgenJobRunner:
             _, tiktoken_env = setup_gpt_oss_tiktoken()
             extra_env_vars.update(tiktoken_env)
 
-        vllm_cfg = VLLMConfig(
+        # 2026-05-28: only forward health-check overrides when explicitly set
+        # (YAML value plumbed through TaskgenJobConfig.health_max_attempts). If
+        # None, VLLMConfig's own default (480 attempts = 2h) wins. This is the
+        # fix for the silent-120 override bug; see agent_log
+        # 2026-05-28_glm51_cross_node_tp_proxy_failure.md.
+        vllm_cfg_kwargs = dict(
             model_path=model_path,
             tensor_parallel_size=self.config.tensor_parallel_size,
             pipeline_parallel_size=self.config.pipeline_parallel_size,
             data_parallel_size=self.config.data_parallel_size,
             api_port=self.config.api_port,
             endpoint_json_path=self.config.endpoint_json_path,
-            health_max_attempts=self.config.health_max_attempts,
-            health_retry_delay=self.config.health_retry_delay,
             server_config=self.config.vllm_server_config,  # Pass through YAML config
         )
+        if self.config.health_max_attempts is not None:
+            vllm_cfg_kwargs["health_max_attempts"] = self.config.health_max_attempts
+        if self.config.health_retry_delay is not None:
+            vllm_cfg_kwargs["health_retry_delay"] = self.config.health_retry_delay
+        vllm_cfg = VLLMConfig(**vllm_cfg_kwargs)
 
         log_dir = Path(self.config.experiments_dir) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -839,8 +867,14 @@ class TracegenJobConfig:
     vllm_server_config: Dict[str, Any] = field(default_factory=dict)  # Raw vllm_server config from YAML
 
     # Health check settings
-    health_max_attempts: int = 120
-    health_retry_delay: int = 15
+    # 2026-05-28: was `int = 120` (a hardcoded ~30-min cap that silently overrode
+    # YAML `backend.healthcheck_max_attempts`). Changed to Optional[int] = None so
+    # the value from the datagen YAML (threaded via exp_args["trace_health_max_attempts"]
+    # at the construction site) flows through to VLLMConfig. When None, VLLMConfig's
+    # own default (currently 480 = 2h budget) wins. See
+    # /Users/benjaminfeuer/Documents/notes/ot-agent/agent_logs/2026-05-28_glm51_cross_node_tp_proxy_failure.md
+    health_max_attempts: Optional[int] = None
+    health_retry_delay: Optional[int] = None
 
     # Harbor settings
     model: str = ""
@@ -1176,7 +1210,12 @@ class TracegenJobRunner:
             _, tiktoken_env = setup_gpt_oss_tiktoken()
             extra_env_vars.update(tiktoken_env)
 
-        vllm_cfg = VLLMConfig(
+        # 2026-05-28: only forward health-check overrides when explicitly set
+        # (YAML value plumbed through TracegenJobConfig.health_max_attempts). If
+        # None, VLLMConfig's own default (480 attempts = 2h) wins. This is the
+        # fix for the silent-120 override bug; see agent_log
+        # 2026-05-28_glm51_cross_node_tp_proxy_failure.md.
+        vllm_cfg_kwargs = dict(
             model_path=model_path,
             tensor_parallel_size=self.config.tensor_parallel_size,
             pipeline_parallel_size=self.config.pipeline_parallel_size,
@@ -1184,10 +1223,13 @@ class TracegenJobRunner:
             api_port=self.config.api_port,
             endpoint_json_path=self.config.endpoint_json_path,
             custom_model_name=self.config.served_model_id,
-            health_max_attempts=self.config.health_max_attempts,
-            health_retry_delay=self.config.health_retry_delay,
             server_config=self.config.vllm_server_config,  # Pass through YAML config
         )
+        if self.config.health_max_attempts is not None:
+            vllm_cfg_kwargs["health_max_attempts"] = self.config.health_max_attempts
+        if self.config.health_retry_delay is not None:
+            vllm_cfg_kwargs["health_retry_delay"] = self.config.health_retry_delay
+        vllm_cfg = VLLMConfig(**vllm_cfg_kwargs)
 
         log_dir = Path(self.config.experiments_dir) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)

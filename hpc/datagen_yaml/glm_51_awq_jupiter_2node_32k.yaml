@@ -29,7 +29,13 @@ backend:
   type: ray
   wait_for_endpoint: true
   ray_cgraph_max_inflight_executions: 16
-  healthcheck_max_attempts: 160
+  # 2026-05-28: raised 160 -> 300 (75-min window at 15s spacing) after the silent
+  # 120-attempt override at hpc/datagen_launch_utils.py:613,842 was fixed. GLM-5.1
+  # is a hybrid GDN+Mamba+DSA+MoE arch (GlmMoeDsaForCausalLM) — weight load (141
+  # AWQ shards on GPFS, ~21min) + FULL_AND_PIECEWISE cudagraph capture (11 sizes)
+  # across cross-IB TP=8 routinely exceeds 30 minutes before "Application startup
+  # complete". See agent_log 2026-05-28_glm51_cross_node_tp_proxy_failure.md.
+  healthcheck_max_attempts: 300
   healthcheck_retry_delay: 15
 vllm_server:
   model_path: QuantTrio/GLM-5.1-AWQ
@@ -90,6 +96,22 @@ vllm_server:
   # (Bug C iter 4-8). To re-enable for this YAML, add the flag back here OR set
   # `enable_chunked_prefill: true` / `enable_prefix_caching: true` at the top
   # level — both opt-in paths suppress the auto-injected `--no-...`.
+  # 2026-05-28: GDN-prefill JIT-inside-cudagraph-capture mitigations.
+  # `--gdn-prefill-backend triton` matches the Qwen3.5-397B DP=1 fix (see
+  # agent_log 2026-05-28_qwen35_397b_dp1_525612_failure.md) — vLLM logs
+  # "FlashInfer GDN prefill kernel is JIT-compiled; first run may take a while
+  # to compile" and explicitly recommends triton to avoid the JIT inside the
+  # FULL_AND_PIECEWISE capture region. GLM-5.1's hybrid (gdn_attention_core +
+  # mamba_mixer2 + sparse_attn_indexer + unified_mla_kv_cache_update) adds the
+  # same code path. `--safetensors-load-strategy prefetch` halves the 21-min
+  # GPFS weight load of the 141-shard AWQ checkpoint (vLLM's auto-prefetch
+  # skips on unrecognized NFS, so we force it on). Combined with the 75-min
+  # healthcheck window above, this gives weight-load + capture room to land.
+  # See agent_log 2026-05-28_glm51_cross_node_tp_proxy_failure.md.
+  - --gdn-prefill-backend
+  - triton
+  - --safetensors-load-strategy
+  - prefetch
   # With chunked prefill OFF (now the OT-Agent launcher default), vLLM requires
   # max_num_batched_tokens >= max_model_len — otherwise the prompt can't fit
   # in a single forward pass and the engine refuses to start with a Pydantic
