@@ -977,9 +977,15 @@ class LocalHarborRunner:
                 vllm_proc.proc.wait()
                 return
 
-            # Wait for endpoint and run health check (only for local vLLM)
+            # Wait for endpoint and run health check (only for local vLLM).
+            # iris multi-host mode: the controller spends time on `wait_for_nodes`
+            # (all ranks must join the head's Ray cluster) BEFORE launching
+            # vllm serve and writing endpoint_json. On preempt-retry, the 4
+            # ranks rejoin staggered, so the default 300s easily times out.
+            # Match the controller's cluster_join_timeout (1200s) when iris_serve.
             if needs_local_vllm:
-                wait_for_endpoint(self._endpoint_json, vllm_proc)
+                endpoint_timeout = 1200 if iris_serve else 300
+                wait_for_endpoint(self._endpoint_json, vllm_proc, timeout=endpoint_timeout)
                 run_endpoint_health_check(
                     self._endpoint_json,
                     args.health_max_attempts,
