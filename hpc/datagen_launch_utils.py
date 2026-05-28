@@ -114,9 +114,15 @@ def _count_tasks_in_path(tasks_path: str) -> int:
         return count
 
     # Strategy 5: Pre-extracted task directories (each task has an instruction.md)
+    # Use os.walk(followlinks=True) so symlink-based task subsets (created by
+    # `ln -s` on a head of a larger corpus) are also counted — Path.rglob does
+    # not traverse directory symlinks by default.
     if p.is_dir():
         task_marker = "instruction.md"
-        count = sum(1 for d in p.rglob(task_marker) if d.is_file())
+        count = sum(
+            1 for root, _dirs, files in os.walk(str(p), followlinks=True)
+            if task_marker in files
+        )
         if count > 0:
             print(f"[chunk] Counted {count} tasks via task folder marker ({task_marker})")
             return count
@@ -908,8 +914,13 @@ class TracegenJobRunner:
         """Check if path is a directory of pre-extracted task folders (with instruction.md)."""
         if not path.is_dir():
             return False
-        # Quick check: any instruction.md under the directory?
-        return any(path.rglob("instruction.md"))
+        # Quick check: any instruction.md under the directory? Use os.walk with
+        # followlinks=True so symlink-based subsets are recognised (Path.rglob
+        # does not traverse directory symlinks).
+        for _root, _dirs, files in os.walk(str(path), followlinks=True):
+            if "instruction.md" in files:
+                return True
+        return False
 
     def _slice_task_folders(self, tasks_path: str, chunk_index: int, chunk_size: int) -> str:
         """Slice a directory of pre-extracted task folders for this chunk.
@@ -918,9 +929,14 @@ class TracegenJobRunner:
         Returns the path to the chunk directory.
         """
         p = Path(tasks_path)
-        # Collect all task directories (containing instruction.md), sorted for determinism
+        # Collect all task directories (containing instruction.md), sorted for
+        # determinism. Use os.walk(followlinks=True) so symlink-based subsets
+        # (e.g. a 1000-task slice of a larger 10K corpus, created via `ln -s`)
+        # are descended into — Path.rglob does not traverse directory symlinks.
         task_dirs = sorted(
-            d.parent for d in p.rglob("instruction.md") if d.is_file()
+            Path(root)
+            for root, _dirs, files in os.walk(str(p), followlinks=True)
+            if "instruction.md" in files
         )
         total = len(task_dirs)
         start = chunk_index * chunk_size
