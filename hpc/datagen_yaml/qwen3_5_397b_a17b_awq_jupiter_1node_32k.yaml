@@ -69,9 +69,14 @@ vllm_server:
   # (vLLM even prints a hint suggesting the switch when you pass `awq`).
   - --quantization
   - awq_marlin
-  # Disables CUDA graphs + Inductor; Triton kernels still JIT but in eager
-  # dispatch, avoiding the cross-rank deadlock.
-  - --enforce-eager
+  # 2026-05-28: --enforce-eager REPLACED by compiled + fuse_allreduce_rms=false
+  # (the one-line MiniMax DP>1 capture fix). At DP=1 1-node the allreduce is
+  # intra-node NVLink so MNNVL works fine, but we include the flag as a uniform
+  # safety net — and to get cudagraph throughput back. The mamba post-load
+  # calibration is pre-empted separately by --block-size 2096 below; that's
+  # orthogonal to enforce-eager. See reference_minimax_dp_mnnvl_fix.
+  - --compilation-config
+  - '{"pass_config":{"fuse_allreduce_rms":false}}'
   # Pre-empt the mamba post-load page-size calibration. The auto-compute
   # message from prior runs was:
   #   "Setting attention block size to 2096 tokens to ensure that

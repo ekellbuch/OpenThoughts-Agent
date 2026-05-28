@@ -60,12 +60,15 @@ vllm_server:
   - bfloat16
   - --kv-cache-dtype
   - fp8
-  # JIT-deadlock protector. enforce_eager disables CUDA graphs + Inductor
-  # so Triton kernels JIT in plain eager dispatch — JIT may happen once
-  # on first hit, but it doesn't deadlock cross-rank coordination.
-  # Per 449331/449354 evidence: with enforce_eager the engine ran healthy
-  # for 3+ hours serving 32 concurrent reqs at ~100 tok/s gen throughput.
-  - --enforce-eager
+  # 2026-05-28: --enforce-eager REPLACED by compiled + fuse_allreduce_rms=false
+  # (the one-line MiniMax DP>1 capture fix). DP=1 here, but cross-node TP=8 still
+  # crosses InfiniBand, and the flashinfer MNNVL fused allreduce illegal-accesses
+  # on cross-node IB (no multi-node NVLink). Disabling the fusion pass falls back
+  # to standard NCCL allreduce (IB-capable). Compiled = cudagraph throughput; if
+  # JIT-deadlock recurs (449331/449354-style) we'd re-add enforce-eager. See
+  # reference_minimax_dp_mnnvl_fix.
+  - --compilation-config
+  - '{"pass_config":{"fuse_allreduce_rms":false}}'
   # Force string-form content rendering through the chat template; zai-org's
   # official vLLM recipe sets this — GLM-5.1's template doesn't handle the
   # OpenAI list-of-dict content form that vLLM's `auto` mode may auto-select.
