@@ -94,3 +94,14 @@ vllm_server:
   # max_num_batched_tokens >= max_model_len, so set to 32768.
   - --max-num-batched-tokens
   - '32768'
+  # 2026-05-28: 525612 hung silently 8m18s after torch.compile finish, only
+  # post-compile log line was shm_broadcast 600s warning, HTTP server never
+  # bound. vllm itself printed the hint: "Use --gdn-prefill-backend triton to
+  # avoid JIT compile time" — FlashInfer's GDN prefill kernel JIT-compiles
+  # *during* cudagraph capture on Qwen3.5's hybrid GDN+Mamba2 layers, the
+  # workers go silent under the JIT lock and never come back. Switch to
+  # triton to skip the FlashInfer JIT path entirely. Companion GLM-5.1
+  # 525611 doesn't hit this (different architecture, no GDN layers).
+  # See agent_logs/2026-05-28_qwen35_397b_dp1_525612_failure.md.
+  - --gdn-prefill-backend
+  - triton
