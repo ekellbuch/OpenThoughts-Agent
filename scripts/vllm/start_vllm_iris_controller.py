@@ -74,8 +74,10 @@ def _log(msg: str) -> None:
 
 
 def _rank() -> int:
-    # IRIS_TASK_ID is the full task path (e.g. "/user/job/0"); rank = trailing segment.
-    return int(os.environ.get("IRIS_TASK_ID", "0").rsplit("/", 1)[-1])
+    # IRIS_TASK_ID is the full task path (e.g. "/user/job/0"); on retried tasks
+    # iris appends a ":N" retry suffix (e.g. "/user/job/0:2"). The rank is the
+    # trailing path segment with any retry suffix stripped.
+    return int(os.environ.get("IRIS_TASK_ID", "0").rsplit("/", 1)[-1].split(":", 1)[0])
 
 
 def _num_tasks() -> int:

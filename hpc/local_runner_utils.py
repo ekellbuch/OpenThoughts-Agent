@@ -858,9 +858,10 @@ class LocalHarborRunner:
         # so we must NOT call start_ray()), and harbor runs on the driver rank
         # only. Non-iris (SLURM/local) paths are unchanged.
         iris_serve = needs_local_vllm and os.environ.get("OT_AGENT_IRIS_SERVE") == "1"
-        # IRIS_TASK_ID is the full task path (e.g. "/user/job/0"); the rank is
-        # the trailing path segment, not a leading "rank:..." token.
-        iris_rank = int(os.environ.get("IRIS_TASK_ID", "0").rsplit("/", 1)[-1])
+        # IRIS_TASK_ID is the full task path (e.g. "/user/job/0"); on retried
+        # tasks iris appends a ":N" retry suffix (e.g. "/user/job/0:2"). The
+        # rank is the trailing path segment with any retry suffix stripped.
+        iris_rank = int(os.environ.get("IRIS_TASK_ID", "0").rsplit("/", 1)[-1].split(":", 1)[0])
 
         # Set up directories
         experiments_dir, logs_dir = self._setup_directories()
