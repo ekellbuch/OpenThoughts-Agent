@@ -1,0 +1,52 @@
+# Qwen3.5-122B-A10B-FP8 — v5p-32 Q9: 32k seqs=32, bf16 KV.
+#
+# Extends the seqs ladder past Q8's seqs=16 (918 mean / 1276 peak) since
+# scaling is still near-linear at the edge. Harbor n_concurrent must be 64
+# (seqs × DP=2) to keep Daytona feed matched.
+#
+# KV budget: at 32k context × 32 seqs × 2 DP = 2M tokens. Per chip across
+# TP=8 / 16 chips: 125k tokens × ~32 KiB bf16 = ~4 GiB — comfortable inside
+# the ~79 GiB free after FP8 weights (~15.6 GiB).
+
+env_vars:
+  RUNAI_STREAMER_CONCURRENCY: '4'
+  MODEL_IMPL_TYPE: vllm
+  AWS_ENDPOINT_URL: https://storage.googleapis.com
+
+engine:
+  type: vllm_local
+  model: gs://marin-models-us/ot-agent/models/Qwen/Qwen3.5-122B-A10B-FP8/
+  max_output_tokens: 8192
+  healthcheck_interval: 1800
+  vllm_local: {}
+backend:
+  type: ray
+  wait_for_endpoint: true
+vllm_server:
+  model_path: gs://marin-models-us/ot-agent/models/Qwen/Qwen3.5-122B-A10B-FP8/
+  num_replicas: 1
+  tensor_parallel_size: 8
+  pipeline_parallel_size: 1
+  data_parallel_size: 2
+  time_limit: '48:00:00'
+  max_model_len: 32768
+  max_num_seqs: 32
+  gpu_memory_utilization: 0.85
+  enable_expert_parallel: true
+  enable_auto_tool_choice: true
+  tool_call_parser: qwen3_coder
+  reasoning_parser: qwen3
+  trust_remote_code: true
+  extra_args:
+  - --dtype
+  - bfloat16
+  - --load-format
+  - runai_streamer
+  - --block-size
+  - '64'
+  - --max-num-partial-prefills
+  - '1'
+  - --limit-mm-per-prompt
+  - '{"image":0,"video":0}'
+  - --max-num-batched-tokens
+  - '32768'
