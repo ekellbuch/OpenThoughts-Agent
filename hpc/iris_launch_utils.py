@@ -29,8 +29,11 @@ larger slices.
 from __future__ import annotations
 
 import argparse
+import json as _json
 import os
 import shlex
+import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -49,6 +52,120 @@ DEFAULT_PRIORITY = "interactive"
 # cross-region writes (eval outputs are ~MB-scale, so this is fine).
 # Override with $OT_AGENT_GCS_OUTPUT_ROOT or the --gcs-output-dir flag.
 DEFAULT_GCS_OUTPUT_ROOT = "gs://marin-eu-west4/ot-agent"
+
+
+# Maps the multi-region prefix in a single-region zone name
+# ("us-east5" → "us") to the GCS multi-region bucket that's free/cheap
+# from any single-region in that prefix. We use multi-region buckets
+# (gs://marin-models-us, gs://marin-models-eu) rather than per-zone
+# buckets so a job that gets re-scheduled into a sibling zone within
+# the same continent (e.g. us-east5 → us-central1) still reads/writes
+# locally.
+_REGION_PREFIX_TO_BUCKET = {
+    "us": "gs://marin-models-us",
+    "europe": "gs://marin-models-eu",
+}
+
+
+def _region_prefix(region: str) -> Optional[str]:
+    """Return the multi-region prefix ('us', 'europe') for a single-region.
+
+    >>> _region_prefix("us-east5")
+    'us'
+    >>> _region_prefix("europe-west4")
+    'europe'
+    >>> _region_prefix("asia-northeast1")  # unmapped
+    None
+    """
+    for prefix in _REGION_PREFIX_TO_BUCKET:
+        if region.startswith(prefix + "-"):
+            return prefix
+    return None
+
+
+def _gcs_bucket_for_region(region: str) -> Optional[str]:
+    """Return the cheapest GCS bucket for workers in ``region``.
+
+    Returns the multi-region bucket (``gs://marin-models-us`` /
+    ``gs://marin-models-eu``) matching the region's continent. Returns
+    None for unmapped regions — callers should fall back rather than
+    silently emit a wrong bucket.
+    """
+    prefix = _region_prefix(region)
+    return _REGION_PREFIX_TO_BUCKET.get(prefix) if prefix else None
+
+
+def _iris_query(cluster_config: str, sql: str, timeout: int = 30) -> List[dict]:
+    """Run a SQL query against the iris controller, return parsed rows.
+
+    Shells out to the ``iris query -f json`` CLI rather than wrangling
+    the connectrpc client directly: it handles tunnel setup, auth, and
+    the protobuf round-trip for us. ``shutil.which`` picks up the iris
+    binary from whichever venv the launcher is running in (e.g. the
+    otagent conda env on the launch host).
+    """
+    iris_bin = shutil.which("iris")
+    if iris_bin is None:
+        # Fall back to the marin venv if iris isn't on PATH. This is
+        # the developer's expected layout per [[iris-python-env]].
+        iris_bin = "/Users/benjaminfeuer/Documents/marin/.venv/bin/iris"
+    if not Path(iris_bin).exists():
+        raise RuntimeError(
+            "iris CLI not found on PATH or at the documented marin venv "
+            "location; can't run dynamic region discovery."
+        )
+    cmd = [iris_bin, "--config", str(cluster_config), "query", "-f", "json", sql]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"iris query failed (rc={result.returncode}): {result.stderr.strip()}"
+        )
+    out = result.stdout.strip()
+    if not out:
+        return []
+    return _json.loads(out)
+
+
+def discover_region_for_tpu(
+    cluster_config: str, tpu_spec: str
+) -> tuple[Optional[str], List[dict]]:
+    """Pick the region with the most v5p/v6e capacity for ``tpu_spec``.
+
+    Queries iris's worker_attributes table to find every region that has
+    workers of the requested device variant, ranks them by unassigned-
+    worker count (warm/idle workers first), and returns the top region
+    plus the full ranked breakdown.
+
+    Returns ``(region, rows)`` where ``region`` may be ``None`` if no
+    workers are visible (e.g., scale-group exists but has been scaled to
+    zero). Caller falls back to the static default in that case.
+
+    The pin happens at submit time and iris's scheduler honors region
+    constraints across preempt-retries, so a job picked into us-east5
+    stays in us-east5 (or another us-* zone iris adds later if the
+    constraint is multi-region) for its whole lifetime — preserving
+    harbor's resume invariant on a stable ``jobs_dir`` location.
+    """
+    # slice_id is NULL/empty for unassigned (warm) workers. Rank regions
+    # by unassigned count (more warm = better odds of avoiding a queue)
+    # then by total (tie-breaker for hot regions still likely to recycle
+    # soonest).
+    sql = (
+        "SELECT wa.str_value AS region, "
+        "COUNT(*) AS total, "
+        "SUM(CASE WHEN w.slice_id IS NULL OR w.slice_id = '' THEN 1 ELSE 0 END) AS unassigned "
+        f"FROM workers w JOIN worker_attributes wa ON w.worker_id = wa.worker_id "
+        f"WHERE w.device_variant = '{tpu_spec}' AND wa.key = 'region' "
+        "GROUP BY wa.str_value "
+        "ORDER BY unassigned DESC, total DESC, region"
+    )
+    rows = _iris_query(cluster_config, sql)
+    # Drop rows for regions we can't route to a known bucket — picking
+    # one would just re-create the cross-continent problem.
+    candidates = [r for r in rows if r.get("region") and _gcs_bucket_for_region(r["region"])]
+    if not candidates:
+        return None, rows
+    return candidates[0]["region"], rows
 
 
 def parse_tpu_vm_count(tpu_spec: Optional[str]) -> int:
@@ -310,6 +427,56 @@ class IrisLauncher:
             raise SystemExit(
                 "--gcs-output-dir is required (set OT_AGENT_GCS_OUTPUT_ROOT or pass the flag)."
             )
+
+        # Dynamic region discovery + pin. When the user did NOT explicitly
+        # set --gcs-output-dir or $OT_AGENT_GCS_OUTPUT_ROOT (i.e., the value
+        # is still the cross-continent default), query iris for which
+        # region has v5p/v6e capacity for this TPU spec, override the
+        # output bucket to the matching multi-region bucket, and pin the
+        # iris job to that region so preempt-retry can't cross-continent
+        # failover. Skipped on --resume-from (the existing job's bucket
+        # is authoritative) and when no TPU is requested.
+        args._pinned_region = None
+        user_set_output = bool(
+            os.environ.get("OT_AGENT_GCS_OUTPUT_ROOT")
+            or args.gcs_output_dir != DEFAULT_GCS_OUTPUT_ROOT
+        )
+        if (
+            not user_set_output
+            and not getattr(args, "resume_from", None)
+            and getattr(args, "tpu", None)
+        ):
+            try:
+                region, rows = discover_region_for_tpu(args.cluster_config, args.tpu)
+            except Exception as exc:
+                print(
+                    f"[iris] Region discovery failed ({exc}); falling back to "
+                    f"static default {DEFAULT_GCS_OUTPUT_ROOT}. Cross-region "
+                    "egress possible if iris schedules outside that bucket's "
+                    "region.",
+                    file=sys.stderr, flush=True,
+                )
+            else:
+                if region is None:
+                    print(
+                        f"[iris] No workers visible for --tpu={args.tpu}; falling "
+                        f"back to static default {DEFAULT_GCS_OUTPUT_ROOT}.",
+                        file=sys.stderr, flush=True,
+                    )
+                else:
+                    bucket = _gcs_bucket_for_region(region)
+                    args.gcs_output_dir = f"{bucket}/ot-agent"
+                    args._pinned_region = region
+                    summary = ", ".join(
+                        f"{r['region']}: {r.get('unassigned', 0)} warm / "
+                        f"{r.get('total', 0)} total"
+                        for r in rows if r.get('region')
+                    )
+                    print(
+                        f"[iris] Region pin: --tpu={args.tpu} → {region} "
+                        f"(bucket {bucket}). Capacity: {summary or 'none reported'}.",
+                        flush=True,
+                    )
 
         # --resume-from: look up a previously-submitted job and route the
         # new task's harbor command at the old GCS path. The iris-level
@@ -685,11 +852,16 @@ class IrisLauncher:
                 primary_tpu, None, args.replicas
             )
             resources_proto = resources.to_proto()
+            # Pin the job to the region we discovered at submit time, so
+            # preempt-retries land back in the same continent and our
+            # output bucket stays local.
+            pinned_region = getattr(args, "_pinned_region", None)
             constraints = build_job_constraints(
                 resources_proto=resources_proto,
                 tpu_variants=tpu_variants,
                 replicas=replicas,
-                regions=None, zone=None,
+                regions=(pinned_region,) if pinned_region else None,
+                zone=None,
                 preemptible=args.preemptible,
             )
 
