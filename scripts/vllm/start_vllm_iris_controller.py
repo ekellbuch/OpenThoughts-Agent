@@ -49,6 +49,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import hashlib
 import signal
 import socket
 import subprocess
@@ -82,6 +83,73 @@ def _rank() -> int:
 
 def _num_tasks() -> int:
     return int(os.environ.get("IRIS_NUM_TASKS", "1"))
+
+
+def _cpu_tag() -> str:
+    """Stable short tag for the host CPU, used to namespace the XLA cache.
+
+    The JAX persistent compile cache hashes the HLO graph + target hardware,
+    but NOT the host CPU sub-revision. XLA's lowering passes that produce
+    host-side glue code (collectives, runtime, buffer placement) can emit
+    AVX-512 vs AVX-256 paths depending on the CPU the lowering machine had.
+    Two hosts with the SAME model+TPU but DIFFERENT CPU microarchs would
+    hash identical → one writes, the other reads → wrong-execution bug
+    (`device_put AssertionError` we hit on 2026-05-26, see
+    [[xla-persistent-cache-cross-host-poison]]).
+
+    Mitigate by namespacing the cache subdir per CPU model. Read
+    /proc/cpuinfo's ``model name`` line (the marketing string is the best
+    proxy for microarch we get without parsing CPUID), hash it. Return
+    "unknown" on platforms without /proc (mac dev hosts; safe — they'll
+    just share one "unknown" subdir, never poisoning real workers).
+    """
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    name = line.split(":", 1)[1].strip()
+                    return hashlib.sha1(name.encode()).hexdigest()[:12]
+    except FileNotFoundError:
+        pass
+    return "unknown"
+
+
+def _model_tag(model: Optional[str]) -> str:
+    """Short organizational tag for the model — last path component, sanitized.
+
+    The JAX cache key already hashes the full HLO so this subdir level is
+    purely for human-friendly cache hygiene (so you can ``gsutil rm -r``
+    one model's cache without touching another's).
+    """
+    if not model:
+        return "unknown"
+    last = model.rstrip("/").rsplit("/", 1)[-1] or "unknown"
+    # Strip characters that aren't safe in GCS object paths or that would
+    # collide with siblings (just being defensive — gs:// is permissive).
+    return "".join(c if c.isalnum() or c in "._-" else "_" for c in last)
+
+
+def _setup_xla_cache(model: Optional[str]) -> None:
+    """Wire up the JAX persistent compile cache, namespaced per CPU+model.
+
+    Reads ``OT_AGENT_XLA_CACHE_BASE`` (set by the iris launcher to the
+    region-matched bucket prefix), appends per-CPU and per-model subdirs,
+    and exports ``JAX_COMPILATION_CACHE_DIR`` so JAX/vLLM lowering picks
+    it up. The env export reaches every subprocess we spawn (vllm serve,
+    ray workers, engine cores).
+
+    No-op when the base isn't set — caller hasn't opted in to caching.
+    Idempotent: re-running with the same base is harmless.
+    """
+    base = os.environ.get("OT_AGENT_XLA_CACHE_BASE", "").strip()
+    if not base or base.lower() == "disabled":
+        return
+    cache_dir = f"{base.rstrip('/')}/{_cpu_tag()}/{_model_tag(model)}"
+    os.environ["JAX_COMPILATION_CACHE_DIR"] = cache_dir
+    # Also surface for vLLM-TPU's lowering passes which look at this env
+    # name in some code paths.
+    os.environ.setdefault("XLA_PERSISTENT_CACHE_PATH", cache_dir)
+    _log(f"XLA cache: {cache_dir} (cpu_tag={_cpu_tag()}, model_tag={_model_tag(model)})")
 
 
 def _own_ip() -> str:
@@ -384,6 +452,8 @@ def _print_env_snapshot() -> None:
         "RAY_ADDRESS",
         "HF_HOME",
         "MODEL_IMPL_TYPE",
+        "OT_AGENT_XLA_CACHE_BASE",
+        "JAX_COMPILATION_CACHE_DIR",
     ):
         print(f"  {key}={os.environ.get(key, '<unset>')}", flush=True)
 
@@ -558,6 +628,11 @@ def run_worker(args: argparse.Namespace) -> int:
 
 def main() -> None:
     args, extra_args = parse_args()
+    # Set up the JAX persistent compile cache before _print_env_snapshot
+    # so the snapshot logs the resolved cache dir, and before any code path
+    # (head or worker) spawns subprocesses — those subprocesses inherit
+    # JAX_COMPILATION_CACHE_DIR via os.environ.
+    _setup_xla_cache(args.model)
     _print_env_snapshot()
     rank = _rank()
     if rank == 0:

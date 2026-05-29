@@ -541,6 +541,21 @@ class IrisLauncher:
             f"{remote_output_dir.rstrip('/')}/_ray_rendezvous",
         )
 
+        # Wire the iris controller's XLA persistent cache to the same
+        # region-matched bucket we picked above. The worker appends
+        # /<cpu_tag>/<model_tag>/ to namespace per-microarch (the only
+        # axis the JAX cache key doesn't already discriminate; see
+        # [[xla-persistent-cache-cross-host-poison]]). One shared base
+        # across all jobs is fine — JAX hashes the HLO into per-config
+        # subdirs of its own beneath the dir we hand it. Disable with
+        # OT_AGENT_XLA_CACHE_BASE=disabled in the environment.
+        if args.gcs_output_dir:
+            cache_root = args.gcs_output_dir.rstrip("/").rsplit("/ot-agent", 1)[0]
+            env_vars.setdefault(
+                "OT_AGENT_XLA_CACHE_BASE",
+                f"{cache_root}/ot-agent/xla_cache",
+            )
+
         # Default extras = ["datagen-tpu"]; allow override via repeated --extras
         # or --extras '' (single empty) to install nothing extra.
         if args.extras is None:
