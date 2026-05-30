@@ -484,11 +484,32 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
 
         # Set dependency on task job if both are enabled, otherwise use CLI dependency
         if task_enabled and task_job_id and task_job_id != "dry_run_task_job_id":
-            dependency = f"afterok:{task_job_id}"
+            base_dependency = f"afterok:{task_job_id}"
         else:
-            dependency = exp_args.get("dependency")
+            base_dependency = exp_args.get("dependency")
 
-        for chunk_idx in chunk_indices:
+        # Rolling concurrency cap across chunks. `chunk_array_max` (parsed into
+        # exp_args["_chunk_array_max"]) bounds how many chunk jobs run at once:
+        # chunk[i] gets an extra `afterany:<chunk[i-max]>` dependency so it cannot
+        # start until the chunk `max` positions earlier has finished. With M total
+        # chunks and a cap of K, at most K are ever RUNNING; the rest queue behind
+        # their gating predecessor. afterany (not afterok) so a failed/timed-out
+        # chunk still releases its successor rather than wedging the whole sweep.
+        # 0/unset → all chunks submit with only base_dependency (unbounded, prior behavior).
+        # CLI --chunk_array_max overrides the datagen-config value when provided.
+        chunk_array_max = exp_args.get("chunk_array_max")
+        if chunk_array_max is None:
+            chunk_array_max = exp_args.get("_chunk_array_max")
+        try:
+            chunk_array_max = int(chunk_array_max) if chunk_array_max else 0
+        except (TypeError, ValueError):
+            chunk_array_max = 0
+        if chunk_array_max and num_chunks > chunk_array_max:
+            print(f"[datagen] chunk concurrency cap: {chunk_array_max} of {num_chunks} chunks run at once "
+                  f"(rolling afterany gate)")
+        submitted_chunk_job_ids: list[str] = []
+
+        for list_pos, chunk_idx in enumerate(chunk_indices):
             is_chunked = chunk_idx is not None
             suffix = f"_chunk{chunk_idx}" if is_chunked else ""
             chunk_job_name = f"{job_name}_traces{suffix}"
@@ -577,13 +598,31 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             trace_sbatch_output.write_text(sbatch_text)
             os.chmod(trace_sbatch_output, 0o750)
 
+            # Compose this chunk's dependency: base (task-job/CLI) AND the rolling
+            # concurrency gate (afterany on the chunk `chunk_array_max` positions back).
+            chunk_dependency = base_dependency
+            if chunk_array_max and list_pos >= chunk_array_max:
+                gate_job_id = submitted_chunk_job_ids[list_pos - chunk_array_max]
+                if gate_job_id:
+                    chunk_dependency = (
+                        f"{base_dependency},afterany:{gate_job_id}"
+                        if base_dependency else f"afterany:{gate_job_id}"
+                    )
+
             if exp_args.get("dry_run"):
                 print(f"DRY RUN: Tracegen sbatch script written to {trace_sbatch_output}")
-                if dependency:
-                    print(f"  Would submit with dependency: {dependency}")
+                if chunk_dependency:
+                    print(f"  Would submit with dependency: {chunk_dependency}")
+                # Placeholder so downstream chunks' gate-indexing stays aligned in dry runs.
+                submitted_chunk_job_ids.append(f"dry_run_chunk{chunk_idx}")
             else:
-                job_id = launch_sbatch(str(trace_sbatch_output), dependency=dependency)
-                print(f"✓ Trace generation job submitted: {job_id} ({chunk_job_name})")
+                job_id = launch_sbatch(str(trace_sbatch_output), dependency=chunk_dependency)
+                submitted_chunk_job_ids.append(job_id)
+                gate_note = (
+                    f" [gated on {submitted_chunk_job_ids[list_pos - chunk_array_max]}]"
+                    if chunk_array_max and list_pos >= chunk_array_max else ""
+                )
+                print(f"✓ Trace generation job submitted: {job_id} ({chunk_job_name}){gate_note}")
 
 
 # ==============================================================================

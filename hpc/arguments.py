@@ -510,6 +510,12 @@ class DataGenArgs:
         default=None,
         metadata={"help": "Maximum number of tasks per trace chunk when splitting trace jobs"}
     )
+    chunk_array_max: Optional[int] = field(
+        default=None,
+        metadata={"help": "Max number of trace chunks to run concurrently (rolling afterany gate; "
+                          "chunk[i] waits on chunk[i-N]). 0/unset = all chunks submit at once. "
+                          "Overrides the datagen-config chunk_array_max when provided."}
+    )
     datagen_script: Optional[str] = field(
         default=None,
         metadata={"help": "Path to data generation script (e.g., data/gsm8k_test/generate.py)"}
