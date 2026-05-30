@@ -131,6 +131,8 @@ def _build_steps(args: argparse.Namespace) -> List[Step]:
     if args.rl_traces:
         temp_dir = out / "Q2_temporal"
         temp_marker = temp_dir / "temporal_summary.json"
+        temp_plot = temp_dir / "temporal_summary.png"
+        temp_dir.mkdir(parents=True, exist_ok=True)
         steps.append(
             Step(
                 name="Q2.temporal_trace_analysis",
@@ -142,8 +144,8 @@ def _build_steps(args: argparse.Namespace) -> List[Step]:
                     [
                         args.rl_traces,
                         "--bin-hours", str(args.rl_bin_hours),
-                        "--output-dir", str(temp_dir),
-                        *(["--max-rows", str(args.max_rows)] if args.max_rows else []),
+                        "--output", str(temp_marker),
+                        "--plot", str(temp_plot),
                     ],
                 ),
             )
@@ -249,6 +251,7 @@ def _build_steps(args: argparse.Namespace) -> List[Step]:
     # Q4: solve_rate_by_context for baseline vs post-RL.
     if args.baseline_eval and args.post_rl_eval:
         sr_dir = out / "Q4_solve_rate_by_context"
+        sr_dir.mkdir(parents=True, exist_ok=True)
         sr_png = sr_dir / "solve_rate.png"
         steps.append(
             Step(
@@ -419,6 +422,23 @@ def run(args: argparse.Namespace) -> int:
     args.output_dir = Path(args.output_dir).expanduser().resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Normalize HuggingFace URLs to bare ``owner/name`` so sub-script calls
+    # to ``datasets.load_dataset`` succeed regardless of whether the caller
+    # passed a full https URL.
+    from scripts.analysis.auto_resolve import parse_hf_url as _parse_hf_url
+
+    def _norm_hf(value):
+        if not value:
+            return value
+        try:
+            return _parse_hf_url(value)
+        except Exception:
+            return value
+
+    for _attr in ("rl_traces", "model_repo", "baseline_eval", "post_rl_eval"):
+        if getattr(args, _attr, None):
+            setattr(args, _attr, _norm_hf(getattr(args, _attr)))
+
     # --list-evals mode: print the candidate eval pairs and exit.
     if args.list_evals:
         if not args.model_repo:
@@ -503,6 +523,12 @@ def run(args: argparse.Namespace) -> int:
             print("[orchestrator] auto-resolve notes:")
             for n in resolved.notes:
                 print(f"  - {n}")
+
+    # Re-normalize after the resolver — the resolver may have filled
+    # ``baseline_eval`` / ``post_rl_eval`` with full https URLs.
+    for _attr in ("rl_traces", "model_repo", "baseline_eval", "post_rl_eval"):
+        if getattr(args, _attr, None):
+            setattr(args, _attr, _norm_hf(getattr(args, _attr)))
 
     steps = _build_steps(args)
     if not steps:
