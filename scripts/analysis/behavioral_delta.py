@@ -8,12 +8,15 @@ eval traces) as ``--before`` and the post-RL trace dataset as ``--after``.
 The script:
 - Loads both trace datasets via the shared :func:`scripts.analysis.utils.load_traces`
   loader (HF id, JSONL, or directory of ``result.json`` all supported).
+- Extracts per-trace behavioral features (tool-call frequency, tool-error
+  rate, think-token budget, response verbosity, code-block density, self-
+  correction frequency, premature-stop rate, tool-call-by-name).
 - Aggregates macro-level metrics: reward, turn count, conversation token
   count, error-type distribution, failure-mode distribution (from the
   ``failure_mode_analysis`` column if ``update_hf_failure_modes`` was
   run first).
-- Diffs each metric. Emits a markdown report ranking the failure modes
-  that rose / fell most, plus the tasks whose pass/fail status flipped.
+- Diffs each metric, sorted by magnitude of delta so the most-shifted
+  behavior appears at the top of the report.
 
 Usage:
     python -m scripts.analysis.behavioral_delta \\
@@ -27,22 +30,47 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections import Counter, defaultdict
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.analysis.utils import (  # noqa: E402
+    SCALAR_BEHAVIORAL_FIELDS,
     Trace,
     count_tokens,
     get_tiktoken_encoder,
     group_by_task,
     load_traces,
 )
+
+
+# ---------------------------------------------------------------------------
+# Display config: human-readable name + unit hint for each behavioral feature.
+# ---------------------------------------------------------------------------
+
+_FEATURE_DISPLAY: Dict[str, Tuple[str, str, str]] = {
+    # field name        : (label                       , value-fmt , delta-fmt)
+    "tool_calls_total":  ("tool calls / trace",          ".1f",      "+.2f"),
+    "tool_errors":       ("tool errors / trace",          ".1f",      "+.2f"),
+    "tool_responses":    ("tool responses / trace",       ".1f",      "+.2f"),
+    "tool_error_rate":   ("tool error rate",              ".1%",      "+.1f"),  # delta as pp
+    "think_blocks":      ("think blocks / trace",         ".2f",      "+.2f"),
+    "think_tokens":      ("think tokens / trace",         ".0f",      "+.0f"),
+    "think_token_ratio": ("think / assistant ratio",      ".1%",      "+.1f"),  # delta as pp
+    "assistant_msgs":    ("assistant msgs / trace",       ".1f",      "+.2f"),
+    "assistant_tokens":  ("assistant tokens / trace",     ".0f",      "+.0f"),
+    "mean_assistant_tokens": ("mean tokens / asst msg",   ".1f",      "+.2f"),
+    "code_fence_blocks": ("code fences / trace",          ".2f",      "+.2f"),
+    "self_correction_hits": ("self-correction phrases / trace", ".2f", "+.2f"),
+}
+
+# Ratio fields are reported in percentage points rather than raw fraction.
+_RATIO_FIELDS = {"tool_error_rate", "think_token_ratio"}
 
 
 @dataclass
@@ -58,9 +86,15 @@ class Summary:
     pass_set: set  # tasks with at least one reward > 0
     fail_set: set  # tasks with no reward > 0 (and at least one trial)
     fm_coverage: float  # fraction of rows with a failure_mode label
+    # Per-trace behavioral feature means (None-safe).
+    behavioral: Dict[str, Optional[float]] = field(default_factory=dict)
+    # Tool-call frequency by tool name (sum across all traces).
+    tool_call_by_name: Dict[str, int] = field(default_factory=dict)
+    # Premature stop rate (assistant-ended traces / total traces with msgs).
+    premature_stop_rate: Optional[float] = None
 
 
-def _mean(xs: Sequence[float]) -> Optional[float]:
+def _mean(xs: Sequence[Optional[float]]) -> Optional[float]:
     xs = [x for x in xs if x is not None]
     return sum(xs) / len(xs) if xs else None
 
@@ -80,6 +114,28 @@ def summarize(label: str, traces: Sequence[Trace]) -> Summary:
             pass_set.add(task)
         elif rows:
             fail_set.add(task)
+
+    # Behavioral feature means. For ratio fields we average per-trace ratios
+    # (None-skipping) which is more faithful than dividing sums — a trace
+    # with no tool responses shouldn't drag the error rate down to 0.
+    behavioral: Dict[str, Optional[float]] = {}
+    for field_name in SCALAR_BEHAVIORAL_FIELDS:
+        values = [getattr(t.behavioral, field_name) for t in traces]
+        behavioral[field_name] = _mean(values)
+
+    # Tool-call distribution by tool name.
+    tool_calls: Dict[str, int] = {}
+    for t in traces:
+        for name, count in t.behavioral.tool_calls_by_name.items():
+            tool_calls[name] = tool_calls.get(name, 0) + count
+
+    # Premature-stop rate among traces with at least one message.
+    eligible = [t for t in traces if t.behavioral.assistant_msgs > 0]
+    if eligible:
+        premature_rate = sum(1 for t in eligible if t.behavioral.premature_stop) / len(eligible)
+    else:
+        premature_rate = None
+
     return Summary(
         label=label,
         n=len(traces),
@@ -91,6 +147,9 @@ def summarize(label: str, traces: Sequence[Trace]) -> Summary:
         pass_set=pass_set,
         fail_set=fail_set,
         fm_coverage=fm_coverage,
+        behavioral=behavioral,
+        tool_call_by_name=tool_calls,
+        premature_stop_rate=premature_rate,
     )
 
 
@@ -103,12 +162,49 @@ def _delta_str(before: Optional[float], after: Optional[float], pct: bool = Fals
     return f"{d:+.2f}"
 
 
-def _rank_dist_delta(before: Dict[str, int], after: Dict[str, int]) -> List[tuple]:
-    """Return (key, before_share, after_share, delta_share) sorted by |delta|.
+def _format_value(field_name: str, value: Optional[float]) -> str:
+    if value is None:
+        return "—"
+    fmt = _FEATURE_DISPLAY.get(field_name, ("", ".2f", "+.2f"))[1]
+    if field_name in _RATIO_FIELDS:
+        return f"{value:{fmt}}"
+    return f"{value:{fmt}}"
 
-    Shares are normalized to fractions of the total in each dataset, so
-    different sample sizes don't bias the diff.
+
+def _format_delta(field_name: str, before: Optional[float], after: Optional[float]) -> str:
+    if before is None or after is None:
+        return "—"
+    d = after - before
+    if field_name in _RATIO_FIELDS:
+        return f"{d*100:+.1f}pp"
+    fmt = _FEATURE_DISPLAY.get(field_name, ("", "", "+.2f"))[2]
+    return f"{d:{fmt}}"
+
+
+def _ranked_behavioral_deltas(
+    before: Summary, after: Summary
+) -> List[Tuple[str, Optional[float], Optional[float], Optional[float], float]]:
+    """Return (field, before, after, delta, |normalized_delta|) sorted by |normalized_delta| desc.
+
+    Normalization makes ratios (already in 0..1) and large counts comparable:
+    we divide each delta by max(|before|, |after|, eps) — so a doubling of
+    something small ranks the same as a doubling of something large.
     """
+    rows = []
+    for field_name in SCALAR_BEHAVIORAL_FIELDS:
+        b = before.behavioral.get(field_name)
+        a = after.behavioral.get(field_name)
+        if b is None or a is None:
+            continue
+        delta = a - b
+        scale = max(abs(b), abs(a), 1e-9)
+        rows.append((field_name, b, a, delta, abs(delta) / scale))
+    rows.sort(key=lambda r: r[4], reverse=True)
+    return rows
+
+
+def _rank_dist_delta(before: Dict[str, int], after: Dict[str, int]) -> List[tuple]:
+    """Return (key, before_share, after_share, delta_share) sorted by |delta|."""
     bt = sum(before.values()) or 1
     at_ = sum(after.values()) or 1
     keys = set(before) | set(after)
@@ -145,6 +241,64 @@ def write_markdown_report(
         f"{_delta_str(before.mean_tokens, after.mean_tokens)} |",
         "",
     ]
+
+    # --- Behavioral features (sorted by magnitude of delta) ----------------
+    bdeltas = _ranked_behavioral_deltas(before, after)
+    if bdeltas:
+        lines += [
+            "## Behavioral features (sorted by magnitude of delta)",
+            "",
+            "Per-trace means. Tool-call / tool-error rows surface whether the "
+            "model is calling tools more or less often, and whether those calls "
+            "succeed. Think-token rows surface whether reasoning budget shifted. "
+            "Self-correction and code-fence rows surface stylistic changes.",
+            "",
+            "| feature | before | after | delta | |Δ| / scale |",
+            "|---|---|---|---|---|",
+        ]
+        for field_name, b, a, _d, norm in bdeltas:
+            label = _FEATURE_DISPLAY.get(field_name, (field_name, "", ""))[0]
+            lines.append(
+                f"| **{label}** | {_format_value(field_name, b)} | "
+                f"{_format_value(field_name, a)} | "
+                f"{_format_delta(field_name, b, a)} | {norm:.2f} |"
+            )
+        lines.append("")
+
+    # --- Premature stop rate (binary; reported separately) -----------------
+    if before.premature_stop_rate is not None or after.premature_stop_rate is not None:
+        lines += [
+            "## Premature stop rate",
+            "",
+            "Fraction of traces ending on an assistant message (rather than a "
+            "tool response). For agentic loops this is a proxy for the model "
+            "giving up mid-task or running out of context.",
+            "",
+            "| metric | before | after | delta |",
+            "|---|---|---|---|",
+            f"| premature stop rate | "
+            f"{before.premature_stop_rate if before.premature_stop_rate is None else f'{before.premature_stop_rate:.1%}'} | "
+            f"{after.premature_stop_rate if after.premature_stop_rate is None else f'{after.premature_stop_rate:.1%}'} | "
+            f"{_delta_str(before.premature_stop_rate, after.premature_stop_rate, pct=True)} |",
+            "",
+        ]
+
+    # --- Tool-call distribution by tool name -------------------------------
+    tool_delta = _rank_dist_delta(before.tool_call_by_name, after.tool_call_by_name)
+    if tool_delta:
+        lines += [
+            "## Tool-call distribution shifts (by tool name)",
+            "",
+            "Share of all tool calls in each dataset. Rows where a tool's "
+            "share rose are evidence the policy adopted that tool more often "
+            "post-RL.",
+            "",
+            "| tool | before share | after share | delta |",
+            "|---|---|---|---|",
+        ]
+        for key, b, a, d in tool_delta[:top_n]:
+            lines.append(f"| `{key}` | {b:.1%} | {a:.1%} | {d*100:+.1f}pp |")
+        lines.append("")
 
     fm_delta = _rank_dist_delta(before.failure_mode_dist, after.failure_mode_dist)
     if fm_delta:
@@ -214,7 +368,8 @@ def write_markdown_report(
 
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     # Also drop a JSON sidecar with the raw counts so downstream tooling
-    # (e.g., the orchestrator) doesn't need to re-parse the markdown.
+    # (e.g., the orchestrator, the LLM-judge step) doesn't need to re-parse
+    # the markdown.
     sidecar = output_path.with_suffix(".json")
     sidecar.write_text(
         json.dumps(
@@ -228,6 +383,9 @@ def write_markdown_report(
                     "error_dist": before.error_dist,
                     "failure_mode_dist": before.failure_mode_dist,
                     "fm_coverage": before.fm_coverage,
+                    "behavioral": before.behavioral,
+                    "tool_call_by_name": before.tool_call_by_name,
+                    "premature_stop_rate": before.premature_stop_rate,
                 },
                 "after": {
                     "label": after.label,
@@ -238,7 +396,20 @@ def write_markdown_report(
                     "error_dist": after.error_dist,
                     "failure_mode_dist": after.failure_mode_dist,
                     "fm_coverage": after.fm_coverage,
+                    "behavioral": after.behavioral,
+                    "tool_call_by_name": after.tool_call_by_name,
+                    "premature_stop_rate": after.premature_stop_rate,
                 },
+                "behavioral_ranked_deltas": [
+                    {
+                        "field": field_name,
+                        "before": b,
+                        "after": a,
+                        "delta": d,
+                        "normalized_abs_delta": norm,
+                    }
+                    for field_name, b, a, d, norm in _ranked_behavioral_deltas(before, after)
+                ],
                 "task_flips": {
                     "newly_passing": newly_passing,
                     "newly_failing": newly_failing,

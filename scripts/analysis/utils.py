@@ -18,6 +18,265 @@ _EPISODE_PATTERN = re.compile(r"(\d+)")
 
 
 # ---------------------------------------------------------------------------
+# Behavioral pattern detectors
+# ---------------------------------------------------------------------------
+#
+# These regexes detect agent-trace behavioral features used by behavioral_delta
+# and temporal_trace_analysis. The patterns are deliberately generous: this is
+# observational analysis, not exact accounting. False positives are acceptable
+# as long as they apply equally to before/after datasets (so the *delta* is
+# still meaningful).
+
+# OpenAI/Anthropic-style structured tool_calls live on the message dict itself
+# (msg["tool_calls"]). The OT-Agent trace format embeds them as
+# ``<tool_call>{json}</tool_call>`` inside assistant content.
+_TOOL_CALL_XML_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE)
+
+# Tool-result messages come back as ``role=user`` with ``New Terminal Output:``
+# in the OT-Agent format, or as ``role=tool`` in OpenAI/Anthropic.
+_TOOL_OUTPUT_MARKER = "New Terminal Output:"
+
+# Error patterns that appear in tool/terminal output and indicate the model's
+# previous action failed. Matches Python tracebacks, shell errors, common
+# error strings. We intentionally avoid matching "error" as a substring of
+# longer words (e.g. "errorhandler"), use word boundaries.
+_TOOL_ERROR_RE = re.compile(
+    r"(?:\bTraceback\s*\(most recent call last\)|"
+    r"\bSyntaxError\b|\bNameError\b|\bTypeError\b|\bValueError\b|"
+    r"\bAttributeError\b|\bKeyError\b|\bIndexError\b|\bImportError\b|"
+    r"\bModuleNotFoundError\b|\bFileNotFoundError\b|"
+    r"\bcommand not found\b|\bNo such file or directory\b|"
+    r"\bPermission denied\b|\bsegmentation fault\b|"
+    r"\bbash: .*?: command not found\b|"
+    r"^\s*Error[:\s]|^E\s+|"
+    r"\bFAILED\b|\bfailed\s+with\b)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Thinking-block detector (two common conventions).
+_THINK_BLOCK_RE = re.compile(r"<think(?:ing)?\s*>(.*?)</think(?:ing)?\s*>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(r"<think(?:ing)?\s*>", re.IGNORECASE)
+
+# Fenced code block density (we count triple-backtick OPEN markers; a fully
+# paired block counts as one).
+_CODE_FENCE_RE = re.compile(r"```")
+
+# Self-correction phrasing. Order matters only for documentation; we OR all of
+# them and count occurrences.
+_SELF_CORRECTION_PATTERNS: list[str] = [
+    r"\blet me reconsider\b",
+    r"\bactually,?\b",
+    r"\bwait,?\b",
+    r"\bon second thought\b",
+    r"\bI was wrong\b",
+    r"\bI'm wrong\b",
+    r"\blet me try again\b",
+    r"\blet me retry\b",
+    r"\blet me re-?try\b",
+    r"\blet me re-?examine\b",
+    r"\bhmm,?\b",
+    r"\bnever mind\b",
+    r"\bmy mistake\b",
+    r"\bI made an error\b",
+    r"\bthat (?:didn't|won't|did not) work\b",
+    r"\bnot quite right\b",
+]
+_SELF_CORRECTION_RE = re.compile("|".join(_SELF_CORRECTION_PATTERNS), re.IGNORECASE)
+
+# Names of tools we surface separately when present. Extracted as the value
+# of "name" in a parsed tool_call JSON payload, or matched as
+# ``"name": "<tool>"`` directly if the JSON is malformed.
+_TOOL_NAME_FROM_JSON_RE = re.compile(r'"name"\s*:\s*"([^"]+)"')
+
+
+def _safe_str_content(content: Any) -> str:
+    """Coerce a message ``content`` field (str / list-of-dicts / other) to str."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                t = item.get("text") or item.get("content") or ""
+                if isinstance(t, str):
+                    parts.append(t)
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        t = content.get("text") or content.get("content") or ""
+        return t if isinstance(t, str) else ""
+    return ""
+
+
+@dataclass
+class BehavioralFeatures:
+    """Per-trace behavioral features extracted from the conversation.
+
+    Computed once per trace at load time so downstream binning / aggregation
+    is cheap. All counts are integers; ratios are floats in [0, 1] (or None
+    when the denominator is zero).
+    """
+    tool_calls_total: int = 0
+    tool_calls_by_name: Dict[str, int] = field(default_factory=dict)
+    tool_errors: int = 0  # responses whose text matches typical error patterns
+    tool_responses: int = 0  # total tool/terminal-output responses
+    tool_error_rate: Optional[float] = None  # tool_errors / tool_responses
+    think_blocks: int = 0  # number of <think>...</think> openings (counts both `<think>` and `<thinking>`)
+    think_tokens: int = 0  # token count INSIDE <think> blocks
+    assistant_msgs: int = 0
+    assistant_tokens: int = 0
+    think_token_ratio: Optional[float] = None  # think_tokens / assistant_tokens
+    mean_assistant_tokens: Optional[float] = None  # assistant_tokens / assistant_msgs
+    code_fence_blocks: int = 0  # roughly (number of ``` markers) // 2
+    self_correction_hits: int = 0
+    premature_stop: bool = False  # last assistant turn was not followed by a tool turn AND reward < threshold
+    last_role: Optional[str] = None
+
+
+def _count_tokens_local(text: str, encoder) -> int:
+    """Token count helper that tolerates a missing encoder.
+
+    Duplicates ``count_tokens`` body to avoid a forward-declaration ordering
+    headache: ``count_tokens`` is defined later in this module.
+    """
+    if not text:
+        return 0
+    if encoder is not None:
+        try:
+            return len(encoder.encode(text, disallowed_special=()))
+        except Exception:
+            return len(text.split())
+    return len(text.split())
+
+
+def extract_behavioral_features(
+    record: Dict[str, Any],
+    encoder: Optional[Any] = None,
+) -> BehavioralFeatures:
+    """Extract per-trace behavioral features from a conversation record.
+
+    Handles both OpenAI/Anthropic-style ``tool_calls`` (set on the message
+    object) and the OT-Agent-style ``<tool_call>{json}</tool_call>`` embedded
+    in assistant content. Tool responses are detected as ``role=tool`` (OAI)
+    or ``role=user`` content containing ``New Terminal Output:`` (OT-Agent).
+    """
+    features = BehavioralFeatures()
+    if not isinstance(record, dict):
+        return features
+
+    messages = record.get("messages") or record.get("conversations")
+    if not isinstance(messages, list) or not messages:
+        return features
+
+    last_role: Optional[str] = None
+    by_name: Dict[str, int] = {}
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        if isinstance(role, str):
+            last_role = role
+        content = _safe_str_content(msg.get("content"))
+
+        if role == "assistant":
+            features.assistant_msgs += 1
+            tok = _count_tokens_local(content, encoder)
+            features.assistant_tokens += tok
+
+            # Structured tool_calls on the message (OpenAI / Anthropic schema).
+            structured_calls = msg.get("tool_calls")
+            if isinstance(structured_calls, list):
+                for call in structured_calls:
+                    features.tool_calls_total += 1
+                    name = None
+                    if isinstance(call, dict):
+                        fn = call.get("function")
+                        if isinstance(fn, dict):
+                            name = fn.get("name")
+                        name = name or call.get("name")
+                    if isinstance(name, str) and name:
+                        by_name[name] = by_name.get(name, 0) + 1
+
+            # Embedded <tool_call>{json}</tool_call> blocks (OT-Agent schema).
+            for block in _TOOL_CALL_XML_RE.findall(content):
+                features.tool_calls_total += 1
+                # Parse the tool name out of the JSON payload.
+                try:
+                    payload = json.loads(block.strip())
+                    name = payload.get("name") if isinstance(payload, dict) else None
+                except (json.JSONDecodeError, AttributeError):
+                    name = None
+                    m = _TOOL_NAME_FROM_JSON_RE.search(block)
+                    if m:
+                        name = m.group(1)
+                if isinstance(name, str) and name:
+                    by_name[name] = by_name.get(name, 0) + 1
+
+            # Thinking blocks.
+            features.think_blocks += len(_THINK_OPEN_RE.findall(content))
+            for inner in _THINK_BLOCK_RE.findall(content):
+                features.think_tokens += _count_tokens_local(inner, encoder)
+
+            # Fenced code blocks: count pairs of ```.
+            n_fences = len(_CODE_FENCE_RE.findall(content))
+            features.code_fence_blocks += n_fences // 2
+
+            # Self-correction phrases.
+            features.self_correction_hits += len(_SELF_CORRECTION_RE.findall(content))
+
+        elif role == "tool":
+            features.tool_responses += 1
+            if _TOOL_ERROR_RE.search(content):
+                features.tool_errors += 1
+
+        elif role == "user":
+            # OT-Agent loops tool output through a user-role message prefixed
+            # with "New Terminal Output:". Count those as tool responses.
+            if _TOOL_OUTPUT_MARKER in content:
+                features.tool_responses += 1
+                if _TOOL_ERROR_RE.search(content):
+                    features.tool_errors += 1
+
+    features.tool_calls_by_name = by_name
+    features.last_role = last_role
+
+    if features.assistant_msgs:
+        features.mean_assistant_tokens = features.assistant_tokens / features.assistant_msgs
+    if features.assistant_tokens:
+        features.think_token_ratio = features.think_tokens / features.assistant_tokens
+    if features.tool_responses:
+        features.tool_error_rate = features.tool_errors / features.tool_responses
+
+    # Premature stop: trace ended on an assistant turn (rather than a tool
+    # response). For agentic loops, ending without a final tool call is a
+    # proxy for the model giving up mid-task. Note this is a weak signal —
+    # some legitimate completions DO end on an assistant message.
+    features.premature_stop = last_role == "assistant"
+
+    return features
+
+
+# Convenience list of feature names that downstream code aggregates as
+# scalar deltas. Tool-call-by-name is handled separately.
+SCALAR_BEHAVIORAL_FIELDS: tuple[str, ...] = (
+    "tool_calls_total",
+    "tool_errors",
+    "tool_responses",
+    "tool_error_rate",
+    "think_blocks",
+    "think_tokens",
+    "think_token_ratio",
+    "assistant_msgs",
+    "assistant_tokens",
+    "mean_assistant_tokens",
+    "code_fence_blocks",
+    "self_correction_hits",
+)
+
+
+# ---------------------------------------------------------------------------
 # JSONL iteration
 # ---------------------------------------------------------------------------
 
@@ -383,9 +642,18 @@ class Trace:
     # "dir:/path/results"). Useful when cross-referencing traces from
     # multiple sources in the same analysis pass.
     source: Optional[str] = None
+    # Cached behavioral feature pack. Eagerly extracted at load time so the
+    # behavioral-delta / temporal aggregation paths can read fields directly
+    # without re-walking the conversation.
+    behavioral: BehavioralFeatures = field(default_factory=BehavioralFeatures)
 
     @classmethod
-    def from_row(cls, row: Dict[str, Any], source: Optional[str] = None) -> "Trace":
+    def from_row(
+        cls,
+        row: Dict[str, Any],
+        source: Optional[str] = None,
+        encoder: Optional[Any] = None,
+    ) -> "Trace":
         # update_hf_failure_modes writes to "failure_mode_analysis" by default;
         # accept either the new short name or the legacy long name.
         fm = row.get("failure_mode") or row.get("failure_mode_analysis")
@@ -402,6 +670,7 @@ class Trace:
             conversation=extract_conversation_text(row),
             failure_mode=fm if isinstance(fm, str) else None,
             source=source,
+            behavioral=extract_behavioral_features(row, encoder=encoder),
         )
 
 
@@ -441,6 +710,7 @@ def load_traces(
     *,
     split: str = "train",
     max_rows: Optional[int] = None,
+    encoder: Optional[Any] = None,
 ) -> List[Trace]:
     """Load traces from any of the supported source types.
 
@@ -450,8 +720,17 @@ def load_traces(
       - Local directory of trial folders (each holding ``result.json``)
 
     Returns a list of :class:`Trace` instances. ``max_rows`` caps the
-    number of rows loaded (useful for smoke tests).
+    number of rows loaded (useful for smoke tests). ``encoder`` (e.g. from
+    :func:`get_tiktoken_encoder`) is passed through to the behavioral-feature
+    extractor for accurate think-token / assistant-token counts. When
+    ``encoder`` is ``None`` we auto-fetch one — pass it explicitly when
+    loading many datasets to avoid repeated initialisation.
     """
+    # Lazily fetch a shared encoder so behavioral features get accurate
+    # tokenization for free.
+    if encoder is None:
+        encoder = get_tiktoken_encoder()
+
     if isinstance(source, str) and not Path(source).expanduser().exists():
         # Treat as HF repo id.
         ds = load_hf_trace_dataset(source, split=split)
@@ -459,7 +738,7 @@ def load_traces(
         for i, row in enumerate(ds):
             if max_rows is not None and i >= max_rows:
                 break
-            traces.append(Trace.from_row(row, source=f"hf:{source}"))
+            traces.append(Trace.from_row(row, source=f"hf:{source}", encoder=encoder))
         return traces
 
     path = Path(source).expanduser().resolve()
@@ -467,7 +746,7 @@ def load_traces(
         rows = list(iter_jsonl(path))
         if max_rows is not None:
             rows = rows[:max_rows]
-        return [Trace.from_row(r, source=f"jsonl:{path}") for r in rows]
+        return [Trace.from_row(r, source=f"jsonl:{path}", encoder=encoder) for r in rows]
 
     if path.is_dir():
         rows: List[Dict[str, Any]] = []
@@ -475,7 +754,7 @@ def load_traces(
             rows.append(row)
             if max_rows is not None and len(rows) >= max_rows:
                 break
-        return [Trace.from_row(r, source=f"dir:{path}") for r in rows]
+        return [Trace.from_row(r, source=f"dir:{path}", encoder=encoder) for r in rows]
 
     raise ValueError(
         f"Cannot resolve traces source {source!r}: not an existing JSONL, "

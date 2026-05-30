@@ -107,6 +107,39 @@ def _build_steps(args: argparse.Namespace) -> List[Step]:
             )
         )
 
+    # Q1: LLM judge diff (GPT-5 same-task before/after pair classification).
+    # Gated on --llm-judge because it costs API money. Runs AFTER behavioral_delta
+    # in execution order (the orchestrator runs steps in append order); uses the
+    # same baseline/post-RL pair the resolver chose.
+    if args.baseline_eval and args.post_rl_eval and args.llm_judge:
+        llm_md = out / "Q1_llm_judge_diff" / "report.md"
+        steps.append(
+            Step(
+                name="Q1.llm_judge_diff",
+                description=(
+                    f"LLM judge ({args.llm_judge_model}) pairwise behavioral comparison; "
+                    f"max {args.llm_judge_max_pairs} pairs"
+                ),
+                question="Q1",
+                output_marker=llm_md,
+                runner=_module_runner(
+                    "scripts.analysis.llm_judge_diff",
+                    [
+                        "--before", args.baseline_eval,
+                        "--after", args.post_rl_eval,
+                        "--output", str(llm_md),
+                        "--max-pairs", str(args.llm_judge_max_pairs),
+                        "--model", args.llm_judge_model,
+                        "--max-concurrent", str(args.llm_judge_concurrent),
+                        *(["--max-rows", str(args.max_rows)] if args.max_rows else []),
+                    ],
+                ),
+                # Optional in the sense that an API failure shouldn't fail
+                # the whole pipeline — the cheaper analyses are still useful.
+                optional=True,
+            )
+        )
+
     # NOTE: Q1.rl_summary (formerly summarize_conversations on RL-time
     # traces) is intentionally NOT a step here. summarize_conversations.py
     # only accepts a positional JSONL path (no HF id, no --output flag),
@@ -404,6 +437,33 @@ def parse_args() -> argparse.Namespace:
         "--annotate-failure-modes",
         action="store_true",
         help="Run update_hf_failure_modes on baseline + post-rl FIRST (GPT-5 API; can be slow)",
+    )
+    parser.add_argument(
+        "--llm-judge",
+        action="store_true",
+        help=(
+            "Enable Q1.llm_judge_diff (GPT-5 same-task pair classification). "
+            "Off by default since each pair costs API money. Caches results "
+            "in <output-dir>/Q1_llm_judge_diff/llm_judge_cache.json — re-runs "
+            "are cheap."
+        ),
+    )
+    parser.add_argument(
+        "--llm-judge-model",
+        default="openai/gpt-5-2025-08-07",
+        help="LiteLLM-style model id for the LLM judge step (default GPT-5)",
+    )
+    parser.add_argument(
+        "--llm-judge-max-pairs",
+        type=int,
+        default=30,
+        help="Max pair judgments (largest-behavioral-delta first; default 30)",
+    )
+    parser.add_argument(
+        "--llm-judge-concurrent",
+        type=int,
+        default=4,
+        help="Max concurrent LLM-judge API calls (default 4)",
     )
     parser.add_argument(
         "--output-dir",

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -72,38 +73,55 @@ def _bin_rl_reward(
     return centers, means
 
 
+_ISO_TS_TAIL_RE = re.compile(
+    # Anchored: must reach end of string. Accepts:
+    #   2026-05-25T12:00
+    #   2026-05-25T12:00:01
+    #   2026-05-25T12:00:01.651141
+    #   2026-05-25T12:00:01+00:00
+    #   2026-05-25T12:00:01.651141+00:00
+    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}"
+    r"(?::\d{2}(?:\.\d+)?)?"
+    r"(?:Z|[+-]\d{2}:?\d{2})?)$"
+)
+
+
 def _parse_eval_spec(spec: str) -> Tuple[str, Optional[datetime], Optional[str]]:
     """Parse ``<source>[@<label>][:<iso-timestamp>]``.
 
+    The trailing ``:<iso-timestamp>`` is recognized via an anchored regex
+    that accepts ``HH:MM``, ``HH:MM:SS``, ``HH:MM:SS.us``, and any of those
+    with a ``+HH:MM`` / ``Z`` UTC offset. This means the source / label
+    portion can safely contain colons too (rare, but defensible).
+
     Examples:
-      ``penfever/foo``                  → (source, None, None)
-      ``penfever/foo@step-500``         → (source, None, "step-500")
-      ``penfever/foo:2026-05-25T12:00`` → (source, datetime, None)
-      ``penfever/foo@step-500:2026-05-25T12:00`` → all three
+      ``penfever/foo``                       → (source, None, None)
+      ``penfever/foo@step-500``              → (source, None, "step-500")
+      ``penfever/foo:2026-05-25T12:00``      → (source, datetime, None)
+      ``penfever/foo@step-500:2026-05-25T12:00:01.651141+00:00`` → all three
     """
     label: Optional[str] = None
     ts: Optional[datetime] = None
-    # Split off timestamp last (search for last ":" that looks like an ISO date)
-    # ISO timestamps have ":" embedded, so just split on the LAST ":" before any 'T'.
-    # We use a simpler convention: timestamps must be tagged with "@label:ts" or just
-    # ":ts" at the end. ts is everything after the last colon if it parses as datetime.
-    if ":" in spec:
-        head, _, tail = spec.rpartition(":")
-        # Tail could be HH:MM (still part of ISO) — try a few splits.
-        for candidate_tail, candidate_head in [
-            (tail, head),
-            (f"{head.rpartition(':')[2]}:{tail}", head.rpartition(":")[0]) if ":" in head else (tail, head),
-        ]:
+
+    # Strip the timestamp tail (anchored regex; matches at most once).
+    match = _ISO_TS_TAIL_RE.search(spec)
+    if match:
+        ts_str = match.group(1)
+        head = spec[: match.start()]
+        # The separator before the timestamp must be ':' (this is our
+        # spec format). If it's not, treat the whole thing as source.
+        if head.endswith(":"):
+            head = head[:-1]
             try:
-                ts = datetime.fromisoformat(candidate_tail)
-                head = candidate_head
-                break
+                ts = datetime.fromisoformat(ts_str)
             except (TypeError, ValueError):
                 ts = None
+                head = spec
         else:
             head = spec
     else:
         head = spec
+
     if "@" in head:
         source, _, label = head.partition("@")
     else:
@@ -125,6 +143,11 @@ def _eval_marker(spec: str, max_rows: Optional[int]) -> Dict[str, Any]:
     }
 
 
+def _is_baseline_label(label: str) -> bool:
+    """Heuristic: detect baseline markers so we can colour/style them differently."""
+    return label.lower().startswith("baseline") or "base" in label.lower()
+
+
 def _plot(rl_centers, rl_means, eval_markers, output_path: Path, bin_hours: float) -> None:
     try:
         import matplotlib
@@ -133,25 +156,87 @@ def _plot(rl_centers, rl_means, eval_markers, output_path: Path, bin_hours: floa
     except ImportError:
         print("[eval-temporal-overlay] matplotlib unavailable; skipping plot", file=sys.stderr)
         return
-    fig, ax = plt.subplots(figsize=(11, 5))
+    fig, ax = plt.subplots(figsize=(12, 5))
     if rl_centers:
         ax.plot(rl_centers, rl_means, "-o", label=f"RL-time reward (bin={bin_hours}h)", color="#36c", markersize=4)
-    for m in eval_markers:
-        if m["timestamp"] is None or m["mean_reward"] is None:
-            continue
-        ax.scatter([m["timestamp"]], [m["mean_reward"]], color="#a30", s=80, marker="D", zorder=5)
-        ax.annotate(
-            m["label"],
-            (m["timestamp"], m["mean_reward"]),
-            textcoords="offset points",
-            xytext=(6, 6),
-            fontsize=9,
-        )
+
+    # Group markers by timestamp so we can horizontally jitter co-located
+    # ones (a common case: baseline-eval-ts auto-resolved to the same
+    # post-RL training_end timestamp). Without jitter, the baseline marker
+    # is rendered exactly behind the post-RL marker and becomes invisible.
+    plotted = [m for m in eval_markers if m["timestamp"] is not None and m["mean_reward"] is not None]
+    by_ts: Dict[datetime, List[Dict[str, Any]]] = defaultdict(list)
+    for m in plotted:
+        by_ts[m["timestamp"]].append(m)
+
+    # Jitter strategy: total time span / 80 -> per-step offset; 0 for solo.
+    if rl_centers:
+        span = (max(rl_centers) - min(rl_centers))
+    elif plotted:
+        ts_list = [m["timestamp"] for m in plotted]
+        span = max(ts_list) - min(ts_list) if len(ts_list) > 1 else timedelta(hours=1)
+    else:
+        span = timedelta(hours=1)
+    jitter_step = span / 80 if span.total_seconds() > 0 else timedelta(minutes=15)
+
+    baseline_label_set = False
+    postrl_label_set = False
+    for ts, group in by_ts.items():
+        # Sort within group: baseline first so post-RL renders on top, then
+        # apply symmetric horizontal jitter around the timestamp.
+        group.sort(key=lambda m: 0 if _is_baseline_label(m["label"]) else 1)
+        n = len(group)
+        # Compute offsets centered on 0: -((n-1)/2)*step ... +((n-1)/2)*step
+        for idx, m in enumerate(group):
+            offset_index = idx - (n - 1) / 2
+            x_pos = ts + jitter_step * offset_index
+            is_baseline = _is_baseline_label(m["label"])
+            color = "#666" if is_baseline else "#a30"
+            marker = "s" if is_baseline else "D"
+            edge = "white"
+            legend_label: Optional[str] = None
+            if is_baseline and not baseline_label_set:
+                legend_label = "baseline eval"
+                baseline_label_set = True
+            elif not is_baseline and not postrl_label_set:
+                legend_label = "post-RL eval"
+                postrl_label_set = True
+            ax.scatter(
+                [x_pos],
+                [m["mean_reward"]],
+                color=color,
+                s=90,
+                marker=marker,
+                edgecolors=edge,
+                linewidths=1.2,
+                zorder=5,
+                label=legend_label,
+            )
+            # Annotation: stack labels vertically when co-located.
+            ax.annotate(
+                m["label"],
+                (x_pos, m["mean_reward"]),
+                textcoords="offset points",
+                xytext=(8, 8 - 14 * idx),
+                fontsize=8,
+                color="#333",
+            )
+        # Draw a thin vertical guide so eyeballing back to the timestamp is easy.
+        if n > 1:
+            ax.axvline(
+                x=ts,
+                color="#bbb",
+                linestyle=":",
+                linewidth=0.8,
+                zorder=1,
+                alpha=0.7,
+            )
+
     ax.set_xlabel("wall-clock time")
     ax.set_ylabel("mean reward per trial")
     ax.set_title("RL-time reward (line) with post-RL eval-checkpoint rewards (markers)")
     ax.grid(True, alpha=0.3)
-    ax.legend(loc="lower right")
+    ax.legend(loc="lower right", fontsize=9)
     fig.autofmt_xdate()
     fig.tight_layout()
     fig.savefig(output_path, dpi=130)

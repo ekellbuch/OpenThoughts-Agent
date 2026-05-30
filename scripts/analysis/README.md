@@ -9,9 +9,9 @@ keyed to four research questions:
 
 | Question | Steps invoked |
 |---|---|
-| **Q1.** What model behaviors are changing as a result of RL? | `behavioral_delta` + `summarize_conversations` (+ optional `update_hf_failure_modes` upstream) |
-| **Q2.** Are reward changes over time attributable to behavior or other factors? | `temporal_trace_analysis` + `parse_skyrl_metrics` |
-| **Q3.** Do behavioral changes persist in post-RL eval traces? | `eval_temporal_overlay` + `trace_pair_render` + `post_training_comparison` |
+| **Q1.** What model behaviors are changing as a result of RL? | `behavioral_delta` (macro counts + per-feature deltas sorted by magnitude) + optional `llm_judge_diff` (GPT-5 pairwise classification, opt-in with `--llm-judge`) + optional `update_hf_failure_modes` upstream |
+| **Q2.** Are reward changes over time attributable to behavior or other factors? | `temporal_trace_analysis` (reward + behavioral small-multiples per bin) + `parse_skyrl_metrics` |
+| **Q3.** Do behavioral changes persist in post-RL eval traces? | `eval_temporal_overlay` + `trace_pair_render` (collapsible HTML w/ diff cards) + `post_training_comparison` |
 | **Q4.** Do those changes affect eval results? If not, is it expected? | `solve_rate_by_context` (+ Q1/Q3 outputs for interpretation) |
 
 Each step writes into `--output-dir/<step>/` and is skipped if its output marker already exists (use `--force` to re-run, `--skip <names>` to opt out, `--only <names>` for a subset). The plan + cross-linked index land at `--output-dir/{pipeline_plan.json, INDEX.md}`.
@@ -64,11 +64,12 @@ Add `--annotate-failure-modes` to run `update_hf_failure_modes` on both eval rep
 
 | Script | Question | Description |
 |---|---|---|
-| `behavioral_delta.py` | Q1 | Diff failure-mode + behavioral metrics between two trace datasets. Writes markdown + JSON sidecar. |
-| `trace_pair_render.py` | Q3 | Side-by-side HTML render of representative trials per common task (default sort: pass/fail flips first). |
-| `eval_temporal_overlay.py` | Q3 | Extends `temporal_trace_analysis`: overlays eval-checkpoint markers on the RL-time reward curve. |
+| `behavioral_delta.py` | Q1 | Diff failure-mode + per-feature behavioral metrics between two trace datasets. Per-trace features (tool calls, tool errors, think tokens, response verbosity, code-fence density, self-correction phrases, premature stops, tool-call distribution by tool name) are sorted by magnitude of delta. Writes markdown + JSON sidecar. |
+| `llm_judge_diff.py` | Q1 | GPT-5 (via `ajudge.llms.litellm_llm.LiteLLM`) pairwise classifier on same-task before/after trace pairs. Per pair: behavior-change paragraph + tags + confidence + winner + reason. Aggregates to a tag distribution + win-rate table + top-5 verbatim judgments. Caches per (task, before-trial, after-trial, model). |
+| `trace_pair_render.py` | Q3 | Side-by-side HTML render of representative trials per common task. Diff summary card per pair; collapsible `<details>` messages with role-coded borders, expand/collapse-all buttons, pygments syntax-highlighted code fences, distinct `<think>` styling, labelled `<tool_call>` chips. Default open: first user msg + last assistant msg. |
+| `eval_temporal_overlay.py` | Q3 | Extends `temporal_trace_analysis`: overlays eval-checkpoint markers on the RL-time reward curve. Co-located baseline / post-RL markers are auto-jittered horizontally so both stay visible. |
 | `auto_resolve.py` | (orchestrator helper) | Given `(rl_traces, model_repo)`, looks up the model + its `sandbox_jobs` in Supabase and snapshots `<model_repo>/training_logs/` from HF to fill in the orchestrator's other flags automatically. |
-| `analyze_rl_behavior.py` | (orchestrator) | Runs all of the above + the existing scripts in the right order, with resumability via output-marker detection. `--model-repo` triggers `auto_resolve`. |
+| `analyze_rl_behavior.py` | (orchestrator) | Runs all of the above + the existing scripts in the right order, with resumability via output-marker detection. `--model-repo` triggers `auto_resolve`. `--llm-judge` enables the GPT-5 pair classifier. |
 
 ## Shared Utilities
 
