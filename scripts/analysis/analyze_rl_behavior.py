@@ -107,25 +107,13 @@ def _build_steps(args: argparse.Namespace) -> List[Step]:
             )
         )
 
-    # Q1: summarize_conversations on the RL-time traces (token/turn macros).
-    if args.rl_traces:
-        rl_summary = out / "Q1_rl_summary" / "summary.txt"
-        steps.append(
-            Step(
-                name="Q1.rl_summary",
-                description="Per-row token/turn/reward stats on RL-time traces",
-                question="Q1",
-                output_marker=rl_summary,
-                # summarize_conversations expects a JSONL on disk; if the
-                # source is an HF id, the user should pre-export. We make
-                # this step optional and tolerate JSONL-only sources here.
-                runner=_module_runner(
-                    "scripts.analysis.summarize_conversations",
-                    [args.rl_traces, "--output", str(rl_summary)],
-                ),
-                optional=True,
-            )
-        )
+    # NOTE: Q1.rl_summary (formerly summarize_conversations on RL-time
+    # traces) is intentionally NOT a step here. summarize_conversations.py
+    # only accepts a positional JSONL path (no HF id, no --output flag),
+    # and its outputs — per-row token/turn/reward stats — are already
+    # covered by Q2.temporal_trace_analysis (binned + overall) and
+    # Q1.behavioral_delta (per-dataset macros). Re-add if a JSONL-only
+    # workflow comes back.
 
     # Q2: temporal_trace_analysis on the RL-time traces.
     if args.rl_traces:
@@ -151,20 +139,47 @@ def _build_steps(args: argparse.Namespace) -> List[Step]:
             )
         )
 
-    # Q2: parse_skyrl_metrics on training logs.
+    # Q2: parse_skyrl_metrics on training logs. The script writes
+    # ``<ts>_metrics_report.md`` (timestamped) inside its output dir
+    # and has no --output-filename override. Wrap the runner to drop a
+    # ``summary.md`` symlink at the most recent report, so our marker-
+    # based skip-detection and INDEX.md cross-link both work.
     if args.training_log_dir:
         skyrl_dir = out / "Q2_skyrl_metrics"
         skyrl_marker = skyrl_dir / "summary.md"
+
+        def _run_skyrl(args=args, skyrl_dir=skyrl_dir, marker=skyrl_marker) -> int:
+            rc = _run_subprocess([
+                sys.executable, "-m", "scripts.analysis.parse_skyrl_metrics",
+                args.training_log_dir, str(skyrl_dir),
+            ])
+            if rc != 0:
+                return rc
+            reports = sorted(skyrl_dir.glob("*_metrics_report.md"))
+            if not reports:
+                print(
+                    "[orchestrator] parse_skyrl_metrics succeeded (rc=0) but no "
+                    "*_metrics_report.md was produced; INDEX link will be missing.",
+                    file=sys.stderr,
+                )
+                return rc
+            latest = reports[-1]
+            if marker.exists() or marker.is_symlink():
+                marker.unlink()
+            try:
+                marker.symlink_to(latest.name)  # relative symlink stays valid if dir moves
+            except OSError:
+                # Fall back to copy on filesystems that can't symlink.
+                shutil.copy2(latest, marker)
+            return rc
+
         steps.append(
             Step(
                 name="Q2.parse_skyrl_metrics",
                 description="KL / grad-norm / LR / vLLM stats from SkyRL training logs",
                 question="Q2",
                 output_marker=skyrl_marker,
-                runner=_module_runner(
-                    "scripts.analysis.parse_skyrl_metrics",
-                    [args.training_log_dir, str(skyrl_dir)],
-                ),
+                runner=_run_skyrl,
             )
         )
 
