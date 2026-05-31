@@ -1,0 +1,270 @@
+entrypoint: examples.terminal_bench.entrypoints.main_tbench
+
+# 56GPU teacher-hint variant — RECONFIGURED-HINT arm of the v3 paired
+# ablation (14-node Perlmutter). Identical to 56GPU_base_maxgn09_hint.yaml
+# except the teacher-hint gate is lowered: min_turns 4 → 2 (check_interval
+# stays 4). Paired with 56GPU_base_maxgn09_nohint.yaml (the no-hint control)
+# for a clean keep/kill test on whether teacher-hint pays off.
+#
+# v3 motivation (REPORT_v3.md, 2026-05-31): teacher-hint stopped paying off
+# because the trajectory-length regime shifted SHORT — 90% of rollouts now
+# finish in <8 turns, mean ~4.5 — so the hint-eligible [8,16) cohort
+# evaporated and the min_turns=4 gate let most short rollouts finish before
+# becoming eligible. Lowering min_turns to 2 makes a 4-5 turn rollout
+# hint-eligible at its first check (turn 4).
+#
+# Inherited from 56GPU_base_maxgn09_hint.yaml (UNCHANGED): max_grad_norm 0.9,
+# n_concurrent_trials 500, num_parallel_generation_workers 1500,
+# max_input_tokens 40959 / max_model_len 40960 (the 2026-05-28 context-budget
+# revert), enable_summarize false. Same base model / dataset / seed (42) /
+# 56 GPU / 14-node layout as the control.
+
+config_groups:
+  terminal_bench_config: terminal_bench
+
+terminal_bench:
+  trials_dir: null
+
+  harbor:
+    name: terminus-2
+    max_episodes: 999999
+    enable_summarize: false
+    store_all_messages: true
+    enable_episode_logging: false
+    record_terminal_session: false
+    enable_pane_logging: false
+
+    strict_json_parser: true
+
+    interleaved_thinking: true
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: true
+    override_timeout_sec: 1800
+
+    override_cpus: 1
+    override_memory_mb: 2048
+    override_storage_mb: 2048
+
+    auto_snapshot: true
+
+    verifier_override_timeout_sec: 120
+
+    max_retries: 3
+    min_wait_sec: 60.0
+    max_wait_sec: 600.0
+    wait_multiplier: 2.0
+
+    exclude_exceptions:
+      - VerifierTimeoutError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - VerifierOutputParseError
+      - VerifierRuntimeError
+
+    prm:
+      name: teacher_hint
+      engine_type: openai
+      engine_kwargs:
+        model: gpt-5.5-2026-04-23
+        # max_tokens 2048: paired with the teacher_hint PRM's 2048-token
+        # hard mandate in its system prompt (preserves the May-21 fix
+        # that resolved the ContextLengthExceeded collapse on job 53102590).
+        max_tokens: 2048
+      # v3 ablation (2026-05-31): trajectory regime shifted short (median
+      # ~4.5 turns), so lower the gate so short rollouts actually receive a
+      # hint:
+      #   check_interval 4 (kept from v2 8→4; first fire still at turn 4)
+      #   min_turns      4 → 2  (a 4-5 turn rollout is now eligible at turn 4)
+      check_interval: 4
+      min_turns: 2
+      k: 8
+
+    # v3 (2026-05-25): walked back concurrency 900 → 500. Three v2 chain
+    # links (53383710/12/13) died with the Ray-2.48 distributed-refcount
+    # SIGABRT after monotonically-growing volumes of
+    # `reference_count.cc:1619: ref already removed` warnings (133→431→838).
+    # Root cause: single skyrl_entrypoint driver hits a Ray-internal
+    # threshold under extreme actor/object-ref concurrency. v1 (300 trials)
+    # ran 23h clean; 500 keeps 1.67x v1 headroom while staying clear of
+    # the empirically-bad ceiling. check_interval=4 retained — that is
+    # the actual ablation knob.
+    n_concurrent_trials: 500
+
+    log_level: INFO
+
+    enable_reward_shaping: false
+
+    enable_error_classification: true
+    mask_exceptions:
+      - DaytonaError
+      - EnvironmentStartTimeoutError
+      - NetworkError
+      - ConnectionError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - AgentEnvironmentTimeoutError
+      - ContextLengthExceededError
+    default_error_treatment: zero
+    # NOTE (2026-05-27): AgentTimeoutError / ContextLengthExceededError moved
+    # OUT of passthrough_exceptions into zero_exceptions. Passthrough routed
+    # these soft-limit trials through the *normal* (live-trajectory) path in
+    # terminal_bench_generator._process_trial_result, keeping the trial's
+    # dangling vLLM ObjectRefs + orphaned litellm async-callback closures
+    # alive in the training batch. That fed Ray's distributed-refcount race
+    # (reference_count.cc:1619 → SIGABRT / WorkerCrashedError) that killed the
+    # GLM-4_7-swesmith maxgn09_hint chain (true 32847-token overflows on ~32k
+    # prompts). zero_exceptions takes the EARLY-RETURN path (response_ids=[0],
+    # reward=0, included in baseline) which never consumes rollout_details, so
+    # no dangling refs enter training. Matches harbor_config.py schema default.
+    passthrough_exceptions:
+      - AgentTimeoutError
+    zero_exceptions: []
+
+  model_info:
+    # 2026-05-28: 32767 → 65535 was REVERTED to 40959 after 53508905 FAILED
+    # at 5:48 with vLLM ValidationError: "max_model_len (65536) > derived
+    # max_model_len (max_position_embeddings=40960 in model's config.json)".
+    # The base model's name "GLM-4_7-…-131k-fixthink" was aspirational
+    # training-target naming; the actual config.json caps at 40960. Could
+    # force 65k with VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 but vLLM warns of
+    # CUDA errors / garbage outputs from RoPE extrapolation past trained
+    # range. 40959 (one-below-max-model-len) preserves the original
+    # loose-truncation pattern while giving ~25% more headroom than the
+    # 32767 that failed. See 2026-05-28_perlmutter_53494636_…
+    max_input_tokens: 40959
+    max_output_tokens: 4096
+
+  archiving:
+    enabled: false
+
+  trace_upload:
+    enabled: true
+    repo_org: DCAgent
+    episodes: last
+    dataset_type: SFT
+
+trainer:
+  strategy: fsdp2
+  algorithm:
+    advantage_estimator: rloo_n
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    eps_clip_low: 0.2
+    eps_clip_high: 0.05
+    loss_reduction: token_mean
+
+  epochs: 2
+  max_steps: 80
+  update_epochs_per_batch: 1
+
+  train_batch_size: 64
+  policy_mini_batch_size: 64
+  eval_batch_size: 64
+
+  micro_forward_batch_size_per_gpu: 4
+  micro_train_batch_size_per_gpu: 1
+
+  max_prompt_length: 999999
+
+  eval_interval: 999999
+  eval_before_train: false
+  ckpt_interval: 3
+  resume_mode: latest
+  hf_save_interval: 5
+  hf_hub_repo_id: null
+  hf_hub_private: false
+  hf_hub_revision: main
+
+  enable_db_registration: false
+
+  project_name: OpenThoughts-Agent
+  log_level: INFO
+  tracker_commit_each_step: true
+
+  run_name: null
+  ckpt_path: null
+  export_path: null
+
+  policy:
+    optimizer_config:
+      lr: 8e-6
+      weight_decay: 0.0
+      adam_betas: [0.9, 0.999]
+      max_grad_norm: 0.9
+    fsdp_config:
+      cpu_offload: true
+      reshard_after_forward: true
+      fsdp_size: 4
+  ref:
+    fsdp_config:
+      cpu_offload: true
+      reshard_after_forward: true
+      fsdp_size: 4
+
+  placement:
+    colocate_all: false
+    policy_num_nodes: 2
+    ref_num_nodes: 2
+    policy_num_gpus_per_node: 4
+    ref_num_gpus_per_node: 4
+
+  fully_async:
+    max_staleness_steps: 16
+    # v3 (2026-05-25): walked back 2304 → 1500 alongside n_concurrent_trials
+    # 900 → 500 to avoid the Ray-2.48 ref-counting SIGABRT. 1500 is ~2x v1's
+    # 768. Keeps inference-engine pressure low while staying clear of the
+    # driver-side concurrency ceiling.
+    num_parallel_generation_workers: 1500
+
+generator:
+  backend: vllm
+  timeout_multiplier: 1.0
+  model_dtype: bfloat16
+
+  inference_engine_tensor_parallel_size: 1
+  # 14-node layout: 48 inference engines + 8 GPUs policy/ref = 56 GPUs.
+  num_inference_engines: 48
+
+  n_samples_per_prompt: 8
+  eval_n_samples_per_prompt: 8
+
+  gpu_memory_utilization: 0.85
+
+  max_num_seqs: 24
+  max_num_batched_tokens: 16384
+
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  enable_http_endpoint: true
+  enable_ray_prometheus_stats: false
+  vllm_stats_interval: 1
+  append_eos_token_after_stop_str_in_multi_turn: true
+  max_turns: 999999
+
+  sampling_params:
+    max_generate_length: 4096
+    temperature: 0.7
+    top_p: 0.95
+    top_k: 20
+
+  engine_init_kwargs:
+    # 2026-05-28: 32768 → 65536 REVERTED to 40960 (the model's actual
+    # max_position_embeddings per config.json). vLLM ValidationError on
+    # 53508905 confirmed the "131k-fixthink" suffix was aspirational
+    # naming, not architectural. 40960 still gives ~25% more headroom
+    # over the failing 32768 — should push most of the boundary-hugging
+    # overflow distribution out of the FD-churn → SIGABRT path. If
+    # 24-948/link overflow rate persists at 40k, the next lever is
+    # option 2 (pre-filter dataset to drop prompts > ~36k tokens).
+    max_model_len: 40960
+    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
+
+data:
+  train_data: []
+  val_data: ["open-thoughts/OpenThoughts-TB-dev"]
