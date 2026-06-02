@@ -933,6 +933,16 @@ class RLJobRunner:
             import traceback
             traceback.print_exc()
 
+        # On a crash, preserve Ray logs BEFORE the (potentially slow) trace
+        # upload. The sbatch EXIT-trap also preserves them, but it only runs
+        # after this Python process returns — and this process then blocks on
+        # the trace upload below. If the wall clock kills the job during that
+        # upload, the trap never completes and the crash evidence (the dead
+        # worker's python-core-worker-*.log) is lost. Preserving here first
+        # guarantees the evidence survives even if the upload is later killed.
+        if training_exit_code != 0:
+            self._preserve_ray_logs_on_crash()
+
         # Upload traces after training (success or failure — partial traces are valuable)
         upload_proc = self._launch_trace_upload(training_exit_code)
         if upload_proc is not None:
@@ -951,6 +961,59 @@ class RLJobRunner:
                 print(f"[RLJobRunner] Trace upload failed with exit code {upload_exit_code}.", flush=True)
 
         return training_exit_code
+
+    def _preserve_ray_logs_on_crash(self) -> None:
+        """Best-effort: preserve Ray logs immediately after a training crash,
+        before the (potentially slow) trace upload, so a wall-clock kill can't
+        destroy the crash evidence.
+
+        Mirrors the sbatch EXIT-trap's ``cleanup_ray_logs`` exactly (head-node
+        ``/tmp/ray`` rsync + the shared ``collect_worker_ray_logs.sh`` for
+        worker nodes) but runs early. Bounded by a timeout so it can never
+        itself hang the job, and fully non-fatal — any failure is logged and
+        ignored. Running twice (here + the EXIT trap) is harmless: rsync is
+        additive.
+        """
+        job_dir = Path(self.config.experiments_dir) / self.config.job_name
+        dest = job_dir / "ray_logs"
+        repo_root = Path(__file__).resolve().parents[1]
+        collector = repo_root / "scripts" / "ray" / "collect_worker_ray_logs.sh"
+
+        # Same steps as the sbatch trap, in the same order.
+        script = (
+            'mkdir -p "$DEST"; '
+            'if [[ -d /tmp/ray ]]; then rsync -a --ignore-errors /tmp/ray/ "$DEST/" 2>/dev/null || true; fi; '
+            'for d in /tmp/ray_logs /tmp/ray_tmp; do '
+            '  if [[ -d "$d" ]]; then rsync -a --ignore-errors "$d/" "$DEST/$(basename "$d")/" 2>/dev/null || true; fi; '
+            'done; '
+            'if [[ -f "$COLLECTOR" ]]; then source "$COLLECTOR"; collect_worker_ray_logs "$DEST"; fi'
+        )
+        env = {**os.environ, "DEST": str(dest), "COLLECTOR": str(collector)}
+
+        print(
+            f"[RLJobRunner] Crash detected (exit!=0) — preserving Ray logs to {dest} "
+            f"BEFORE trace upload (so a wall-clock kill can't lose crash evidence)...",
+            flush=True,
+        )
+        try:
+            subprocess.run(
+                ["bash", "-c", script],
+                env=env,
+                timeout=600,
+                stdout=sys.stdout,
+                stderr=subprocess.STDOUT,
+            )
+            print("[RLJobRunner] Crash-time Ray log preservation complete.", flush=True)
+        except subprocess.TimeoutExpired:
+            print(
+                "[RLJobRunner] Crash-time Ray log preservation timed out (600s); continuing.",
+                flush=True,
+            )
+        except Exception as e:
+            print(
+                f"[RLJobRunner] Crash-time Ray log preservation failed (non-fatal): {e}",
+                flush=True,
+            )
 
     def _launch_trace_upload(self, training_exit_code: int) -> Optional[subprocess.Popen]:
         """Launch post-training trace upload as a subprocess.
