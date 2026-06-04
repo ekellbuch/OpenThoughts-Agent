@@ -1,6 +1,6 @@
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional
 import argparse
 import sys
 from enum import Enum
@@ -766,6 +766,28 @@ class RLArgs:
             "Default: dcagent-rl"
         }
     )
+    rl_container_sif: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Path to an Apptainer/Singularity SIF image to use as the RL "
+            "runtime. OPT-IN: when set, the SkyRL trainer + Ray head/workers run "
+            "inside the SIF via `apptainer exec --nv` instead of activating the "
+            "host venv/conda. Live host SkyRL/harbor source is bind-mounted over "
+            "the in-SIF install via PYTHONPATH. Mutually informative with "
+            "--rl_use_conda/--rl_conda_env (the host-activation switches are "
+            "skipped when this is set)."
+        }
+    )
+    rl_container_binds: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "help": "Bind-mount sources for --rl_container_sif (each passed as "
+            "`--bind <src>`). Defaults to /e/scratch and /e/data1 (the Jupiter "
+            "GPFS roots covering code, SIF, tasks, checkpoints, HF cache). "
+            "Only used when --rl_container_sif is set.",
+            "nargs": "+",
+        }
+    )
     hf_hub_repo_id: Optional[str] = field(
         default=None,
         metadata={
@@ -872,6 +894,12 @@ def _add_dataclass_arguments(arg_group, dataclass_type, exclude_fields=None, *, 
                 "help": help_text,
                 "default": field.default,
             }
+            nargs = field.metadata.get("nargs")
+            if nargs is not None:
+                # Multi-value option (e.g. --rl_container_binds /e/scratch /e/data1).
+                # type(None) defaults to str above, which is correct for str lists.
+                kwargs["nargs"] = nargs
+                kwargs["type"] = str
             if choices:
                 kwargs["choices"] = choices
             if required:

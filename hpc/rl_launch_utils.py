@@ -26,6 +26,108 @@ from hpc.hf_utils import is_hf_dataset_path
 from hpc.launch_utils import get_daytona_api_key_override
 
 
+# Default Apptainer bind mounts for the RL container runtime mode.
+# These GPFS roots on Jupiter are NOT auto-bound by Apptainer (only $HOME,
+# $PWD, /tmp, /proc, /sys, /dev are) and cover code, SIF, tasks, checkpoints,
+# HF cache, and experiments. See scope_rl_via_apptainer_launcher.md §3.
+DEFAULT_RL_CONTAINER_BINDS: List[str] = ["/e/scratch", "/e/data1"]
+
+
+def build_apptainer_prefix(
+    sif: str,
+    binds: Optional[List[str]] = None,
+    pythonpath: Optional[str] = None,
+) -> List[str]:
+    """Build the ``apptainer exec --nv`` command prefix for the RL runtime.
+
+    Mirrors the SFT-MCA precedent (``hpc/sbatch_sft_mca/vista_train_mca.sbatch``
+    line 139: ``srun singularity exec --nv --bind ... <sif> ...``).
+
+    The returned list is meant to be *prepended* to a command (Ray ``ray start``,
+    the ray.init() wait script, or the SkyRL driver), so that the command runs
+    inside the SIF using the container's own Python install. A ``PYTHONPATH``
+    is prepended via ``--env`` so the live host SkyRL/harbor source overrides
+    the install baked into the container (live-source bind, §3 of the design doc).
+
+    Intentional omissions per the design doc:
+    - NO ``--cleanenv``: host env (UV_USE_IO_URING, NCCL_*, etc.) must survive.
+    - NO ``--net``/``--network``: the container shares the host network so Ray's
+      ``--node-ip-address``/``--address`` and VLLM_HOST_IP work unchanged.
+
+    Args:
+        sif: Absolute path to the Apptainer/Singularity SIF image.
+        binds: Bind-mount sources (default: DEFAULT_RL_CONTAINER_BINDS). Each is
+            passed as ``--bind <src>`` (DST==SRC).
+        pythonpath: Value for an ``--env PYTHONPATH=...`` flag, prepended so the
+            bind-mounted host source wins over the in-SIF install. If None, no
+            PYTHONPATH override is injected (apptainer passes host env by default).
+
+    Returns:
+        List of command tokens ending with the SIF path, e.g.::
+
+            ["apptainer", "exec", "--nv",
+             "--bind", "/e/scratch", "--bind", "/e/data1",
+             "--env", "PYTHONPATH=...", "<sif>"]
+    """
+    if binds is None:
+        binds = DEFAULT_RL_CONTAINER_BINDS
+    prefix: List[str] = ["apptainer", "exec", "--nv"]
+    for b in binds:
+        prefix.extend(["--bind", b])
+    if pythonpath:
+        prefix.extend(["--env", f"PYTHONPATH={pythonpath}"])
+    prefix.append(sif)
+    return prefix
+
+
+def _build_container_pythonpath() -> str:
+    """Build the in-container PYTHONPATH for the Apptainer RL runtime mode.
+
+    Prepends the live host SkyRL (skyrl-train), harbor, and workdir paths so the
+    bind-mounted host source wins over the install baked into the SIF (the SIF
+    installed our SkyRL fork ``--no-deps``). Resolved at runtime inside the
+    sbatch job from environment set by the dotenv + sbatch (SKYRL_HOME, DCFT,
+    WORKDIR), so it reflects the actual cluster paths. Mirrors
+    ``universal_rl.sbatch:143`` (``PYTHONPATH="$WORKDIR:..."``).
+
+    Returns:
+        Colon-joined PYTHONPATH string. Includes the existing $PYTHONPATH tail
+        so nothing already on the host path is dropped.
+    """
+    parts: List[str] = []
+
+    skyrl_home = os.environ.get("SKYRL_HOME")
+    if skyrl_home:
+        parts.append(os.path.join(skyrl_home, "skyrl-train"))
+
+    # Harbor lives as a sibling of OpenThoughts-Agent ($DCFT/../harbor on
+    # Jupiter); fall back to $HARBOR_HOME if set explicitly.
+    harbor_home = os.environ.get("HARBOR_HOME")
+    if not harbor_home:
+        dcft = os.environ.get("DCFT")
+        if dcft:
+            harbor_home = os.path.join(os.path.dirname(dcft.rstrip("/")), "harbor")
+    if harbor_home:
+        parts.append(harbor_home)
+
+    workdir = os.environ.get("WORKDIR") or os.environ.get("DCFT")
+    if workdir:
+        parts.append(workdir)
+
+    existing = os.environ.get("PYTHONPATH")
+    if existing:
+        parts.append(existing)
+
+    # De-dup while preserving order.
+    seen = set()
+    deduped = []
+    for p in parts:
+        if p and p not in seen:
+            seen.add(p)
+            deduped.append(p)
+    return ":".join(deduped)
+
+
 def prebuild_daytona_snapshots(
     resolved_train_data: List[str],
     max_new_snapshots: int = 10,
@@ -378,6 +480,21 @@ def get_rl_env_activation(exp_args: Dict[str, Any]) -> str:
     Returns:
         Multi-line shell script for environment activation.
     """
+    # Apptainer runtime mode (OPT-IN): when --rl_container_sif is set the Python
+    # comes from inside the SIF (and the bind-mounted host SkyRL/harbor), so the
+    # host venv/conda activation is skipped entirely. The three command seams
+    # (Ray head/worker, ray.init() wait, SkyRL driver) are wrapped in
+    # `apptainer exec --nv` downstream. Mirrors SFT-MCA, which `conda activate`s
+    # *inside* the container, not on the host.
+    container_sif = exp_args.get("rl_container_sif")
+    if container_sif:
+        return (
+            "# RL Apptainer runtime mode (--rl_container_sif set):\n"
+            "# Host venv/conda activation SKIPPED. Python is provided by the SIF\n"
+            f"# ({container_sif}); Ray + SkyRL run via `apptainer exec --nv`.\n"
+            'echo "RL runtime: Apptainer SIF (host venv/conda activation skipped)"'
+        )
+
     use_conda = exp_args.get("rl_use_conda", False)
     conda_env = exp_args.get("rl_conda_env", "dcagent-rl")
 
@@ -494,6 +611,13 @@ class RLJobConfig:
     harbor_env: str = "daytona"
 
     proxychains_binary: Optional[str] = None
+
+    # Apptainer/Singularity RL runtime mode (OPT-IN). When container_sif is set,
+    # the SkyRL trainer + Ray head/workers run inside the SIF via
+    # `apptainer exec --nv` instead of activating the host venv/conda. See
+    # scope_rl_via_apptainer_launcher.md.
+    container_sif: Optional[str] = None
+    container_binds: List[str] = field(default_factory=list)
 
     # Ray object store size in GB (default: 40)
     ray_object_store_gb: float = 40.0
@@ -687,6 +811,9 @@ def construct_rl_sbatch_script(exp_args: dict, hpc) -> str:
         pinggy_token=exp_args.get("pinggy_token"),
         agent_name=agent_name,
         harbor_env=harbor_env,
+        container_sif=exp_args.get("rl_container_sif"),
+        container_binds=list(exp_args.get("rl_container_binds") or DEFAULT_RL_CONTAINER_BINDS)
+        if exp_args.get("rl_container_sif") else [],
         ray_object_store_gb=float(exp_args.get("ray_object_store_gb", 40.0)),
     )
 
@@ -1164,6 +1291,12 @@ class RLJobRunner:
             disable_cpu_bind=getattr(hpc, "disable_cpu_bind", False),
             gpu_bind=getattr(hpc, "gpu_bind", "none"),
             proxychains_binary=getattr(hpc, "proxychains_binary", None),
+            # Apptainer RL runtime mode (OPT-IN): wrap ray start / ray.init()
+            # wait scripts in `apptainer exec --nv` when a SIF is configured.
+            container_sif=getattr(self.config, "container_sif", None),
+            container_binds=list(getattr(self.config, "container_binds", []) or []),
+            container_pythonpath=_build_container_pythonpath()
+            if getattr(self.config, "container_sif", None) else "",
         )
 
         print(f"Starting Ray cluster with {num_nodes} nodes, {gpus_per_node} GPUs/node", flush=True)
@@ -1233,13 +1366,28 @@ class RLJobRunner:
         Returns:
             Exit code from SkyRL process.
         """
-        # Build command - use sys.executable to ensure we use the same Python
-        # as the current process (respects conda/venv activation)
-        cmd = [sys.executable, "-m", self.config.skyrl_entrypoint]
+        # Build command. In the default (host venv/conda) path we use
+        # sys.executable so we run the same Python as the current process
+        # (which the sbatch activated). In Apptainer mode the Python comes
+        # from inside the SIF, so we use a bare "python" prefixed with the
+        # apptainer-exec list.
+        container_sif = getattr(self.config, "container_sif", None)
+        if container_sif:
+            apptainer_prefix = build_apptainer_prefix(
+                container_sif,
+                binds=self.config.container_binds or None,
+                pythonpath=_build_container_pythonpath(),
+            )
+            cmd = apptainer_prefix + ["python", "-m", self.config.skyrl_entrypoint]
+        else:
+            cmd = [sys.executable, "-m", self.config.skyrl_entrypoint]
         cmd.extend(self.config.skyrl_hydra_args)
 
         print(f"\nRunning SkyRL:", flush=True)
-        print(f"  Python: {sys.executable}", flush=True)
+        if container_sif:
+            print(f"  Runtime: Apptainer SIF {container_sif}", flush=True)
+        else:
+            print(f"  Python: {sys.executable}", flush=True)
         print(f"  Entrypoint: {self.config.skyrl_entrypoint}", flush=True)
         print(f"  Args: {len(self.config.skyrl_hydra_args)} Hydra arguments", flush=True)
 
@@ -1253,6 +1401,9 @@ class RLJobRunner:
             else:
                 cwd = None
 
+        # Proxychains stays OUTSIDE the apptainer exec: egress is handled at the
+        # host layer (proxychains4 -f <conf> apptainer exec ... python ...), so
+        # the container needn't know about proxychains. See design doc §5.
         if self.config.proxychains_binary:
             print(f"Using proxychains binary: {self.config.proxychains_binary}", flush=True)
             cmd = [f'{self.config.proxychains_binary}', '-f', "$PROXYCHAINS_CONF_FILE"] + cmd

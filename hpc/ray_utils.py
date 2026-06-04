@@ -126,6 +126,16 @@ class RayClusterConfig:
     # When set, wraps ray commands with: proxychains4 -f $PROXYCHAINS_CONF_FILE ray start ...
     # This is more reliable on some systems (e.g., Jupiter ARM GH200 nodes)
     proxychains_binary: str = ""
+    # Apptainer/Singularity RL runtime mode (OPT-IN). When container_sif is set,
+    # `ray start` (head + worker) and the ray.init() wait scripts run inside the
+    # SIF via `apptainer exec --nv`. Proxychains stays OUTSIDE the apptainer exec
+    # (proxychains4 -f conf apptainer exec ... ray ...). See
+    # scope_rl_via_apptainer_launcher.md §5.
+    container_sif: Optional[str] = None
+    container_binds: List[str] = field(default_factory=list)
+    # In-container PYTHONPATH (prepended via `--env`) so the bind-mounted host
+    # SkyRL/harbor source overrides the in-SIF install.
+    container_pythonpath: str = ""
 
 
 @dataclass
@@ -471,9 +481,25 @@ class RayCluster:
         # 2. LD_PRELOAD approach: preserve LD_PRELOAD env var for Ray workers
         #    Requires localnet exclusions in proxychains config to not proxy Ray traffic
 
+        # Apptainer RL runtime mode (OPT-IN): wrap the `ray start ...` invocation
+        # in `apptainer exec --nv <binds> <sif>` so Ray runs from the SIF's own
+        # install. `ray` (cmd[0]) resolves inside the container. Proxychains, when
+        # used, stays OUTSIDE the apptainer exec (added below) so egress is handled
+        # at the host layer and the container needn't know about proxychains.
+        # See scope_rl_via_apptainer_launcher.md §5.
+        if self.config.container_sif:
+            from hpc.rl_launch_utils import build_apptainer_prefix
+            apptainer_prefix = build_apptainer_prefix(
+                self.config.container_sif,
+                binds=self.config.container_binds or None,
+                pythonpath=self.config.container_pythonpath or None,
+            )
+            cmd = apptainer_prefix + cmd
+
         if self.config.proxychains_binary:
             # Wrapped binary approach: unset LD_PRELOAD (avoid double-proxying) and wrap ray command
             # Uses $PROXYCHAINS_CONF_FILE env var (set by SSH tunnel setup script)
+            # In container mode the wrap is: proxychains4 -f conf apptainer exec ... ray ...
             unset_proxychains = "unset LD_PRELOAD 2>/dev/null; "
             ray_cmd_str = ' '.join(cmd)
             proxychains_wrap = f'{self.config.proxychains_binary} -f "$PROXYCHAINS_CONF_FILE" '
@@ -563,8 +589,19 @@ class RayCluster:
         # Build the wait command
         # Unset proxychains env vars to avoid interfering with Ray communication
         unset_proxychains = "unset LD_PRELOAD PROXYCHAINS_CONF_FILE 2>/dev/null; "
-        wait_cmd = unset_proxychains + " ".join([
-            sys.executable,
+        # In Apptainer mode the wait script imports ray, so it must run INSIDE
+        # the SIF; use a bare `python` prefixed with `apptainer exec --nv`.
+        # Otherwise use the host sys.executable (the activated venv/conda).
+        if self.config.container_sif:
+            from hpc.rl_launch_utils import build_apptainer_prefix
+            python_invocation = build_apptainer_prefix(
+                self.config.container_sif,
+                binds=self.config.container_binds or None,
+                pythonpath=self.config.container_pythonpath or None,
+            ) + ["python"]
+        else:
+            python_invocation = [sys.executable]
+        wait_cmd = unset_proxychains + " ".join(python_invocation + [
             str(script_path),
             "--address", self.address,
             "--expected-gpus", str(self.total_gpus),
@@ -680,7 +717,17 @@ sys.exit(1)
 
             # Run on head node via srun
             # Wrap in bash to unset proxychains env vars before running Python with ray.init()
-            bash_cmd = f"unset LD_PRELOAD PROXYCHAINS_CONF_FILE 2>/dev/null; {sys.executable} {script_path}"
+            # In Apptainer mode the poll script imports ray → must run inside the SIF.
+            if self.config.container_sif:
+                from hpc.rl_launch_utils import build_apptainer_prefix
+                python_invocation = " ".join(build_apptainer_prefix(
+                    self.config.container_sif,
+                    binds=self.config.container_binds or None,
+                    pythonpath=self.config.container_pythonpath or None,
+                ) + ["python"])
+            else:
+                python_invocation = sys.executable
+            bash_cmd = f"unset LD_PRELOAD PROXYCHAINS_CONF_FILE 2>/dev/null; {python_invocation} {script_path}"
             srun_cmd = [
                 "srun",
                 f"--export={self.config.srun_export_env}",
