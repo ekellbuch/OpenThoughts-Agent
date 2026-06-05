@@ -2,31 +2,65 @@
 """
 Export traces from a Harbor job directory into a Hugging Face dataset and upload it.
 
-This mirrors the end-of-run trace export/upload behavior used by HPC Launch
-datagen flows, but works as a simple standalone script.
+This is a SINGLE streaming path. It enumerates trial directories
+NON-RECURSIVELY-stat'd (via Harbor's pruning ``iter_trial_dirs`` os.walk —
+never ``root.rglob("*")``), processes trials in chunks, writes each chunk as a
+parquet shard to a temp dir, and uploads the shards to the HF dataset repo via
+``HfApi.upload_folder``. Peak RAM is bounded to roughly one chunk, NOT the whole
+dataset — this avoids the ~150 GB git-LFS commit balloon that OOM-killed prior
+trace uploads.
+
+The UPLOAD mechanism is ALWAYS this streaming path — it does NOT depend on
+whether the dataset is registered in Supabase. Registration is a separate,
+ORTHOGONAL post-upload step controlled by ``--skip_register``:
+
+- No flag (default)  -> stream-upload, THEN register the finished HF repo in
+  Supabase (datagen path: the trace dataset IS the artifact).
+- ``--skip_register``  -> stream-upload only, no Supabase registration (RL path:
+  the trace dataset rides along, but the RL *model* is registered separately).
+
+Crucially, ``--skip_register`` can no longer change the upload mechanism or
+cause the old git-LFS OOM — it only toggles the Supabase registration step.
 
 Examples:
 
-  # Export from a completed Harbor job directory and push to HF
+  # Datagen: export, upload (streaming), AND register in Supabase
   python -m scripts.harbor.make_and_upload_trace_dataset \
     --job_dir /path/to/jobs/codecontests_glm46 \
     --repo_id DCAgent/code_contests-GLM-4.6-traces \
     --episodes last \
     --filter success
 
+  # RL cleanup: upload only (streaming), do NOT register
+  python -m scripts.harbor.make_and_upload_trace_dataset \
+    --job_dir "$EXPERIMENTS_DIR/<job>/<job>" \
+    --repo_id penfever/<job> \
+    --episodes last \
+    --skip_register
+
 Notes:
 - Requires Harbor to be installed/importable and a completed Harbor job dir.
 - Auth to HF via HF_TOKEN env var or `huggingface-cli login`.
-- Optional Supabase registration can be skipped with --skip_register.
+- Datasets are created PUBLIC by default. Pass --private for private repos.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
+import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
+
+
+# ---------------------------------------------------------------------------
+# Harbor monkeypatches (preserved from the previous implementation). These make
+# Harbor's per-trial collectors robust against malformed agent dirs, surrogate
+# characters, and inline subagent merging. They are installed before any
+# collection runs.
+# ---------------------------------------------------------------------------
 
 
 def _install_safe_episode_guard() -> None:
@@ -333,16 +367,23 @@ def _install_inline_subagent_merger() -> None:
     traces_utils.extract_conversations_from_trajectory = patched_extract_conversations_from_trajectory
 
 
-def _import_export_traces():
-    """Resolve the export_traces helper, preferring the OpenThoughts-Agent wrapper."""
+def _install_harbor_patches() -> None:
+    """Install all Harbor monkeypatches used by the streaming exporter."""
+    _install_safe_episode_guard()
+    _install_dataset_sanitizer()
+    _install_inline_subagent_merger()
+
+
+# ---------------------------------------------------------------------------
+# Streaming export helpers
+# ---------------------------------------------------------------------------
+
+
+def _import_traces_utils():
+    """Resolve Harbor's traces_utils module (the per-trial collectors live here)."""
     try:
-        from database.unified_db.utils import export_traces  # type: ignore
-        return export_traces
-    except Exception:
-        pass
-    try:
-        from harbor.utils.traces_utils import export_traces  # type: ignore
-        return export_traces
+        from harbor.utils import traces_utils  # type: ignore
+        return traces_utils
     except Exception as exc:  # pragma: no cover - environment dependent
         raise SystemExit(
             "Harbor is not available. Install it (pip install -e ../harbor) "
@@ -350,9 +391,226 @@ def _import_export_traces():
         )
 
 
+def _finalize_chunk(ds):
+    """Apply the same sanitize/format cleanup the legacy path applied, per-chunk.
+
+    Mirrors ``scripts.harbor.run_and_export_traces._finalize_trace_dataset`` and
+    ``data.commons.clean_empty_structs`` but is applied to a single bounded
+    chunk so peak memory stays small.
+    """
+    try:
+        from scripts.harbor.run_and_export_traces import _finalize_trace_dataset  # type: ignore
+        ds = _finalize_trace_dataset(ds)
+    except Exception:
+        pass
+    return ds
+
+
+def _iter_trial_dirs_nonrecursive(traces_utils, root: Path) -> Iterator[Path]:
+    """Yield trial dirs using Harbor's PRUNING os.walk enumeration.
+
+    Harbor's ``iter_trial_dirs`` uses ``os.walk`` with in-place pruning of
+    ``dirnames`` once a trial dir is found — it NEVER descends into a trial's
+    ~20-30 inner files and NEVER does ``root.rglob("*")``. This keeps the cost
+    at O(directory skeleton) instead of O(every file), which is what GPFS-hangs
+    on large runs.
+    """
+    yield from traces_utils.iter_trial_dirs(root, recursive=True)
+
+
+def _collect_trial_rows(
+    traces_utils,
+    trial_dir: Path,
+    *,
+    episodes: str,
+    success_filter: Optional[str],
+    include_instruction: bool,
+    include_verifier_output: bool,
+    verbose: bool,
+) -> List[Dict[str, Any]]:
+    """Collect conversation rows for a single trial. Returns [] on skip/error."""
+    from harbor.models.agent.name import AgentName  # type: ignore
+    from harbor.agents.factory import AgentFactory  # type: ignore
+
+    try:
+        run_meta = traces_utils.load_run_metadata(trial_dir)
+    except (ValueError, FileNotFoundError) as exc:
+        if verbose:
+            print(f"[traces] Skipping {trial_dir.name}: {exc}")
+        return []
+
+    agent_name = run_meta["agent_name"]
+    agent_enum = AgentName(agent_name)
+    agent_class = AgentFactory._AGENT_MAP.get(agent_enum)
+    if agent_class is None or not agent_class.SUPPORTS_ATIF:
+        raise NotImplementedError(
+            f"{agent_name} does not support Harbor's trajectory format (ATIF), cannot export traces"
+        )
+
+    if success_filter in ("success", "failure"):
+        succ = traces_utils._trial_is_success(trial_dir)
+        if succ is None:
+            if verbose:
+                print(f"[traces] Trial {trial_dir.name}: missing result.json; skipping due to filter")
+            return []
+        if success_filter == "success" and not succ:
+            return []
+        if success_filter == "failure" and succ:
+            return []
+
+    try:
+        return traces_utils.collect_conversations_from_trial(
+            trial_dir,
+            run_meta=run_meta,
+            episodes=episodes,
+            verbose=verbose,
+            include_instruction=include_instruction,
+            include_verifier_output=include_verifier_output,
+            embed_tools_in_conversation=True,
+        )
+    except (UnicodeDecodeError, ValueError, OSError) as e:
+        if verbose:
+            print(f"[traces] Trial {trial_dir.name}: skipping due to decode/read error: {e}")
+        return []
+
+
+def _flush_chunk_to_parquet(rows: List[Dict[str, Any]], to_sharegpt: bool, traces_utils, shard_path: Path) -> int:
+    """Convert a chunk of rows to a (finalized) Dataset and write one parquet shard.
+
+    Returns the number of rows written. The intermediate Dataset is dropped as
+    soon as the parquet file is on disk, so peak RAM is bounded to one chunk.
+    """
+    if not rows:
+        return 0
+    ds = traces_utils.rows_to_dataset(rows)
+    if to_sharegpt:
+        ds = traces_utils.convert_openai_to_sharegpt(ds, "conversations", "conversations_sharegpt")
+    ds = _finalize_chunk(ds)
+    n = len(ds)
+    ds.to_parquet(str(shard_path))
+    return n
+
+
+def stream_export_and_upload(
+    *,
+    job_dir: Path,
+    repo_id: str,
+    episodes: str,
+    success_filter: Optional[str],
+    to_sharegpt: bool,
+    private: bool,
+    include_instruction: bool = True,
+    include_verifier_output: bool = True,
+    chunk_size: int = 200,
+    verbose: bool = False,
+) -> int:
+    """Single streaming path: enumerate trials, write parquet shards, upload via HfApi.
+
+    Memory is bounded to roughly one ``chunk_size`` worth of rows at any time:
+    we never hold the full row set in RAM, never build one giant in-memory
+    Dataset, and never git-clone / git-LFS. Returns the total row count.
+    """
+    from huggingface_hub import HfApi  # type: ignore
+
+    traces_utils = _import_traces_utils()
+    _install_harbor_patches()
+
+    api = HfApi()
+    api.create_repo(repo_id, repo_type="dataset", private=private, exist_ok=True)
+    print(f"[trace-export] Repo {repo_id} ensured (private={private}).")
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="trace_shards_"))
+    shards_dir = tmp_root / "data"
+    shards_dir.mkdir(parents=True, exist_ok=True)
+
+    total_rows = 0
+    shard_idx = 0
+    chunk: List[Dict[str, Any]] = []
+
+    def _flush() -> None:
+        nonlocal chunk, shard_idx, total_rows
+        if not chunk:
+            return
+        shard_path = shards_dir / f"train-{shard_idx:05d}.parquet"
+        written = _flush_chunk_to_parquet(chunk, to_sharegpt, traces_utils, shard_path)
+        if written:
+            print(f"[trace-export] Wrote shard {shard_path.name} ({written} rows; running total {total_rows + written}).")
+            total_rows += written
+            shard_idx += 1
+        else:
+            # Nothing materialized (e.g. all rows finalized away); drop empty file.
+            if shard_path.exists():
+                shard_path.unlink()
+        chunk = []
+
+    try:
+        n_trials = 0
+        for trial_dir in _iter_trial_dirs_nonrecursive(traces_utils, job_dir):
+            n_trials += 1
+            rows = _collect_trial_rows(
+                traces_utils,
+                trial_dir,
+                episodes=episodes,
+                success_filter=success_filter,
+                include_instruction=include_instruction,
+                include_verifier_output=include_verifier_output,
+                verbose=verbose,
+            )
+            if rows:
+                chunk.extend(rows)
+            if len(chunk) >= chunk_size:
+                _flush()
+        _flush()  # final partial chunk
+
+        print(f"[trace-export] Enumerated {n_trials} trial dirs; collected {total_rows} rows into {shard_idx} shard(s).")
+
+        if shard_idx == 0:
+            # Still write an empty dataset so downstream consumers see a valid
+            # (zero-row) repo rather than nothing — mirrors prior behavior.
+            empty_ds = traces_utils.rows_to_dataset([])
+            empty_path = shards_dir / "train-00000.parquet"
+            empty_ds.to_parquet(str(empty_path))
+            print("[trace-export] No rows collected; wrote an empty parquet shard.")
+
+        print(f"[trace-export] Uploading parquet shard(s) from {shards_dir} to {repo_id} via HfApi...")
+        api.upload_folder(
+            folder_path=str(shards_dir),
+            path_in_repo="data",
+            repo_id=repo_id,
+            repo_type="dataset",
+        )
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    return total_rows
+
+
+def register_trace_dataset_in_supabase(repo_id: str, dataset_type: str = "SFT") -> None:
+    """Register an already-uploaded trace dataset repo in Supabase.
+
+    This is the ORTHOGONAL post-upload step. It runs against the FINISHED HF
+    repo (``register_hf_dataset`` reads the dataset's metadata back from the HF
+    API), so it is completely decoupled from the streaming upload mechanism —
+    it cannot affect peak memory and cannot trigger the old git-LFS OOM. It is
+    invoked by ``main()`` only when ``--skip_register`` is NOT passed.
+
+    This reuses the same registration logic the legacy
+    ``data.commons.upload_traces_to_hf`` default branch used, but called as a
+    clean separate step rather than entangled with the upload.
+    """
+    try:
+        from database.unified_db.utils import register_hf_dataset  # type: ignore
+    except Exception as exc:  # pragma: no cover - environment dependent
+        raise SystemExit(
+            "Could not import register_hf_dataset for Supabase registration. "
+            f"Import error: {exc}"
+        )
+    register_hf_dataset(repo_name=repo_id, dataset_type=dataset_type)
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Make and upload a trace dataset from a Harbor job directory",
+        description="Make and upload a trace dataset from a Harbor job directory (single streaming path)",
     )
     p.add_argument("--job_dir", required=True, help="Path to Harbor job directory")
     p.add_argument("--repo_id", required=True, help="Target HF dataset repo (org/name)")
@@ -376,81 +634,77 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--dataset_type",
         default="SFT",
-        help="Dataset type for registration (SFT or RL). Default: SFT",
+        help="Dataset type label ('SFT' or 'RL') used by the Supabase registration step. Default: SFT",
     )
     p.add_argument(
         "--skip_register",
         action="store_true",
-        help="Skip Supabase registration after upload",
+        help="Upload only; do NOT register the dataset in Supabase. This flag "
+        "controls ONLY registration — the (always-streaming, memory-safe) upload "
+        "path is identical either way. RL cleanup passes this (the model is "
+        "registered separately); datagen omits it (the dataset is the artifact).",
+    )
+    p.add_argument(
+        "--private",
+        action="store_true",
+        help="Create the HF dataset repo as private (default: public)",
+    )
+    p.add_argument(
+        "--chunk_size",
+        type=int,
+        default=200,
+        help="Trials' rows per parquet shard (bounds peak memory). Default: 200",
+    )
+    p.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Verbose per-trial logging",
     )
     return p.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+
     job_dir = Path(args.job_dir).expanduser().resolve()
     if not job_dir.exists() or not job_dir.is_dir():
         raise SystemExit(f"job_dir does not exist or is not a directory: {job_dir}")
 
-    export_traces = _import_export_traces()
-    _install_safe_episode_guard()
-    _install_dataset_sanitizer()
-    _install_inline_subagent_merger()
-
-    # Map filter flag to traces_utils argument
     success_filter = None if args.filter == "none" else args.filter
 
-    print(f"[trace-export] Exporting traces from: {job_dir}")
-    ds = export_traces(
-        root=job_dir,
-        recursive=True,
+    # Step 1 — the single, always-streaming, memory-safe upload mechanism.
+    print(f"[trace-export] Streaming export from: {job_dir}")
+    total = stream_export_and_upload(
+        job_dir=job_dir,
+        repo_id=args.repo_id,
         episodes=args.episodes,
-        to_sharegpt=bool(args.to_sharegpt),
-        repo_id=None,
-        push=False,
-        verbose=False,
         success_filter=success_filter,
-        export_subagents=False,
-        include_instruction=True,
-        include_verifier_output=True,
-        chunk_size=1000,
-        use_rich_progress=True,
+        to_sharegpt=bool(args.to_sharegpt),
+        private=bool(args.private),
+        chunk_size=max(1, int(args.chunk_size)),
+        verbose=bool(args.verbose),
     )
-    try:
-        from scripts.harbor.run_and_export_traces import _finalize_trace_dataset  # type: ignore
-    except Exception as exc:  # pragma: no cover - environment dependent
-        raise SystemExit(f"Failed to import Harbor trace finalizer: {exc}")
 
-    ds = _finalize_trace_dataset(ds)
-
-    # Push to HF and optionally register in DB
-    print(f"[trace-export] Exported {len(ds)} rows. Uploading to {args.repo_id}...")
-    try:
-        from data.commons import upload_traces_to_hf  # push + optional registration
-    except Exception as exc:  # pragma: no cover - environment dependent
-        raise SystemExit(
-            "Could not import data.commons.upload_traces_to_hf. Ensure project dependencies "
-            f"are installed. Import error: {exc}"
-        )
-
-    max_shard_size = "100MB"
-    num_shards = None
     print(
-        f"[trace-export] Using chunked upload: max_shard_size={max_shard_size}."
+        f"[trace-export] Upload complete ({total} rows): "
+        f"https://huggingface.co/datasets/{args.repo_id}"
     )
 
-    # upload_traces_to_hf handles cleaning empty struct columns and push_to_hub
-    upload_traces_to_hf(
-        ds,
-        args.repo_id,
-        args.dataset_type,
-        max_shard_size=max_shard_size,
-        num_shards=num_shards,
-    )
-    print(f"[trace-export] Upload complete: https://huggingface.co/datasets/{args.repo_id}")
-
+    # Step 2 — ORTHOGONAL post-upload Supabase registration, gated only by
+    # --skip_register. This runs against the finished HF repo and cannot affect
+    # the upload's memory profile.
     if args.skip_register:
-        print("[trace-export] Note: --skip_register is set; Supabase registration may have been attempted by upload_traces_to_hf.")
+        print(
+            "[trace-export] --skip_register set: upload only, NOT registering "
+            "in Supabase."
+        )
+    else:
+        print(
+            f"[trace-export] Registering {args.repo_id} in Supabase "
+            f"(dataset_type={args.dataset_type})..."
+        )
+        register_trace_dataset_in_supabase(args.repo_id, dataset_type=args.dataset_type)
+        print(f"[trace-export] Supabase registration complete for {args.repo_id}.")
 
 
 if __name__ == "__main__":
