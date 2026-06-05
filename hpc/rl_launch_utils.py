@@ -106,6 +106,15 @@ def _build_container_pythonpath() -> str:
     """
     parts: List[str] = []
 
+    # Extra pure-python deps installed into a bind-mounted dir for SIFs built
+    # --no-deps (e.g. hydra-core + antlr4, which the qwen3_next/main_tbench
+    # entrypoint imports but skyrl_megatron_vllm.sif lacks). Sourced from
+    # RL_CONTAINER_PYDEPS (colon-separated); prepended FIRST so it wins. Unset
+    # => no-op (byte-identical to the prior path).
+    pydeps = os.environ.get("RL_CONTAINER_PYDEPS", "")
+    for p in (x for x in pydeps.split(":") if x):
+        parts.append(p)
+
     skyrl_home = os.environ.get("SKYRL_HOME")
     if skyrl_home:
         parts.append(os.path.join(skyrl_home, "skyrl-train"))
