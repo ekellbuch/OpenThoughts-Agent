@@ -86,6 +86,17 @@ def build_apptainer_prefix(
         prefix.extend(["--bind", b])
     if pythonpath:
         prefix.extend(["--env", f"PYTHONPATH={pythonpath}"])
+    # Force WANDB_MODE into the container explicitly. Although apptainer passes
+    # host env by default (no --cleanenv), the SkyRL wandb.init() inside the SIF
+    # was NOT seeing the host WANDB_MODE=offline (dotenv-set) on the 80B run
+    # (job 599463) and tried an online init that timed out after 90s against
+    # wandb.ai through proxychains (CommError: "Run initialization has timed
+    # out"). Pinning it on the apptainer --env list guarantees offline mode
+    # inside the container, removing the network dependency entirely; the .out
+    # log carries all train metrics and the offline run can be `wandb sync`'d
+    # later. Defaults to offline but honors an explicit host override.
+    wandb_mode = os.environ.get("WANDB_MODE", "offline")
+    prefix.extend(["--env", f"WANDB_MODE={wandb_mode}"])
     prefix.append(sif)
     return prefix
 
