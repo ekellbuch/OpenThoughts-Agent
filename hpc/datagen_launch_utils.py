@@ -1396,6 +1396,25 @@ def run_datagen_job_main():
         python -m hpc.datagen_launch_utils --mode tracegen --config /path/to/config.json
     """
     import argparse
+    import asyncio
+
+    # Force CPython stock asyncio (NOT uvloop) at the datagen orchestrator's
+    # shared chokepoint -- EVERY datagen path funnels through this entrypoint
+    # (`python -m hpc.datagen_launch_utils --mode {taskgen,tracegen}`), so this
+    # is the datagen analog of SkyRL's BasePPOExp.run() reset. Ray installs
+    # uvloop in every worker/actor by default (RAY_USE_UVLOOP, gated in
+    # ray/_private/async_compat.py + default_worker.py), and libuv's
+    # io_uring/epoll-ctl path SIGABRTs + freezes the harbor agent event loops
+    # under Daytona sandbox-teardown socket churn (uv__epoll_ctl_prep /
+    # uv__io_poll asserts, libuv 1.45-1.49+). Resetting the policy here -- BEFORE
+    # the runner inits the Ray cluster / vLLM and spawns the harbor subprocess --
+    # ensures this driver process (and any in-process asyncio.run) builds a stock
+    # SelectorEventLoop with no libuv path. The sbatch template additionally
+    # exports RAY_USE_UVLOOP=0 (belt) and harbor's run_async chokepoint resets the
+    # policy in the agent subprocess (suspenders) -- see RL fix
+    # feedback_uvloop_libuv_019_pin. DeprecationWarning on 3.12+ is benign on our
+    # runtime; the policy still works.
+    asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
     parser = argparse.ArgumentParser(description="Run datagen job from config JSON")
     parser.add_argument(

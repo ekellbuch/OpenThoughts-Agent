@@ -334,6 +334,19 @@ class HPC(BaseModel):
             "# workers during this transient phase. Already disabled for GH200",
             "# (unified memory), now disabled universally.",
             'export RAY_memory_monitor_refresh_ms=0',
+            "# Force Ray (and every worker/actor it spawns) onto CPython stock",
+            "# asyncio instead of uvloop. Ray installs uvloop in every worker by",
+            "# default (RAY_USE_UVLOOP defaults True -> ray/_private/async_compat.py",
+            "# try_install_uvloop in default_worker.py). libuv's io_uring/epoll-ctl",
+            "# machinery SIGABRTs and then freezes the harbor agent event loops under",
+            "# Daytona sandbox-teardown socket churn (uv__epoll_ctl_prep / uv__io_poll",
+            "# asserts; present across libuv 1.45-1.49+). This is the SAME class of",
+            "# freeze that the RL path fixed via asyncio.set_event_loop_policy in",
+            "# BasePPOExp.run(). Belt: kill it globally for the whole datagen job;",
+            "# suspenders: the harbor run_async chokepoint also resets the policy.",
+            "# Datagen is network-RTT-bound (vLLM/Daytona) so uvloop's throughput",
+            "# edge is moot here.",
+            'export RAY_USE_UVLOOP=0',
         ]
 
         lines += [
