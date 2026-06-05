@@ -64,4 +64,5 @@ set -x
   trainer.run_name="leonardo_gsm8k_canary" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$CKPT_DIR" \
+  trainer.export_path="$CKPT_DIR/exports" \
   "$@"

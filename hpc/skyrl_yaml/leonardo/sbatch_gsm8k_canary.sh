@@ -49,7 +49,10 @@ export WANDB_MODE=offline
 export VLLM_CACHE_ROOT=$SF/vllm_cache
 export TRITON_CACHE_DIR=$SF/vllm_cache/triton
 export FLASHINFER_WORKSPACE_BASE=$SF/vllm_cache/flashinfer
-mkdir -p "$CKPT_DIR" "$VLLM_CACHE_ROOT" "$TRITON_CACHE_DIR" "$FLASHINFER_WORKSPACE_BASE"
+# Writable HOME on scratch — SkyRL defaults several paths to ${HOME}/... and the
+# container's own /home is read-only (image root -> /leonardo RO fs).
+export CONTAINER_HOME=$SF/canary_home
+mkdir -p "$CKPT_DIR" "$VLLM_CACHE_ROOT" "$TRITON_CACHE_DIR" "$FLASHINFER_WORKSPACE_BASE" "$CONTAINER_HOME"
 
 # Point the run script at the external uv venv python.
 export VENV_PY=$VENV/bin/python
@@ -62,7 +65,7 @@ singularity exec --nv \
   --no-home \
   --bind /leonardo_work:/leonardo_work,/leonardo_scratch:/leonardo_scratch \
   --pwd "$MARIN" \
-  --env HOME=/home/ray,PATH=/usr/local/bin:/usr/bin:/bin \
+  --env HOME=$CONTAINER_HOME,PATH=/usr/local/bin:/usr/bin:/bin \
   --env HF_HUB_OFFLINE=1,TRANSFORMERS_OFFLINE=1,HF_HOME=$HF_HOME,HF_HUB_CACHE=$HF_HUB_CACHE,WANDB_MODE=offline,VLLM_CACHE_ROOT=$VLLM_CACHE_ROOT,TRITON_CACHE_DIR=$TRITON_CACHE_DIR,FLASHINFER_WORKSPACE_BASE=$FLASHINFER_WORKSPACE_BASE,DATA_DIR=$DATA_DIR,MODEL_PATH=$MODEL_PATH,NUM_GPUS=$NUM_GPUS,CKPT_DIR=$CKPT_DIR,LOGGER=console,VENV_PY=$VENV_PY \
   "$SANDBOX" bash "$CFG/run_gsm8k_canary.sh"
 
