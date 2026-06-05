@@ -127,6 +127,12 @@ def _build_container_pythonpath() -> str:
         if dcft:
             harbor_home = os.path.join(os.path.dirname(dcft.rstrip("/")), "harbor")
     if harbor_home:
+        # Harbor uses a src/ layout (importable package at harbor/src/harbor),
+        # so the importable root is harbor/src — add it when present (current
+        # marin harbor). Keep the repo root too for the flat-layout fallback.
+        harbor_src = os.path.join(harbor_home, "src")
+        if os.path.isdir(os.path.join(harbor_src, "harbor")):
+            parts.append(harbor_src)
         parts.append(harbor_home)
 
     workdir = os.environ.get("WORKDIR") or os.environ.get("DCFT")
