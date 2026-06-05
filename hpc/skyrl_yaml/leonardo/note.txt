@@ -30,5 +30,21 @@ Pre-staged on the LOGIN node (compute has no internet):
 - dataset: $WORK/data/gsm8k/{train,validation}.parquet
            (built with MarinSkyRL examples/gsm8k/gsm8k_dataset.py)
 
-Container env approach: see SIF build notes. The SIF bakes MarinSkyRL's
-skyrl-train + vLLM 0.11.0 (cu128, py312) so no runtime internet is needed.
+Container / env approach (DOCUMENTED):
+- Image: a WRITABLE APPTAINER SANDBOX dir at
+  $SCRATCH_FAST/marinskyrl_sandbox, built on the login node from
+  docker://anyscale/ray:2.51.1-slim-py312-cu128 (the SkyRL docker base).
+  We use a sandbox dir rather than a .sif because the mksquashfs step that
+  produces a .sif OOM-killed on the login node and hit fatal lustre.lov
+  xattr errors on Lustre tmp. apptainer execs a sandbox dir as a valid image.
+- Python env: SkyRL's NATIVE uv flow, NOT conda. Ran `uv sync --extra vllm`
+  (uv 0.9.4) inside the sandbox against the committed uv.lock; the resolved
+  venv lives at $SCRATCH_FAST/marin_venv (torch 2.8.0+cu128, vllm 0.11.0,
+  flash-attn 2.8.3, xformers, ...). Chose uv over conda because conda cannot
+  reliably satisfy SkyRL's pinned cu128 wheels + the flashinfer-jit-cache
+  custom index + the torch/vllm/flash-attn conflict graph that uv resolves
+  deterministically from uv.lock. Import check PASSED:
+    import torch (2.8.0+cu128), vllm (0.11.0), skyrl_train  -> ok
+- At runtime the sbatch binds /leonardo_work + /leonardo_scratch, runs the
+  sandbox via `singularity exec --nv --no-home`, and invokes
+  $marin_venv/bin/python -m skyrl_train.entrypoints.main_base. No internet needed.

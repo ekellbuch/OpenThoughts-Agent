@@ -23,7 +23,9 @@ set -x
 : "${INFERENCE_BACKEND:=vllm}"
 
 # We run from the MarinSkyRL skyrl-train dir so the uv project / installed env resolves.
-python -m skyrl_train.entrypoints.main_base \
+# $VENV_PY is the external uv-resolved venv python (set by the sbatch); fall back to `python`.
+: "${VENV_PY:=python}"
+"$VENV_PY" -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

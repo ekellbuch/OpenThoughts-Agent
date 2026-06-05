@@ -13,13 +13,25 @@
 #SBATCH --error=%x_%j.out
 #
 # MarinSkyRL NON-AGENTIC GSM8K GRPO canary on Leonardo (1 node x 4 A100-64GB).
-# apptainer exec --nv the marinskyrl.sif and run run_gsm8k_canary.sh with
-# LOCAL pre-staged model + dataset, fully offline.
+# apptainer exec --nv the marinskyrl apptainer image (writable sandbox built on
+# the login node) + an external uv-resolved venv, running run_gsm8k_canary.sh
+# with LOCAL pre-staged model + dataset, fully offline.
+#
+# Env approach (DOCUMENTED): SkyRL is uv-native. We use SkyRL's native uv flow
+# (`uv sync --extra vllm`) rather than a conda env, because conda cannot reliably
+# satisfy SkyRL's pinned cu128 wheels + flashinfer-jit-cache custom index + the
+# torch/vllm/flash-attn conflict graph that uv resolves deterministically from
+# the committed uv.lock. The resolved venv lives OUTSIDE the image at
+# $SF/marin_venv (Lustre, bind-mounted at runtime). The container itself is a
+# WRITABLE SANDBOX dir (not a .sif): the squashfs/mksquashfs step OOM-killed on
+# the login node (and hit lustre.lov xattr fatals on Lustre tmp), so we run
+# apptainer directly against the sandbox dir, which is a fully valid image.
 set -euxo pipefail
 
 WORK=/leonardo_work/AIFAC_5C0_290/bfeuer00
 SF=/leonardo_scratch/fast/AIFAC_5C0_290/bfeuer00
-SIF=$WORK/containers/marinskyrl.sif
+SANDBOX=$SF/marinskyrl_sandbox
+VENV=$SF/marin_venv
 MARIN=$WORK/code/MarinSkyRL/skyrl-train
 CFG=$WORK/code/OpenThoughts-Agent/hpc/skyrl_yaml/leonardo
 
@@ -39,16 +51,19 @@ export TRITON_CACHE_DIR=$SF/vllm_cache/triton
 export FLASHINFER_WORKSPACE_BASE=$SF/vllm_cache/flashinfer
 mkdir -p "$CKPT_DIR" "$VLLM_CACHE_ROOT" "$TRITON_CACHE_DIR" "$FLASHINFER_WORKSPACE_BASE"
 
-# Bind WORK + scratch so cache/model/data are visible inside the container.
-BINDS="$WORK,$SF"
+# Point the run script at the external uv venv python.
+export VENV_PY=$VENV/bin/python
 
+# Bind the full Lustre roots (so $WORK, $SF, model, data, venv all resolve in-container).
+# --no-home + clean PATH to avoid the host ~/.bashrc conda-leak seen during the build.
 nvidia-smi || true
 
-# Run from the skyrl-train dir so the installed skyrl_train package + hydra configs resolve.
 singularity exec --nv \
-  --bind "$BINDS" \
+  --no-home \
+  --bind /leonardo_work:/leonardo_work,/leonardo_scratch:/leonardo_scratch \
   --pwd "$MARIN" \
-  --env HF_HUB_OFFLINE=1,TRANSFORMERS_OFFLINE=1,HF_HOME=$HF_HOME,HF_HUB_CACHE=$HF_HUB_CACHE,WANDB_MODE=offline,VLLM_CACHE_ROOT=$VLLM_CACHE_ROOT,TRITON_CACHE_DIR=$TRITON_CACHE_DIR,FLASHINFER_WORKSPACE_BASE=$FLASHINFER_WORKSPACE_BASE,DATA_DIR=$DATA_DIR,MODEL_PATH=$MODEL_PATH,NUM_GPUS=$NUM_GPUS,CKPT_DIR=$CKPT_DIR,LOGGER=console \
-  "$SIF" bash "$CFG/run_gsm8k_canary.sh"
+  --env HOME=/home/ray,PATH=/usr/local/bin:/usr/bin:/bin \
+  --env HF_HUB_OFFLINE=1,TRANSFORMERS_OFFLINE=1,HF_HOME=$HF_HOME,HF_HUB_CACHE=$HF_HUB_CACHE,WANDB_MODE=offline,VLLM_CACHE_ROOT=$VLLM_CACHE_ROOT,TRITON_CACHE_DIR=$TRITON_CACHE_DIR,FLASHINFER_WORKSPACE_BASE=$FLASHINFER_WORKSPACE_BASE,DATA_DIR=$DATA_DIR,MODEL_PATH=$MODEL_PATH,NUM_GPUS=$NUM_GPUS,CKPT_DIR=$CKPT_DIR,LOGGER=console,VENV_PY=$VENV_PY \
+  "$SANDBOX" bash "$CFG/run_gsm8k_canary.sh"
 
 echo "CANARY_EXIT=$?"
