@@ -314,6 +314,15 @@ trainer:
     # Safe because use_kl_loss/use_kl_in_reward are both false here (no ref
     # model), so the policy placement group is policy-only.
     policy_strict_spread_pg: true
+    # 80B-only opt-in: build the policy placement group out of one {GPU:1,CPU:1}
+    # bundle PER policy GPU (8 nodes x 4 = 32 bundles == world_size) instead of
+    # one whole-node {GPU:4} bundle per node. len(bundles)==world_size engages
+    # get_reordered_bundle_indices() so each policy actor probes its bundle's
+    # single physical GPU via ray.get_gpu_ids() and pins to that distinct device.
+    # Fixes the GPU0-stacking init-OOM that killed the 28-node attempts
+    # (639939/640384) in the real EP layout. Default false elsewhere -> ablation
+    # yamls (arm0/shaped/arm1) are byte-identical and their restart-links safe.
+    policy_per_gpu_bundles: true
 
   # Fully async generation.
   fully_async:
@@ -402,7 +411,14 @@ generator:
     # the Qwen3-8B a3 production runs use). Confirmed compatible with the
     # Qwen3-Next interleaved-thinking history during bring-up (full 64/64 rollout
     # produced a healthy reward signal). Path is relative to the SkyRL repo root.
-    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
+    # NOTE: leading ./ is load-bearing. The bare relative form
+    # `chat_templates/...jinja2` has exactly one slash and so is misclassified as
+    # an HF repo id by is_hf_dataset_path() -> resolve_paths_in_dict leaves it
+    # relative -> in-container CWD ambiguity (the affca932 caveat). The ./ prefix
+    # forces file-path classification so it resolves to an absolute PROJECT_ROOT
+    # path (/e/scratch/.../OpenThoughts-Agent/chat_templates/...) under the
+    # bind-mounted /e/scratch, reachable regardless of runtime CWD.
+    custom_chat_template_chat_completion_path: ./chat_templates/qwen3_thinking_acc.jinja2
 
 # Data paths
 data:
