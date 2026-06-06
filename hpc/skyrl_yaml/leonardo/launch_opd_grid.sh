@@ -15,6 +15,10 @@ SBATCH=$CFGDIR/sbatch_opd_qwen3.sh
 MANIFEST=$CFGDIR/opd_grid_manifest.txt
 WALL=08:00:00
 
+# The sbatch's hardcoded defaults are SMOKE sizing. Always prepend the TRUE BASE
+# config (matches live full run 44708545); per-cell overrides come AFTER and win.
+BASE_KNOBS="TRAIN_BATCH_SIZE=64 MINI_BATCH_SIZE=64 N_SAMPLES=8 MAX_GEN_LEN=1024 TOPK=128"
+
 BATCH1=(base topk32 topk64 topk256 teacherTP4 tbs128 gen512 cudagraph)
 BATCH2=(lr3e6 lr3e5 lr1e4 n4 n16 topk16)
 
@@ -32,9 +36,9 @@ for cell in "${WANT[@]}"; do
     # split on |
     IFS='|' read -r c steps overrides <<< "$line"
     c=$(echo "$c" | xargs); steps=$(echo "$steps" | xargs); overrides=$(echo "$overrides" | xargs)
-    echo ">> launching cell=$c MAX_STEPS=$steps overrides=[$overrides]"
+    echo ">> launching cell=$c MAX_STEPS=$steps base=[$BASE_KNOBS] overrides=[$overrides]"
     jid=$(sbatch --parsable --job-name="opd_${c}" --time="$WALL" "$SBATCH" \
-            MAX_STEPS="$steps" $overrides)
+            $BASE_KNOBS MAX_STEPS="$steps" $overrides)
     rc=$?
     if [[ $rc -ne 0 || -z "$jid" ]]; then echo "!! sbatch FAILED for $c (rc=$rc)"; continue; fi
     echo "   submitted jobid=$jid"

@@ -10,6 +10,14 @@
 # Step ~= 24 min (~95% is teacher scoring = timing/fwd_logprobs_values_reward).
 # 8h wall -> ~16 base steps; lighter top_k/gen cells fit many more.
 #
+# IMPORTANT: the sbatch's HARDCODED defaults are the SMOKE sizing
+# (TBS16/N4/gen512/topk64), NOT the base. launch_opd_grid.sh therefore ALWAYS
+# prepends BASE_KNOBS = "TRAIN_BATCH_SIZE=64 MINI_BATCH_SIZE=64 N_SAMPLES=8
+# MAX_GEN_LEN=1024 TOPK=128" before each cell's overrides (hydra/env last-wins),
+# so a cell that lists e.g. TOPK=32 overrides only that knob on the true base.
+# (max_model_len is auto = MAX_PROMPT_LEN+MAX_GEN_LEN = 512+1024 = 1536 in the
+# run script.)
+#
 # ============================ BATCH 1 (speed) ============================
 # cell        | MAX_STEPS | overrides
 base          | 16  |
