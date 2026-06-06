@@ -95,11 +95,10 @@ terminal_bench:
     extra_body:
       chat_template_kwargs:
         enable_thinking: true
-    # 900s agent timeout — inherited from 56GPU_base. Boundary-hugging a3
-    # datasets otherwise wait ~1800s on the slowest sample and the generation
-    # buffer never fills. AgentTimeoutError stays PASSTHROUGH (partial
-    # trajectory + reward is meaningful signal).
-    override_timeout_sec: 900
+    # 1800s agent timeout — the value the working baked sbatch ran. The 80B is
+    # slower per agent step than the 8B, so the longer ceiling lets boundary
+    # samples finish rather than truncating. AgentTimeoutError stays PASSTHROUGH.
+    override_timeout_sec: 1800
 
     # Environment settings
     override_cpus: 1
@@ -118,19 +117,19 @@ terminal_bench:
     max_wait_sec: 600.0
     wait_multiplier: 2.0
 
+    # Order matches the working baked sbatch (the hydra list is positional).
     exclude_exceptions:
       - VerifierTimeoutError
-      - VerifierRuntimeError
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - VerifierOutputParseError
+      - VerifierRuntimeError
 
-    # 384 concurrent trials. Lower than 56GPU_base's 675 because there are
-    # only 8 inference engines here (vs 48), so the achievable in-flight
-    # generation parallelism is much lower — over-subscribing Daytona just
-    # piles resident trial state in the driver (the host-memory OOM failure
-    # mode documented in 56GPU_base). 384 ≈ 48 trials/engine, comfortable.
-    n_concurrent_trials: 384
+    # 300 concurrent trials — the value the working baked sbatch ran. With 16
+    # TP=4 engines this is ~19 trials/engine; over-subscribing Daytona piles
+    # resident trial state in the driver (the host-memory OOM mode documented in
+    # 56GPU_base), so 300 stays comfortably under that ceiling.
+    n_concurrent_trials: 300
 
     # Logging settings
     log_level: INFO
@@ -140,6 +139,9 @@ terminal_bench:
 
     # RLOO-N error classification (mirrors 56GPU_base production settings)
     enable_error_classification: true
+    # Order + membership match the working baked sbatch. ContextLengthExceededError
+    # is PASSTHROUGH (not masked) here: the 80B's longer outputs hit the context
+    # limit as a meaningful (zero-reward) signal rather than being masked out.
     mask_exceptions:
       - DaytonaError
       - EnvironmentStartTimeoutError
@@ -148,11 +150,10 @@ terminal_bench:
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - AgentEnvironmentTimeoutError
-      - ContextLengthExceededError
     default_error_treatment: zero
     passthrough_exceptions:
       - AgentTimeoutError
-    zero_exceptions: []
+      - ContextLengthExceededError
 
   # Model info for Harbor's hosted_vllm validation.
   # 768-token buffer below max_model_len=32768 (matches 56GPU_base): harbor's
@@ -160,7 +161,10 @@ terminal_bench:
   # a 32767-capped prompt can tokenize to 32769 at the engine and trip the
   # retry-storm → FD-exhaustion → SIGABRT path. 32000 truncates first.
   model_info:
-    max_input_tokens: 32000
+    # 32767 — the value the working baked sbatch ran (1 below max_model_len
+    # 32768). The harbor /tokenize token-counter fix (now live) removes the +2
+    # litellm-vs-vLLM drift that the original 32000 buffer guarded against.
+    max_input_tokens: 32767
     max_output_tokens: 4096
 
   archiving:
@@ -179,6 +183,13 @@ terminal_bench:
 # =============================================================================
 trainer:
   strategy: fsdp2
+  # Gradient checkpointing is REQUIRED for the 80B at 32k context (activation
+  # memory otherwise overflows the GH200 HBM headroom left after the sharded
+  # optimizer state). use_reentrant=false is the recompute-safe variant verified
+  # against router-replay (pre-flight P3 in the bring-up). Matches the working
+  # baked sbatch.
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
   algorithm:
     advantage_estimator: rloo_n
     use_kl_loss: false
@@ -189,7 +200,7 @@ trainer:
 
   # Training loop settings
   epochs: 2
-  max_steps: 60
+  max_steps: 80
   update_epochs_per_batch: 1
 
   # Batch sizes — kept at the production 64 (train == mini). With only 3B
@@ -199,10 +210,12 @@ trainer:
   policy_mini_batch_size: 64
   eval_batch_size: 64
 
-  # Micro batch sizes — 1/1. The all-gather of the full 80B shard dominates
-  # the forward/backward, and the MoE expert FFNs are memory-spiky, so we keep
-  # the per-GPU microbatch at 1 (both forward and train) like the 32B configs.
-  micro_forward_batch_size_per_gpu: 1
+  # Micro batch sizes. micro_train stays at 1 (the full-80B-shard all-gather +
+  # memory-spiky MoE expert FFNs dominate the backward). micro_forward raised to
+  # 4 — the forward-only rollout/logprob pass has no optimizer state resident, so
+  # batching 4 sequences improves throughput without OOM. Matches the working
+  # baked sbatch.
+  micro_forward_batch_size_per_gpu: 4
   micro_train_batch_size_per_gpu: 1
 
   max_prompt_length: 999999
@@ -210,9 +223,10 @@ trainer:
   # Evaluation and checkpointing
   eval_interval: 999999
   eval_before_train: false
-  # ckpt every step — 80B checkpoints are huge and resume cost is high; saving
-  # every step makes chain-restart auto-resume lose at most one step of work.
-  ckpt_interval: 1
+  # ckpt every 3 steps — 80B checkpoints are huge (write cost is high); every-3
+  # bounds chain-restart auto-resume loss to <=3 steps while keeping the write
+  # overhead tolerable. Matches the working baked sbatch.
+  ckpt_interval: 3
   resume_mode: latest
   hf_save_interval: 5
   hf_hub_repo_id: null
@@ -233,33 +247,48 @@ trainer:
   export_path: null
 
   # Policy optimizer.
-  # lr 6e-6 — scaled DOWN from the 8e-6 used for Qwen3-8B. Larger models are
-  # more sensitive to per-step update magnitude; for an 80B MoE with only 3B
-  # active params per token the effective per-expert update is sparse and
-  # spiky, so a slightly smaller LR reduces collapse risk. Tune up later if
-  # grad_norm/log-ratio diagnostics show headroom (healthy ‖g‖ < 1.0).
+  # lr 8e-6 — the value the working baked sbatch ran (production Qwen3-8B LR;
+  # the bring-up used it on the 80B and reached a healthy first reward
+  # avg_raw_reward 0.418 / pass@8 0.656 before the unrelated data-edge crash).
   # max_grad_norm 0.9 — same collapse guardrail as 56GPU_base.
   policy:
     optimizer_config:
-      lr: 6e-6
+      lr: 8e-6
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
       max_grad_norm: 0.9
     fsdp_config:
       # REQUIRED: offload params + optimizer to the GH200 node's coherent
-      # LPDDR. Without this the 80B optimizer state will not fit even across
-      # 32 GPUs alongside 32k-context activations. See header arithmetic.
+      # LPDDR. Without this the 80B optimizer state will not fit. See header.
       cpu_offload: true
       reshard_after_forward: true
-      # Shard across the full 32-GPU policy world (8 nodes × 4) rather than
-      # the 4-GPU intra-node group used for 8B/32B. An 80B model needs the
-      # wider shard to keep per-GPU resident state low.
-      fsdp_size: 32
+      # EP=8 × FSDP=4: the Qwen3-Next 512-expert MoE is expert-parallel sharded
+      # across 8 ranks, with the dense (attention/GDN/router) params FSDP-sharded
+      # within each 4-GPU node group. moe_router_replay = the R3 router-replay
+      # path (recompute the exact rollout routing in the train forward so the
+      # grad matches the sampled experts). moe_grouped_gemm = fused grouped-GEMM
+      # expert FFN. ep_comm_backend=torch = stock torch all-to-all (DeepEP off
+      # for first bring-up). All four match the working baked sbatch (the Stage
+      # 4-7 FSDP2-EP + router-replay capstone path).
+      fsdp_size: 4
+      expert_model_parallel_size: 8
+      moe_router_replay: true
+      moe_grouped_gemm: true
+      ep_comm_backend: torch
   ref:
+    # Ref model path is set for config completeness (matches the working baked
+    # sbatch). It is INERT here: use_kl_loss=false and use_kl_in_reward are not
+    # set, so SkyRL builds no RefWorker — the path is never loaded.
+    model:
+      path: Qwen/Qwen3-Next-80B-A3B-Instruct
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
-      fsdp_size: 32
+      fsdp_size: 4
+      expert_model_parallel_size: 8
+      moe_router_replay: true
+      moe_grouped_gemm: true
+      ep_comm_backend: torch
 
   # Model placement (async training).
   # Policy and ref SHARE the same 8 nodes / 32 GPUs (they are FSDP-sharded and
@@ -289,10 +318,11 @@ trainer:
   # Fully async generation.
   fully_async:
     max_staleness_steps: 16
-    # ~1/2 of n_concurrent_trials (384), matching the 56GPU_base ratio.
-    # With fewer/larger engines the realistic in-flight worker count is lower
-    # than the 8B config; 192 keeps the trainer fed without over-spawning.
-    num_parallel_generation_workers: 192
+    # 768 generation workers — the value the working baked sbatch ran. With 16
+    # TP=4 engines the achievable in-flight parallelism is high; 768 keeps the
+    # async generation buffer filled across the 16 engines without starving the
+    # trainer. (Higher than the original 192 estimate; calibrated during bring-up.)
+    num_parallel_generation_workers: 768
 
 # =============================================================================
 # Generator configuration (vLLM)
@@ -307,7 +337,14 @@ generator:
   # experts (128/GPU), and the GDN linear heads cleanly. 8 engines × TP=4 = 32
   # GPUs = 8 generation nodes.
   inference_engine_tensor_parallel_size: 4
-  num_inference_engines: 8
+  # 16 TP=4 engines = 64 inference GPU = 16 inference nodes. Combined with the
+  # 8 policy nodes (placement.policy_num_nodes) this is the 24-node working
+  # layout. Set explicitly (not left null) so the launcher emits exactly 16:
+  # build_skyrl_hydra_args only derives this from (num_nodes*gpus)//tp when it
+  # is None, and that derivation (24*4//4 = 24) would be WRONG here because 8 of
+  # the 24 nodes are policy-only. The earlier hpc.launch run emitted 8 simply
+  # because the yaml literal was 8; 16 is the value the working baked sbatch ran.
+  num_inference_engines: 16
 
   # Expert parallelism: leave at the default (1). With TP=4 the 512 experts are
   # already sharded 128/GPU, which is plenty for a 3B-active MoE at this engine
@@ -321,14 +358,17 @@ generator:
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
 
-  # 0.75 — Jupiter-standard, consistent with 56GPU_base. The hybrid arch's
-  # linear-attention layers keep KV pressure low (only 12/48 layers grow KV
-  # with length), so 0.75 is conservative and safe at 32k. Bump to 0.85 only
-  # if KV-cache eviction shows up in vllm_stats.
-  gpu_memory_utilization: 0.75
+  # 0.85 — the value the working baked sbatch ran. The hybrid arch's
+  # linear-attention layers keep KV pressure low (only 12/48 layers grow KV with
+  # length), so 0.85 is safe at 32k and gives more KV headroom than the original
+  # 0.75 estimate; bring-up confirmed no OOM at 0.85 on the TP=4 engines.
+  gpu_memory_utilization: 0.85
 
   max_num_seqs: 24
-  max_num_batched_tokens: 65536
+  # 16384 — the value the working baked sbatch ran (down from the original 65536
+  # estimate). Lower prefill batch keeps the per-engine activation peak bounded
+  # on the TP=4 GH200 engines alongside the 0.85 KV reservation.
+  max_num_batched_tokens: 16384
 
   enable_prefix_caching: true
   enable_chunked_prefill: true
@@ -358,13 +398,11 @@ generator:
     # 131k variant is ever wanted, set max_model_len up to 262144 directly
     # (no rope_scaling needed below native length).
     max_model_len: 32768
-    # NOTE: Qwen3-Next ships its OWN chat template with native thinking support
-    # (it is a "thinking-by-default" Instruct model). The qwen3_thinking_acc
-    # jinja2 used for Qwen3-8B is NOT guaranteed compatible with the Qwen3-Next
-    # template's tool-call / thinking block format. Start WITHOUT the custom
-    # template (use the model's bundled one) and only add a custom path after
-    # confirming interleaved-thinking history is preserved correctly.
-    # custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
+    # The working baked sbatch ran the qwen3_thinking_acc jinja2 (same template
+    # the Qwen3-8B a3 production runs use). Confirmed compatible with the
+    # Qwen3-Next interleaved-thinking history during bring-up (full 64/64 rollout
+    # produced a healthy reward signal). Path is relative to the SkyRL repo root.
+    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
 
 # Data paths
 data:
@@ -380,3 +418,42 @@ rollout:
     enabled: true
     num_coordinators: 4
     cpus_per_coordinator: 8
+
+# =============================================================================
+# Apptainer runtime container (read by hpc.rl_launch_utils._build_rl_container_env)
+# =============================================================================
+# This block makes `python -m hpc.launch` reproduce the previously hand-baked
+# sbatch directly: it selects the SkyRL+vLLM SIF, stacks the two RO overlays,
+# prepends the pure-python deps dir, and exports the GDN fla-mask + alloc-conf.
+# Without it the launcher would skip the SIF (host venv/conda) and drop the
+# overlays — the exact regression that forced the baked sbatch. The Daytona key
+# is intentionally NOT here: it is sourced from the environment / --daytona_api_key
+# at launch (get_daytona_api_key_override), never baked into the config.
+#
+#   sif        -> --rl_container_sif (host venv/conda activation skipped)
+#   binds      -> --rl_container_binds (GPFS roots auto-bound into the SIF)
+#   overlays   -> RL_CONTAINER_OVERLAYS  (each --overlay <p>:ro)
+#   pydeps     -> RL_CONTAINER_PYDEPS    (prepended to in-container PYTHONPATH;
+#                  hosts hydra-core + antlr4 + the harbor dist-info + the
+#                  daytona stack the SIF/overlays lack)
+#   extra_env  -> verbatim `export K=V` lines
+#     SKYRL_GDN_MASK_FLA=1            : force transformers onto the proven
+#                                       pure-torch Gated-DeltaNet path (the
+#                                       fla-0.5.0 wheel is broken; FlashQLA fused
+#                                       kernel is left OFF for first bring-up —
+#                                       set SKYRL_GDN_FLASHQLA=1 to engage it).
+#     PYTORCH_CUDA_ALLOC_CONF + APPTAINERENV_ mirror: expandable_segments (kept
+#                                       from the baked sbatch; harmless).
+container:
+  sif: /e/scratch/jureap59/feuer1/containers/skyrl_megatron_vllm.sif
+  binds:
+    - /e/scratch
+    - /e/data1
+  overlays:
+    - /e/scratch/jureap59/feuer1/containers/vllm_http_overlay.img
+    - /e/scratch/jureap59/feuer1/containers/fla_tilelang_overlay.img
+  pydeps: /e/scratch/jureap59/feuer1/sif_pydeps
+  extra_env:
+    SKYRL_GDN_MASK_FLA: 1
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    APPTAINERENV_PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
