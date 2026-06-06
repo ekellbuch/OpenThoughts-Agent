@@ -106,6 +106,16 @@ fi
 # --- NCCL/Networking settings (cluster-specific) ---
 {nccl_exports}
 
+# --- RL container env (Apptainer SIF overlays / pydeps / extra exports) ---
+# Emitted by the launcher from the RL yaml `container:` section (if present).
+# Sets RL_CONTAINER_OVERLAYS / RL_CONTAINER_PYDEPS (read at runtime by
+# hpc/rl_launch_utils.py build_apptainer_prefix + _build_container_pythonpath)
+# plus any container.extra_env exports (e.g. SKYRL_GDN_MASK_FLA, alloc-conf).
+# Empty (comment-only) when the yaml has no container section — byte-identical
+# to the prior non-container path. Exported here so every Ray daemon/driver
+# (apptainer --env passthrough + srun --export=ALL) inherits them.
+{rl_container_env}
+
 # --- Standard environment variables ---
 # UV_USE_IO_URING=0 forces libuv (bundled in uvloop 0.22.1 as libuv 1.48.0)
 # onto the plain, immediate epoll_ctl path instead of the io_uring EPOLL_CTL
