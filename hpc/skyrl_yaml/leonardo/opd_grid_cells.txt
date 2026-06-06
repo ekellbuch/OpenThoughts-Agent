@@ -1,0 +1,43 @@
+# OPD speed x convergence grid — per-cell launch spec for Leonardo.
+# Consumed by launch_opd_grid.sh. One cell per line:
+#   <cell_name> | <MAX_STEPS> | <space-separated overrides passed to sbatch_opd_qwen3.sh>
+#
+# Overrides are split by sbatch_opd_qwen3.sh: KEY=VAL (no dot) -> sizing env;
+# anything with a dot (teacher.* / trainer.* / generator.*) -> hydra passthrough.
+#
+# BASE (matches live full run 44708545): TBS64 N8 gen1024 topk128 lr1e-5,
+# teacher TP2 x1 engine, student 4xTP1 colocated, student enforce_eager=true.
+# Step ~= 24 min (~95% is teacher scoring = timing/fwd_logprobs_values_reward).
+# 8h wall -> ~16 base steps; lighter top_k/gen cells fit many more.
+#
+# ============================ BATCH 1 (speed) ============================
+# cell        | MAX_STEPS | overrides
+base          | 16  |
+topk32        | 16  | TOPK=32
+topk64        | 16  | TOPK=64
+topk256       | 10  | TOPK=256
+teacherTP4    | 16  | TEACHER_TP=4 TEACHER_NUM_ENGINES=1
+tbs128        | 8   | TRAIN_BATCH_SIZE=128 MINI_BATCH_SIZE=128
+gen512        | 16  | MAX_GEN_LEN=512
+cudagraph     | 16  | generator.enforce_eager=false
+#
+# DIVERGENCES vs grid.md plan (recorded there too):
+#  - DROPPED `temp07`: teacher scoring uses a fixed temperature=1.0 in
+#    score_sequences(); there is NO teacher-temperature config knob. Replaced in
+#    Batch 2 by `topk16` (extends the top_k tradeoff curve to the cheap extreme).
+#  - `noeager` -> `cudagraph`: the run script already sets student
+#    generator.enforce_eager=true (cudagraph OFF) as the base, so the directive's
+#    "base = cudagraph ON" was inverted. The meaningful test is enabling cuda
+#    graphs (enforce_eager=false); base stays eager.
+#
+# ========================= BATCH 2 (convergence) =========================
+# combo_fast / combo_conv overrides are FILLED from Batch-1 winners before launch.
+# cell        | MAX_STEPS | overrides
+lr3e6         | 16  | trainer.policy.optimizer_config.lr=3e-6
+lr3e5         | 16  | trainer.policy.optimizer_config.lr=3e-5
+lr1e4         | 16  | trainer.policy.optimizer_config.lr=1e-4
+n4            | 16  | N_SAMPLES=4
+n16           | 12  | N_SAMPLES=16
+topk16        | 16  | TOPK=16
+# combo_fast  | 16  | <best-speed knobs from Batch 1>
+# combo_conv  | 14  | <best-lr from Batch 2 + TOPK=256 + N_SAMPLES=16>
