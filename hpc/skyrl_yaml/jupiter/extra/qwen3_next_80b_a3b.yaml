@@ -275,6 +275,16 @@ trainer:
     ref_num_nodes: 8
     policy_num_gpus_per_node: 4
     ref_num_gpus_per_node: 4
+    # Reserve the 8 policy nodes (STRICT_SPREAD, whole-node bundles) BEFORE the
+    # vLLM inference engines' placement group is created, so policy claims its
+    # 8 dedicated nodes first and the 16 TP=4 engines (run_engines_locally) are
+    # forced onto the disjoint remaining 16 nodes. Without this, the two
+    # independent PACK placement groups race on an exactly-full 24-node cluster
+    # and a policy FSDP worker can land on a GPU already holding a ~94 GiB vLLM
+    # engine -> torch.OutOfMemoryError at policy init (jobs 626872/629299).
+    # Safe because use_kl_loss/use_kl_in_reward are both false here (no ref
+    # model), so the policy placement group is policy-only.
+    policy_strict_spread_pg: true
 
   # Fully async generation.
   fully_async:
