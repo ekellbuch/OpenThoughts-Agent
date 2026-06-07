@@ -478,6 +478,19 @@ generator:
     # path (/e/scratch/.../OpenThoughts-Agent/chat_templates/...) under the
     # bind-mounted /e/scratch, reachable regardless of runtime CWD.
     custom_chat_template_chat_completion_path: ./chat_templates/qwen3_thinking_acc.jinja2
+    # R3 ROUTER-REPLAY CAPTURE FLAG (added 2026-06-07, plan step 2). Tells the
+    # vLLM EngineCore to emit per-token expert routing and (with a vLLM that
+    # serializes it over /chat/completions) populate rollout_details[*].extra
+    # ["routed_experts"], which the FSDP2 replay hook consumes so the train
+    # forward replays the EXACT sampled experts (π_old == π_train for the MoE).
+    # INERT on the production skyrl_megatron_vllm.sif (stock vLLM 0.16.0 has the
+    # engine emission but not the chat-completions serving serialization), so
+    # leaving it True is byte-safe there — capture simply stays null and the run
+    # falls back to TIS (use_tis below). It becomes LIVE on the rebuilt SIF
+    # (fork vLLM 0.20.2rc0, PR #39917 device-cache capture). At step 4 of the
+    # R3 bring-up, flip fsdp_config.moe_router_replay back to true alongside the
+    # new SIF to run BOTH TIS and R3.
+    enable_return_routed_experts: true
 
 # Data paths
 data:
