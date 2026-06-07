@@ -1,0 +1,67 @@
+# GSM8K GRPO ACCURACY grid — per-cell launch spec for Leonardo (Qwen2.5-1.5B, 1 node x 4 A100-64GB).
+# Consumed by launch_accuracy_grid.sh. One cell per line:
+#   <cell_name> | <space-separated hydra overrides appended after the combo_C base>
+#
+# These overrides are passed to sbatch_gsm8k_grid.sh, which runs run_gsm8k_canary.sh "$@".
+# run_gsm8k_canary.sh emits a fixed hydra command (the CANARY base); everything the launcher
+# appends is LAST-WINS, so it overrides the canary defaults.
+#
+# ============================ BASE (combo_C + plateau sizing) ============================
+# The launcher ALWAYS prepends BASE_KNOBS = the throughput-winner combo_C deltas vs the canary
+# PLUS plateau sizing (epochs/max_steps raised so the run is wall-limited, not 25-step / 1-epoch
+# capped). combo_C = tbs128 (~58 steps/epoch on the 7,473-row gsm8k set), so epochs=8 gives
+# ~464 steps of data; max_steps=400 covers the typical gsm8k GRPO plateau (~150-300 steps) with
+# headroom and lets the 8h wall be the real limiter. Wider cells (n16/gen2048) run fewer steps in
+# the wall but never exhaust data.
+#
+#   BASE_KNOBS (in launch_accuracy_grid.sh):
+#     trainer.train_batch_size=128 trainer.policy_mini_batch_size=128
+#     generator.n_samples_per_prompt=8 generator.gpu_memory_utilization=0.85
+#     generator.enforce_eager=false
+#     trainer.micro_train_batch_size_per_gpu=16 trainer.micro_forward_batch_size_per_gpu=16
+#     trainer.epochs=8 trainer.max_steps=400
+#     trainer.eval_interval=20 trainer.eval_before_train=true
+#     generator.eval_n_samples_per_prompt=8 trainer.ckpt_interval=20
+#
+# CANARY base values a cell can override by listing them (defaults if not listed):
+#   lr=1.0e-6 (canary) ; max_generate_length=512 (combo_C carries the canary 512, NOT 1024) ;
+#   use_kl_loss=false ; temperature=1.0 ; eps_clip_high=0.2 ; model=Qwen2.5-1.5B-Instruct.
+#   NOTE: base_long lr = the CANARY lr = 1.0e-6 (confirmed in run_gsm8k_canary.sh).
+#
+# ============================ BATCH 1 (10 cells) ============================
+# cell       | overrides vs combo_C base
+base_long    |
+lr3e7        | trainer.policy.optimizer_config.lr=3e-7
+lr1e6        | trainer.policy.optimizer_config.lr=1e-6
+lr3e6        | trainer.policy.optimizer_config.lr=3e-6
+lr1e5        | trainer.policy.optimizer_config.lr=1e-5
+lr3e5        | trainer.policy.optimizer_config.lr=3e-5
+n4           | generator.n_samples_per_prompt=4
+n16          | generator.n_samples_per_prompt=16
+gen1024      | generator.sampling_params.max_generate_length=1024
+gen2048      | generator.sampling_params.max_generate_length=2048
+#
+# (base_long carries no override -> pure combo_C at canary lr 1e-6, run to plateau.
+#  lr1e6 == base_long lr but listed explicitly per the spec's lr ladder; kept as a
+#  distinct cell so the lr axis is complete/self-documenting in the manifest.)
+#
+# ============================ BATCH 2 (directly launchable) ============================
+# cell       | overrides vs combo_C base
+kl001        | trainer.algorithm.use_kl_loss=true trainer.algorithm.kl_loss_coef=0.001
+kl01         | trainer.algorithm.use_kl_loss=true trainer.algorithm.kl_loss_coef=0.01
+temp07       | generator.sampling_params.temperature=0.7
+temp12       | generator.sampling_params.temperature=1.2
+clip028      | trainer.algorithm.eps_clip_high=0.28
+entbonus     | trainer.algorithm.use_entropy_loss=true trainer.algorithm.entropy_loss_coef=0.01
+base_q3      | trainer.policy.model.path=Qwen/Qwen3-1.7B
+#
+# ============================ HELD (iterate step — filled from Batch-1 winners) ============================
+# combo_acc       | <lr-winner> <n-winner> <gen-winner>
+# combo_acc_stab  | combo_acc + best stabilizer (kl/clip/ent from Batch 2)
+#
+# ============================ FLAGGED (needs code, not a hydra knob) ============================
+# rshape | gsm8k reward is utils.compute_score() exact-match in skyrl-gym/skyrl_gym/envs/gsm8k/
+#          {env.py,utils.py}; there is NO format/partial-credit hydra knob. Wiring rshape needs a
+#          code edit to the gsm8k env reward fn (+ rebuild of the editable skyrl-gym in the sandbox).
+#          Deferred per directive ("if it needs code, note it for later").
+#          NOTE: entbonus IS wireable (use_entropy_loss/entropy_loss_coef) -> launched above.
