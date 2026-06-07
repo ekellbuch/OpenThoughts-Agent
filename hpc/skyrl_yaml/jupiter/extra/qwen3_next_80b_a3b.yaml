@@ -137,6 +137,19 @@ terminal_bench:
     # Reward shaping (disabled - binary rewards)
     enable_reward_shaping: false
 
+    # -------------------------------------------------------------------------
+    # TIS root-cause fix (2026-06-07, supersedes a7d4193 forward-symmetry fix).
+    # -------------------------------------------------------------------------
+    # collect_rollout_details=true makes Harbor request + store per-token
+    # ROLLOUT LOGPROBS from vLLM (standard OpenAI `choices[].logprobs`, no
+    # container patch needed — unlike per-token routed_experts, which require
+    # vLLM `enable_return_routed_experts` + a non-standard serving-JSON field
+    # that this SIF's stock vLLM 0.16.0 does NOT emit). These rollout logprobs
+    # are the TRUE generation distribution; trainer.algorithm.use_tis below
+    # uses them to bound the off-policy importance ratio. REQUIRED for use_tis
+    # (the trainer asserts non-null rollout_logprobs when use_tis=true).
+    collect_rollout_details: true
+
     # RLOO-N error classification (mirrors 56GPU_base production settings)
     enable_error_classification: true
     # Order + membership match the working baked sbatch. ContextLengthExceededError
@@ -197,6 +210,31 @@ trainer:
     eps_clip_low: 0.2
     eps_clip_high: 0.05
     loss_reduction: token_mean
+    # -------------------------------------------------------------------------
+    # TIS root-cause fix (2026-06-07) — ROOT CAUSE: the rollout's per-token
+    # expert ROUTING is never captured (vLLM EngineCore init logs
+    # `enable_return_routed_experts=False`; stock vLLM 0.16.0 cannot emit
+    # per-token routed_experts in the OpenAI chat-completion JSON, and the
+    # SIF/overlay is read-only so we cannot make option-A capture work without
+    # a container rebuild). With routing uncaptured, moe_router_replay replays
+    # SENTINEL/native routing that does NOT match the actual vLLM generation
+    # routing → π_old (recomputed) ≠ the true generation distribution → the
+    # log_ratio explosion that produced log_ratio_abs_max=19.79 /
+    # raw_grad_norm=1.13e6 / policy_loss=13258 on job 651054 (the a7d4193
+    # forward-symmetry fix made both forwards SYMMETRIC but both still used the
+    # wrong sentinel routing, so it cancels in train-vs-old but NOT in
+    # generation-vs-old).
+    #
+    # FIX (option C, the tractable lever): Truncated Importance Sampling.
+    # use_tis multiplies the policy loss by
+    #   clamp(exp(old_log_probs - rollout_logprobs), max=tis_imp_ratio_cap),
+    # down-weighting tokens where the train-recompute (native routing) diverges
+    # from the true rollout logprob (vLLM generation). This BOUNDS the
+    # off-policy ratio created by the uncaptured routing → bounded grad,
+    # correct importance-corrected training. cap=2.0 is the standard truncation
+    # (fengyao off-policy-rl). REQUIRES collect_rollout_details=true (above).
+    use_tis: true
+    tis_imp_ratio_cap: 2.0
 
   # Training loop settings
   epochs: 2
@@ -272,7 +310,16 @@ trainer:
       # 4-7 FSDP2-EP + router-replay capstone path).
       fsdp_size: 4
       expert_model_parallel_size: 8
-      moe_router_replay: true
+      # moe_router_replay DISABLED (2026-06-07 TIS fix): the rollout routing is
+      # never captured (enable_return_routed_experts=False in the vLLM engine),
+      # so replay would replay SENTINEL/native routing — the broken path that
+      # caused the log_ratio explosion. With it OFF, the train forward uses
+      # native routing consistently (PPO ratio≈1, on-policy at step 1) and TIS
+      # (algorithm.use_tis above) corrects the rollout-vs-train mismatch. The EP
+      # mesh is governed by expert_model_parallel_size (kept at 8) and is
+      # INDEPENDENT of router_replay (fsdp_worker.py:356 vs fsdp_strategy.py
+      # ep_size), so EP=8×FSDP=4 is unchanged.
+      moe_router_replay: false
       moe_grouped_gemm: true
       ep_comm_backend: torch
   ref:
@@ -286,7 +333,9 @@ trainer:
       reshard_after_forward: true
       fsdp_size: 4
       expert_model_parallel_size: 8
-      moe_router_replay: true
+      # Disabled to match policy (2026-06-07 TIS fix). Ref is INERT here anyway
+      # (use_kl_loss=false → no RefWorker built), so this is config-consistency.
+      moe_router_replay: false
       moe_grouped_gemm: true
       ep_comm_backend: torch
 
