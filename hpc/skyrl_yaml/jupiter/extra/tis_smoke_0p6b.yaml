@@ -112,9 +112,12 @@ trainer:
   max_steps: 4
   update_epochs_per_batch: 1
 
-  train_batch_size: 16
-  policy_mini_batch_size: 16
-  eval_batch_size: 16
+  # dataset is a tiny 4-task subset (Daytona snapshot-quota constrained), and
+  # SkyRL asserts dataset_size >= train_batch_size (train_batch_size counts
+  # PROMPTS). 4 prompts x n_samples_per_prompt=4 = 16 trajectories per step.
+  train_batch_size: 4
+  policy_mini_batch_size: 4
+  eval_batch_size: 4
 
   micro_forward_batch_size_per_gpu: 4
   micro_train_batch_size_per_gpu: 1
