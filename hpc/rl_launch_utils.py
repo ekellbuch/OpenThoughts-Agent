@@ -231,10 +231,38 @@ def _build_container_pythonpath() -> str:
     if existing:
         parts.append(existing)
 
+    # Flatten any colon-joined entries (e.g. the inherited $PYTHONPATH is itself
+    # a colon-list) and drop entries containing shell metacharacters. On Jupiter
+    # the inherited PYTHONPATH can still carry an UNEXPANDED dotenv tail like
+    #   $(resolve_rl_repo_dir "$DCFT")/skyrl-train:${DCFT_PRIVATE:-$DCFT}${PYTHONPATH:+:$PYTHONPATH}
+    # (when resolve_rl_repo.sh wasn't sourced in the shell that first exported
+    # PYTHONPATH, the `$()`/`${}` substitutions never ran). Such an entry is a
+    # bogus import path AND — because it contains spaces, `"`, and `)` — corrupts
+    # the `apptainer exec --env PYTHONPATH=<value>` argument: apptainer mis-reads
+    # the value tail as the SIF image path and dies with
+    #   FATAL: could not open image .../OpenThoughts-Agent/"...")/skyrl-train:...
+    # → the ray head exits 255 before producing output (80B step-4 651533-651541
+    # / 651960). The real importable roots (sif_pydeps, SkyRL/skyrl-train,
+    # harbor/src, harbor, OTA) are all added above and never contain shell
+    # syntax, so dropping the dirty entries is safe and keeps imports intact.
+    _SHELL_META = set(" \t$()`\"'{}")
+    flat: List[str] = []
+    for entry in parts:
+        for sub in entry.split(":"):
+            if not sub:
+                continue
+            if any(ch in _SHELL_META for ch in sub):
+                continue  # unexpanded/garbled path entry — skip
+            if not sub.startswith("/"):
+                continue  # only absolute paths are valid in-container imports;
+                          # drops stray fragments left by splitting a garbled
+                          # entry (e.g. the "+" from "${PYTHONPATH:+:...}")
+            flat.append(sub)
+
     # De-dup while preserving order.
     seen = set()
     deduped = []
-    for p in parts:
+    for p in flat:
         if p and p not in seen:
             seen.add(p)
             deduped.append(p)
