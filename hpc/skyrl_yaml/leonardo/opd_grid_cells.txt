@@ -47,5 +47,12 @@ lr1e4         | 16  | trainer.policy.optimizer_config.lr=1e-4
 n4            | 16  | N_SAMPLES=4
 n16           | 12  | N_SAMPLES=16
 topk16        | 16  | TOPK=16
-# combo_fast  | 16  | <best-speed knobs from Batch 1>
-# combo_conv  | 14  | <best-lr from Batch 2 + TOPK=256 + N_SAMPLES=16>
+# combo_fast = fastest Batch-1 corner: topk32 (-64% step) + gen512 (-46% step,
+#   compounding via shorter teacher-score token count). cudagraph gave no
+#   step-level win (1446 vs 1461 base) so it is NOT in the combo. MAX_STEPS=20
+#   (cheap cell -> many steps fit the 8h wall; more steps = cleaner KL slope).
+combo_fast    | 20  | TOPK=32 MAX_GEN_LEN=512
+# combo_conv  = best-lr from Batch 2 + TOPK=256 + N_SAMPLES=16. FILLED after the
+#   lr cells resolve (lr is the dominant convergence lever). Launched in the
+#   iterate step once the Batch-2 lr winner is known.
+# combo_conv  | 14  | trainer.policy.optimizer_config.lr=<winner> TOPK=256 N_SAMPLES=16

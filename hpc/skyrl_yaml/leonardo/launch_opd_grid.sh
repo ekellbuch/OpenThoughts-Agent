@@ -20,7 +20,8 @@ WALL=08:00:00
 BASE_KNOBS="TRAIN_BATCH_SIZE=64 MINI_BATCH_SIZE=64 N_SAMPLES=8 MAX_GEN_LEN=1024 TOPK=128"
 
 BATCH1=(base topk32 topk64 topk256 teacherTP4 tbs128 gen512 cudagraph)
-BATCH2=(lr3e6 lr3e5 lr1e4 n4 n16 topk16)
+BATCH2=(lr3e6 lr3e5 lr1e4 n4 n16 topk16 combo_fast)
+# combo_conv is launched separately in the iterate step (needs the Batch-2 lr winner).
 
 declare -a WANT
 if [[ "${1:-}" == "--batch1" ]]; then WANT=("${BATCH1[@]}")
