@@ -1015,6 +1015,61 @@ def construct_rl_sbatch_script(exp_args: dict, hpc) -> str:
         hydra_args.extend(skyrl_overrides)
         print(f"Applied {len(skyrl_overrides)} CLI overrides")
 
+    # --- Auto-resume guard: defeat the dedup-fork -> step-0 trap -------------
+    # When the run dir collides with a prior run, setup_experiments_dir forks it
+    # to <name>_N (and --dry_run redirects it to <name>__dryrun).
+    # build_skyrl_hydra_args then derives trainer.ckpt_path / trainer.export_path
+    # from that redirected dir -- which is empty -- so SkyRL silently restarts
+    # from global_step_0, discarding all prior progress. If the ORIGINAL
+    # (canonical) run dir already holds checkpoints and the user did NOT request
+    # a fresh start (--overwrite_output_dir / --allow_overwrite), pin ckpt_path,
+    # export_path, and resume_mode at the canonical dir so this launch resumes
+    # the real run. Hydra is last-wins: these append AFTER both the
+    # build-derived args and the user's --skyrl_override, so they override the
+    # (empty) derived ckpt_path. We skip any key the user pinned explicitly via
+    # --skyrl_override so manual overrides still win.
+    _fresh_start_requested = bool(
+        exp_args.get("overwrite_output_dir") or exp_args.get("allow_overwrite")
+    )
+    canonical_root = getattr(exp_paths, "canonical_root", None)
+    if canonical_root is not None and not _fresh_start_requested:
+        canonical_ckpt = Path(canonical_root) / job_name / "checkpoints"
+        derived_ckpt = Path(experiments_subdir) / job_name / "checkpoints"
+        try:
+            has_ckpts = canonical_ckpt.is_dir() and any(
+                p.is_dir() and p.name.startswith("global_step")
+                for p in canonical_ckpt.iterdir()
+            )
+        except OSError:
+            has_ckpts = False
+        if has_ckpts and canonical_ckpt.resolve() != derived_ckpt.resolve():
+            def _user_pinned(key: str) -> bool:
+                return any(
+                    a.split("=", 1)[0].lstrip("+").strip() == key
+                    for a in skyrl_overrides
+                )
+
+            canonical_export = Path(canonical_root) / job_name / "exports"
+            injected = []
+            if not _user_pinned("trainer.ckpt_path"):
+                hydra_args.append(f"trainer.ckpt_path={canonical_ckpt}")
+                injected.append("ckpt_path")
+            if not _user_pinned("trainer.export_path"):
+                hydra_args.append(f"trainer.export_path={canonical_export}")
+                injected.append("export_path")
+            if not _user_pinned("trainer.resume_mode"):
+                hydra_args.append("trainer.resume_mode=latest")
+                injected.append("resume_mode")
+            if injected:
+                print(
+                    "[rl_launch] AUTO-RESUME: canonical run dir "
+                    f"{canonical_ckpt} has checkpoints and this launch was "
+                    f"redirected to {experiments_subdir}. Pinned "
+                    f"{', '.join(injected)} to the canonical dir so training "
+                    "resumes instead of restarting from global_step_0. "
+                    "Pass --overwrite_output_dir true to force a fresh run."
+                )
+
     # Extract config values
     num_nodes = int(exp_args.get("num_nodes") or 1)
     gpus_per_node = int(exp_args.get("gpus_per_node") or hpc.gpus_per_node)

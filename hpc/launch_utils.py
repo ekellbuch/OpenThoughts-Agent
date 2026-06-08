@@ -596,6 +596,15 @@ class ExperimentsPaths:
     sbatch: Path
     configs: Path
     logs: Path
+    # The canonical run-dir target BEFORE any --dry_run redirect or dedup
+    # collision-fork was applied. ``root`` may differ from this when the job
+    # name collided with a prior run (forked to ``<name>_2``) or when this is
+    # a dry run (redirected to ``<name>__dryrun``). Resume logic uses this to
+    # locate the original run's checkpoints. See setup_experiments_dir.
+    canonical_root: Optional[Path] = None
+    # True when ``root`` was forked off ``canonical_root`` due to a collision
+    # with an existing run's config artifacts.
+    renamed_for_collision: bool = False
 
 
 def setup_experiments_dir(
@@ -639,6 +648,22 @@ def setup_experiments_dir(
         # Fallback to just "experiments" (legacy behavior)
         experiments_subdir = "experiments"
     experiments_abs = resolve_workspace_path(experiments_subdir)
+
+    # Capture the canonical run-dir target BEFORE any dry-run redirect or dedup
+    # collision-fork. Resume logic (hpc/rl_launch_utils.py) reads this to find a
+    # prior run's checkpoints even when this launch lands at a forked/redirected
+    # ``root``.
+    canonical_root = experiments_abs
+
+    # Dry runs must NOT seed the real run's dedup config. A bare ``--dry_run``
+    # otherwise writes ``configs/<job>_*_config.json`` into the canonical dir,
+    # which makes the subsequent REAL launch detect a collision and fork to
+    # ``<name>_2`` (where the trainer's ckpt_path re-derives to an empty dir →
+    # silent restart from global_step_0). Route dry runs to a dedicated
+    # ``__dryrun`` sibling so they never touch the real namespace. See
+    # ``reference_a3_rl_resume_dryrun_regenerates_config``.
+    if exp_args.get("dry_run"):
+        experiments_abs = experiments_abs.parent / f"{experiments_abs.name}__dryrun"
 
     # Deduplicate: if experiments dir already exists with configs from a different
     # run, append a numeric suffix to avoid collisions. This prevents a new job
@@ -687,6 +712,8 @@ def setup_experiments_dir(
         sbatch=experiments_abs / sbatch_subdir,
         configs=experiments_abs / "configs",
         logs=experiments_abs / "logs",
+        canonical_root=canonical_root,
+        renamed_for_collision=renamed_for_collision,
     )
 
     if create_dirs:
