@@ -1,6 +1,7 @@
 import math
 import os
 import re
+import shlex
 import socket
 from typing import Dict, List
 from pydantic import BaseModel, computed_field
@@ -274,9 +275,22 @@ class HPC(BaseModel):
         return "\n".join(lines)
 
     def get_srun_export_env(self) -> str:
-        """Generate SRUN --export string with all necessary env vars."""
+        """Generate SRUN --export string with all necessary env vars.
+
+        srun parses ``--export`` as a comma-separated list, so any value that
+        itself contains a comma (e.g. the JSON ``RAY_object_spilling_config``
+        blob) cannot be embedded here verbatim — it would re-tokenize and
+        corrupt the export list. Such values are skipped from the explicit
+        ``KEY=value`` entries; ``ALL`` (always first) already propagates them
+        to the srun child from the launcher shell environment, where the
+        sbatch ``export KEY="value"`` lines (get_rl_env_exports) have set them.
+        """
         env_parts = ["ALL"]
         for key, value in {**self.env_vars, **self.library_paths}.items():
+            if "," in str(value):
+                # Covered by ALL + the sbatch-level export; embedding it here
+                # would break srun's comma-delimited --export parsing.
+                continue
             env_parts.append(f"{key}={value}")
         # Add common paths
         # env_parts.append("PATH=$PATH")
@@ -286,10 +300,19 @@ class HPC(BaseModel):
         return ",".join(env_parts)
 
     def get_ray_env_vars(self) -> str:
-        """Generate space-separated env vars for Ray worker processes."""
+        """Generate space-separated env vars for Ray worker processes.
+
+        These tokens are interpolated into an ``env KEY=val KEY2=val2 ray
+        start ...`` command run under ``bash -c`` (see ray_utils._start_node),
+        so any value containing shell-special characters (spaces, quotes,
+        braces, commas — e.g. the JSON ``RAY_object_spilling_config`` blob)
+        must be shell-quoted to survive as a single ``KEY=value`` token.
+        shlex.quote is a no-op for already-safe values, so this is
+        byte-identical for every plain-string env var.
+        """
         env_parts = []
         for key, value in {**self.env_vars, **self.library_paths}.items():
-            env_parts.append(f"{key}={value}")
+            env_parts.append(f"{key}={shlex.quote(str(value))}")
         env_parts.append("PATH=$PATH")
         env_parts.append("LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}")
         env_parts.append("PYTHONPATH=${PYTHONPATH:-}")
@@ -854,33 +877,29 @@ jupiter = HPC(
         # Symlink fix isn't viable because creating the symlink itself needs
         # a new inode. See reference_jupiter_inode_quota.md.
         "OT_AGENT_RAY_LOG_DIR": "/e/data1/datasets/playground/ot-baf/experiments/_ray_logs",
-        # NCCL flight recorder for v4i and beyond — keeps last 10000 collective
-        # ops per rank in a ring buffer, dumped to disk on timeout. v4h told us
-        # _ALLGATHER_BASE on TP group hangs at seq 14157; the flight recorder
-        # gives us each peer rank's last-completed seq so we can see if peer is
-        # behind (slow workload), at same point but not enqueued (GIL/JIT), or
-        # already past (out-of-order issue). DESYNC_DEBUG=1 adds extra state
-        # logging at timeout. Dump path is /e/data1 (no quota issues vs /tmp
-        # tmpfs which gets cleaned up).
-        # v4k dumps printed a deprecation warning recommending the new name
-        # TORCH_FR_BUFFER_SIZE. Set both for forward compat across PyTorch
-        # 2.x versions — both still honored in 2.11 but the legacy name is
-        # going away in a future release.
-        "TORCH_NCCL_TRACE_BUFFER_SIZE": "10000",
-        "TORCH_FR_BUFFER_SIZE": "10000",
-        "TORCH_NCCL_DESYNC_DEBUG": "1",
-        "TORCH_NCCL_DEBUG_INFO_TEMP_FILE": "/e/data1/datasets/playground/ot-baf/experiments/_nccl_dumps/nccl_trace",
-        # vLLM's pynccl bypasses ProcessGroupNCCL — PyTorch flight recorder
-        # is blind to it. Our local instrumentation in pynccl.py records the
-        # same shape/seq info for pynccl-driven collectives (MoE all-to-all
-        # etc.). Dump triggers: SIGUSR1, atexit. Same dir as TORCH_NCCL_DEBUG_INFO_TEMP_FILE.
-        "VLLM_PYNCCL_TRACE_BUFFER_SIZE": "10000",
-        "VLLM_PYNCCL_TRACE_DUMP_DIR": "/e/data1/datasets/playground/ot-baf/experiments/_nccl_dumps/nccl_trace",
-        # vLLM's ray_env.py default whitelist (VLLM_/LMCACHE_/NCCL_/UCX_/HF_/HUGGING_FACE_)
-        # doesn't include TORCH_NCCL_ — so without this override, the env vars above
-        # only exist on the launcher shell, not inside DPMoEEngineCoreActor or
-        # RayWorkerProc where PyTorch reads them. Additive prefix override:
-        "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY": "TORCH_NCCL_,TORCH_FR_,VLLM_PYNCCL_",
+        # Redirect Ray's object-store SPILL directory to GPFS /e/scratch
+        # (multi-PB free) instead of the compute node's LOCAL disk (default
+        # /tmp/ray, a small node-local fs that fills). The 80B Qwen3-Next
+        # R3+TIS run completes its rollout cleanly but the first training step
+        # OOD-crashes with `ray.exceptions.OutOfDiskError: Local disk is full`:
+        # the R3 routed_experts capture arrays ([gen_len × ~48 layers × top-10]
+        # per token) × 300 concurrent trials × 8 samples — plus trajectories /
+        # logprobs — overflow the Ray object store and spill to node-local disk.
+        # R3 capture roughly multiplies the rollout-data footprint vs the
+        # no-capture runs. GPFS has petabytes free; only node-local is
+        # exhausted, so point the spill at /e/scratch.
+        #
+        # `RAY_object_spilling_config` is read by the Ray head when it
+        # initializes the object store (and propagated to every worker via
+        # the per-node `env KEY=val ray start ...` prefix in
+        # get_ray_env_vars()). The filesystem spill backend writes spilled
+        # objects under `params.directory_path`. The dir is created lazily by
+        # Ray. Keep the path short (well under the 107-byte plasma_store socket
+        # limit, which lives under --temp-dir, NOT here).
+        "RAY_object_spilling_config": (
+            '{"type":"filesystem","params":'
+            '{"directory_path":"/e/scratch/jureap59/feuer1/ray_spill"}}'
+        ),
     },
     # NOTE: Do NOT use master_addr_suffix="i" - the "i" suffixed hostname is not DNS-resolvable
     # InfiniBand routing is handled by NCCL_SOCKET_IFNAME=ib0 instead

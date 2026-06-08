@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass, asdict, field
@@ -602,7 +603,12 @@ def get_rl_env_exports(exp_args: Dict[str, Any], hpc: Optional[Any] = None) -> s
 
     lines = ["# RL training environment variables"]
     for key, value in env_vars.items():
-        lines.append(f'export {key}="{value}"')
+        # shlex.quote keeps values with shell-special characters intact —
+        # notably the JSON RAY_object_spilling_config blob, whose inner
+        # double-quotes would otherwise prematurely close a naive
+        # `export KEY="value"` and mangle the spill config. shlex.quote is a
+        # no-op for plain values, so this is byte-identical for all other vars.
+        lines.append(f"export {key}={shlex.quote(str(value))}")
 
     return "\n".join(lines)
 
