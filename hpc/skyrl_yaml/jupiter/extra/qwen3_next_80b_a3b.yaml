@@ -433,6 +433,19 @@ generator:
   # MoE in vLLM 0.11 is UNVALIDATED here, so we start with plain TP.
   inference_engine_expert_parallel_size: 1
 
+  # mp EXECUTOR BACKEND (R3 capture hang fix, 2026-06-08). The Qwen3-Next hybrid
+  # arch (GatedDeltaNet + 512-expert MoE) deadlocks vLLM's Ray Compiled-DAG when
+  # enable_return_routed_experts=true (capture ON): rank-0 stuck in the DAG channel
+  # read at 0% GPU. vLLM 0.16 has NO non-DAG ray path. The `mp` (multiprocessing)
+  # executor has no Compiled-DAG and runs capture-ON cleanly at full cudagraph speed
+  # (validated 12/12 rounds, real 80B TP=4, mp + cudagraphs + gmr_fix + capturer clip;
+  # agent log 2026-06-07_80b_taskA_routed_experts_logprob_rootcause.md cycle 3).
+  # Off-by-default flag; only engaged here. Requires colocate_all=false (set above)
+  # AND the 2 vLLM Bug#1 fix files bind-mounted over the SIF (see container.binds).
+  # Each SkyRL inference actor reserves the whole TP*PP=4 GPU slice (bundle_index=-1)
+  # and vLLM forks its 4 TP workers locally (no per-worker Ray actors).
+  inference_engine_mp_backend: true
+
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
 
@@ -547,6 +560,18 @@ container:
   binds:
     - /e/scratch
     - /e/data1
+    # R3 capture Bug#1 vLLM fix files, bind-mounted OVER the prod SIF's vLLM
+    # (md5 889b2b36; NO rebuild). Validated 12/12 clean on the real 80B TP=4
+    # (mp backend + cudagraphs). Each entry is a full apptainer src:dst:ro spec
+    # passed verbatim to `apptainer exec --bind`; they land on the Ray head,
+    # every worker, and the SkyRL driver (build_apptainer_prefix), so the
+    # forked vLLM mp workers see them. The capturer_fix DEFENSIVE CLIP is
+    # load-bearing (fired 18x in validation: drops residual-OOB tokens'
+    # routing gracefully → no crash, no hang). gmr_fix sizes the hybrid
+    # kv-buffer (num_blocks+1)*block_size. (scheduler_fix.py was staged but
+    # NOT required for the 12/12-clean config — these two suffice.)
+    - /e/scratch/jureap59/feuer1/tmp/r3repro/gmr_fix.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_model_runner.py:ro
+    - /e/scratch/jureap59/feuer1/tmp/r3repro/capturer_fix.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/routed_experts_capturer.py:ro
   overlays:
     - /e/scratch/jureap59/feuer1/containers/vllm_http_overlay.img
     - /e/scratch/jureap59/feuer1/containers/fla_tilelang_overlay.img
