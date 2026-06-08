@@ -1,0 +1,38 @@
+{
+  "_comment": "Delphi cold-start SFT registry (marin #6279). Five datasets: 4 instruction + 1 CoT-warmup. Each carries its own columns/tags so a heterogeneous 90/10 mix parses correctly (global CLI --role_tag cannot serve different schemas at once). Launch with --dataset_dir sft/delphi. See SFT_COLDSTART_GRID.md.",
+
+  "tulu3": {
+    "hf_hub_url": "allenai/tulu-3-sft-mixture",
+    "formatting": "sharegpt",
+    "columns": { "messages": "messages" },
+    "tags": { "role_tag": "role", "content_tag": "content", "user_tag": "user", "assistant_tag": "assistant", "system_tag": "system" }
+  },
+
+  "magpie": {
+    "hf_hub_url": "Magpie-Align/Magpie-Llama-3.3-Pro-500K-Filtered",
+    "formatting": "sharegpt",
+    "columns": { "messages": "conversations" },
+    "tags": { "role_tag": "from", "content_tag": "value", "user_tag": "human", "assistant_tag": "gpt", "system_tag": "system" }
+  },
+
+  "wildchat_1.1m": {
+    "hf_hub_url": "nyu-dice-lab/wildchat50m-rewild-sft-1118773",
+    "formatting": "sharegpt",
+    "columns": { "messages": "conversation" },
+    "tags": { "role_tag": "role", "content_tag": "content", "user_tag": "user", "assistant_tag": "assistant", "system_tag": "system" }
+  },
+
+  "wildchat_386k": {
+    "hf_hub_url": "nyu-dice-lab/wildchat50m-rewild-sft-385700",
+    "formatting": "sharegpt",
+    "columns": { "messages": "conversation" },
+    "tags": { "role_tag": "role", "content_tag": "content", "user_tag": "user", "assistant_tag": "assistant", "system_tag": "system" }
+  },
+
+  "delphi_warmup": {
+    "hf_hub_url": "laion/llama-nemotron-science-reasoning-on-le3000tok-100k",
+    "formatting": "sharegpt",
+    "columns": { "messages": "messages" },
+    "tags": { "role_tag": "role", "content_tag": "content", "user_tag": "user", "assistant_tag": "assistant", "system_tag": "system" }
+  }
+}

@@ -571,7 +571,21 @@ rollout:
 #     PYTORCH_CUDA_ALLOC_CONF + APPTAINERENV_ mirror: expandable_segments (kept
 #                                       from the baked sbatch; harmless).
 container:
-  sif: /e/scratch/jureap59/feuer1/containers/skyrl_megatron_vllm.sif
+  # BAKED SIF (2026-06-08): the two former runtime --overlay .img files
+  # (vllm_http_overlay.img + fla_tilelang_overlay.img) are now merged into the
+  # SIF rootfs. RUNTIME --overlay FUSE mounts are REMOVED — they were the
+  # confirmed root cause of the 80B bootstrap failures (jobs 661437/438/439):
+  # fuse2fs/squashfuse mounting the two overlays from GPFS TIMED OUT on the Ray
+  # HEAD node ("fuse2fs exited: Mount failed while opening filesystem
+  # (overlay-images/0,1)") -> head GCS never came up -> workers stuck ->
+  # wait_for_cluster 600s timeout. Baking eliminates the GPFS FUSE-overlay
+  # mount entirely (nothing to mount at launch). The baked SIF contains the
+  # EXACT validated overlay bits: vLLM routed_experts HTTP serialization (4
+  # patched vllm/entrypoints/openai files) + tilelang 0.1.8 + FlashQLA
+  # (flash_qla 0.1.0+6ef4858) + apache-tvm-ffi 0.1.9 + the (masked) fla 0.5.0.
+  # The gmr_fix/capturer_fix SINGLE-FILE bind mounts below are UNCHANGED (they
+  # are bind mounts, not overlays — not the failure mode, and still required).
+  sif: /e/scratch/jureap59/feuer1/containers/skyrl_megatron_vllm_r3baked.sif
   binds:
     - /e/scratch
     - /e/data1
@@ -587,9 +601,9 @@ container:
     # NOT required for the 12/12-clean config — these two suffice.)
     - /e/scratch/jureap59/feuer1/tmp/r3repro/gmr_fix.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_model_runner.py:ro
     - /e/scratch/jureap59/feuer1/tmp/r3repro/capturer_fix.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/routed_experts_capturer.py:ro
-  overlays:
-    - /e/scratch/jureap59/feuer1/containers/vllm_http_overlay.img
-    - /e/scratch/jureap59/feuer1/containers/fla_tilelang_overlay.img
+  # overlays: REMOVED 2026-06-08 — baked into skyrl_megatron_vllm_r3baked.sif
+  # above (was the GPFS FUSE-mount timeout root cause of the head-node bootstrap
+  # failures). Do NOT re-add runtime --overlay flags for the 80B run.
   pydeps: /e/scratch/jureap59/feuer1/sif_pydeps
   extra_env:
     SKYRL_GDN_MASK_FLA: 1
