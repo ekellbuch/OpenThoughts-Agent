@@ -326,7 +326,9 @@ trainer:
       # expert FFN. ep_comm_backend=torch = stock torch all-to-all (DeepEP off
       # for first bring-up). All four match the working baked sbatch (the Stage
       # 4-7 FSDP2-EP + router-replay capstone path).
-      fsdp_size: 4
+      # fsdp_size 4->6 (2026-06-08): EP=8 x FSDP=6 = 48 policy GPUs (12 nodes),
+      # up from 32, to clear the step-2 policy-backward GPU CUDA-OOM.
+      fsdp_size: 6
       expert_model_parallel_size: 8
       # moe_router_replay RE-ENABLED (2026-06-07 step 4, R3+TIS bring-up): the
       # earlier log_ratio explosion was caused by replaying SENTINEL routing
@@ -352,7 +354,7 @@ trainer:
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
-      fsdp_size: 4
+      fsdp_size: 6
       expert_model_parallel_size: 8
       # Re-enabled to match policy (2026-06-07 step 4, R3+TIS). Ref is INERT here
       # anyway (use_kl_loss=false → no RefWorker built), so this is config-consistency.
@@ -370,8 +372,12 @@ trainer:
   # but the policy/ref footprint is fixed here at 8 nodes.
   placement:
     colocate_all: false
-    policy_num_nodes: 8
-    ref_num_nodes: 8
+    # 2026-06-08: 8->12 policy nodes (32->48 GPUs, EP=8 x FSDP=6) to clear the
+    # step-2 policy-backward GPU CUDA-OOM. Step 1 passed clean; step 2 OOM'd once
+    # the optimizer state was resident — more FSDP shards = less per-GPU HBM.
+    # LAUNCH MUST PASS --num_nodes 28 (12 policy + 16 vLLM-engine nodes).
+    policy_num_nodes: 12
+    ref_num_nodes: 12
     policy_num_gpus_per_node: 4
     ref_num_gpus_per_node: 4
     # Reserve the 8 policy nodes (STRICT_SPREAD, whole-node bundles) BEFORE the
