@@ -185,7 +185,14 @@ class HPC(BaseModel):
         """Generate environment variable exports for SBATCH scripts."""
         lines = []
         for key, value in {**self.env_vars, **self.library_paths}.items():
-            lines.append(f'export {key}="{value}"')
+            # shlex.quote keeps values with shell-special characters intact —
+            # notably the JSON RAY_object_spilling_config blob, whose inner
+            # double-quotes would otherwise prematurely close a naive
+            # `export KEY="value"` and mangle the spill config (Ray then fails
+            # json.loads at `ray start --head`). shlex.quote is a no-op for
+            # plain values, so this is byte-identical for all other vars.
+            # Mirrors get_rl_env_exports in rl_launch_utils.py.
+            lines.append(f"export {key}={shlex.quote(str(value))}")
         return "\n".join(lines)
 
     def get_exclude_directive(self) -> str:
