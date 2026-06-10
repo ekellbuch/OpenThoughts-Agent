@@ -33,6 +33,6 @@
     "formatting": "sharegpt",
     "columns": { "messages": "messages" },
     "tags": { "role_tag": "role", "content_tag": "content", "user_tag": "user", "assistant_tag": "assistant", "system_tag": "system" },
-    "file_name": "/leonardo_work/AIFAC_5C0_290/bfeuer00/data/hub/datasets--laion--llama-nemotron-science-reasoning-on-le3000tok-100k/snapshots/7e83b6c34cc65869c3a3dc56a1ecdbff36f59408/data"
+    "file_name": "/leonardo_work/AIFAC_5C0_290/bfeuer00/data/hub/datasets--laion--llama-nemotron-science-reasoning-on-le3000tok-100k-canonical-think/snapshots/28b859eff28b774ad53e86f595c8320fafb9020c/data"
   }
 }
