@@ -80,6 +80,20 @@ echo "=== [1b] staging vLLM fork source into sandbox ==="
 mkdir -p "$SANDBOX/opt/vllm_build"
 cp -a "$VLLM_SRC"/. "$SANDBOX/opt/vllm_build/"
 
+# Stage the PEP517 build-backend wheels (setuptools_scm + deps) INTO the sandbox.
+# The booster compute node has NO internet, so pip cannot fetch these at build
+# time. They are pre-downloaded on the (internet-enabled) login node into
+# $BUILD_DEPS_WHEELS and installed offline (--no-index) before the editable
+# vLLM build, which runs setup.py in-env under --no-build-isolation and needs
+# setuptools_scm present. (Root cause of the job 848577 failure.)
+BUILD_DEPS_WHEELS=/e/scratch/jureap59/feuer1/sif_build/build_deps_wheels
+echo "=== [1c] staging build-backend wheels into sandbox ==="
+[ -d "$BUILD_DEPS_WHEELS" ] || { echo "FATAL: build-deps wheelhouse not found at $BUILD_DEPS_WHEELS (pre-download on login node: apptainer exec $BASE_SIF python -m pip download --dest $BUILD_DEPS_WHEELS setuptools_scm setuptools wheel packaging)"; exit 4; }
+ls "$BUILD_DEPS_WHEELS"/*.whl >/dev/null 2>&1 || { echo "FATAL: no .whl in $BUILD_DEPS_WHEELS"; exit 4; }
+mkdir -p "$SANDBOX/opt/build_deps_wheels"
+cp -a "$BUILD_DEPS_WHEELS"/. "$SANDBOX/opt/build_deps_wheels/"
+echo "staged $(ls "$SANDBOX/opt/build_deps_wheels"/*.whl | wc -l) build-dep wheels."
+
 # ---------------------------------------------------------------------------
 # 2. Build + install vLLM 0.20.2rc0 fork FROM SOURCE against in-SIF torch 2.9
 # ---------------------------------------------------------------------------
@@ -107,6 +121,17 @@ apptainer exec --writable --no-home \
     nvcc --version | tail -2
     echo "--- strip torch pins so the build uses the in-SIF NGC torch 2.9 ---"
     python use_existing_torch.py
+    echo "--- install PEP517 build-backend deps OFFLINE (setuptools_scm + deps) ---"
+    # With --no-build-isolation the editable build runs setup.py in THIS env, so
+    # setuptools_scm (+ setuptools/wheel/packaging) must be present here explicitly.
+    # The base SIF lacks setuptools_scm -> job 848577 failed at "Preparing editable
+    # metadata (pyproject.toml)" with ModuleNotFoundError: No module named
+    # setuptools_scm. The compute node has no internet; install from the staged
+    # wheelhouse. NOT guarded by `|| true` -- this MUST succeed or the build is
+    # doomed at metadata generation anyway.
+    python -m pip install --no-index --find-links /opt/build_deps_wheels \
+      setuptools_scm setuptools wheel packaging
+    python -c "import setuptools_scm; print(\"setuptools_scm\", setuptools_scm.__version__)"
     echo "--- install python build deps (no torch) ---"
     python -m pip install --no-build-isolation -r requirements/build.txt || true
     echo "--- build + install vLLM (editable, no-build-isolation, existing torch) ---"
