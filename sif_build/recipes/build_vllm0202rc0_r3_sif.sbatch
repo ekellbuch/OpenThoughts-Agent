@@ -137,8 +137,12 @@ apptainer exec --writable --no-home \
     # under set -e (job 849267). Use importlib.metadata, and do NOT gate the
     # build on the version string -- a successful import is the only thing the
     # editable build actually needs.
-    python -c "import setuptools_scm; print('setuptools_scm import OK')"  # the REAL gate (import must work)
-    python -c "import importlib.metadata as md; print('setuptools_scm', md.version('setuptools-scm'))" || true  # version report is non-fatal
+    # NB: the whole in-sandbox block is wrapped in bash -lc + a single-quoted string,
+    # so these python -c snippets must use ESCAPED DOUBLE QUOTES (\") ONLY. Any bare
+    # single-quote char anywhere in this block (even in a comment) closes the outer
+    # quote and the shell runs import as a command (job 849776: unexpected EOF).
+    python -c "import setuptools_scm; print(\"setuptools_scm import OK\")"  # the REAL gate (import must work)
+    python -c "import importlib.metadata as md; print(\"setuptools_scm\", md.version(\"setuptools-scm\"))" || true  # version report is non-fatal
     echo "--- install python build deps (no torch) ---"
     python -m pip install --no-build-isolation -r requirements/build.txt || true
     echo "--- build + install vLLM (editable, no-build-isolation, existing torch) ---"
