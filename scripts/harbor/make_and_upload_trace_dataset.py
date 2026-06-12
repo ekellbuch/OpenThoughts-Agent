@@ -65,6 +65,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -554,6 +555,113 @@ def _flush_chunk_to_parquet(
     return n
 
 
+def _upload_shard(api, repo_id: str, shard_path: Path) -> None:
+    """Push ONE shard as its own additive commit, then remove it locally.
+
+    Each shard lands independently — a mid-run failure leaves the
+    already-pushed shards intact and resumable rather than losing the whole
+    run (the old end-only ``upload_folder`` lost everything on any crash).
+    """
+    path_in_repo = f"data/{shard_path.name}"
+    # Test seam: when set, copy the shard to a local dir instead of hitting the
+    # Hub (lets the subprocess path be exercised offline without real creds).
+    fake_dir = os.environ.get("TRACE_EXPORT_FAKE_UPLOAD_DIR")
+    if fake_dir:
+        dest = Path(fake_dir) / shard_path.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(shard_path, dest)
+    else:
+        api.upload_file(
+            path_or_fileobj=str(shard_path),
+            path_in_repo=path_in_repo,
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message=f"Add {path_in_repo}",
+        )
+    print(f"[trace-export] Uploaded {path_in_repo} to {repo_id}.")
+    shard_path.unlink(missing_ok=True)
+
+
+def _process_one_shard_in_subprocess(
+    *,
+    trial_dirs: List[str],
+    shard_idx: int,
+    repo_id: str,
+    episodes: str,
+    success_filter: Optional[str],
+    to_sharegpt: bool,
+    include_instruction: bool,
+    include_verifier_output: bool,
+    tmp_root: str,
+    verbose: bool,
+) -> int:
+    """Worker body: collect this batch's rows, write + upload ONE shard, return row count.
+
+    This runs in a FRESH process (multiprocessing ``spawn``). The collection
+    path (Harbor's ``collect_conversations_from_trial`` + the ``datasets``
+    ``from_list``/``.map``/``to_parquet`` cycle) accumulates per-row native
+    memory that ``gc.collect()`` + ``pyarrow.release_unused()`` do NOT reliably
+    return to the OS — empirically ~1 GB per 200-row shard, climbing linearly
+    until OOM on a 24k-row run. Doing each shard in its own process makes the
+    OS reclaim ALL of that on process exit, so parent RSS stays flat at roughly
+    one chunk regardless of how leaky the per-chunk libraries are. The parent
+    only ever holds a list of trial-dir path strings.
+    """
+    from huggingface_hub import HfApi  # type: ignore
+
+    traces_utils = _import_traces_utils()
+    _install_harbor_patches()
+
+    chunk: List[Dict[str, Any]] = []
+    for td in trial_dirs:
+        rows = _collect_trial_rows(
+            traces_utils,
+            Path(td),
+            episodes=episodes,
+            success_filter=success_filter,
+            include_instruction=include_instruction,
+            include_verifier_output=include_verifier_output,
+            verbose=verbose,
+        )
+        if rows:
+            chunk.extend(rows)
+
+    if not chunk:
+        return 0
+
+    shard_path = Path(tmp_root) / f"train-{shard_idx:05d}.parquet"
+    cache_dir = Path(tmp_root) / f"_cache-{shard_idx:05d}"
+    written = _flush_chunk_to_parquet(
+        chunk, to_sharegpt, traces_utils, shard_path, cache_dir
+    )
+    if not written:
+        shard_path.unlink(missing_ok=True)
+        return 0
+
+    api = HfApi()
+    _upload_shard(api, repo_id, shard_path)
+    return written
+
+
+def _run_shard_subprocess(kwargs: Dict[str, Any]) -> int:
+    """Run one shard in a spawned subprocess and return its row count.
+
+    On any subprocess crash (including OOM-kill of the child, which no longer
+    takes down the parent) we raise so the caller can decide. Because shards
+    are additive commits, a crash leaves prior shards intact.
+    """
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(processes=1, maxtasksperchild=1) as pool:
+        return pool.apply(_shard_worker_entry, (kwargs,))
+
+
+def _shard_worker_entry(kwargs: Dict[str, Any]) -> int:
+    """Top-level (picklable) entry the spawned worker runs."""
+    return _process_one_shard_in_subprocess(**kwargs)
+
+
 def stream_export_and_upload(
     *,
     job_dir: Path,
@@ -569,85 +677,65 @@ def stream_export_and_upload(
 ) -> int:
     """Single streaming path: enumerate trials, write parquet shards, upload via HfApi.
 
-    Memory is bounded to roughly one ``chunk_size`` worth of rows at any time:
-    we never hold the full row set in RAM, never build one giant in-memory
-    Dataset, and never git-clone / git-LFS. Returns the total row count.
+    Memory is bounded to roughly one ``chunk_size`` worth of TRIALS at any time.
+    The parent process only enumerates trial directories (cheap, pruned os.walk)
+    and batches their path strings; each batch's collect + parquet-write +
+    upload happens in a FRESH spawned subprocess that exits afterward, so the OS
+    reclaims the per-chunk native-memory leak (Harbor collection + ``datasets``
+    Arrow buffers) that gc/pyarrow-release alone do NOT free. Peak parent RSS is
+    flat across shards. Each shard is an additive hub commit, so a mid-run
+    failure leaves prior shards intact + resumable. Returns the total row count.
     """
     from huggingface_hub import HfApi  # type: ignore
 
     traces_utils = _import_traces_utils()
-    _install_harbor_patches()
 
     api = HfApi()
     api.create_repo(repo_id, repo_type="dataset", private=private, exist_ok=True)
     print(f"[trace-export] Repo {repo_id} ensured (private={private}).")
 
-    # Working root: each shard is written here, uploaded, then deleted. We never
-    # keep more than one shard's worth of parquet on disk at a time.
+    # Working root: each shard is written here by its subprocess, uploaded, then
+    # deleted. We never keep more than one shard's worth of parquet on disk.
     tmp_root = Path(tempfile.mkdtemp(prefix="trace_shards_"))
 
     total_rows = 0
     shard_idx = 0
-    chunk: List[Dict[str, Any]] = []
 
-    def _upload_shard(shard_path: Path) -> None:
-        """Push ONE shard as its own additive commit, then remove it locally.
-
-        Each shard lands independently — a mid-run failure leaves the
-        already-pushed shards intact and resumable rather than losing the whole
-        run (the old end-only ``upload_folder`` lost everything on any crash).
-        """
-        path_in_repo = f"data/{shard_path.name}"
-        api.upload_file(
-            path_or_fileobj=str(shard_path),
-            path_in_repo=path_in_repo,
-            repo_id=repo_id,
-            repo_type="dataset",
-            commit_message=f"Add {path_in_repo}",
-        )
-        print(f"[trace-export] Uploaded {path_in_repo} to {repo_id}.")
-        shard_path.unlink(missing_ok=True)
-
-    def _flush() -> None:
-        nonlocal chunk, shard_idx, total_rows
-        if not chunk:
+    def _dispatch(batch: List[str]) -> None:
+        nonlocal total_rows, shard_idx
+        if not batch:
             return
-        shard_path = tmp_root / f"train-{shard_idx:05d}.parquet"
-        cache_dir = tmp_root / f"_cache-{shard_idx:05d}"
-        written = _flush_chunk_to_parquet(
-            chunk, to_sharegpt, traces_utils, shard_path, cache_dir
+        written = _run_shard_subprocess(
+            dict(
+                trial_dirs=batch,
+                shard_idx=shard_idx,
+                repo_id=repo_id,
+                episodes=episodes,
+                success_filter=success_filter,
+                to_sharegpt=to_sharegpt,
+                include_instruction=include_instruction,
+                include_verifier_output=include_verifier_output,
+                tmp_root=str(tmp_root),
+                verbose=verbose,
+            )
         )
-        # Free the row buffer BEFORE the (network-bound) upload so peak RSS is
-        # bounded to one chunk even while the upload is in flight.
-        chunk = []
-        _release_arrow_memory()
         if written:
-            print(f"[trace-export] Wrote shard {shard_path.name} ({written} rows; running total {total_rows + written}). Uploading...")
-            _upload_shard(shard_path)
             total_rows += written
             shard_idx += 1
-        else:
-            # Nothing materialized (e.g. all rows finalized away); drop empty file.
-            shard_path.unlink(missing_ok=True)
+            print(f"[trace-export] Shard {shard_idx - 1:05d} done ({written} rows; running total {total_rows}).")
 
     try:
         n_trials = 0
+        batch: List[str] = []
         for trial_dir in _iter_trial_dirs_nonrecursive(traces_utils, job_dir):
             n_trials += 1
-            rows = _collect_trial_rows(
-                traces_utils,
-                trial_dir,
-                episodes=episodes,
-                success_filter=success_filter,
-                include_instruction=include_instruction,
-                include_verifier_output=include_verifier_output,
-                verbose=verbose,
-            )
-            if rows:
-                chunk.extend(rows)
-            if len(chunk) >= chunk_size:
-                _flush()
-        _flush()  # final partial chunk
+            batch.append(str(trial_dir))
+            # Batch by TRIAL count — the driver of per-shard memory. (rows/trial
+            # varies, but a fixed trial-batch keeps each subprocess bounded.)
+            if len(batch) >= chunk_size:
+                _dispatch(batch)
+                batch = []
+        _dispatch(batch)  # final partial batch
 
         print(f"[trace-export] Enumerated {n_trials} trial dirs; collected {total_rows} rows into {shard_idx} shard(s).")
 
@@ -659,7 +747,7 @@ def stream_export_and_upload(
             empty_ds.to_parquet(str(empty_path))
             del empty_ds
             _release_arrow_memory()
-            _upload_shard(empty_path)
+            _upload_shard(api, repo_id, empty_path)
             print("[trace-export] No rows collected; uploaded an empty parquet shard.")
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
@@ -735,7 +823,7 @@ def _parse_args() -> argparse.Namespace:
         "--chunk_size",
         type=int,
         default=200,
-        help="Trials' rows per parquet shard (bounds peak memory). Default: 200",
+        help="Trials per parquet shard / per subprocess (bounds peak memory). Default: 200",
     )
     p.add_argument(
         "--verbose",
