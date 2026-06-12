@@ -5,10 +5,26 @@ Export traces from a Harbor job directory into a Hugging Face dataset and upload
 This is a SINGLE streaming path. It enumerates trial directories
 NON-RECURSIVELY-stat'd (via Harbor's pruning ``iter_trial_dirs`` os.walk —
 never ``root.rglob("*")``), processes trials in chunks, writes each chunk as a
-parquet shard to a temp dir, and uploads the shards to the HF dataset repo via
-``HfApi.upload_folder``. Peak RAM is bounded to roughly one chunk, NOT the whole
-dataset — this avoids the ~150 GB git-LFS commit balloon that OOM-killed prior
+parquet shard, uploads that shard to the HF dataset repo IMMEDIATELY via an
+additive ``HfApi.upload_file`` commit, then DROPS the shard from disk and frees
+the in-process Arrow/datasets buffers. Peak RAM is bounded to roughly one chunk,
+NOT the whole dataset — this avoids the ~150 GB balloon that OOM-killed prior
 trace uploads.
+
+Why per-shard incremental upload (not one ``upload_folder`` at the end)?
+- The previous implementation accumulated EVERY parquet shard in a local temp
+  dir and only uploaded them in ONE ``upload_folder`` commit at the very end.
+  That had two failure modes: (1) an OOM/crash before the final upload left
+  ZERO shards on the hub (the whole run was lost — exactly what happened on
+  explore-tis-untrunc), and (2) the per-chunk ``Dataset.from_list`` + ``.map``
+  + ``.to_parquet`` cycle leaks memory-mapped Arrow tables and HF ``datasets``
+  cache files that are never released, so RSS still climbed monotonically
+  across hundreds of chunks even though the live row buffer was bounded.
+- The fix pushes each shard as its own additive commit and immediately frees
+  the chunk (``del`` the Dataset, ``gc.collect()``, release the pyarrow memory
+  pool, and discard the per-chunk HF datasets cache dir). A mid-run failure now
+  leaves all already-pushed shards intact + resumable, and peak RSS tracks
+  ``chunk_size`` × row-size flat across shards.
 
 The UPLOAD mechanism is ALWAYS this streaming path — it does NOT depend on
 whether the dataset is registered in Supabase. Registration is a separate,
@@ -47,6 +63,7 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import shutil
 import sys
@@ -474,20 +491,66 @@ def _collect_trial_rows(
         return []
 
 
-def _flush_chunk_to_parquet(rows: List[Dict[str, Any]], to_sharegpt: bool, traces_utils, shard_path: Path) -> int:
+def _release_arrow_memory() -> None:
+    """Force-free Arrow + Python buffers so per-chunk RSS does not accumulate.
+
+    HF ``datasets`` (``Dataset.from_list`` + ``.map`` + ``.to_parquet``) leaves
+    memory-mapped Arrow tables and writer buffers alive that the pyarrow memory
+    pool does NOT return to the OS on its own. Across hundreds of chunks this
+    is the dominant monotonic-RSS leak even when the live row buffer is bounded.
+    We explicitly run a GC pass and release the default pyarrow memory pool's
+    unused blocks after every chunk.
+    """
+    gc.collect()
+    try:
+        import pyarrow as pa  # type: ignore
+
+        pool = pa.default_memory_pool()
+        # release_unused() hands freed-but-cached arena blocks back to the OS;
+        # available on pyarrow's system/jemalloc/mimalloc pools.
+        release = getattr(pool, "release_unused", None)
+        if callable(release):
+            release()
+    except Exception:
+        pass
+
+
+def _flush_chunk_to_parquet(
+    rows: List[Dict[str, Any]],
+    to_sharegpt: bool,
+    traces_utils,
+    shard_path: Path,
+    cache_dir: Path,
+) -> int:
     """Convert a chunk of rows to a (finalized) Dataset and write one parquet shard.
 
-    Returns the number of rows written. The intermediate Dataset is dropped as
-    soon as the parquet file is on disk, so peak RAM is bounded to one chunk.
+    Returns the number of rows written. The intermediate Dataset is dropped and
+    the per-chunk HF datasets cache dir is wiped as soon as the parquet file is
+    on disk, so peak RAM (and disk-cache) is bounded to one chunk. ``cache_dir``
+    isolates this chunk's ``.map`` cache files so they can be deleted eagerly
+    instead of piling up under the shared ``~/.cache/huggingface`` tree.
     """
     if not rows:
         return 0
-    ds = traces_utils.rows_to_dataset(rows)
-    if to_sharegpt:
-        ds = traces_utils.convert_openai_to_sharegpt(ds, "conversations", "conversations_sharegpt")
-    ds = _finalize_chunk(ds)
-    n = len(ds)
-    ds.to_parquet(str(shard_path))
+    import datasets as _hf_datasets  # type: ignore
+
+    # Pin every intermediate Dataset's on-disk artifacts to this chunk's
+    # throwaway cache dir so they are removed with it (the global HF datasets
+    # cache otherwise grows one Arrow file per chunk and never shrinks).
+    prev_cache = _hf_datasets.config.HF_DATASETS_CACHE
+    try:
+        _hf_datasets.config.HF_DATASETS_CACHE = cache_dir
+        ds = traces_utils.rows_to_dataset(rows)
+        if to_sharegpt:
+            ds = traces_utils.convert_openai_to_sharegpt(ds, "conversations", "conversations_sharegpt")
+        ds = _finalize_chunk(ds)
+        n = len(ds)
+        ds.to_parquet(str(shard_path))
+        del ds
+    finally:
+        _hf_datasets.config.HF_DATASETS_CACHE = prev_cache
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        _release_arrow_memory()
     return n
 
 
@@ -519,29 +582,53 @@ def stream_export_and_upload(
     api.create_repo(repo_id, repo_type="dataset", private=private, exist_ok=True)
     print(f"[trace-export] Repo {repo_id} ensured (private={private}).")
 
+    # Working root: each shard is written here, uploaded, then deleted. We never
+    # keep more than one shard's worth of parquet on disk at a time.
     tmp_root = Path(tempfile.mkdtemp(prefix="trace_shards_"))
-    shards_dir = tmp_root / "data"
-    shards_dir.mkdir(parents=True, exist_ok=True)
 
     total_rows = 0
     shard_idx = 0
     chunk: List[Dict[str, Any]] = []
 
+    def _upload_shard(shard_path: Path) -> None:
+        """Push ONE shard as its own additive commit, then remove it locally.
+
+        Each shard lands independently — a mid-run failure leaves the
+        already-pushed shards intact and resumable rather than losing the whole
+        run (the old end-only ``upload_folder`` lost everything on any crash).
+        """
+        path_in_repo = f"data/{shard_path.name}"
+        api.upload_file(
+            path_or_fileobj=str(shard_path),
+            path_in_repo=path_in_repo,
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message=f"Add {path_in_repo}",
+        )
+        print(f"[trace-export] Uploaded {path_in_repo} to {repo_id}.")
+        shard_path.unlink(missing_ok=True)
+
     def _flush() -> None:
         nonlocal chunk, shard_idx, total_rows
         if not chunk:
             return
-        shard_path = shards_dir / f"train-{shard_idx:05d}.parquet"
-        written = _flush_chunk_to_parquet(chunk, to_sharegpt, traces_utils, shard_path)
+        shard_path = tmp_root / f"train-{shard_idx:05d}.parquet"
+        cache_dir = tmp_root / f"_cache-{shard_idx:05d}"
+        written = _flush_chunk_to_parquet(
+            chunk, to_sharegpt, traces_utils, shard_path, cache_dir
+        )
+        # Free the row buffer BEFORE the (network-bound) upload so peak RSS is
+        # bounded to one chunk even while the upload is in flight.
+        chunk = []
+        _release_arrow_memory()
         if written:
-            print(f"[trace-export] Wrote shard {shard_path.name} ({written} rows; running total {total_rows + written}).")
+            print(f"[trace-export] Wrote shard {shard_path.name} ({written} rows; running total {total_rows + written}). Uploading...")
+            _upload_shard(shard_path)
             total_rows += written
             shard_idx += 1
         else:
             # Nothing materialized (e.g. all rows finalized away); drop empty file.
-            if shard_path.exists():
-                shard_path.unlink()
-        chunk = []
+            shard_path.unlink(missing_ok=True)
 
     try:
         n_trials = 0
@@ -565,20 +652,15 @@ def stream_export_and_upload(
         print(f"[trace-export] Enumerated {n_trials} trial dirs; collected {total_rows} rows into {shard_idx} shard(s).")
 
         if shard_idx == 0:
-            # Still write an empty dataset so downstream consumers see a valid
-            # (zero-row) repo rather than nothing — mirrors prior behavior.
+            # Still write+push an empty dataset so downstream consumers see a
+            # valid (zero-row) repo rather than nothing — mirrors prior behavior.
+            empty_path = tmp_root / "train-00000.parquet"
             empty_ds = traces_utils.rows_to_dataset([])
-            empty_path = shards_dir / "train-00000.parquet"
             empty_ds.to_parquet(str(empty_path))
-            print("[trace-export] No rows collected; wrote an empty parquet shard.")
-
-        print(f"[trace-export] Uploading parquet shard(s) from {shards_dir} to {repo_id} via HfApi...")
-        api.upload_folder(
-            folder_path=str(shards_dir),
-            path_in_repo="data",
-            repo_id=repo_id,
-            repo_type="dataset",
-        )
+            del empty_ds
+            _release_arrow_memory()
+            _upload_shard(empty_path)
+            print("[trace-export] No rows collected; uploaded an empty parquet shard.")
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
 
