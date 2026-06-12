@@ -18,7 +18,7 @@
 #
 #   python -m hpc.launch \
 #     --job_type rl \
-#     --rl_config ./hpc/skyrl_yaml/jupiter/extra/qwen3_coder_30b_a3b.yaml \
+#     --rl_config ./hpc/skyrl_yaml/jupiter/24GPU_qwen3_coder_30b_a3b.yaml \
 #     --model_path Qwen/Qwen3-Coder-30B-A3B-Instruct \
 #     --num_nodes 6 \
 #     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
@@ -173,7 +173,9 @@ trainer:
     kl_loss_coef: 0.0
     eps_clip_low: 0.2
     eps_clip_high: 0.05
-    loss_reduction: token_mean
+    # seqnorm baseline (2026-06-12): inherited from 56GPU_seqnorm_tis.yaml — global
+    # length-unbiased + grad-accum-correct + dead-group-dilution-free. (TIS already on below.)
+    loss_reduction: seq_mean_token_sum_norm_global
     # Truncated Importance Sampling ON. Bounds the off-policy ratio between the
     # vLLM rollout distribution and the FSDP train-recompute (clamp(exp(old_lp -
     # rollout_lp), max=cap)). cap=2.0 = the standard truncation. REQUIRES

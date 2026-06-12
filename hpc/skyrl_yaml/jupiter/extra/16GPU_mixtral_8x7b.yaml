@@ -19,7 +19,7 @@
 #
 #   python -m hpc.launch \
 #     --job_type rl \
-#     --rl_config ./hpc/skyrl_yaml/jupiter/extra/mixtral_8x7b.yaml \
+#     --rl_config ./hpc/skyrl_yaml/jupiter/extra/16GPU_mixtral_8x7b.yaml \
 #     --model_path mistralai/Mixtral-8x7B-Instruct-v0.1 \
 #     --num_nodes 4 \
 #     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \

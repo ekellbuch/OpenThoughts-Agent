@@ -15,7 +15,7 @@
 #
 #   python -m hpc.launch \
 #     --job_type rl \
-#     --rl_config ./hpc/skyrl_yaml/jupiter/extra/qwen3_next_80b_a3b.yaml \
+#     --rl_config ./hpc/skyrl_yaml/jupiter/extra/128GPU_qwen3_next_80b_a3b.yaml \
 #     --model_path Qwen/Qwen3-Next-80B-A3B-Instruct \
 #     --num_nodes 16 \
 #     --train_data '["DCAgent/<dataset>"]' \
