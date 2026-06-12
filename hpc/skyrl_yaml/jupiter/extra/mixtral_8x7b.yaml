@@ -395,18 +395,29 @@ container:
     APPTAINERENV_VLLM_ATTENTION_BACKEND: FLASH_ATTN
     APPTAINERENV_TRITON_LIBCUDA_PATH: /.singularity.d/libs
     # --- Cross-node NCCL fix for the 0.20.2rc0 SIF (job 852308 died at
-    # fsdp_strategy.py:435 torch::cuda::nccl::scatter with "NCCL Error 2:
-    # unhandled system error" on the 2-node IB policy state-dict load).
-    # NCCL log showed NET/IB : Using mlx5_0..3:1/IB/SHARP → SHARP/CollNet
-    # active inside Apptainer, the classic NCCL-Error-2 source when the SHARP
-    # daemon/libs are not wired through the container. Disable SHARP (CollNet)
-    # and NVLS; keep DEBUG=INFO so a recurrence surfaces the exact transport
-    # line. Config-local (this SIF only) — does NOT touch shared infra. ---
+    # fsdp_strategy.py:435 torch::cuda::nccl::scatter with "NCCL Error 2/3"
+    # on the 2-node IB policy state-dict load). Root-caused via 2-node smokes:
+    #   * SHARP/NVLS disable (option A, job 852358): scatter still FAILED
+    #     (Error 3) with collnet/nvls confirmed OFF → NOT SHARP/NVLS.
+    #   * NCCL_NET_PLUGIN=none (Test 1, job 852368): dropped the HPC-X
+    #     libnccl-net.so, forced NCCL built-in IB transport — scatter STILL
+    #     FAILED Error 3 → NOT the HPC-X plugin either. It's the NCCL-2.28.9
+    #     core point-to-point/IB path in this SIF (baked SIF runs NCCL 2.27.7
+    #     fine on the identical fabric).
+    #   * NCCL_P2P_DISABLE=1 (Test 2, job 852369): cross-node all_reduce AND
+    #     scatter both PASSED on all 8 ranks → THE FIX. Routes the scatter
+    #     P2P via SHM+net instead of the broken direct-P2P path.
+    # Keep the SHARP/NVLS disables (harmless) + DEBUG=INFO (surfaces recurrence).
+    # Perf caveat: P2P_DISABLE forgoes direct GPU-to-GPU P2P for collectives;
+    # acceptable for a 2-policy-node FSDP run (state-dict load + grad sync),
+    # and it is correctness-safe. Config-local (this SIF only). ---
     NCCL_COLLNET_ENABLE: 0
     NCCL_NVLS_ENABLE: 0
+    NCCL_P2P_DISABLE: 1
     NCCL_DEBUG: INFO
     APPTAINERENV_NCCL_COLLNET_ENABLE: 0
     APPTAINERENV_NCCL_NVLS_ENABLE: 0
+    APPTAINERENV_NCCL_P2P_DISABLE: 1
     APPTAINERENV_NCCL_DEBUG: INFO
     # --- HF offline on compute nodes (model pre-staged to HF cache) ---
     HF_HUB_OFFLINE: 1
