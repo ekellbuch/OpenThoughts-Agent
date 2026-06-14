@@ -200,6 +200,24 @@ def _drop_deprecated_fields(exp_args: dict, base_config: dict) -> None:
         print("Dropping deprecated argument 'push_to_db' from train config")
 
 
+# Launcher-only control keys that LlamaFactoryArgs exposes for our launch-time
+# preflight logic (e.g. _configure_output_and_logging's resume/overwrite guards)
+# but that must NEVER be written into the LLaMA-Factory train_config.yaml.
+# transformers v5 removed `overwrite_output_dir` from Seq2SeqTrainingArguments,
+# so leaving it in the YAML makes LLaMA-Factory's HfArgumentParser raise
+# "Some keys are not used by the HfArgumentParser: ['overwrite_output_dir']".
+_LAUNCHER_ONLY_TRAIN_CONFIG_KEYS = ("overwrite_output_dir",)
+
+
+def _strip_launcher_only_keys(base_config: dict) -> None:
+    """Remove launcher-only control keys from the config before it is dumped to
+    the LLaMA-Factory train_config.yaml. These keys are consumed earlier in
+    construct_config_yaml() and are not recognized by LLaMA-Factory's parser."""
+    for key in _LAUNCHER_ONLY_TRAIN_CONFIG_KEYS:
+        if base_config.pop(key, None) is not None:
+            print(f"Stripping launcher-only key '{key}' from train config (not a LLaMA-Factory arg)")
+
+
 def _merge_launch_overrides(base_config: dict, exp_args: dict) -> dict:
     explicit_cli_keys = set(exp_args.get("_explicit_cli_keys", []))
     exp_args.pop("_explicit_cli_keys", None)
@@ -491,6 +509,7 @@ def construct_config_yaml(exp_args):
     base_config = maybe_compute_gradient_accumulation(base_config, exp_args)
     _maybe_assign_tokenized_path(base_config, exp_args, dataset_entries)
     apply_data_argument_overrides(base_config, exp_args)
+    _strip_launcher_only_keys(base_config)
 
     train_config_path_out = _write_train_config(configs_dir, exp_args["job_name"], base_config)
 
