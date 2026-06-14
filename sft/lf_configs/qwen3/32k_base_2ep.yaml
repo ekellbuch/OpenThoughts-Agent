@@ -5,7 +5,7 @@ global_batch_size: 16
 ### model
 model_name_or_path: Qwen/Qwen3-8B
 trust_remote_code: true
-attn: fa2
+attn: sdpa  # otagent env lacks flash_attn → fa2 silently falls back to EAGER → 32k OOM; sdpa is torch-native mem-efficient (no flash_attn pkg needed)
 enable_liger_kernel: true
 optim: adamw_torch_fused
 
