@@ -23,7 +23,7 @@ When making changes to Harbor or SkyRL, edit the local repos and sync via git (c
 All three codebases (Harbor, SkyRL, OT-Agent) are installed as **editable installs** (`pip install -e .`) on all clusters. After `git pull`, the updated source is immediately active — no reinstall needed.
 
 - **Harbor**: `/Users/benjaminfeuer/Documents/harbor` — agent framework, environment backends, terminus agent
-- **SkyRL**: `/Users/benjaminfeuer/Documents/SkyRL` — RL training framework, trainer, terminal_bench generator
+- **SkyRL**: `/Users/benjaminfeuer/Documents/MarinSkyRL` (repo `marin-community/MarinSkyRL`, branch `penfever/working` — source of truth) — RL training framework, trainer, terminal_bench generator
 
 **Jupiter conda environments**: Use `otagent` for all OT-Agent work (job launching, scripts, uploads). Use `curator` only for curator data-generation jobs.
 
