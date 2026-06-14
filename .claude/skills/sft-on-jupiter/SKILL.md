@@ -129,6 +129,20 @@ scratch instead of resuming); `--max_restarts N` (chain restarts).
 > `Optional[bool]` field passed on the CLI, e.g. `--do_train true`, `--packing true` — all fixed by the same
 > change.) Make sure the cluster has pulled the fix (`git pull`) before relying on the flag.
 
+> **`overwrite_output_dir` written into the LF train config — transformers v5 (FIXED 2026-06-13, `hpc/launch.py`
+> `7b259c84`).** Even after the bool-coercion fix above, job 860017 hit the **identical** error
+> `ValueError: Some keys are not used by the HfArgumentParser: ['overwrite_output_dir']` (~3 min in, during arg
+> parse). Different root cause: the launcher MERGES `overwrite_output_dir` into `base_config` (it's a
+> `LlamaFactoryArgs` field, used by `_configure_output_and_logging` for the resume/overwrite preflight guards),
+> then DUMPS the whole `base_config` into `train_config.yaml`. On the **torch-2.11 / transformers 5.8 stack**,
+> `overwrite_output_dir` was **removed from `Seq2SeqTrainingArguments`** (also why you see "warmup_ratio …
+> removed in v5.2" warnings), so LLaMA-Factory's `HfArgumentParser(allow_extra_keys=False)` no longer recognizes
+> it and rejects the YAML. Fix: `_strip_launcher_only_keys()` pops `overwrite_output_dir` (a launcher-only
+> control flag) from `base_config` right before `_write_train_config`, AFTER all in-launcher consumers have run.
+> The `--overwrite_output_dir true` CLI flag still works — its preflight semantics are unchanged; it just no
+> longer leaks into the LF config. Verify post-launch: `grep -c overwrite_output_dir
+> experiments/<exp>/configs/*_train_config.yaml` must print `0`.
+
 Arbitrary LLaMA-Factory/trainer keys can be
 overridden on the CLI (the launcher passes them through) — e.g. learning rate / epochs / cutoff_len if you need
 to deviate from a config. `--dataset_dir` to point at a non-default datasets root.
