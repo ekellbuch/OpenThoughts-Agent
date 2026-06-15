@@ -508,7 +508,7 @@ def construct_config_yaml(exp_args):
     base_config = _configure_output_and_logging(base_config, exp_args, checkpoints_dir)
     base_config = maybe_compute_gradient_accumulation(base_config, exp_args)
     _maybe_assign_tokenized_path(base_config, exp_args, dataset_entries)
-    apply_data_argument_overrides(base_config, exp_args)
+    apply_data_argument_overrides(base_config, exp_args, registry_mode=artifacts.registry_mode)
     _strip_launcher_only_keys(base_config)
 
     train_config_path_out = _write_train_config(configs_dir, exp_args["job_name"], base_config)
