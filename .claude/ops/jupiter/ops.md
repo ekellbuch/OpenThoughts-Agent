@@ -1,0 +1,78 @@
+# JSC Jupiter Access
+
+**SSH**: `ssh Jupiter` (alias in `~/.ssh/config`). User `feuer1`, group `jureap59`. If the alias isn't
+configured, IPv4 is required: `ssh -i ~/.ssh/id_ed25519_jsc feuer1@login01.jupiter.fz-juelich.de -4`.
+
+**Cluster**: GH200 96GB GPUs (aarch64), 4/node, 48 nodes, SLURM. **No internet on compute nodes** (proxy
+via SSH tunnel on compute; **login nodes have direct internet / HF Hub access**) — pre-download
+datasets/models on the login node before submitting jobs.
+
+**Non-interactive SSH**: `$DCFT_ACTIVATE_ENV` does NOT work over non-interactive SSH — use full paths, e.g.
+```bash
+ssh Jupiter '/e/scratch/jureap59/feuer1/miniforge3/envs/otagent/bin/python ...'
+```
+
+**Tmux**: sessions persist across disconnects — `tmux ls`; `tmux attach -t 2` (main work session).
+
+**Pre-launch preamble** (run before launching any job — pulls latest code; `GIT_TERMINAL_PROMPT=0`
+prevents interactive-auth hangs):
+```bash
+source ~/.bashrc; source ~/secrets.env; \
+cd /e/scratch/jureap59/feuer1/harbor && git stash && git pull; \
+cd /e/scratch/jureap59/feuer1/OpenThoughts-Agent/SkyRL && git stash && git pull; \
+conda activate otagent; \
+cd /e/scratch/jureap59/feuer1/OpenThoughts-Agent && GIT_TERMINAL_PROMPT=0 git pull && \
+git submodule update --init --remote sft/llamafactory; \
+source hpc/dotenv/jupiter.env
+```
+
+**Key paths**:
+- Code (`$DCFT`): `/e/scratch/jureap59/feuer1/OpenThoughts-Agent` — experiments in `experiments/`, eval logs
+  in `eval/jupiter/logs/`, dotenv `hpc/dotenv/jupiter.env`.
+- Harbor: `/e/scratch/jureap59/feuer1/harbor`
+- Conda env: `/e/scratch/jureap59/feuer1/miniforge3/envs/otagent/`
+- **Personal data root (`$DCFT_DATA`) — USE THIS**: `/e/data1/datasets/playground/ot-baf`
+  → HF cache (`$HF_HUB_CACHE`/`$HF_HOME`) `…/ot-baf/hf_hub`, checkpoints (`$CHECKPOINTS_DIR`)
+  `…/ot-baf/checkpoints/`, wheels `…/ot-baf/wheels/`.
+- Eval job files: `/e/data1/datasets/playground/ot/eval_jobs/`
+- **Legacy shared data — avoid for new WRITES**: `/e/data1/datasets/playground/ot` (owned by `nezhurina1`;
+  its xet/datasets cache subdirs were created by other users with `0755`, causing `Permission denied` on HF
+  Xet uploads + dataset lock files). Read-only references to existing `/ot` artifacts are fine.
+
+**Job management** (SLURM): `sqme` (your queued/running jobs), `squeue -u feuer1` (detailed), `scancel <job_id>`.
+
+**Rsync files to local** (from Mac):
+```bash
+rsync -avz --progress -e "ssh -i ~/.ssh/id_ed25519_jsc -4" \
+  feuer1@login01.jupiter.fz-juelich.de:/remote/path /local/path
+```
+
+> Which **runtime / conda env / SIF** to use for which workstream (RL venv vs the MoE/0.20.2rc0 SIFs vs
+> `otagent`/`sft-qwen35`) lives in **`ENVIRONMENT_MAP.md`** in this directory — not duplicated here.
+
+---
+
+# Filesystem & GPFS hygiene
+
+- **Never run `find` or `du` on Jupiter GPFS** (`/e/scratch`, `/e/data1`) — `stat`-walks are very slow and stall the SSH session for minutes. To locate logs/dirs use canonical paths + depth-1 `ls -td <dir>/*JOBID*`, `ls | wc -l`, or `squeue -j JOBID -o '%Z'` (the `%Z` workdir). Same caution on Perlmutter/Leonardo parallel FS.
+- **Cleanup subagents must bake these rules into their prompt** (subagents don't inherit memory): never `du`/`find` to size or locate; **detach** the long `rm -rf` (`nohup … &` or a tmux session logging `RM_DONE <dir> exit=$?`) and let the agent EXIT — do NOT poll a multi-hundred-thousand-file GPFS delete to completion (it's idempotent/resumable). History: a `du -sh` on a `trace_jobs/` tree hung 75min; two synchronous `rm -rf` blocked cleanup agents 2.5h — and all the important checklist steps had already completed.
+
+## Inode quota (the bind that bites) — EDQUOT can masquerade as sig53
+`/e/scratch/jureap59` has a **project-shared inode quota** (~8.0M soft / 8.8M hard, shared across all jureap59 members, 2–4h lag). Datagen jobs create thousands of trial subdirs → we hit inodes long before the data limit.
+- Inspect: `jutil project dataquota -p jureap59 | grep exa_scratch` (project), `df -i /e/scratch` (live), `du -s --inodes <subdir>` (mine — but avoid on huge trees).
+- **EDQUOT presents as a sig53 sbatch failure** (9–13s, exit `0:53`, empty `logs/` dir): the kernel can't create the `.out` → SIGRTMIN+19. Diagnostic separation — if the **launcher python** errors at `paths.sbatch.mkdir()` with `OSError: [Errno 122] Disk quota exceeded` → EDQUOT; if the launcher succeeds but Slurm reports sig53 with NO `.out` at all → lean true trap (see below).
+- **Over-soft writes only work during the GPFS grace period** (~7 days). Once grace expires, every new-inode op fails as if over-hard even while "under hard" — verify with `touch <existing-dir>/probe_$$`. Don't revert `OT_AGENT_RAY_LOG_DIR`/scratch-dodge patches on "under hard" alone.
+- **Freeing inodes (order):** `rm -rf ~/.cache/uv` (biggest disposable target — uv extract cache, rebuilds itself; freed 131k and cleared EDQUOT once), then `~/.cache/{pip,wandb,torch,curator,flashinfer}`, then old experiment dirs. Always re-survey your own usage before accepting an "it's other members'/out-of-hands" diagnosis.
+- Last-resort dodge: `--experiments_dir /e/data1/datasets/playground/ot-baf/experiments` + `OT_AGENT_RAY_LOG_DIR=/e/data1/...` to avoid `/e/scratch` entirely (needs the `ray_utils.py:520` patch, commit `122cae2d`).
+
+## sbatch signal-53 trap (true cluster-side variant)
+Distinct from EDQUOT: `sbatch` returns a JID, RUNS 9–18s, then FAILS `0:53` `Reason=RaisedSignal:53(Real-time_signal_19)`, **no log file at all** (script's first line never runs). `srun` from the same shell works fine; already-running sbatches keep running — affects NEW submissions only. Per-user/per-account, not per-node. Ruled out: reservation, account, node count, cpus-per-task, mail dirs, `--export=NONE`, WorkDir, `--exclude`, even raw `--wrap='echo hello'`. **Probe:** `sbatch --reservation=reformo --account=reformo --partition=booster --time=00:02:00 --nodes=1 --gres=gpu:4 --wrap='echo hello'` — if it FAILs 0:53 the trap is active → fall back to `srun` for one-offs, or use `python -m hpc.launch` (its submission path has been observed healthy). Untried next steps: fresh login shell, different login node, CPU-only sbatch, JSC support (slurmstepd/spank-side). First seen 2026-04-29.
+
+## Ray bootstrap transients (NOT code/config bugs)
+A fresh RL launch can die during Ray bring-up; these are transient infra, recovered by the `afterany` restart chain (don't manually resubmit — risks the ≤6 RUNNING-RL cap):
+- **Cold-start DNS race:** head exits `code 255` (before writing its `ray_head_<node>.log`) OR driver reports `Ray cluster did not reach desired resources within 600 seconds`. Cause: Ray's `get_node_ip_address()` probes external DNS (8.8.8.8) for the local IP; compute nodes have no internet → ~49s timeout → late GCS → workers never all register in the 600s window. Amplified by two multi-node clusters bootstrapping in the same minute → **stagger launches**. Durable (unvalidated) fix: explicit `--node-ip-address` on head+worker `ray start` / skip the DNS probe / raise `wait_for_cluster`.
+- **SLURM node-prolog wedge:** job sits `RUNNING Reason=Prolog` for HOURS, `.batch` never launches → **NO `.out` at all** (empty `_N/logs/`), GPUs idle. Signature = RUNNING but `*.out` absent/empty after ~2–3min → **scancel + resubmit FAST** (new allocation draws different nodes); don't let it hold the allocation.
+- **login01 fork-saturation → FALSE empty squeue:** the `Jupiter` alias is `login01`, which periodically fork-saturates (`fork: Resource temporarily unavailable`, ssh exit 254/127) → `ssh Jupiter "squeue"` returns EMPTY = a false "drained". **Re-check via login02/03/04** (`ssh -i ~/.ssh/id_ed25519_jsc -o AddressFamily=inet feuer1@login02.jupiter.fz-juelich.de "<cmd>"`). Keep ssh commands SIMPLE (single inline string) — nested loops / `$VAR="ssh…"` indirection exit 127 under this shell.
+
+## Compiled DP>1 illegal-memory-access = MNNVL fused allreduce
+MiniMax-M2.7-AWQ / GLM-4.7-AWQ compiled (cudagraphs ON) at **DP>1** crash with `CUDA driver error: an illegal memory access` in `profile_cudagraph_memory` during startup capture (DP=1 is fine). Cause: vLLM's `fuse_allreduce_rms` pass swaps in flashinfer's `trtllm_mnnvl_allreduce_fusion` (Multi-Node NVLink) kernel, but Jupiter's cross-node transport is **InfiniBand** → writes to a non-existent NVLink peer. **Fix (one flag):** `--compilation-config '{"pass_config":{"fuse_allreduce_rms":false}}'`. The MoE all-to-all is a red herring. Diagnostic that cracked it: `CUDA_LAUNCH_BLOCKING=1` (propagate to the cross-node Ray DP actor via `VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=CUDA_LAUNCH_BLOCKING`) → synchronous traceback names the kernel.
