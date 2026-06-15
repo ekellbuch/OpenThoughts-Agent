@@ -11,6 +11,7 @@ from huggingface_hub.errors import HFValidationError
 
 from hpc.arguments import JobType, LlamaFactoryArgs, parse_args
 from hpc.cli_utils import normalize_job_type
+from hpc.data_argument_keys import DATA_ARGUMENT_KEYS
 from hpc.launch_utils import (
     _merge_dependencies,
     apply_env_overrides,
@@ -223,11 +224,29 @@ def _merge_launch_overrides(base_config: dict, exp_args: dict) -> dict:
     exp_args.pop("_explicit_cli_keys", None)
     preprocessor_owned = set()
 
+    # Registry mode (--dataset_dir with a dataset_info.json): each dataset's
+    # column/tag schema is resolved per-dataset FROM the registry. The global
+    # LlamaFactoryArgs schema defaults (messages="conversations", role_tag="from",
+    # formatting="sharegpt", ...) are non-None, so without this guard they get
+    # copied into the config below and OVERRIDE the per-dataset resolution — which
+    # breaks heterogeneous mixes (e.g. wildchat_386k's column is `conversation`,
+    # not `conversations` -> KeyError in dataset preprocessing). Skip these schema
+    # keys unless the user EXPLICITLY set them on the CLI. (Same registry detection
+    # as _materialize_dataset_and_model.)
+    _ds_dir = base_config.get("dataset_dir")
+    _registry_mode = bool(
+        _ds_dir and _ds_dir != "ONLINE" and os.path.isdir(_ds_dir)
+        and os.path.isfile(os.path.join(_ds_dir, "dataset_info.json"))
+    )
+    _registry_protected_keys = set(DATA_ARGUMENT_KEYS) | {"formatting"}
+
     llama_fields = {field.name for field in dataclasses.fields(LlamaFactoryArgs)}
     for key, value in exp_args.items():
         if key.startswith("_"):
             continue
         if key == "deepspeed" and key not in explicit_cli_keys:
+            continue
+        if _registry_mode and key in _registry_protected_keys and key not in explicit_cli_keys:
             continue
         # Don't overwrite base config values with None defaults from LlamaFactoryArgs.
         # Only override if the value was explicitly set on CLI or is non-None.
