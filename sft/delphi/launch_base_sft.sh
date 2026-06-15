@@ -13,7 +13,7 @@
 #
 # Usage:  bash launch_base_sft.sh <PREP_JOBID>
 #   (PREP_JOBID = the sft/delphi/prep_base_tok.sbatch job; all SFT cells gate afterany on it.)
-set -euo pipefail
+set -eo pipefail
 
 PREP_JID="${1:?usage: launch_base_sft.sh <PREP_JOBID>}"
 DCFT=/leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent

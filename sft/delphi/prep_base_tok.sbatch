@@ -17,7 +17,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:30:00
 #SBATCH --output=/leonardo_work/AIFAC_5C0_290/bfeuer00/experiments/delphi-prepared-tok-base/tokprep_%j.log
-set -euo pipefail
+set -eo pipefail
 source /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/etc/profile.d/conda.sh
 conda activate otagent
 source /leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent/hpc/dotenv/leonardo.env
