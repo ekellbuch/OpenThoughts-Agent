@@ -146,3 +146,29 @@ Both the 8B (step 2) and 32B (step 3) cleanup checklists invoke `hf upload`
 straight from the login node (login has direct internet, no kill policy).
 On Leonardo the same one-liner WILL die at ~100 s and leave a partial
 upload — use the sbatch template above instead.
+
+## vLLM 0.20.2rc0 cross-cluster twin — build decision (2026-06-16)
+
+Leonardo's analogue of Jupiter's prod `skyrl_megatron_vllm0202rc0_r3.sif` (vLLM fork
+`penfever/working @ 5d7319dd1`: 0.20.2rc0 + R3 capture + DCP GQA-LSE fp32 fix). Built as a
+**writable singularity sandbox dir** on `$WORK` (NOT a `.sif` — `mksquashfs` OOMs / `lustre.lov`
+xattr errors on the Lustre login node). Full runtime detail + recipe paths: `ENVIRONMENT_MAP.md` §2d.
+
+**The CUDA question (decided):** Leonardo A100 nodes load kernel driver `535.274.02` (native CUDA
+≤12.2); `singularity --nv` binds that host driver and a container can't replace it. The *toolkit*,
+however, can be CUDA-13 via **forward compatibility** — `cuda-compat-13` (bundled in NGC cu13 images
+at `/usr/local/cuda/compat`, with `LD_LIBRARY_PATH=/usr/local/cuda/compat` ahead of the `--nv` bind)
+provides a newer userspace `libcuda` that runs a cu13 toolkit on the older datacenter driver (A100 =
+datacenter, supported). This must be verified empirically (forward-compat has a per-version
+minimum-driver floor; confirm 535 is within cu13's floor by running a cu13 kernel on an A100).
+
+**Decision (user-approved):**
+1. **Prefer** the true **CUDA-13 / torch-2.9** twin (NGC 25.09 + `cuda-compat-13`, arch 8.0) for real
+   cross-cluster parity — gated on the forward-compat test passing on the 535 driver.
+2. **Fallback (sanctioned, "if we have no other option"):** the **torch-2.8 / NGC-25.06 / CUDA-12.9.1**
+   twin (recipe already written under `sif_build/recipes/`) — differs from Jupiter only in the
+   torch/CUDA floor; same fork commit, R3, DCP fix, SkyRL/Megatron/TE, arch 8.0.
+3. A CINECA driver upgrade (→≥580.65 for native CUDA-13) is **NOT** required; the fallback is acceptable.
+
+Build not yet run (the forward-compat test+build agent was repeatedly killed by an API outage on
+2026-06-16; re-run when it clears).
