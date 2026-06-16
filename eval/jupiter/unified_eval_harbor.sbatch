@@ -356,6 +356,27 @@ echo "CUDA_HOME=$CUDA_HOME ; nvcc=$(command -v nvcc || echo MISSING)"
 source "$DCFT/eval/build_vllm_cmd.sh"
 build_vllm_cmd "$PYTHON_BIN" "$MODEL" "$GPU_MEMORY_UTIL"
 
+# ==============================================================================
+# Build model_info for hosted_vllm (harbor #339 hard-requires it: terminus-2's
+# LiteLLM init calls validate_hosted_vllm_model_config, which raises
+# "hosted_vllm models require `model_info` specifying token limits and costs."
+# when model_info is absent — killing every trial before any vLLM POST).
+# We derive it from the served vLLM context (EVAL_VLLM_MAX_MODEL_LEN, default
+# 32768) + the LLM-call output budget (EVAL_MAX_OUTPUT_TOKENS, default 16384):
+#   max_input_tokens  = served context (full window available to the prompt)
+#   max_output_tokens = output budget, clamped < served context
+#   *_cost_per_token  = 0 (self-hosted → pricing irrelevant)
+# Passed below as an --agent-kwarg so EVERY hosted_vllm agentic eval is covered.
+# ==============================================================================
+MI_MAX_MODEL_LEN="${EVAL_VLLM_MAX_MODEL_LEN:-32768}"
+MI_MAX_OUTPUT="${EVAL_MAX_OUTPUT_TOKENS:-16384}"
+# Clamp output budget to stay strictly below the served context.
+if [ "$MI_MAX_OUTPUT" -ge "$MI_MAX_MODEL_LEN" ] 2>/dev/null; then
+    MI_MAX_OUTPUT=$(( MI_MAX_MODEL_LEN / 2 ))
+fi
+MODEL_INFO_JSON="{\"max_input_tokens\":${MI_MAX_MODEL_LEN},\"max_output_tokens\":${MI_MAX_OUTPUT},\"input_cost_per_token\":0,\"output_cost_per_token\":0}"
+echo "[model_info] $MODEL_INFO_JSON"
+
 env TMPDIR="/tmp" \
     TRITON_CACHE_DIR="/tmp/triton_cache_${USER}" \
     TORCH_COMPILE_CACHE_DIR="/tmp/torch_cache_${USER}" \
@@ -551,6 +572,7 @@ else
         --env "daytona" \
         --agent-kwarg "api_base=http://localhost:8000/v1" \
         --agent-kwarg "key=fake_key" \
+        --agent-kwarg "model_info=$MODEL_INFO_JSON" \
         --n-attempts 3 \
         --job-name "$RUN_TAG" \
         --jobs-dir "$EVAL_JOBS_DIR" \
