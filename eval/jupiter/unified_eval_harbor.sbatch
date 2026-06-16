@@ -45,7 +45,9 @@ RUN_TAG_ARG="${4:-}"
 N_CONCURRENT="${EVAL_N_CONCURRENT:-128}"
 GPU_MEMORY_UTIL="${EVAL_GPU_MEMORY_UTIL:-0.95}"
 DAYTONA_ERROR_THRESHOLD="${EVAL_DAYTONA_THRESHOLD:-999999}"
-HARBOR_CONFIG="${EVAL_HARBOR_CONFIG:-$DCFT/eval/jupiter/dcagent_eval_config.yaml}"
+# NOTE: $DCFT is defined further below, so inline its default here too (else an omitted
+# --harbor-config expands to a bad absolute path '/eval/jupiter/...' → FileNotFoundError).
+HARBOR_CONFIG="${EVAL_HARBOR_CONFIG:-${DCFT:-/e/scratch/jureap59/$USER/OpenThoughts-Agent}/eval/jupiter/dcagent_eval_config.yaml}"
 DB_JOB_ID="${EVAL_DB_JOB_ID:-}"
 
 # Strip slashes and special chars for file-safe names
