@@ -13,6 +13,14 @@
 # Each pattern entry has a "match" regex and the same config fields as a model entry.
 
 models:
+  # laion seqnorm-tis-shaped RL 8B (Qwen3-8B, native ctx 40960 → serve 32k).
+  # --enforce-eager bypasses the vLLM-nightly aot_compile path that is incompatible with
+  # torch 2.11.0+cu130 in Jupiter's otagent env (RuntimeError: aot_compile is not supported →
+  # EngineCore init fails on every TP worker). REMOVE once the vLLM/torch env is repaired.
+  "laion/seqnorm-tis-shaped-40-8B":
+    max_model_len: 32768
+    extra_args: "--enforce-eager"
+
   "NovaSky-AI/SA-SWE-32B":
     max_model_len: 32768
     swap_space: 32
