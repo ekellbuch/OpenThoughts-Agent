@@ -616,19 +616,39 @@ container:
   binds:
     - /e/scratch
     - /e/data1
-    # *** BINDS PENDING ON-CLUSTER VERIFICATION (Stage B). ***
-    # The 0.16-era gmr_fix/capturer_fix single-file binds targeted
-    # /usr/local/lib/python3.12/dist-packages/vllm/...  — but on the 0.20.2rc0 SIF
-    # vLLM lives at /opt/vllm_build/vllm/ (ENVIRONMENT_MAP §2d), so those dst paths
-    # are WRONG here and the R3-emission/capture code may have moved/upstreamed in
-    # 0.20.2rc0. With R3 still ON, the capturer defensive-clip is likely still
-    # needed; confirm the in-SIF vLLM layout + whether the fix files apply to
-    # 0.20.2rc0 before re-adding any single-file binds (and rebase the patch onto
-    # the 0.20.2rc0 source if the API changed). Do NOT carry the dist-packages
-    # paths forward blindly.
+    # DCP guard-lift bind (Stage B, verified 2026-06-16). The 0.20.2rc0 SIF's vLLM
+    # at /opt/vllm_build/vllm/config/vllm.py is the UNPATCHED fail-closed upstream
+    # guard (built from fork base 3e3a1c45d; GUARD_LIFT_PRESENT=False), so the env
+    # var alone does NOT clear it. This bind overlays the EXACT committed file from
+    # fork commit 17c7c70a5 (mlfoundations/vllm feuer/dcp-gqa-lse-fix), which is
+    # byte-identical to the in-SIF file EXCEPT the single VLLM_ALLOW_ROUTED_EXPERTS_DCP
+    # hunk (diff verified: 1 hunk only) → surgically safe, no rebuild. Dry config
+    # validation confirmed: bind+env=1 → NO raise; bind+env unset → raise (fail-closed
+    # preserved); no-bind+env=1 → raise (bind required). File extracted on-cluster via
+    # `git show 17c7c70a5:vllm/config/vllm.py` (no working-tree edits).
+    - /e/scratch/jureap59/feuer1/tmp/dcp_guardlift/vllm_config_guardlift.py:/opt/vllm_build/vllm/config/vllm.py:ro
+    # NOTE on the 0.16-era gmr_fix/capturer_fix binds (prod 32k config): those
+    # targeted /usr/local/lib/python3.12/dist-packages/vllm/... and do NOT apply
+    # here — 0.20.2rc0 vLLM lives at /opt/vllm_build/vllm/ and the R3 capture path
+    # was upstreamed into this build. The Stage-C parity smoke confirms R3 capture
+    # works on this SIF WITHOUT those binds; re-add a rebased capturer clip only if
+    # the smoke surfaces a residual-OOB crash (it did not in 0.16 once clipped).
   # overlays: do NOT re-add runtime --overlay flags (GPFS FUSE-mount timeout on the
-  # Ray head — bake any extra bits, e.g. torchtitan 0.2.2, into the SIF instead).
-  pydeps: /e/scratch/jureap59/feuer1/sif_pydeps
+  # Ray head). torchtitan 0.2.2 (REQUIRED for ep_comm_backend=torch ExpertParallel,
+  # SkyRL fsdp_utils.py:667) is NOT in this SIF and is supplied via the PYTHONPATH
+  # pydeps below — NOT via skyrl_titan_overlay.img (that runtime overlay is exactly
+  # the GPFS-FUSE Ray-bootstrap timeout risk). torchtitan 0.2.2 is pure-python (0
+  # .so), so PYTHONPATH injection is the bake-equivalent (no rebuild, no FUSE).
+  #
+  # pydeps is colon-separated (rl_launch_utils.py:202), prepended FIRST. The
+  # isolated sif_pydeps_longctx_titan022 dir holds ONLY torchtitan 0.2.2 (+ its
+  # dist-info), copied out of skyrl_titan_overlay.img; the shared sif_pydeps
+  # supplies tyro 1.0.13 (torchtitan's dep) + daytona/hydra/harbor/etc. The shared
+  # sif_pydeps' own torchtitan was renamed aside (.bak_for_overlay_0p2p2) so there
+  # is NO version clash, and the prod 32k 80B run's shared-pydeps view is untouched.
+  # Verified on-cluster: torchtitan 0.2.2 + ExpertParallel() instantiate on the
+  # bare SIF (no overlay) with this exact two-dir PYTHONPATH.
+  pydeps: /e/scratch/jureap59/feuer1/sif_pydeps_longctx_titan022:/e/scratch/jureap59/feuer1/sif_pydeps
   extra_env:
     SKYRL_GDN_MASK_FLA: 1
     PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
