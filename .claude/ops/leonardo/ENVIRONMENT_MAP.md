@@ -56,6 +56,13 @@ NO Harbor/Daytona/agentic yet (proxyserver deferred).
 
 ---
 
+### 2d. `skyrl_megatron_vllm0202rc0_r3_sandbox` — the Jupiter prod-SIF cross-cluster twin (RECIPE; build pending)
+The x86/A100 analogue of Jupiter's `skyrl_megatron_vllm0202rc0_r3.sif`: SkyRL editable (`penfever/SkyRL @ 2ab513a6`) + Megatron-core 0.14.0 + TE + flash-attn + **vLLM fork `penfever/working @ 5d7319dd1`** (0.20.2rc0 + native R3 routed-experts capture + the DCP GQA-LSE fp32 fix). Built as a **writable singularity sandbox dir** at `$WORK/containers/skyrl_megatron_vllm0202rc0_r3_sandbox/` (NOT a `.sif` — mksquashfs OOM/xattr blocker on Lustre login).
+- **THE CUDA-13 BLOCKER (the #1 gate).** Leonardo A100 nodes run driver **`535.274.02` → max CUDA `12.2`** (verified `srun nvidia-smi`); `module avail` tops at `cuda/12.6`, no `cuda-compat`, no CUDA-13 module. Jupiter's base is **NGC 25.09 / CUDA 13.0**, which needs driver **≥580.65** — **infeasible** on Leonardo until CINECA upgrades the driver (a human/admin action). So the twin is **NOT byte-identical**: it rides the newest CUDA-**12** NGC PyTorch base, **`nvcr.io/nvidia/pytorch:25.06-py3` (CUDA 12.9.1, torch 2.8.0a0)** — one NGC step behind Jupiter's torch 2.9. (NGC 25.07/25.08 already cut over to CUDA 13.) CUDA-12 **minor**-forward-compat is what lets cu128/cu129 run on the 535 driver (verified: otagent torch 2.9.1+cu128 runs A100 kernels at cap (8,0)); it does NOT bridge the 12→13 major gap.
+- **Matched vs differs:** matched = vLLM fork commit `5d7319dd1`, R3 native capture, DCP fp32 fix, model archs (Gemma4/Qwen3Moe/Qwen3Next), SkyRL/Megatron/TE stack. Differs = torch 2.8/cu12.9 (vs 2.9/cu13), `TORCH_CUDA_ARCH_LIST=8.0` (A100, vs 9.0 GH200), GDN/FlashQLA overlay **omitted** (deferred; vanilla GDN still runs).
+- **Recipe (committed):** `.claude/ops/leonardo/sif_build/recipes/{README_vllm0202rc0_r3_leonardo.md, build_vllm0202rc0_r3_leonardo.sbatch}`. Two-phase sbatch (A: SkyRL+Megatron+flash-attn; B: vLLM-from-source against in-base torch 2.8 via `use_existing_torch.py`, arch 8.0, offline wheelhouses). **Build the sandbox on WORK, not SCRATCH_FAST** (SCRATCH_FAST was 3.7 T / 1 T over quota, grace=none, 2026-06-16). Runtime env: `VLLM_ATTENTION_BACKEND=FLASH_ATTN`, `VLLM_USE_FLASHINFER_SAMPLER=0`, `LIBRARY_PATH=/.singularity.d/libs` for tp>1.
+- **Status (2026-06-16):** recipe written; the multi-hour build is NOT yet run (gated on the driver feasibility decision above being accepted: build the closest-achievable torch-2.8 twin, OR escalate a CINECA driver upgrade for true torch-2.9/CUDA-13 parity).
+
 ## 3. VERIFY before you trust
 
 ```bash

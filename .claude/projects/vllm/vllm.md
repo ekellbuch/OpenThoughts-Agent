@@ -30,7 +30,10 @@ capture** and the in-progress **DCP GQA-LSE fix**.
 | Line | torch | Runtime | Notes |
 |---|---|---|---|
 | **vLLM 0.16.0** | 2.9 | RL venv + `*_r3baked.sif` (Jupiter) | the dense-RL + MoE/80B stack; carries the R3 patch |
-| **vLLM 0.20.2rc0** | 2.11 | `skyrl_megatron_vllm0202rc0_r3.sif` + otagent | the new SIF; R3 upstreamed; getting the DCP fix |
+| **vLLM 0.20.2rc0** | 2.11 | `skyrl_megatron_vllm0202rc0_r3.sif` (Jupiter) + otagent | the new SIF; R3 upstreamed; getting the DCP fix |
+| **vLLM 0.20.2rc0 (Leonardo twin)** | 2.8 | `skyrl_megatron_vllm0202rc0_r3_sandbox/` (Leonardo, x86/A100) | cross-cluster twin of the Jupiter SIF — **same fork commit `5d7319dd1` (R3 + DCP fp32 fix), one NGC step back on torch/CUDA**: NGC 25.06 (CUDA 12.9.1, torch 2.8), `TORCH_CUDA_ARCH_LIST=8.0`, built as a **writable sandbox dir** (no .sif). Recipe: `.claude/ops/leonardo/sif_build/recipes/` |
+
+**Cross-cluster twin (Leonardo, x86/A100) — built one NGC step behind on purpose.** Leonardo's A100 driver is `535.274.02` (max **CUDA 12.2**); CUDA 13.0 (Jupiter's NGC 25.09 base) needs driver ≥580.65 and is **infeasible** there until a CINECA driver upgrade. CUDA-12 minor-forward-compat lets cu128/cu129 run on the 535 driver (verified: otagent's torch 2.9.1+cu128 runs A100 kernels), so the twin uses **NGC 25.06 / CUDA 12.9.1 / torch 2.8** — the newest CUDA-12 NGC PyTorch base (25.07/25.08 cut over to CUDA 13). The vLLM fork commit, R3 native capture, DCP fp32 fix, and SkyRL/Megatron/TE stack are matched; only the torch/CUDA floor differs (2.8/cu12.9 vs 2.9/cu13). GDN/FlashQLA overlay omitted on Leonardo (deferred). Full feasibility + recipe: `.claude/ops/leonardo/sif_build/recipes/README_vllm0202rc0_r3_leonardo.md`.
 
 - **The router patch is commit-sensitive on the 0.16 line:** `084aa19f0` is the newest torch-2.9.1-pinned fork commit that still carries the `routed_experts` **RL-emission** path — later commits bump torch (2.10→2.11). The older torch-2.9.1 bump predates the patch (has routed_experts only in upstream MoE infra, NOT the RL emission). Verify a build by grepping `gpu_model_runner`/`scheduler`/`output_processor` for the emission path, not just `vllm.__version__` (which reports `dev`/`0.1.dev…`). See `.claude/ops/jupiter/ENVIRONMENT_MAP.md` §0 (torch is the reliable discriminator).
 
