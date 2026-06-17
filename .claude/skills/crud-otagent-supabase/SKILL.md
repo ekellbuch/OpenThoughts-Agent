@@ -200,6 +200,57 @@ fields and resolve FKs). Full flags are in `OpenThoughts-Agent/CLAUDE.md`.
   scaling-laws SFT grid) — do **not** register those. Honor any
   `enable_db_registration: false` and documented no-DB series.
 
+## Cross-linking eval traces to the leaderboard (`hf_traces_link`)
+
+After an eval's HF trace dataset is uploaded, the leaderboard's **trace icon** keys off the
+**`sandbox_jobs.hf_traces_link`** column (a `text` URL on the **job** row, NOT on `models`) —
+see `.claude/projects/ota-leaderboard/ota-leaderboard.md` (DB-contract §5: missing link →
+grey/red icon, and the `hideNoTraceLink` filter drops the row). Cross-linking = setting that
+**one column** to the trace repo URL. Touch **nothing else** (never scores/`metrics`,
+`model_id`, status).
+
+**Discover the eval → HF-repo mapping** (don't guess the repo from the run-tag — the auto-push
+often fails or truncates). For each eval, the run dir is `$EVAL_JOBS_DIR/eval-<safe_model>_<safe_dataset>`
+(`safe_*` = `/`→`_`); read its two files:
+- **`meta.env`** → `DB_JOB_ID` (the `sandbox_jobs.id` to update), `SLURM_JOB_ID`, `MODEL`, `REPO_ID`.
+- **`upload.log`** → the `[uploader] upload_eval_results(... hf_repo_id='<org>/<run_tag>')` line is the
+  repo the auto-harvest *attempted*. **It is frequently NOT the live repo** — the auto-push targets
+  `DCAgent2/<run_tag>` (no `-traces` suffix) and on the shared `DCAgent2` org it commonly **403s on
+  storage quota** (`exceeded your public storage space`). The real, manually re-uploaded dataset lands
+  in **`laion/<run_tag>-traces`** (the canonical `<org>/<run_tag>-traces` convention; `rl-job-cleanup`
+  §8 / `eval-agentic-cleanup` §1). **Always confirm on HF which repo actually exists + is non-empty
+  before linking** — do not link the failed `DCAgent2` attempt.
+
+```python
+from huggingface_hub import HfApi; api = HfApi(token=os.environ["HF_TOKEN"])
+rid = f"laion/{run_tag}-traces"                 # run_tag = the eval run-dir basename
+info = api.dataset_info(rid, files_metadata=True)   # raises if missing
+assert any(s.rfilename.endswith(".parquet") for s in info.siblings), f"{rid} empty"
+url  = f"https://huggingface.co/datasets/{rid}"
+```
+> **96-char trap:** HF repo names cap at **96 chars after the `org/`**. A long run-tag (e.g.
+> `eval-laion_swesmith-coldstart-complete-lt32k-2ep-8B_DCAgent2_swebench-verified-random-100-folders-traces`,
+> 109 chars) **cannot be created** — the uploader truncates+hashes it (`…swebench-verified80dacb91`) or
+> the push silently never lands. If `dataset_info` raises `HFValidationError` on length, the canonical-named
+> repo does not exist → **flag that eval as un-linkable, do NOT invent a link.**
+
+**FK-safe, idempotent, single-column update** (same cross-user rule as DELETE/MUTATE below — assert
+ownership *before* writing, scope the write to `id` + `username`, never overwrite a good link):
+
+```python
+ME = "feuer1"   # the cluster username that OWNS the rows — NOT the Mac's os.environ["USER"]
+row = c.table("sandbox_jobs").select("id,username,hf_traces_link").eq("id", job_id).execute().data[0]
+assert row["username"] == ME, f"FK-SAFETY STOP: owned by {row['username']} != {ME} — do NOT mutate"
+if row["hf_traces_link"] == url:    pass                      # idempotent: already correct → skip
+elif row["hf_traces_link"]:         pass                      # a DIFFERENT good link exists → don't clobber
+else:
+    c.table("sandbox_jobs").update({"hf_traces_link": url}).eq("id", job_id).eq("username", ME).execute()
+```
+Then **re-read** each row to confirm the link set and that `metrics`/`model_id`/`job_status` are
+unchanged. Report any eval whose trace repo was missing/empty/over-length (couldn't link). This is the
+field `analyze-rl-behavior` waits on — its Q1 behavioral/judge steps auto-resolve to "no post-RL eval
+traces selected" while `hf_traces_link` is `None`.
+
 ## DELETE / MUTATE — cross-user FK safety (MANDATORY pre-check)
 
 Before deleting or updating ANY row, confirm no **other user's** rows depend on
