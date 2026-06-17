@@ -71,6 +71,9 @@ cat "$VLLM_SRC/.vllm_commit" 2>/dev/null || true
 [ -d "$SKYRL_SRC" ] || { echo "FATAL: SkyRL source not at $SKYRL_SRC (clone penfever/SkyRL, checkout 2ab513a6)"; exit 2; }
 [ -d "$BUILD_DEPS_WHEELS" ] || { echo "FATAL: build-deps wheelhouse not at $BUILD_DEPS_WHEELS"; exit 3; }
 [ -d "$RUNTIME_DEPS_WHEELS" ] || { echo "FATAL: runtime-deps wheelhouse not at $RUNTIME_DEPS_WHEELS"; exit 3; }
+# megatron-core is NOT in the NGC base and compute nodes have no internet, so the
+# 0.14.0 wheel MUST be pre-staged in the accel wheelhouse on the login node.
+ls "$ACCEL_WHEELS"/megatron_core-0.14.0-*.whl >/dev/null 2>&1 || { echo "FATAL: megatron-core 0.14.0 wheel not in accel wheelhouse $ACCEL_WHEELS -- run login-node prep: singularity exec -B \$ACCEL_WHEELS:/whl \$BASE_SBX python -m pip download megatron-core==0.14.0 --no-deps --only-binary=:all: -d /whl"; exit 3; }
 nvidia-smi | head -3 || true
 df -h "$WORK" | tail -1
 
@@ -112,17 +115,30 @@ $SINGULARITY exec --writable --no-home \
     set -euo pipefail
     python -c "import torch;print(\"torch\",torch.__version__,\"cuda\",torch.version.cuda)"
     nvcc --version | tail -2
-    echo "--- megatron-core 0.14.0 + flash-attn ---"
-    if ls /opt/accel_wheels/*.whl >/dev/null 2>&1; then
-      python -m pip install --no-index --find-links /opt/accel_wheels --no-deps \
-        "megatron-core==0.14.0" flash-attn || \
-        python -m pip install --no-index --find-links /opt/accel_wheels /opt/accel_wheels/*.whl
+    echo "--- megatron-core 0.14.0 (OFFLINE wheel, --no-deps) ---"
+    # The NGC 25.09 base does NOT ship megatron-core (verified), and compute nodes
+    # have NO internet, so megatron-core 0.14.0 MUST come from the offline accel
+    # wheelhouse. The prebuilt cp312 x86_64 manylinux wheel matches the base ABI
+    # exactly. Install --no-deps: megatron-core 0.14.0's only NON-extra runtime
+    # deps are torch / numpy / packaging, all already in the base (the base's
+    # numpy 2.1.0 vs megatron's conservative numpy<2.0.0 pin is intentionally
+    # ignored -- the Jupiter prod stack runs megatron-core on the NGC numpy 2.x).
+    if ls /opt/accel_wheels/megatron_core-0.14.0-*.whl >/dev/null 2>&1; then
+      python -m pip install --no-index --no-deps --find-links /opt/accel_wheels \
+        "megatron-core==0.14.0"
     else
-      echo "WARN: no accel wheelhouse -- compiling flash-attn from source (long; sm_80)"
-      python -m pip install --no-build-isolation "megatron-core==0.14.0"
-      # NGC 25.09 already ships flash-attn; only build if absent.
-      python -c "import flash_attn" 2>/dev/null && echo "flash-attn already present in base" || \
-        python -m pip install --no-build-isolation flash-attn
+      echo "FATAL: megatron-core 0.14.0 wheel not in /opt/accel_wheels (login-node prep step 5 missed)" >&2
+      exit 4
+    fi
+    echo "--- flash-attn (base ships it; build from source only if absent) ---"
+    # NGC 25.09 already ships flash-attn; only compile if genuinely missing.
+    if python -c "import flash_attn" 2>/dev/null; then
+      echo "flash-attn already present in base"
+    elif ls /opt/accel_wheels/flash_attn-*.whl >/dev/null 2>&1; then
+      python -m pip install --no-index --no-deps --find-links /opt/accel_wheels flash-attn
+    else
+      echo "WARN: flash-attn absent from base AND accel wheelhouse -- compiling from source (long; sm_80)"
+      python -m pip install --no-build-isolation flash-attn
     fi
     echo "--- SkyRL editable (skyrl_train + skyrl_gym) ---"
     cd /opt/SkyRL

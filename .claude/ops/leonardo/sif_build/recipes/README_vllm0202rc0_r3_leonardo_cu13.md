@@ -59,7 +59,8 @@ Builder = SingularityPRO 4.3.1 `/usr/bin/singularity` (NO apptainer/podman/root)
 | Ingredient | Identity | Notes |
 |---|---|---|
 | **Base image** | `docker://nvcr.io/nvidia/pytorch:25.09-py3` (built as sandbox `pytorch_2509_sbx`) | x86_64, CUDA 13.0, torch 2.9.0a0+nv25.09, Python 3.12, TE, apex. **SAME base as Jupiter** → true parity. Runs on the 535 A100 driver via the bundled `cuda-compat-13`. NGC pull/build on the **login node** (compute has none); force `TMPDIR`/`SINGULARITY_TMPDIR` onto GPFS WORK. |
-| **Megatron-core + flash-attn (phase A)** | Megatron-core `0.14.0` (match Jupiter); flash-attn from the NGC base if present, else source (sm_80) | NGC 25.09 already ships flash-attn; phase A only compiles it if absent. |
+| **Megatron-core (phase A)** | Megatron-core `0.14.0` (match Jupiter) — **prebuilt cp312 x86_64 wheel, pre-staged in the offline `accel_wheels` wheelhouse**, installed `--no-deps` | **NOT in the NGC base** (verified: `ModuleNotFoundError: No module named 'megatron'`), so it cannot come "for free" from the base; and compute nodes have no internet, so it must be a pre-downloaded offline wheel. `--no-deps` because its only non-extra runtime deps (`torch`, `numpy`, `packaging`) are already in the base (we keep the base's numpy 2.1.0 over megatron's conservative `numpy<2.0.0` pin — same as Jupiter's prod stack). |
+| **flash-attn (phase A)** | from the NGC base if present, else accel wheelhouse, else source (sm_80) | NGC 25.09 already ships flash-attn; phase A only compiles it if absent. |
 | **SkyRL editable (phase A)** | `penfever/SkyRL @ 2ab513a6`, editable at `/opt/SkyRL` | Match Jupiter prod SIF. Cloned on the login node. (Leonardo's live RL today is MarinSkyRL `penfever/working`; this twin pins the **Jupiter prod-SIF** SkyRL `2ab513a6` for cross-cluster parity — swap the pin if parity should instead track MarinSkyRL.) |
 | **vLLM fork (phase B)** | `penfever/working @ 5d7319dd100b424c73d1bb9b2ba7b52a44ee811b` | Built **from source against the in-base NGC torch 2.9 (cu13)** via `use_existing_torch.py` (strips the fork's `torch==2.11.0` pin). `TORCH_CUDA_ARCH_LIST=8.0`. Carries native R3 + the DCP GQA-LSE fp32 fix (no separate patch). |
 | **GDN overlay** | **OMITTED** (deferred) | Same as Jupiter's FlashQLA/tilelang overlay — no Leonardo image; Qwen3-Next still runs the vanilla GDN path. Follow-up if Qwen3-Next RL is needed on Leonardo. |
@@ -72,9 +73,15 @@ Builder = SingularityPRO 4.3.1 `/usr/bin/singularity` (NO apptainer/podman/root)
    `singularity build --sandbox $WORK/containers/pytorch_2509_sbx docker://nvcr.io/nvidia/pytorch:25.09-py3`.
 2. **Clone the vLLM fork**: `git clone --branch penfever/working https://github.com/mlfoundations/vllm.git $WORK/sif_build/vllm_clone && (cd … && git checkout 5d7319dd1)`.
 3. **Clone SkyRL**: `git clone https://github.com/penfever/SkyRL.git $WORK/sif_build/skyrl_clone && (cd … && git checkout 2ab513a6)`.
-4. **Offline wheelhouses** built with the **cu13 base image's own pip** (ABI match) via `singularity exec pytorch_2509_sbx pip download …`:
+4. **Offline wheelhouses** built with the **cu13 base image's own pip** (ABI match) via `singularity exec pytorch_2509_sbx pip download …`. Pip refuses to write to the sandbox-mounted `/leonardo_work` (read-only without `--writable`); **bind the target dir** to a writable in-container path, e.g. `-B $ACCEL_WHEELS:/whl … -d /whl`:
    - `build_deps_wheels`: `setuptools_scm setuptools wheel packaging`.
    - `runtime_deps_wheels`: the vLLM `common.txt` pure-python deps (named in the sbatch's two-pass install) + `opencv-python-headless --no-deps`. (The resolver also drops torch/numpy/nvidia wheels into the dir; they are NOT installed — the install commands name only the pure-python deps and use `--no-deps`/`use_existing_torch`.)
+   - `accel_wheels` (**MANDATORY** — megatron-core is NOT in the NGC base):
+     ```bash
+     singularity exec --no-home -B "$ACCEL_WHEELS":/whl "$BASE_SBX" \
+       python -m pip download "megatron-core==0.14.0" --no-deps --only-binary=:all: -d /whl
+     ```
+     This fetches the prebuilt `megatron_core-0.14.0-cp312-cp312-manylinux_2_24_x86_64…whl` (~2.2 MB). Optionally also stage a prebuilt `flash_attn` wheel here if you want to skip the base's flash-attn / a source compile.
 
 ---
 
@@ -85,8 +92,10 @@ short for the ~1.5–2.5 h vLLM compile; give 6 h wall). Steps:
 1. `cp -a pytorch_2509_sbx → skyrl_megatron_vllm0202rc0_r3_sandbox` (the base is already a
    sandbox dir, so we copy — no `singularity build` / .sif conversion).
 2. Stage SkyRL + vLLM fork + wheelhouses into `/opt/…` in the sandbox.
-3. **Phase A** (`singularity exec --writable`, no `--nv`): Megatron-core 0.14.0, flash-attn
-   (base or source), SkyRL `-e ./skyrl-train` + `./skyrl-gym`.
+3. **Phase A** (`singularity exec --writable`, no `--nv`): Megatron-core 0.14.0 **from the
+   offline `accel_wheels` wheelhouse, `--no-deps`** (NOT a pip-install-from-internet — compute
+   has no network); flash-attn (base, else wheelhouse, else source); SkyRL `-e ./skyrl-train`
+   + `./skyrl-gym`.
 4. **Phase B** (`singularity exec --writable`, no `--nv`): `use_existing_torch.py`; install
    build-deps + runtime-deps OFFLINE; `pip install --no-build-isolation --no-deps -v -e .`
    with `TORCH_CUDA_ARCH_LIST=8.0`, `SETUPTOOLS_SCM_PRETEND_VERSION=0.20.2rc0`, `MAX_JOBS=24`.
@@ -124,6 +133,7 @@ dcp=1 vs dcp=2, Qwen3-Coder-30B-A3B, greedy temp=0, R3 on → expect token misma
 
 ## Notes / gotchas
 
+- **megatron-core is NOT in the NGC 25.09 base** and compute nodes have no internet — it MUST be a pre-staged offline wheel in `accel_wheels`, installed `--no-deps`. The first cu13 build attempt (job `47061331`, 2026-06-17) FAILED here: `accel_wheels` was empty, so phase A fell to `pip install megatron-core==0.14.0` which hit `Network is unreachable` → `No matching distribution found`. Fix = stage the wheel on the login node (prep step 4) + the preflight now hard-FATALs if it's missing.
 - **Compilers come from the NGC base** (nvcc 13.0 + matching gcc). Do NOT pull conda gcc/nvcc into the sandbox.
 - `use_existing_torch.py` MUST run before `pip install` or pip pulls torch 2.11 and breaks TE/apex/flash-attn.
 - Build scratch (`SINGULARITY_TMPDIR`/`TMPDIR`) on WORK GPFS — NOT Lustre `/scratch_local` (xattr storm), NOT over-quota SCRATCH_FAST, NOT tiny node-local `/tmp`.
