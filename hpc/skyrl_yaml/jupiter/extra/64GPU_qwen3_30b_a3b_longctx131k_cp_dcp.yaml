@@ -241,12 +241,16 @@ trainer:
       fsdp_size: 2
       expert_model_parallel_size: 8
       # CP=2: torch-native ring-SDPA context parallel over the 131k sequence.
-      # Requires trainer.attn_backend=sdpa (set above) + sequence_parallel_size=1.
+      # Requires trainer.attn_backend=sdpa (set above). Ulysses sequence-parallel
+      # (policy.sequence_parallel_size) MUST stay at its schema default of 1 (CP and
+      # Ulysses both shard the seq dim — mutually exclusive); it lives at the policy
+      # top level, NOT in fsdp_config, so it is intentionally NOT set here (the
+      # launcher would otherwise emit a struct-strict override of a nonexistent
+      # fsdp_config key -> omegaconf "not in struct". Matches the 80B long-ctx parent.)
       # G4 divisibility: padded seq_len % (2*cp)=4 == 0 (131072 % 4 == 0 OK).
       context_parallel_size: 2
       cp_style: ring_sdpa
       cp_rotate_method: allgather
-      sequence_parallel_size: 1
       # R3 router-replay: recompute the EXACT rollout routing in the train forward
       # so the MoE grad matches the sampled experts (pi_old == pi_train for the MoE).
       # Fed by enable_return_routed_experts=true (generator) via native R3 capture.
@@ -266,7 +270,6 @@ trainer:
       context_parallel_size: 2
       cp_style: ring_sdpa
       cp_rotate_method: allgather
-      sequence_parallel_size: 1
       moe_router_replay: true
       moe_grouped_gemm: true
       ep_comm_backend: torch
