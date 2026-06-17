@@ -27,8 +27,11 @@
 #   - Inference engines:     4 nodes x 4 GPUs = 16 engines (TP=1)
 #   - Total:                 6 nodes x 4 GPUs = 24 GPUs  -> --num_nodes 6
 #
-# YARN RoPE SCALING: factor 4.0 (32768 * 4 = 131072), applied in BOTH trainer
-# (rope_scaling) and vLLM (engine hf_overrides), matching 24GPU_base_131k.yaml.
+# YARN RoPE SCALING: factor 3.2 (40960 * 3.2 = 131072), applied in BOTH trainer
+# (rope_scaling) and vLLM (engine hf_overrides). GLM-4.7-swesmith is a Qwen3-8B with
+# NATIVE max_position_embeddings=40960 (NOT 32768), so the #232 pattern (3.2/40960)
+# is correct here; the original 4.0/32768 (copied from 24GPU_base_131k.yaml) mismatched
+# the model's native and was rejected at the vLLM ModelConfig gate.
 # =============================================================================
 
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
@@ -163,12 +166,17 @@ trainer:
     use_tis: true
     tis_imp_ratio_cap: 2.0
 
-  # YARN RoPE scaling: extend 32k native context to 131k (matches the SFT base's
-  # cutoff_len=131072 + YaRN factor 4 regime). Mirrored in vLLM hf_overrides below.
+  # YARN RoPE scaling: extend native 40960 context to 131k. GLM-4.7-swesmith is a
+  # Qwen3-8B with NATIVE max_position_embeddings=40960 and NO baked-in rope_scaling
+  # (verified config.json), so the correct YaRN is factor 3.2 (40960 * 3.2 = 131072),
+  # mirroring the proven #232 pattern (64GPU_qwen3_30b_a3b_longctx131k_cp_dcp.yaml).
+  # The earlier 4.0/32768 (inherited from 24GPU_base_131k.yaml) mismatched the model's
+  # actual native 40960 -> vLLM derived max_model_len=40960 and rejected 131072 at the
+  # ModelConfig gate (job 912742/743 fail-loop). Mirrored in vLLM hf_overrides below.
   rope_scaling:
     rope_type: yarn
-    factor: 4.0
-    original_max_position_embeddings: 32768
+    factor: 3.2
+    original_max_position_embeddings: 40960
 
   # Training loop settings
   epochs: 2
@@ -285,11 +293,14 @@ generator:
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
     # YARN RoPE scaling override for vLLM inference engines (must agree with the
     # trainer rope_scaling above; mismatched YaRN SFT<->RL is a silent correctness bug).
+    # factor 3.2 / original 40960 = model's native max_position_embeddings, so vLLM
+    # derives max_model_len = 40960 * 3.2 = 131072 and the ModelConfig gate accepts the
+    # 131072 request natively (no VLLM_ALLOW_LONG_MAX_MODEL_LEN needed — same as #232).
     hf_overrides:
       rope_scaling:
         rope_type: yarn
-        factor: 4.0
-        original_max_position_embeddings: 32768
+        factor: 3.2
+        original_max_position_embeddings: 40960
 
 data:
   train_data: []
