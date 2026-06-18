@@ -45,6 +45,23 @@ entrypoint: examples.terminal_bench.entrypoints.main_tbench
 # lets the allocator grow a single virtual reservation instead of binning fixed blocks,
 # which reclaims that trapped reserved-unallocated headroom.
 #
+# 2026-06-18 UPDATE: expandable_segments was NECESSARY-BUT-INSUFFICIENT. Job 914468
+# FAILED at 3h17m with `tried to allocate 31.43 GiB, 11.65 GiB free, 80.69 GiB
+# allocated by PyTorch, only 128.37 MiB reserved-but-unallocated` in
+# FSDPPolicyWorkerBase.ppo_train (the seqnorm policy BACKWARD). The 128 MiB
+# reserved-but-unallocated PROVES expandable_segments was already active and the
+# allocator is NOT fragmented — this is a GENUINE CAPACITY OVERFLOW at 131k seq len
+# (80.69 GiB of live tensors leaves no room for a 31 GiB backward activation alloc on
+# a 96 GiB GH200). The real fix is `trainer.policy.fsdp_config.cpu_offload: true`
+# (below): offload params/grads to CPU host RAM (~340 GB free per metrics) to free
+# GPU HBM for activations. This does NOT change the training distribution (rollout
+# length / max_num_batched_tokens / 131k science untouched).
+#
+# Two allocator-conf keys are exported (belt-and-suspenders): torch >=2.x renamed
+# PYTORCH_CUDA_ALLOC_CONF -> PYTORCH_ALLOC_CONF (the old name is deprecated-but-still-
+# honored and emits a warning). We set BOTH so the run is clean on new torch and still
+# correct on older torch.
+#
 # This is set via the `container.extra_env` passthrough (rl_launch_utils
 # _build_rl_container_env -> verbatim `export K=V` in {rl_container_env} of the
 # generated sbatch). NO `sif` key is present, so this does NOT switch the run to
@@ -55,6 +72,7 @@ entrypoint: examples.terminal_bench.entrypoints.main_tbench
 # head/worker via `srun --export=ALL`, so the policy FSDP workers see it.
 container:
   extra_env:
+    PYTORCH_ALLOC_CONF: expandable_segments:True
     PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
 
 # =============================================================================
@@ -279,7 +297,14 @@ trainer:
       adam_betas: [0.9, 0.999]
       max_grad_norm: 0.9
     fsdp_config:
-      cpu_offload: false
+      # TRUE-CAPACITY OOM FIX (2026-06-18, job 914468): offload policy params/grads to
+      # CPU host RAM (~340 GB free) so the 96 GiB GH200 HBM is freed for the 131k
+      # backward activations. fsdp2 path -> CPUOffloadPolicy(pin_memory=True) (applies
+      # to BOTH train+inference wraps in fsdp_strategy.py:343). Closes the 31 GiB gap
+      # WITHOUT changing the training distribution (grad-ckpt already on via
+      # ppo_base_config gradient_checkpointing=true; micro_train_batch=1 already
+      # minimal). Does NOT cap rollout length / max_num_batched_tokens (131k science).
+      cpu_offload: true
       reshard_after_forward: true
       fsdp_size: 4
   ref:
