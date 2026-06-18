@@ -84,6 +84,20 @@ SINGULARITY=/usr/bin/singularity   # SingularityPRO 4.3.1; NO apptainer
 #    rather than `singularity build` because the base is ALREADY a sandbox dir
 #    (no .sif to convert). cp -a preserves perms/symlinks (incl. compat/lib.real).
 # ---------------------------------------------------------------------------
+# RESUME=1: skip the destructive [1] base-sandbox clone + [1b] staging and reuse
+# an EXISTING fully-staged $SANDBOX. The clone+stage of the multi-GB NGC 25.09 cu13
+# tree on GPFS is the build's long pole (~9-10h); PHASE A/B only ADD into the
+# sandbox (megatron/flash-attn/skyrl/vllm installs), they never depend on a fresh
+# clone. So a re-run after a late-stage FATAL (e.g. the GPFS-stall transient that
+# tripped 47181886's in-container megatron-wheel ls at 15:59) can resume straight
+# into PHASE A against the intact staged sandbox. ONLY set RESUME=1 when $SANDBOX
+# is a clean, fully-staged base where PHASE A has NOT yet pip-installed anything
+# (i.e. the failure was before/at the first install step).
+if [ "${RESUME:-0}" = "1" ]; then
+  echo "=== [1] RESUME=1 -> reusing existing staged sandbox (skip clone + staging) ==="
+  [ -d "$SANDBOX/opt/accel_wheels" ] || { echo "FATAL (resume): $SANDBOX/opt/accel_wheels missing -- sandbox not staged, cannot RESUME"; exit 2; }
+  echo "reusing sandbox at $SANDBOX"
+else
 echo "=== [1] cloning cu13 base sandbox -> build sandbox ==="
 rm -rf "$SANDBOX"
 cp -a "$BASE_SBX" "$SANDBOX"
@@ -101,6 +115,7 @@ cp -a "$VLLM_SRC"/.            "$SANDBOX/opt/vllm_build/"
 cp -a "$BUILD_DEPS_WHEELS"/.   "$SANDBOX/opt/build_deps_wheels/"
 cp -a "$RUNTIME_DEPS_WHEELS"/. "$SANDBOX/opt/runtime_deps_wheels/"
 [ -d "$ACCEL_WHEELS" ] && cp -a "$ACCEL_WHEELS"/. "$SANDBOX/opt/accel_wheels/" || echo "(no accel wheelhouse -- phase A will compile flash-attn from source)"
+fi
 
 # PREFLIGHT ASSERT (host-side, runs in seconds): the megatron-core install is the
 # FIRST PHASE A step, and it can only see the IN-SANDBOX staged wheelhouse (the
@@ -159,10 +174,24 @@ $SINGULARITY exec --writable --no-home \
     # silently dropped on SingularityPRO 4.3.1 (no overlay/underlay), so /whl is
     # never present inside the container. The host-side preflight assert (after the
     # cp -a stage) already guaranteed the wheel is in $SANDBOX/opt/accel_wheels.
+    # Detect the staged wheel with a short RETRY. 47181886 FAILED here at 15:59
+    # with "ls: /opt/accel_wheels: No such file or directory" EVEN THOUGH the host
+    # had just stat'd that exact wheel (preflight OK, 2170140 bytes) -- the in-
+    # container view of the GPFS-backed sandbox dir transiently returned ENOENT
+    # during the 15:20-16:00 /leonardo_work GPFS stall (same window that killed 10
+    # pass@k jobs). A single ls was enough to fall through to exit 4 and waste the
+    # ~10h clone. Retry a few times with a short sleep so a momentary FS stall does
+    # not masquerade as a missing wheel; the host-side preflight already proved the
+    # wheel is staged, so any miss here is FS-transient, not a real absence.
     MEGA_LINKS=""
-    if ls /opt/accel_wheels/megatron_core-0.14.0-*.whl >/dev/null 2>&1; then
-      MEGA_LINKS=/opt/accel_wheels
-    fi
+    for _try in 1 2 3 4 5 6; do
+      if ls /opt/accel_wheels/megatron_core-0.14.0-*.whl >/dev/null 2>&1; then
+        MEGA_LINKS=/opt/accel_wheels
+        break
+      fi
+      echo "  (attempt $_try) /opt/accel_wheels not yet visible in container -- waiting 10s (FS stall?)" >&2
+      sleep 10
+    done
     if [ -n "$MEGA_LINKS" ]; then
       echo "megatron-core wheel found in $MEGA_LINKS"
       python -m pip install --no-index --no-deps --find-links "$MEGA_LINKS" \
