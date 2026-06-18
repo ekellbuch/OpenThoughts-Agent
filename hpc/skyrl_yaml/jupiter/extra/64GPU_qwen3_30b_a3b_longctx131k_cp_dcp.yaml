@@ -484,6 +484,27 @@ container:
     # 32a11afc8) for durability/rebuilds.
     - /e/scratch/jureap59/feuer1/vllm_patch_232/outputs.patched.py:/opt/vllm_build/vllm/v1/outputs.py
     - /e/scratch/jureap59/feuer1/vllm_patch_232/envs.patched.py:/opt/vllm_build/vllm/envs.py
+    # #232 FIX A (TP-rank-desync wedge, candidate-1 prime fix, 2026-06-18). The
+    # residual EngineDead wedge (no MQ/transport involvement — the small per-step
+    # ModelRunnerOutput never arrived, worker stuck INSIDE execute_model) was a TP-
+    # rank collective desync on a rare mixed chunked-prefill+decode step. The fork-
+    # audit proved the R3 capture path has NO conditional collective; the ONLY rank-
+    # asymmetric R3 op is a rank-0-ONLY host CUDA-stream sync — finalize_pending_copy()
+    # at the TOP of execute_model (gpu_model_runner.py) does _copy_event.synchronize()
+    # only on rank 0 (non-rank-0 capturers have host_cache=None -> no-op). Under
+    # enforce_eager that pre-forward host serialization skews rank-0's collective
+    # launch timing vs its peers -> desync -> execute_model hang -> 900s watchdog ->
+    # EngineDead (job 919724: EngineDead=3 in the first ~1.3h, NO FR dump). FIX A drops
+    # that redundant pre-forward finalize (the host scatter still happens in the step
+    # epilogue via issue_routing_d2h_copy -> sync_fwd_experts_buffer_DtoH, off the
+    # critical pre-collective path; the only host-cache reader,
+    # extract_routed_experts_for_current_batch, finalizes internally). R3 capture
+    # CORRECTNESS is preserved byte-for-byte (buffer contents + per-request host
+    # scatter unchanged); only rank-0's cross-step stream-sync TIMING is equalized.
+    # Patched source committed to the vLLM fork (penfever/working 1b5a72e9a); the
+    # patched file is the pulled fork copy staged at vllm_patch_232/ (single-file bind
+    # over the in-SIF install, same precedent as the MQ + R3-transport binds above).
+    - /e/scratch/jureap59/feuer1/vllm_patch_232/gpu_model_runner.patched.py:/opt/vllm_build/vllm/v1/worker/gpu_model_runner.py
     # NOTE: the 80B long-ctx config bind-mounts a vllm_config_guardlift.py because
     # ITS canonical SIF (rebuilt from the fork base) had the UNPATCHED guard. THIS
     # _cp SIF inherits the canonical SIF that was rebaked from penfever/working,
