@@ -37,6 +37,27 @@
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
 # =============================================================================
+# CUDA allocator: expandable_segments (lever1-SCOPED, NOT a shared-template change).
+# =============================================================================
+# job 914043/914044 OOM'd in the policy backward at gs3 with ~6.79GiB reserved-but-
+# unallocated — classic CUDA caching-allocator fragmentation at 131k context (long,
+# highly variable rollout seq lengths churn the allocator). expandable_segments:True
+# lets the allocator grow a single virtual reservation instead of binning fixed blocks,
+# which reclaims that trapped reserved-unallocated headroom.
+#
+# This is set via the `container.extra_env` passthrough (rl_launch_utils
+# _build_rl_container_env -> verbatim `export K=V` in {rl_container_env} of the
+# generated sbatch). NO `sif` key is present, so this does NOT switch the run to
+# Apptainer mode — it stays on the bare RL venv / plain FSDP2 (the plan-locked
+# Geometry-1 runtime). The export lives ONLY in THIS config's generated sbatch, so it
+# is scoped to the lever1 launch and never touches universal_rl.sbatch or the healthy
+# in-flight #217/#232 RL jobs. Exported in the batch shell -> inherited by every Ray
+# head/worker via `srun --export=ALL`, so the policy FSDP workers see it.
+container:
+  extra_env:
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+# =============================================================================
 # RE-ENABLED 2026-06-17 — RL-venv vLLM now honors the YaRN hf_overrides natively.
 # =============================================================================
 # GLM-4.7-swesmith (Qwen3-8B) has native max_position_embeddings=40960. Reaching
