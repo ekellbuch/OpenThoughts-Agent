@@ -45,6 +45,16 @@ python -m scripts.datagen.extract_tasks_from_parquet \
 ```
 
 **Step 2 — submit the datagen job:**
+
+> **🚧 SUBMIT FROM THE REPO DIR WITH `DCFT` SET — the sbatch WORKDIR guard hard-fails otherwise.**
+> Before launching/relaunching, `cd <repo> && export DCFT=$PWD` (on Jupiter:
+> `/e/scratch/jureap59/feuer1/OpenThoughts-Agent`). The generated `universal_tracegen.sbatch` /
+> `universal_taskgen.sbatch` resolve `WORKDIR` from `DCFT_PRIVATE → DCFT → $PWD`; if you submit from
+> `$HOME` or a scratch subdir with `DCFT` unset, the guard detects the wrong dir (missing
+> `hpc/shell_utils/triton_cache.sh` marker) and **`exit 1`s immediately** with a `FATAL: WORKDIR=... is
+> not the OpenThoughts-Agent repo root` message. This bug silently broke 3 relaunches (#217, stageC,
+> datagen) before the guard existed. If you see that FATAL, `cd` to the repo, `export DCFT=$PWD`, resubmit.
+
 ```bash
 python -m hpc.launch \
   --job_type datagen \

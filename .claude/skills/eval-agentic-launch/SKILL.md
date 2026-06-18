@@ -84,6 +84,16 @@ default** (the user keeps 1–7 for sibling experiments; confirm before borrowin
 > `/Users/benjaminfeuer/Documents/notes/ot-agent/pinggy_bank.md` (assignments shift — re-read before launch).
 
 ## 3. Launch (in tmux — the listener is long-running)
+
+> **🚧 SUBMIT FROM THE REPO DIR WITH `DCFT` SET — the sbatch WORKDIR guard hard-fails otherwise.**
+> Run the cluster preamble (`cd <repo>` + `source hpc/dotenv/<cluster>.env`, which exports `DCFT`) before
+> launching the listener. The generated `universal_eval.sbatch` resolves `WORKDIR` from `DCFT_PRIVATE →
+> DCFT → $PWD`; if the listener submits eval jobs from `$HOME` or a scratch subdir with `DCFT` unset, the
+> guard trips (missing `hpc/shell_utils/triton_cache.sh` marker) and each eval job **`exit 1`s
+> immediately** with a `FATAL: WORKDIR=... is not the OpenThoughts-Agent repo root` message. If you see
+> that FATAL in an eval `.out`, the listener was started from the wrong place — re-run the preamble and
+> relaunch.
+
 General shape (fill the cluster-specific values from `ops/<cluster>/ops.md`):
 ```bash
 # inside a tmux session (the listener runs minutes/model — pre-download; nohup/disown are unreliable)

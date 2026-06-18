@@ -27,6 +27,16 @@ do not duplicate it; run that preamble first.** **Runtime / SIF selection detail
 `.claude/ops/jupiter/ENVIRONMENT_MAP.md`** — summarized in §3 here, deferred there for the gotchas.
 
 ## 1. The canonical launch
+
+> **🚧 SUBMIT FROM THE REPO DIR WITH `DCFT` SET — the sbatch WORKDIR guard hard-fails otherwise.**
+> Before launching/resuming, `cd /e/scratch/jureap59/feuer1/OpenThoughts-Agent && export DCFT=$PWD`
+> (the ops.md preamble does this). The generated `universal_rl.sbatch` resolves `WORKDIR` from
+> `DCFT_PRIVATE → DCFT → $PWD`; if you submit from `$HOME` or a scratch subdir with `DCFT` unset, the
+> guard detects the wrong dir (missing `hpc/shell_utils/triton_cache.sh` marker) and **`exit 1`s
+> immediately** with a `FATAL: WORKDIR=... is not the OpenThoughts-Agent repo root` message. This bug
+> silently broke 3 relaunches (#217, stageC, datagen) before the guard existed. If you ever see that
+> FATAL, you submitted from the wrong place — `cd` to the repo, `export DCFT=$PWD`, resubmit.
+
 ```bash
 python -m hpc.launch --job_type rl \
   --rl_config ./hpc/skyrl_yaml/jupiter/<cfg>.yaml \

@@ -29,6 +29,14 @@ git submodule update --init --remote sft/llamafactory; source hpc/dotenv/jupiter
 ```
 (`git submodule update … sft/llamafactory` is essential — SFT won't run on a stale submodule.)
 
+> **🚧 SUBMIT FROM THE REPO DIR WITH `DCFT` SET — the sbatch WORKDIR guard hard-fails otherwise.**
+> The preamble above already does this (`cd …/OpenThoughts-Agent` + `source hpc/dotenv/jupiter.env`,
+> which exports `DCFT`). Do NOT skip it. The generated `universal_sft.sbatch` resolves `WORKDIR` from
+> `DCFT_PRIVATE → DCFT → $PWD`; submitting from `$HOME` or a scratch subdir with `DCFT` unset trips the
+> guard (missing `hpc/shell_utils/triton_cache.sh` marker) and **`exit 1`s immediately** with a `FATAL:
+> WORKDIR=... is not the OpenThoughts-Agent repo root` message. If you see that FATAL, re-run the
+> preamble (`cd` repo + `source hpc/dotenv/jupiter.env`) and resubmit.
+
 ## 2. Vanilla launch (Qwen3-8B, 32k, single dataset → HF)
 ```bash
 python -m hpc.launch --train_config_path sft/lf_configs/qwen3/32k_base.yaml \
