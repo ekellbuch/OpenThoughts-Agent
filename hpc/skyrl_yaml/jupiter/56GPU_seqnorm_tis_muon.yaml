@@ -257,13 +257,14 @@ trainer:
       adam_betas: [0.9, 0.999]
       max_grad_norm: 0.9
       optimizer_kwargs:
-        # MUON-GROUP hyperparameters. Muon's effective LR scale differs from
-        # AdamW — the orthonormalized update is O(1)-RMS per matrix, so Muon
-        # wants a notably higher LR. 0.02 is the canonical Muon-group LR region
-        # (Keller-Jordan speedrun / Moonshot Kimi recipes use ~2e-2 for the
-        # hidden-matrix group). momentum 0.95 + Newton-Schulz steps 5 are the
-        # standard defaults. Single ablation run — sensible defaults, no sweep.
-        muon_lr: 0.02
+        # MUON-GROUP hyperparameters. 2026-06-17 v2: muon_lr lowered 0.02 -> 8e-6
+        # (= the AdamW-group lr) after the 0.02 run (912778) collapsed: the
+        # ~2500x-AdamW Muon LR drove entropy->0.027 / reward->0.006 / empty
+        # generations -> InvalidChatHistory. Per user, start Muon at the AdamW
+        # baseline LR. NOTE: this makes the run a clean Muon-update-rule vs AdamW
+        # A/B at matched LR (no LR-scale advantage for either arm). momentum 0.95
+        # + Newton-Schulz steps 5 are the standard defaults. No sweep.
+        muon_lr: 8e-6
         muon_momentum: 0.95
         ns_steps: 5
     fsdp_config:
