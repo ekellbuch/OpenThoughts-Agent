@@ -31,6 +31,16 @@ Deploy this each cron sweep to produce ONE comprehensive update across all activ
 - `squeue -u <user> -t RUNNING` (running) + `sacct -u <user> -S <-Nh> -X` (terminal states since last sweep).
 - **Validate squeue succeeded** — an empty result can be a **false-drain flake** (saturated login node /
   slurmctld timeout). Before trusting "drained", re-check via `sacct` and/or a different login node.
+- **LIVENESS CHECK — `RUNNING` is NOT proof of progress (catches silent wedges).** A job can hold its
+  allocation for hours while hung (engine deadlock, NCCL stall, generation-buffer wedge) — squeue still
+  says RUNNING. For EVERY RUNNING job, `stat -c%y <StdOut>` and compare the log mtime to "now": if a job
+  has emitted NOTHING for materially longer than its expected cadence (RL step / SFT log interval / eval
+  trial — minutes, not hours), treat it as a **suspected silent hang** and investigate (tail the log, grep
+  the ray-worker logs for EngineDead/NCCL-timeout/Watchdog/RPC-timeout around the last-output timestamp).
+  A multi-hour-stale log on a multi-node job is a wedge burning nodes → diagnose + (with permission, since
+  it's RUNNING) kill+relaunch. **Never report a RUNNING job as "healthy" without confirming its log is
+  live** — this is how 914214 (stageC) sat wedged at buffer 35/64 for 6.5h on 14 nodes across multiple
+  sweeps. Put the log-mtime (or "last output N min ago") in the table so staleness is visible at a glance.
 - ssh string + paths → `ops/<cluster>`.
 
 ## 2. Bucket every job by type
