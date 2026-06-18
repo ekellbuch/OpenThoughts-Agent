@@ -45,10 +45,11 @@ set -euo pipefail
 # ----- env: conda env `evalchemy-marin` (lm-eval; the env every recent SCORES.md row used) -----
 source /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/etc/profile.d/conda.sh
 conda activate evalchemy-marin
-# Must cd into the evalchemy-MARIN clone (matches the env's editable install). The plain
-# `code/evalchemy` clone is STALE: its eval/eval.py does `from lm_eval.__main__ import
-# parse_eval_args, setup_parser`, both removed in lm-eval 0.4.12 (this env) -> ImportError
-# at startup. evalchemy-marin's eval/eval.py imports them from its eval/lm_eval_compat.py shim.
+# Must cd into the evalchemy-MARIN clone (matches the env's editable install). evalchemy-marin's
+# eval/eval.py imports parse_eval_args/setup_parser from its eval/lm_eval_compat.py shim — unlike
+# the now-removed `code/evalchemy` clone, whose eval/eval.py did `from lm_eval.__main__ import
+# parse_eval_args, setup_parser` (both dropped in lm-eval 0.4.12 -> ImportError at startup).
+# (`code/evalchemy` + its `evalchemy-resume-test` worktree were deleted 2026-06-18; this is the sole clone.)
 cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy-marin
 
 source ~/secrets.env                                            # HF_TOKEN etc. (BEFORE HOME override)

@@ -106,7 +106,7 @@ def main():
                     help="vLLM max_num_seqs (0 => leave vLLM default; lower => smaller sampler-warmup footprint)")
     ap.add_argument("--enforce-eager", action="store_true",
                     help="vLLM enforce_eager=True (frees cudagraph-capture memory; robust for n=128 warmup)")
-    ap.add_argument("--evalchemy-root", default="/leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy")
+    ap.add_argument("--evalchemy-root", default="/leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy-marin")
     ap.add_argument("--limit", type=int, default=0, help="debug: cap #problems")
     args = ap.parse_args()
 

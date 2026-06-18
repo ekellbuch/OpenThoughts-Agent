@@ -47,7 +47,7 @@ This makes the per-TP copies `delphi_eval_tp{1,3,4}.sbatch` obsolete.
 
 ## Environment requirement
 
-- conda env **`evalchemy-marin`** (the env all recent `SCORES.md` rows were produced with), `cd .../code/evalchemy`.
+- conda env **`evalchemy-marin`** (the env all recent `SCORES.md` rows were produced with), `cd .../code/evalchemy-marin` (the editable-install clone the env points at; the legacy `code/evalchemy` and its `evalchemy-resume-test` worktree were removed 2026-06-18).
 - Leonardo `$HOME` is **read-only** from compute and login nodes → the scripts redirect `HOME` +
   flashinfer/triton/inductor/vLLM caches to a writable work-FS `.cache` dir. Without this, no vLLM eval starts.
 - `HF_HUB_OFFLINE=1`: repos + datasets must be **pre-cached on the login node** before submit.

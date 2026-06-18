@@ -44,8 +44,9 @@ sbatch --job-name="delphi-eval-$RUN" <leonardo>/delphi_eval.sbatch laion/$RUN $R
 - **Model-specific `--job-name` is MANDATORY** (don't submit with the generic default) so squeue + the
   `%x-%j.log` + `meta.env` map jobid→model 1:1. The script also self-renames + emits a greppable
   `EVAL_JOBMAP` line + writes `<OUT>/meta.env`.
-- Job shape: 1 node / 4 GPU (A100 64GB) / 8h / `boost_usr_prod`, conda env **`evalchemy`**, runs from
-  `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy`. Output → `…/experiments/delphi-eval/<RUN_NAME>/`.
+- Job shape: 1 node / 4 GPU (A100 64GB) / 8h / `boost_usr_prod`, conda env **`evalchemy-marin`**, runs from
+  `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy-marin` (the single canonical evalchemy clone; the legacy
+  `code/evalchemy` + `evalchemy-resume-test` worktree were removed 2026-06-18). Output → `…/experiments/delphi-eval/<RUN_NAME>/`.
 
 ## 3. Pre-download is REQUIRED (compute is offline)
 `delphi_eval.sbatch` runs `HF_HUB_OFFLINE=1` (Leonardo compute has no internet). **Pre-cache each

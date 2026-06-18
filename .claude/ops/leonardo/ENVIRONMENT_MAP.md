@@ -64,6 +64,20 @@ The x86/A100 analogue of Jupiter's `skyrl_megatron_vllm0202rc0_r3.sif`: SkyRL ed
 - **FINAL DECISION (2026-06-16, user-approved):** (1) **PREFER the true CUDA-13 / torch-2.9 Jupiter twin** — NGC 25.09 base + `cuda-compat-13` forward-compat libs (arch 8.0), pending the empirical forward-compat test on the 535 driver. (2) **SANCTIONED FALLBACK:** if forward-compat can't clear the 535 driver ("if we have no other option"), drop to the **torch-2.8 / NGC-25.06 / CUDA-12.9.1** twin (recipe already written; differs from Jupiter only in the torch/CUDA floor). Escalating a CINECA driver upgrade (→≥580.65) is **not** required — the fallback is acceptable.
 - **✅ FORWARD-COMPAT GATE PASSED (2026-06-16, STAGE 1 empirically verified) → the true CUDA-13/torch-2.9 twin is GO; fallback NOT needed.** Built the cu13 base as a **writable sandbox dir** (`$WORK/containers/pytorch_2509_sbx`, NGC `nvcr.io/nvidia/pytorch:25.09-py3`, 19 G) — note a packed `.sif` pull **FATAL'd** at `while creating squashfs: create command failed: signal: killed` (the documented login-node mksquashfs OOM/kill + `lustre.lov` xattr blocker; `singularity build --sandbox` avoids the squash step and succeeds, with `TMPDIR`/`SINGULARITY_TMPDIR` forced onto GPFS WORK — the default `TMPDIR=/scratch_local` is Lustre and triggers the xattr storm). On an A100 (`srun … boost_qos_dbg`, host driver **535.274.02**) under `singularity exec --nv -B /leonardo_work`, **a real CUDA-13 fp32 matmul executed**: `torch 2.9.0a0+…nv25.09`, `torch.version.cuda 13.0`, `is_available True`, cap `(8,0)`, `2048² matmul maxerr=6.8e-2` (normal tf32 tolerance — real tensor-core compute). `/proc/self/maps` confirms torch loaded **`/usr/local/cuda-13.0/compat/lib.real/libcuda.so.580.82.07`** (the bundled forward-compat userspace), NOT a host 535 libcuda. So the **535 branch is within cu13's forward-compat floor** on the A100 (datacenter GPU). The NGC image already wires the compat libs via its own ldconfig (`compat/lib` → `lib.real`), so no manual `LD_LIBRARY_PATH` reorder was even needed under `--nv`; if a future image doesn't, set `SINGULARITYENV_LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat/lib.real`. Test artifacts: `$WORK/containers/{fwdcompat_test.py,fwdcompat_run.sh,check_libcuda.py}`.
 
+### 2e. `evalchemy-marin` conda — standard / pass@k downstream evals (Delphi #6279)
+
+- **The ONE canonical evalchemy clone:** `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy-marin` —
+  remote `origin = github.com/marin-community/evalchemy.git`, branch `main`. The **`evalchemy-marin` conda env**
+  is the editable install against it (lm-eval v0.4.12 standard). All recent Delphi #6279 pass@k + standard
+  `SCORES.md` rows used this env+clone; the live `evalchemy_eval.sbatch` / `passatk_eval.sbatch` `cd` here.
+- **Use for:** MATH500 / gsm8k / AIME24 (`eval/evalchemy/*.sbatch`) + pass@k (`eval/evalchemy/passatk/`).
+- **CLEANUP (2026-06-18):** the two redundant clones were **deleted** — `code/evalchemy` (a stale
+  `mlfoundations/evalchemy` clone, frozen at clone-time HEAD `6ed67415`, paired with the deprecated 0.4.9.1
+  `evalchemy` conda env; cut over to `evalchemy-marin` on 2026-06-15 after MATH500 validated 9.6% vs 10.2%
+  grader-byte-identical) and `code/evalchemy-resume-test` (a *linked git worktree* of `code/evalchemy` on
+  branch `feuer/resume-manager` @ `d42f2c38`, **fully merged** into `evalchemy-marin` main `3f1618c2` —
+  no unmerged work lost). Do NOT re-create either; `evalchemy-marin` is the only clone.
+
 ## 3. VERIFY before you trust
 
 ```bash

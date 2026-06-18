@@ -22,7 +22,7 @@ DRIVER=$PR/passatk_driver.py
 
 source /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/etc/profile.d/conda.sh
 conda activate evalchemy-marin
-cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy
+cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy-marin
 
 source ~/secrets.env
 export HF_HOME=/leonardo_work/AIFAC_5C0_290/bfeuer00/data/hub

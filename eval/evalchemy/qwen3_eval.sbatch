@@ -37,7 +37,7 @@ set -euo pipefail
 #        `evalchemy`=0.4.9.1 after MATH500 validation 9.6% vs 10.2%, grader byte-identical) -----
 source /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/etc/profile.d/conda.sh
 conda activate evalchemy-marin
-cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy
+cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy-marin
 
 source ~/secrets.env                                            # HF_TOKEN etc. (BEFORE HOME override)
 export HF_HOME=/leonardo_work/AIFAC_5C0_290/bfeuer00/data/hub

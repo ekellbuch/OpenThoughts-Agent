@@ -23,6 +23,7 @@ cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent
 - Code: `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent`
 - Harbor: `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/harbor`
 - MarinSkyRL: `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/MarinSkyRL` (the old `/code/SkyRL` clone was removed 2026-06-08)
+- evalchemy (standard / pass@k evals): `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy-marin` — the **single canonical** clone (remote `origin` = `marin-community/evalchemy`, branch `main`; editable-installed in the `evalchemy-marin` conda env; see ENVIRONMENT_MAP §2e). The redundant `/code/evalchemy` (stale `mlfoundations` clone) and its `/code/evalchemy-resume-test` linked worktree were removed 2026-06-18.
 - Data/HF cache: `/leonardo_work/AIFAC_5C0_290/bfeuer00/data/hub`
 - Experiments: `/leonardo_work/AIFAC_5C0_290/bfeuer00/experiments`
 
