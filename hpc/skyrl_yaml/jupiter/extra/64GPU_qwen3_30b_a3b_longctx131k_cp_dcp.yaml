@@ -466,6 +466,24 @@ container:
     # install (same single-file-bind precedent as the 80B guard-lift below). Patched
     # source is committed to the vLLM fork (penfever/working) for durability/rebuilds.
     - /e/scratch/jureap59/feuer1/vllm_patch_232/multiproc_executor.patched.py:/opt/vllm_build/vllm/v1/executor/multiproc_executor.py
+    # #232 FIX (R3 TRANSPORT, durable root-cause): move the large R3 routed_experts
+    # payload OFF the per-step worker_response_mq execute_model-deadline read path.
+    # The worker now publishes the small ModelRunnerOutput first (routed_experts_dict
+    # cleared, routed_experts_deferred=True), then the ~96MB-at-131k dict as a
+    # SEPARATE ROUTED_EXPERTS message on the same FIFO ring; the driver reads the
+    # small output under the execute_model deadline, then dequeues the big payload
+    # under VLLM_ROUTED_EXPERTS_SIDE_TIMEOUT_SECONDS (1200s default) and re-attaches
+    # it before the scheduler sees it. This stops the read-block starvation that the
+    # 160MB chunk floor alone did NOT (deaths at 42-79k output tokens -> 900s
+    # execute_model RPC timeout -> EngineCore death -> 1694-retry storm, never gs1).
+    # Scheduler/EngineCore/SkyRL path byte-identical -> NO consumer change. The patch
+    # spans 3 files (multiproc_executor.py producer+driver split, outputs.py
+    # routed_experts_deferred flag, envs.py the new side-timeout); all three are
+    # byte-identical drop-in overlays over the SIF base (verified md5 == fork
+    # 5d7319dd1 for the unpatched files). Committed to the vLLM fork (penfever/working
+    # 32a11afc8) for durability/rebuilds.
+    - /e/scratch/jureap59/feuer1/vllm_patch_232/outputs.patched.py:/opt/vllm_build/vllm/v1/outputs.py
+    - /e/scratch/jureap59/feuer1/vllm_patch_232/envs.patched.py:/opt/vllm_build/vllm/envs.py
     # NOTE: the 80B long-ctx config bind-mounts a vllm_config_guardlift.py because
     # ITS canonical SIF (rebuilt from the fork base) had the UNPATCHED guard. THIS
     # _cp SIF inherits the canonical SIF that was rebaked from penfever/working,
@@ -507,3 +525,11 @@ container:
     # APPTAINERENV_ so the forked vLLM workers inside the SIF see it.
     VLLM_MQ_MAX_CHUNK_BYTES_MB: 160
     APPTAINERENV_VLLM_MQ_MAX_CHUNK_BYTES_MB: 160
+    # #232 FIX (R3 TRANSPORT): timeout (s) the driver allows to dequeue the
+    # deferred ~96MB R3 routed_experts side-message AFTER the small per-step
+    # ModelRunnerOutput. This read is NOT governed by the execute_model deadline,
+    # so a slow/contended big transfer can no longer trip the EngineCore-killing
+    # execute_model RPC timeout. Generous by design; mirror to APPTAINERENV_ so the
+    # forked vLLM mp workers inside the SIF see it.
+    VLLM_ROUTED_EXPERTS_SIDE_TIMEOUT_SECONDS: 1200
+    APPTAINERENV_VLLM_ROUTED_EXPERTS_SIDE_TIMEOUT_SECONDS: 1200
