@@ -13,6 +13,11 @@ description: >-
 
 # monitor-job-tables
 
+> **Before pulling any metrics, read `.claude/ops/<cluster>/ops.md` first** (every sweep): it dictates HOW
+> to locate logs safely (`scontrol show job <id> -o` `StdOut=`/`%Z` — **never `find`/`du` on GPFS**), which
+> login node to use (login01 false-drains), and the debug-token caveats (`opCount dead` is benign noise, not
+> `EngineDeadError`). The extraction commands below assume you already know each job's real log path from ops.
+
 Report **every** active and recently-terminated job, **bucketed by type**, each in the format below.
 **Unify cross-cluster runs of the same type into ONE table** (one RL table spanning Jupiter+Leonardo,
 etc.). A separate table for jobs still filling their generation buffer (no metrics yet). The five

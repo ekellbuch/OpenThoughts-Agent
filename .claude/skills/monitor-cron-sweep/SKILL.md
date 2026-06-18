@@ -14,6 +14,15 @@ description: >-
 
 Deploy this each cron sweep to produce ONE comprehensive update across all active clusters.
 
+> **⚠ STEP 0 — READ `.claude/ops/<cluster>/ops.md` FIRST, every sweep, for each cluster you'll touch.**
+> Not optional and not "only when something breaks." The ops doc carries the binding gotchas that
+> repeatedly bite when skipped: the **GPFS `find`/`du` ban** (stat-walks stall the SSH session for minutes —
+> locate logs via `scontrol show job <id> -o` `StdOut=`/`%Z` + depth-1 `ls`, never `find /e/scratch`), the
+> **login01 fork-saturation false-drain** (re-check via login02/03/04), **inode allocations / cleanup-isn't-
+> done-until-rm'd**, the **SIF/Ray-actor/NCCL debugging tooling** (ptrace blocked → faulthandler; the
+> `opCount dead` false-positive), the **sig53/EDQUOT** traps, and shell idioms (`sacct -S now-Nhours`, simple
+> single-string ssh). Reading it first prevents re-deriving — or re-violating — these mid-sweep.
+
 > **⚠ Local clone = ground truth (CLAUDE.md §Always).** Any code/config fix this sweep performs — or
 > dispatches a subagent to perform (reactive relaunches, cleanups, eval-grid fixes) — is edited in the local
 > Mac checkout → commit → push → `git pull` on the cluster. **NEVER** hand-edit, `git commit`, or leave

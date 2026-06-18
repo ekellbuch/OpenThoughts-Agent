@@ -46,6 +46,11 @@ this skill is the durable source of truth: the canonical prompt below is what ge
 ```
 3-HOURLY CLUSTER SWEEP — clusters: jupiter, leonardo (active session only, run to max duration).
 
+STEP 0 (do this FIRST, every sweep): read `.claude/ops/<cluster>/ops.md` for EACH cluster you'll touch —
+it carries the binding gotchas that bite when skipped (GPFS `find`/`du` ban → locate logs via
+`scontrol show job <id> -o` StdOut/`%Z`; login01 false-drain → use login02/03/04; inode limits +
+cleanup-isn't-done-until-rm'd; SIF/NCCL debugging tooling; `sacct -S now-Nhours` / simple single-string ssh).
+
 Check the status of active, pending/queued, and recently-completed jobs on jupiter and leonardo. Gather via
 squeue (RUNNING) + sacct (terminal states since the last tick); VALIDATE squeue succeeded before trusting an
 empty result (false-drain from a saturated login node / slurmctld timeout — re-check via sacct or login02/03/04).
