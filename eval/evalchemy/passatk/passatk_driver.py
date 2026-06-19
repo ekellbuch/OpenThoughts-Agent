@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
 """
+RETIRED (2026-06-15, evalchemy Stage 2b). This standalone driver is SUPERSEDED by
+native pass@k built into evalchemy at the BaseBenchmark level:
+``python -m eval.eval --tasks <BENCH> --num_samples N --pass_at_k 1,8,32,128``
+(see ``eval/task.py`` ``generate_n_samples``/``aggregate_pass_at_k`` + the shared
+unbiased estimator promoted to ``eval/passk.py``, which this file re-implemented in
+``pass_at_k`` below). The native path generates N samples/problem, grades each with
+the benchmark's own grader, and aggregates with the same unbiased estimator.
+
+DO NOT delete yet: the in-flight pass@k SLURM array **46884224** is still running on
+this driver and must be allowed to finish; it re-runs on the native path afterward.
+New pass@k work should use the native ``--num_samples/--pass_at_k`` path, not this.
+
 pass@k driver for the Delphi #6279 pass@k grid (MATH500 / AIME24 / gsm8k).
 
 ONE (model, task) full pass@k eval per invocation. Mechanism (EVAL_CONVENTION §pass@k):
@@ -99,21 +111,35 @@ def main():
     ap.add_argument("--top-p", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--apply-chat-template", action="store_true")
-    # vLLM engine knobs (OOM headroom for the n=128 sampler warmup; defaults preserve prior behavior).
+    ap.add_argument("--evalchemy-root", default="/leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy")
+    ap.add_argument("--limit", type=int, default=0, help="debug: cap #problems")
     ap.add_argument("--gpu-mem-util", type=float, default=0.9,
-                    help="vLLM gpu_memory_utilization (lower => more headroom for the n=128 sampler warmup)")
+                    help="vLLM gpu_memory_utilization (lower => headroom for the n=128 sampler warmup)")
     ap.add_argument("--max-num-seqs", type=int, default=0,
-                    help="vLLM max_num_seqs (0 => leave vLLM default; lower => smaller sampler-warmup footprint)")
+                    help="vLLM max_num_seqs (0 => vLLM default; lower => smaller sampler-warmup footprint)")
     ap.add_argument("--enforce-eager", action="store_true",
                     help="vLLM enforce_eager=True (frees cudagraph-capture memory; robust for n=128 warmup)")
-    ap.add_argument("--evalchemy-root", default="/leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy-marin")
-    ap.add_argument("--limit", type=int, default=0, help="debug: cap #problems")
+
+    ap.add_argument("--offset", type=int, default=0,
+                    help="skip the first N problems (shard start); use with --limit to do a slice.")
+    ap.add_argument("--shard", action="store_true",
+                    help="write results as a SHARD (per-problem c counts in "
+                         "passatk_shard_off<offset>_lim<limit>.json) for offline merge by "
+                         "passatk_merge_shards.py, instead of the whole-cell passatk_results.json. "
+                         "Lets a wall-bound cell be split into slices (--offset/--limit) that each fit "
+                         "the 24h wall; the merge recomputes byte-identical whole-cell pass@k.")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
     done_marker = os.path.join(args.out, "passatk_results.json")
-    if os.path.exists(done_marker):
+    # Shard-mode is EXPLICIT (--shard); offset==0 + no --shard keeps legacy whole-cell semantics.
+    is_shard = args.shard
+    shard_marker = os.path.join(args.out, f"passatk_shard_off{args.offset}_lim{args.limit}.json")
+    if (not is_shard) and os.path.exists(done_marker):
         print(f"already done: {done_marker} exists, skipping", flush=True)
+        return
+    if is_shard and os.path.exists(shard_marker):
+        print(f"already done: {shard_marker} exists, skipping", flush=True)
         return
 
     sys.path.insert(0, args.evalchemy_root)
@@ -154,8 +180,12 @@ def main():
             return gsm8k_strict(text) == gold
         flex_grade = lambda gold, text: gsm8k_flex(text) == gold
 
-    if args.limit:
-        problems = problems[: args.limit]
+    # shard slice: --offset start, --limit count (count of 0 = to end). For a whole-cell run
+    # (offset=0) --limit keeps the legacy debug-cap meaning (head N).
+    if args.offset or args.limit:
+        start = args.offset
+        end = (args.offset + args.limit) if args.limit else len(problems)
+        problems = problems[start:end]
     n_problems = len(problems)
     print(f"[{args.task}] {n_problems} problems, n={args.n} samples each, repo={args.model_repo}", flush=True)
 
@@ -180,8 +210,8 @@ def main():
         llm_kwargs["max_num_seqs"] = args.max_num_seqs
     if args.enforce_eager:
         llm_kwargs["enforce_eager"] = True
-    print(f"[vLLM] engine kwargs: gpu_memory_utilization={args.gpu_mem_util} "
-          f"max_num_seqs={args.max_num_seqs or 'default'} enforce_eager={args.enforce_eager}", flush=True)
+    print("[vLLM] engine kwargs: gpu_memory_utilization=%s max_num_seqs=%s enforce_eager=%s" % (
+        args.gpu_mem_util, args.max_num_seqs or "default", args.enforce_eager), flush=True)
     llm = LLM(**llm_kwargs)
     sp = SamplingParams(n=args.n, temperature=args.temperature, top_p=args.top_p,
                         max_tokens=args.max_gen_toks, seed=args.seed)
@@ -220,6 +250,22 @@ def main():
             if k > n:
                 continue
             res[f"pass@{k}_flex"] = float(np.mean([pass_at_k(n, fc, k) for fc in flex_counts]))
+
+    if is_shard:
+        # write a SHARD: per-problem counts (+ flex) so a merge step can recompute pass@k over
+        # the union of shards. Do NOT write passatk_results.json (that's the merged whole-cell marker).
+        shard = {"task": args.task, "model_repo": args.model_repo, "n_samples": n,
+                 "offset": args.offset, "limit": args.limit, "n_problems": n_problems,
+                 "counts": [int(c) for c in counts]}
+        if args.task == "gsm8k":
+            shard["flex_counts"] = [int(c) for c in flex_counts]
+        with open(os.path.join(args.out, f"samples_off{args.offset}_lim{args.limit}.jsonl"), "w") as f:
+            for r in sample_rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        with open(shard_marker, "w") as f:
+            json.dump(shard, f, indent=2, ensure_ascii=False)
+        print("SHARD " + json.dumps({k: shard[k] for k in ("task","offset","limit","n_problems")}), flush=True)
+        return
 
     with open(os.path.join(args.out, "samples.jsonl"), "w") as f:
         for r in sample_rows:
