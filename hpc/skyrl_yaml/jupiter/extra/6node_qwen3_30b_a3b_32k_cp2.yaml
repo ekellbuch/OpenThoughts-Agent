@@ -418,7 +418,7 @@ rollout:
 # The three torch-2.11 multi-node env fixes (FlashInfer-sampler off, Triton libcuda
 # stub, NCCL P2P_DISABLE) are REQUIRED on this SIF and live in extra_env below.
 container:
-  sif: /e/scratch/jureap59/feuer1/containers/skyrl_megatron_vllm0202rc0_r3_cp_fixb2.sif
+  sif: /e/scratch/jureap59/feuer1/containers/skyrl_megatron_vllm0202rc0_r3_cp_fixb3.sif
   binds:
     - /e/scratch
     - /e/data1
