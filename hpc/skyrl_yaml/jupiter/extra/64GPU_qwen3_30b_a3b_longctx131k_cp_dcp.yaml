@@ -272,11 +272,12 @@ trainer:
       cp_rotate_method: allgather
       # R3 router-replay: recompute the EXACT rollout routing in the train forward
       # so the MoE grad matches the sampled experts (pi_old == pi_train for the MoE).
-      # Fed by enable_return_routed_experts=true (generator) via native R3 capture.
-      # #232 TP-placement-fix relaunch (2026-06-19): R3-ON production restored
-      # (reverted the #237 R3-OFF A/B). With the per-engine STRICT_PACK placement
-      # fix (SkyRL e5f0ff5), TP=4 is on-node so the prior wedge no longer applies.
-      moe_router_replay: true
+      # Fed by enable_return_routed_experts (generator) via native R3 capture.
+      # #232/#237 R3-OFF + placement-fix isolation (2026-06-19): DISABLED to match
+      # enable_return_routed_experts=false. The per-engine STRICT_PACK placement fix
+      # (SkyRL e5f0ff5) is active; this run isolates the placement fix from R3 capture
+      # (job 924245 R3-ON hit a 6th stall on the count-607744 R3/EP collective).
+      moe_router_replay: false
       moe_grouped_gemm: true
       ep_comm_backend: torch
   ref:
@@ -292,8 +293,8 @@ trainer:
       context_parallel_size: 2
       cp_style: ring_sdpa
       cp_rotate_method: allgather
-      # #232 TP-placement-fix relaunch (2026-06-19): R3-ON restored (matches policy).
-      moe_router_replay: true
+      # #232/#237 R3-OFF + placement-fix isolation (2026-06-19): DISABLED (matches policy).
+      moe_router_replay: false
       moe_grouped_gemm: true
       ep_comm_backend: torch
 
@@ -422,11 +423,14 @@ generator:
     # R3 router-replay capture flag — emits per-token expert routing over
     # /chat/completions (native on this 0.20.2rc0 SIF), consumed by the FSDP2
     # replay hook so the train forward replays the EXACT sampled experts.
-    # #232 TP-placement-fix relaunch (2026-06-19): R3-ON production restored
-    # (reverted the #237 R3-OFF A/B). The TP cross-node all-reduce wedge is now
-    # addressed by the per-engine STRICT_PACK placement fix (SkyRL e5f0ff5), so
-    # R3 capture can be re-enabled as the real production run.
-    enable_return_routed_experts: true
+    # #232/#237 R3-OFF + placement-fix isolation (2026-06-19): DISABLED. The TP
+    # cross-node all-reduce wedge is now fixed by the per-engine STRICT_PACK placement
+    # fix (SkyRL e5f0ff5, confirmed by job 924245: spans-across-nodes=0, custom-AR
+    # active). This run isolates that fix WITHOUT R3 capture, because the R3-ON relaunch
+    # (924245) then hit a distinct 6th stall on a count-607744 R3/EP-MoE collective. The
+    # earlier R3-off run (923995) still HAD the placement bug, so this is the first clean
+    # R3-OFF + placement-fix isolation.
+    enable_return_routed_experts: false
     # MUST be false under the RAY inference-engine backend (inference_engine_mp_backend:
     # false, option A). vLLM's R3 guard (_validate_return_routed_experts) rejects
     # --enable-return-routed-experts together with async scheduling. The mp/uniproc
@@ -504,11 +508,11 @@ container:
     APPTAINERENV_LIBRARY_PATH: /.singularity.d/libs
     # R3 + DCP>1 guard-lift (baked into the SIF; env var arms it). Mirror to
     # APPTAINERENV_ so the forked vLLM mp workers inside the SIF see it.
-    # #232 TP-placement-fix relaunch (2026-06-19): R3-ON production restored
-    # (reverted the #237 R3-OFF A/B). At DCP=1 this guard is inert, but restored to
-    # match the original R3-ON production config exactly.
-    VLLM_ALLOW_ROUTED_EXPERTS_DCP: 1
-    APPTAINERENV_VLLM_ALLOW_ROUTED_EXPERTS_DCP: 1
+    # #232/#237 R3-OFF + placement-fix isolation (2026-06-19): DISABLED. With
+    # enable_return_routed_experts=false the R3 path is inert, so this guard-lift is
+    # unneeded. At DCP=1 it was already a no-op; left out to match the R3-OFF config.
+    # VLLM_ALLOW_ROUTED_EXPERTS_DCP: 1
+    # APPTAINERENV_VLLM_ALLOW_ROUTED_EXPERTS_DCP: 1
     # Per-step model-execute RPC timeout (multiproc_executor.py:314; default 300s).
     # Under Option A (TP=8 split 8x{GPU:1} ACROSS 2 NODES) each decode-step TP all-
     # reduce crossed the IB fabric and a single 131k step exceeded even 900s, killing
