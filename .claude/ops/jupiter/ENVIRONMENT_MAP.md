@@ -92,10 +92,9 @@ All built off §2d (`vllm0202rc0_r3`, torch 2.11 / vLLM 0.20.2rc0) for the #232 
 - **`skyrl_megatron_vllm0202rc0_r3_cp_fixb3.sif`** (11.6 GB, 2026-06-19) — ⭐ **CANONICAL CP+R3 SIF.**
   `.vllm_commit = 4d167a4af` (`penfever/working` with the merged **#237** rank-symmetric R3-capture
   fix baked in). **Use this for ALL new CP and/or R3 runs** (the #232 cp2 / cp2_r3 rungs point here).
-- **`skyrl_megatron_vllm0202rc0_r3_cp_fixb2.sif`** (2026-06-19 00:28) — ⚠️ **DEPRECATED** (superseded by
-  `_cp_fixb3`; lacks the #237 fix). A cluster marker `_cp_fixb2.sif.DEPRECATED.txt` sits beside it.
-  **Do NOT launch new runs on it.** Retained ONLY while the cp2 job 926043 + its afterany restart chain
-  (926044-048) are alive (their rendered sbatch baked this path). **DELETE once that chain is terminal.**
+- `skyrl_megatron_vllm0202rc0_r3_cp_fixb2.sif` — ❌ **DELETED 2026-06-19** (~11.6 GB reclaimed). Superseded
+  by `_cp_fixb3` (lacked the #237 fix). Removed after the cp2 chain (926043-048) was cancelled at the
+  CP-MoE-forward-bug hold point; no live job referenced it. Use `_cp_fixb3` for all CP/R3 runs.
 - `_cp_fixb.sif` / `_cp.sif` (earlier 2026-06-19) — older CP-iteration SIFs, superseded by `_cp_fixb3`.
 - `_r3_fixb.sif` / `_r3_v2migration.sif` — non-CP R3 variants (NOT rebuilt with the #237 fix as of
   2026-06-19; a separate rebake is needed if a non-CP R3 run must carry the fix).
