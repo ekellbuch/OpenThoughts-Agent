@@ -80,8 +80,30 @@ Last verified: **2026-06-13** (versions probed live). Re-confirm with §4 if act
   references were **stale comments** (80B yaml line 536, `rl_launch_utils.py` overlay-logic
   comments, the Polaris `ALCC/96GPU_base_80b.yaml`) — the 80B yaml's *active* `container.sif`
   (line 599) is `skyrl_megatron_vllm_r3baked.sif`, and no running job referenced the old SIFs.
-- Only two SIFs remain in `containers/`: `skyrl_megatron_vllm0202rc0_r3.sif` (§2d) and
-  `skyrl_megatron_vllm_r3baked.sif` (§2c).
+- As of 2026-06-13 only two SIFs remained: `skyrl_megatron_vllm0202rc0_r3.sif` (§2d) and
+  `skyrl_megatron_vllm_r3baked.sif` (§2c). **SUPERSEDED — see §2g**: the CP-variant SIF chain
+  (`_cp` → `_cp_fixb` → `_cp_fixb2` → `_cp_fixb3`) plus `_r3_fixb` / `_r3_v2migration` were
+  built afterward off §2d for the #232 FSDP2-CP work.
+
+### 2g. CP-variant SIF chain — `skyrl_megatron_vllm0202rc0_r3_cp*.sif` (#232 FSDP2-CP) ⭐
+All built off §2d (`vllm0202rc0_r3`, torch 2.11 / vLLM 0.20.2rc0) for the #232 FSDP2 context-parallel
+(ring-SDPA) + R3 work. Path prefix: `/e/scratch/jureap59/feuer1/containers/`. Load like §2d
+(`apptainer exec --nv … python …`; same flashinfer/libcuda/attention-backend gotchas apply).
+- **`skyrl_megatron_vllm0202rc0_r3_cp_fixb3.sif`** (11.6 GB, 2026-06-19) — ⭐ **CANONICAL CP+R3 SIF.**
+  `.vllm_commit = 4d167a4af` (`penfever/working` with the merged **#237** rank-symmetric R3-capture
+  fix baked in). **Use this for ALL new CP and/or R3 runs** (the #232 cp2 / cp2_r3 rungs point here).
+- **`skyrl_megatron_vllm0202rc0_r3_cp_fixb2.sif`** (2026-06-19 00:28) — ⚠️ **DEPRECATED** (superseded by
+  `_cp_fixb3`; lacks the #237 fix). A cluster marker `_cp_fixb2.sif.DEPRECATED.txt` sits beside it.
+  **Do NOT launch new runs on it.** Retained ONLY while the cp2 job 926043 + its afterany restart chain
+  (926044-048) are alive (their rendered sbatch baked this path). **DELETE once that chain is terminal.**
+- `_cp_fixb.sif` / `_cp.sif` (earlier 2026-06-19) — older CP-iteration SIFs, superseded by `_cp_fixb3`.
+- `_r3_fixb.sif` / `_r3_v2migration.sif` — non-CP R3 variants (NOT rebuilt with the #237 fix as of
+  2026-06-19; a separate rebake is needed if a non-CP R3 run must carry the fix).
+- **KNOWN CP BUG (2026-06-19, separate from the SIF — it's a SkyRL fix):** Qwen3-**MoE** crashes in the
+  CP≥2 policy forward (`model_wrapper.py:668` passes a dict attention_mask that MoE's `create_causal_mask`
+  can't consume → `AttributeError: 'dict' has no attribute 'ndim'`). Dense-Qwen3 & CP1 are unaffected.
+  Fix is in the SkyRL host clone (`OpenThoughts-Agent/SkyRL/skyrl-train/skyrl_train/model_wrapper.py`),
+  NOT the SIF — editable install, no SIF rebuild. See `agent_logs/2026-06-19_cp2_forward_dict_ndim_bug.md`.
 
 ### 2f. `sft-qwen35` conda — Qwen3.5 SFT (and the other SFT/datagen condas)
 - **Path (Jupiter):** `/e/scratch/jureap59/feuer1/miniforge3/envs/sft-qwen35/`
