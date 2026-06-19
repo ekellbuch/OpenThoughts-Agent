@@ -833,6 +833,7 @@ def submit_eval(
     dependency: Optional[str] = None,
     remote_host: Optional[str] = None,
     remote_workdir: Optional[str] = None,
+    time_limit: Optional[str] = None,
 ) -> Optional[str]:
     """
     Submit a batch job (SLURM sbatch or PBS qsub). Returns job_id if successful.
@@ -868,6 +869,9 @@ def submit_eval(
                 export_parts.append(f"{k}={v}")
         export_flag = ",".join(export_parts)
         cmd = ["sbatch", f"--export={export_flag}"]
+        if time_limit:
+            # CLI --time overrides the #SBATCH --time directive in the script.
+            cmd.append(f"--time={time_limit}")
         if reservation:
             cmd.append(f"--reservation={reservation}")
         if dependency:
@@ -962,6 +966,10 @@ Examples:
     p.add_argument("--harbor-config", default=None,
                    help="Path to Harbor YAML config (passed as EVAL_HARBOR_CONFIG to sbatch)")
     p.add_argument("--reservation", default=os.getenv("EVAL_LISTENER_RESERVATION"), help="SLURM reservation name")
+    p.add_argument("--time-limit", default=os.getenv("EVAL_LISTENER_TIME_LIMIT"),
+                   help="SLURM walltime (e.g. 24:00:00); CLI --time overrides the sbatch #SBATCH --time "
+                        "directive (default 12:00:00). Use a longer limit for full-dataset agentic re-evals "
+                        "that don't finish all trials in 12h (esp. 32B at 16x timeout-multiplier).")
     p.add_argument("--max-jobs", type=int, default=None, help="Maximum number of SLURM jobs to submit in one iteration")
     p.add_argument("--batch-size", type=int, default=None,
                    help="Max concurrent jobs via sliding-window SLURM dependencies. "
@@ -1261,6 +1269,7 @@ def main() -> None:
                         dependency=job_dependency,
                         remote_host=args.remote_host,
                         remote_workdir=args.remote_workdir,
+                        time_limit=args.time_limit,
                     )
 
                     if slurm_id and slurm_id != "DRY_RUN":
