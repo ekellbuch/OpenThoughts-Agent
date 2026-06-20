@@ -42,41 +42,59 @@
 #   * SIF _cp_fixb3.sif carries the merged #237 rank-symmetric R3 capture epilogue
 #     (verified in-SIF: vllm 0.20.2rc0 editable @ /opt/vllm_build/vllm). R3-on supported.
 #
-# AXIS 3 — DCP (vLLM decode-context-parallel) ON, DCP=2:
-#   * generator.inference_engine_decode_context_parallel_size: 1 -> 2. DCP shards the
-#     131k KV cache across the dcp ranks during decode (reuses the TP GPUs; no extra GPUs).
-#   * SkyRL schema constraints (ppo_base_config.yaml:399): tp % dcp == 0; dcp <=
-#     tp/num_kv_heads. 4 KV heads -> dcp=2 REQUIRES TP=8 (2 <= 8/4 = 2). So the vLLM
-#     engine geometry is TP=8 (not the CP2 rung's TP=2 nor the parent's Option-B TP=4).
-#   * R3 + DCP>1: vLLM's _validate_return_routed_experts normally REJECTS R3 + DCP. The
-#     fork guard-lift (VLLM_ALLOW_ROUTED_EXPERTS_DCP=1, baked grep=2 in config/vllm.py)
-#     clears it. The DCP GQA-LSE fp32 fix is inherited (fixb2 -> fixb3 rebake swapped
-#     only the R3 capturer .py). R3+DCP also needs the RAY executor + async_scheduling=
-#     false (the mp executor cannot split the TP=8 atomic bundle across nodes, and Ray
-#     leaves async scheduling ON which would re-trip the R3 guard -> set it false).
+# AXIS 3 — DCP (vLLM decode-context-parallel): DCP=1 on Jupiter (see PLACEMENT FIX).
+#   * generator.inference_engine_decode_context_parallel_size = 1 (was 2). RATIONALE:
+#     the DCP ceiling is dcp <= tp/num_kv_heads (SkyRL _validate_dcp_cfg + vLLM init).
+#     This model has 4 KV heads, so dcp=2 REQUIRES tp >= 8. But a TP=8 engine needs 8
+#     GPUs co-located on ONE node, and Jupiter nodes have only 4 GPUs each. Under the
+#     RAY executor (mp_backend=false, mandatory for R3+DCP) a TP>1 engine is placed as
+#     a per-engine STRICT_PACK PG of tp x {GPU:1} bundles that MUST land on a single
+#     node -> a TP=8 STRICT_PACK PG is UNPLACEABLE on 4-GPU nodes (this is exactly what
+#     killed smoke 934104: "Failed to create placement group with 8 bundles (8.0 GPUs)
+#     ... No available node types can fulfill {'GPU': 8.0}"). The mp executor is no
+#     better — it requests ONE atomic {GPU:8} bundle per engine, equally unplaceable on
+#     a 4-GPU node. THEREFORE dcp=2/tp=8 is GEOMETRICALLY IMPOSSIBLE on Jupiter for this
+#     4-KV-head model at ANY node count; the only Jupiter-legal placement is tp=4 (one
+#     4-GPU node/engine), which forces the DCP ceiling 4/4=1 -> DCP=1.
+#   * This is precisely the user-approved "Option B" the 64GPU 131k parent landed on
+#     (2026-06-17): 8 engines x TP=4 (DCP=1) instead of 4 engines x TP=8 (DCP=2). The
+#     "Option A" (4 x TP8, DCP=2) was tried and DIED — first on cross-node-TP decode RPC
+#     timeout (jobs 908469/911361) and, post the per-engine STRICT_PACK placement fix,
+#     now on the placement group itself (934104). DCP=1/TP=4 is the proven-placeable
+#     geometry for this exact model on this exact cluster.
+#   * With DCP=1 the R3+DCP>1 guard path is MOOT (no DCP): VLLM_ALLOW_ROUTED_EXPERTS_DCP
+#     is harmless-but-unneeded, the DCP GQA-LSE fp32 parity concern no longer applies.
+#     R3 capture itself is UNCHANGED (still ON). R3 still needs the RAY executor +
+#     async_scheduling=false (the ray executor leaves async scheduling ON, which trips
+#     vLLM's R3 guard _validate_return_routed_experts -> keep it false).
 #
-#   *** KNOWN RISK (read before launching) ***: TP=8 spans 2 of Jupiter's 4-GPU nodes,
-#   so the per-decode-step TP all-reduce crosses the IB fabric. The 64GPU 131k config's
-#   "Option A" (4 engines x TP8) DIED on exactly this (cross-node-TP decode RPC timeout,
-#   jobs 908469/911361); its "Option B" dropped to DCP=1/TP=4 (one 4-GPU node/engine, no
-#   cross-node decode) to dodge it. THIS config deliberately runs DCP=2/TP=8 to exercise
-#   REAL decode-KV sharding at 131k. Mitigations carried from the 64GPU config:
+#   *** NOTE — DCP axis reshaped, NOT dropped from intent ***: this rung still exercises
+#   131k + CP=2 ring-SDPA + R3 routed-experts capture (3 of the 4 axes, fully ON). The
+#   DCP axis is pinned to its ONLY Jupiter-placeable value (DCP=1) because the cluster's
+#   4-GPU nodes cannot host the tp=8 engine that dcp>=2 mathematically requires for a
+#   4-KV-head model. DCP=2 KV-sharding at 131k can only be validated on a >=8-GPU-node
+#   cluster (or a model with <=2 KV heads). With DCP=1 a TP=4 engine holds the full 131k
+#   KV on its TP shard (~3.2 GB/131k-seq/GPU vs ~1.6 GB under DCP=2), so max_num_seqs is
+#   kept conservative. Mitigations carried from the 64GPU Option-B config:
 #   disable_custom_all_reduce=true, VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=900, the NCCL
-#   flight-recorder observability block. IF the smoke hangs/times out at decode -> the
-#   de-risked fallback is Option B (DCP=1, TP=4, 8 engines), which has reached generation
-#   cleanly before. This combo (R3 + DCP=2) has NOT itself been end-to-end cluster-validated.
+#   flight-recorder observability block. The R3-ON + 131k + CP=2 stack on this geometry
+#   has NOT itself been end-to-end cluster-validated (that is what this smoke is for).
 #
 # -----------------------------------------------------------------------------
 # GPU / NODE SIZING (16 nodes x 4 GH200 = 64 GPUs)  [colocate_all: false]
 # -----------------------------------------------------------------------------
-# MESH MATH.
+# MESH MATH.  [ref is INERT: use_kl_loss=false -> no RefWorker built -> ref_num_nodes
+#  consumes 0 GPUs; only policy (32) + inference (32) actually allocate. 32+32=64.]
 #   Policy/Ref FSDP : EP=8 x FSDP=2 x CP=2 = 32 policy GPU = 8 nodes
 #                     (identical to the 64GPU 131k parent's policy mesh).
-#   Generation vLLM : 4 engines x TP=8, DCP=2 = 32 gen GPU = 8 nodes
-#                     (DCP=2 reuses the 8 TP GPUs per engine; no extra GPUs).
+#   Generation vLLM : 8 engines x TP=4, DCP=1 = 32 gen GPU = 8 nodes
+#                     (Option B: TP=4 = exactly one 4-GPU node/engine, on-node NVLink
+#                      decode all-reduce, no cross-node TP. Was 4 x TP8/DCP2 = unplaceable
+#                      on Jupiter's 4-GPU nodes -> reshaped to 8 x TP4/DCP1, same 32 GPU.)
 #                     ----------------------------------------------------
 #                                              TOTAL = 64 GPU = 16 nodes.
 #   LAUNCH MUST PASS --num_nodes 16.
+#   BUDGET CHECK: policy 32 + ref 0 (inert) + inference 32 = 64 <= 64. FITS.
 #
 # Why 16 nodes (the 32k rung was 6): 131k = 4x the 32k sequence -> ~4x activation+KV
 #   memory. The 64GPU 131k parent (same model family, same CP=2) established 8 policy
@@ -89,10 +107,9 @@
 #     (CP=2 shards the SEQUENCE dim, not the expert dim, so the MoE guard is unchanged.)
 #   * EP x FSDP x CP = 8 x 2 x 2 = 32 = policy GPU -> VALID.
 #   * CP G4 divisibility: padded seq_len % (2*cp)=4 == 0; 131072 % 4 == 0 -> OK.
-#   * vLLM TP=8 divides 32 attn heads (4/GPU) AND 128 experts (16/GPU). 4 KV heads <
-#     TP=8 -> the KV heads are REPLICATED across the 8/4=2 dcp-shard groups, which IS
-#     the DCP=2 KV layout. tp % dcp = 8 % 2 = 0; dcp=2 <= tp/num_kv_heads = 8/4 = 2 ->
-#     DCP=2 LEGAL.
+#   * vLLM TP=4 divides 32 attn heads (8/GPU), 4 KV heads (1/GPU, no replication, valid
+#     GQA), AND 128 experts (32/GPU). DCP=1 -> dcp <= tp/num_kv_heads = 4/4 = 1 -> LEGAL.
+#     (8 engines x TP=4 = 32 gen GPU; each TP=4 engine fits one whole 4-GPU node.)
 #   * Batch (validate_batch_sizes / fully_async): train_batch_size == policy_mini_batch_
 #     size == 64 (fully-async assert); 64 >= policy_dp_size; 64 % 64 == 0 -> OK.
 #
@@ -354,25 +371,27 @@ generator:
   timeout_multiplier: 1.0
   model_dtype: bfloat16
 
-  # AXIS 3 (DCP): TP=8 per engine — REQUIRED for DCP=2 (dcp <= tp/num_kv_heads = 8/4 =
-  # 2). TP=8 divides 32 attn heads (4/GPU) and 128 experts (16/GPU). 4 engines x TP=8 =
-  # 32 gen GPU = 8 nodes. NOTE: TP=8 spans 2 of Jupiter's 4-GPU nodes -> cross-node-TP
-  # decode all-reduce over IB (the Option-A geometry that died on RPC timeout in the
-  # 64GPU config; see header KNOWN RISK + the timeout/observability mitigations below).
-  inference_engine_tensor_parallel_size: 8
-  # 4 TP=8 engines = 32 inference GPU = 8 nodes. Set EXPLICITLY (not null): the
-  # launcher's (num_nodes*gpus)//tp = 16*4//8 = 8 derivation would be WRONG (8 of the
-  # 16 nodes are policy-only); 4 is the authoritative engine count.
-  num_inference_engines: 4
+  # AXIS 3 (DCP, Option B): TP=4 per engine. TP=4 = exactly ONE 4-GPU node/engine, so
+  # the per-engine STRICT_PACK PG (ray backend) places cleanly on a single node and the
+  # decode TP all-reduce is on-node NVLink (no cross-node IB). TP=4 divides 32 attn heads
+  # (8/GPU), 4 KV heads (1/GPU, no replication), 128 experts (32/GPU). DCP=1 (below) ->
+  # the dcp<=tp/num_kv_heads=4/4=1 ceiling is satisfied. (Was TP=8 for DCP=2; TP=8 is
+  # UNPLACEABLE on Jupiter's 4-GPU nodes -> killed smoke 934104. See header AXIS 3.)
+  inference_engine_tensor_parallel_size: 4
+  # 8 TP=4 engines = 32 inference GPU = 8 nodes. Set EXPLICITLY (not null): the
+  # launcher's (num_nodes*gpus)//tp = 16*4//4 = 16 derivation would be WRONG (8 of the
+  # 16 nodes are policy-only); 8 is the authoritative engine count.
+  num_inference_engines: 8
 
   inference_engine_expert_parallel_size: 1
 
-  # AXIS 3 (DCP=2): decode-context-parallel shards the 131k KV cache across the 2 dcp
-  # ranks during decode (reuses the TP=8 GPUs; no extra GPUs). Halves per-rank KV at
-  # 131k. Requires tp % dcp == 0 (8%2=0) and dcp <= tp/num_kv_heads (2 <= 8/4=2), the
-  # fork DCP GQA-LSE fp32 fix (baked in fixb3), and — with R3 ON — the guard-lift
-  # VLLM_ALLOW_ROUTED_EXPERTS_DCP=1 (extra_env) to clear vLLM's R3+DCP rejection.
-  inference_engine_decode_context_parallel_size: 2
+  # AXIS 3 (DCP=1, Option B): decode-context-parallel DISABLED. dcp=2 would require
+  # tp>=8 (dcp<=tp/num_kv_heads, 4 KV heads), and a TP=8 engine cannot be placed on a
+  # 4-GPU Jupiter node (the 934104 placement-group failure). DCP=1 lifts the ceiling so
+  # TP=4 (one node/engine) is legal. Cost: the full 131k KV sits on the TP shard alone
+  # (~3.2 GB/131k-seq/GPU vs ~1.6 GB under DCP=2) -> max_num_seqs kept conservative
+  # below. With DCP=1 the R3+DCP guard-lift env is moot (harmless-but-unneeded).
+  inference_engine_decode_context_parallel_size: 1
 
   # RAY executor backend (R3 + DCP path). The mp backend requests ONE atomic {GPU:tp}
   # bundle per engine, which cannot place a TP=8 engine across 2 nodes; the ray backend

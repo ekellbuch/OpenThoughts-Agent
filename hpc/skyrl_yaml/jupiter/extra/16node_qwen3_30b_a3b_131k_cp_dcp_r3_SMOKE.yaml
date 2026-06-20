@@ -5,9 +5,10 @@
 #   16node_qwen3_30b_a3b_131k_cp_dcp_r3.yaml whose ONLY job is to exercise the
 #   FULL mesh + DCP + R3 init at 131k WITHOUT waiting for a slow 131k training step:
 #     * the EP8 x FSDP2 x CP2 = 32 policy-GPU FSDP mesh builds at 131k,
-#     * the 4 x TP8 x DCP2 vLLM engines bind (incl. the cross-node-TP decode geometry),
-#     * R3 routed-experts capture initializes (the #237 rank-symmetric epilogue),
-#     * the DCP=2 KV-cache sharding + R3+DCP guard-lift coexist at engine bind.
+#     * the 8 x TP4 (DCP=1) vLLM engines bind (Option-B geometry: one 4-GPU node/engine,
+#       on-node NVLink decode all-reduce — the only Jupiter-placeable geometry for this
+#       4-KV-head model; TP=8/DCP=2 is unplaceable on the 4-GPU nodes and killed 934104),
+#     * R3 routed-experts capture initializes (the #237 rank-symmetric epilogue).
 #   We want a CLEAN engine + mesh + DCP + R3 init, NOT a full training step (131k
 #   steps take hours). Monitor ~30 min for the bind/init, not gs1.
 #
@@ -19,9 +20,10 @@
 #     allgather, attn_backend=sdpa, flash_attn=false, use_sample_packing=false,
 #     gradient_checkpointing=true.
 #   * R3 ON: enable_return_routed_experts=true, moe_router_replay=true, R3 transport env.
-#   * DCP=2 ON: inference_engine_decode_context_parallel_size=2, TP=8, RAY executor,
-#     async_scheduling=false, VLLM_ALLOW_ROUTED_EXPERTS_DCP=1.
-#   * 16 nodes / 64 GPU placement (8 policy + 8 vLLM), fixb3 SIF + all extra_env.
+#   * DCP=1 (Option B): inference_engine_decode_context_parallel_size=1, TP=4, 8 engines,
+#     RAY executor, async_scheduling=false. (DCP=2/TP=8 is geometrically unplaceable on
+#     Jupiter's 4-GPU nodes for this 4-KV-head model — see the production YAML AXIS 3.)
+#   * 16 nodes / 64 GPU placement (8 policy + 8 vLLM-engine), fixb3 SIF + all extra_env.
 #
 # MADE FAST (rollout + step count only — the init/mesh/DCP/R3 code is unaffected):
 #   * train_batch_size 64 -> 32, policy_mini_batch_size 64 -> 32, eval_batch_size 32.
@@ -250,12 +252,16 @@ generator:
   timeout_multiplier: 1.0
   model_dtype: bfloat16
 
-  inference_engine_tensor_parallel_size: 8
-  num_inference_engines: 4
+  # Option B geometry: TP=4 (one 4-GPU node/engine -> placeable under ray STRICT_PACK),
+  # 8 engines = 32 gen GPU = 8 nodes. (Was TP=8/4-engines/DCP=2 -> unplaceable on the
+  # 4-GPU nodes; that is what failed smoke 934104.)
+  inference_engine_tensor_parallel_size: 4
+  num_inference_engines: 8
 
   inference_engine_expert_parallel_size: 1
 
-  inference_engine_decode_context_parallel_size: 2
+  # DCP=1: dcp=2 needs tp>=8 (4 KV heads), and TP=8 cannot place on a 4-GPU node.
+  inference_engine_decode_context_parallel_size: 1
 
   inference_engine_mp_backend: false
 
