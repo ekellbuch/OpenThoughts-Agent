@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, asdict, field
@@ -442,12 +443,47 @@ def _fix_task_permissions(task_dir: Path, verbose: bool = True) -> None:
     Runs chmod -R a+rX on the directory to make all files readable
     and directories traversable.
 
+    IDEMPOTENCY GUARD (added 2026-06-19): the recursive ``chmod -R a+rX`` over a
+    large task tree (e.g. the 5000-task ``exp_rpt_pymethods2test-large``, ~100K
+    inodes) issues ~100K GPFS metadata WRITES on EVERY launch, even when the tree
+    is already world-readable from a prior successful launch. Under GPFS metadata
+    contention that recursive chmod has wedged the launcher in uninterruptible
+    D-state for 35+ min before ``sbatch`` is ever reached. So we first do a SINGLE
+    cheap ``stat`` of the top-level dir (fast even under contention, ~0.004s) and
+    SHORT-CIRCUIT when its perms already satisfy ``a+rX`` for a directory
+    (group+other readable AND group+other traversable). We only skip when perms are
+    VERIFIED already-correct; any dir that genuinely needs the fix (top-level bits
+    missing, or not yet stat-able) still gets the full recursive chmod. This is a
+    conservative top-level check: if the recursive walk were ever interrupted it
+    could leave inner files unfixed, but in practice the tree is written atomically
+    by extraction and re-chmod'd as a unit, so a correct top-level dir implies a
+    correct tree (and the prior-launch path proves it). NEVER use find/du here.
+
     Args:
         task_dir: Path to task directory.
         verbose: Whether to print status messages.
     """
     if not task_dir.exists():
         return
+
+    # Cheap idempotency probe: a single stat on the top-level dir. The bits
+    # `chmod a+rX` sets on a DIRECTORY are S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH (the
+    # owner already has them post-extraction). If all four are present, the
+    # recursive chmod would be a ~100K-write no-op -> skip it.
+    _RX_BITS = stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
+    try:
+        mode = task_dir.stat().st_mode
+        if (mode & _RX_BITS) == _RX_BITS:
+            if verbose:
+                print(f"[rl_launch_utils] Permissions already a+rX on top-level "
+                      f"dir, skipping recursive chmod: {task_dir}")
+            return
+    except OSError as e:
+        # stat failed (race / transient FS) -> fall through to the chmod, which
+        # is the safe, correctness-preserving default.
+        if verbose:
+            print(f"[rl_launch_utils] stat probe failed on {task_dir} ({e}); "
+                  f"running recursive chmod to be safe.")
 
     if verbose:
         print(f"[rl_launch_utils] Fixing permissions on: {task_dir}")
