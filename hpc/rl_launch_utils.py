@@ -173,6 +173,22 @@ def build_apptainer_prefix(
     # later. Defaults to offline but honors an explicit host override.
     wandb_mode = os.environ.get("WANDB_MODE", "offline")
     prefix.extend(["--env", f"WANDB_MODE={wandb_mode}"])
+    # Raise Ray's raylet-startup grace window. On busy 6-node GH200 allocations
+    # the raylet (head AND worker) intermittently fails to finish registering
+    # with the local GCS inside Ray's default 30s (`RAY_raylet_start_wait_time_s`),
+    # so `ray start` aborts with "The current node timed out during startup ...
+    # the GCS has become overloaded" → the driver then loops on
+    # "Failed to connect to GCS ... within 5 seconds" until the 600s wait window
+    # expires (job 930367, #232 cp2). This is slow-to-form, NOT unreachable — the
+    # driver runs ON the head node and still can't reach its own 6379. Ray's own
+    # error message recommends raising this config. apptainer passes it via --env
+    # so it reaches the in-SIF `ray start`; host `env KEY=val` prefixes do NOT
+    # cross the container boundary (and the proxychains path drops ray_env_vars
+    # entirely), making this --env injection the only point that reaches every
+    # ray invocation (head, worker, wait/poll scripts) uniformly. Honors an
+    # explicit host override.
+    raylet_wait = os.environ.get("RAY_raylet_start_wait_time_s", "120")
+    prefix.extend(["--env", f"RAY_raylet_start_wait_time_s={raylet_wait}"])
     prefix.append(sif)
     return prefix
 
@@ -1500,14 +1516,21 @@ class RLJobRunner:
             subprocess.run(
                 ["bash", "-c", script],
                 env=env,
-                timeout=600,
+                # Bounded short (120s, was 600s): on a Ray-bringup failure the
+                # node raylets are already dead/unresponsive, so the worker-log
+                # rsync/collector just blocks until this timeout — adding a full
+                # extra 10min of wedged-allocation on top of the failed bringup
+                # (job 930367 hung ~1h holding 6 nodes while its chain queued
+                # behind it). 120s is ample to grab whatever logs are reachable;
+                # the EXIT-trap cleanup_ray_logs runs again afterward as a belt.
+                timeout=120,
                 stdout=sys.stdout,
                 stderr=subprocess.STDOUT,
             )
             print("[RLJobRunner] Crash-time Ray log preservation complete.", flush=True)
         except subprocess.TimeoutExpired:
             print(
-                "[RLJobRunner] Crash-time Ray log preservation timed out (600s); continuing.",
+                "[RLJobRunner] Crash-time Ray log preservation timed out (120s); continuing.",
                 flush=True,
             )
         except Exception as e:
