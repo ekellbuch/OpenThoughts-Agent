@@ -50,6 +50,30 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 # ---------------------------------------------------------------------------
+# Cross-cluster defaults
+# ---------------------------------------------------------------------------
+# This listener is the single canonical agentic-eval entrypoint for every
+# no-internet HPC cluster. The only things that differ per cluster are the
+# sbatch template + the log dir; everything else (dedup, DB pending-row,
+# size-based harbor-config selection, pre-download, proxy-via-sbatch) is
+# cluster-agnostic. `--cluster <name>` selects these defaults; an explicit
+# --sbatch-script / --log-dir (or the EVAL_LISTENER_SBATCH / EVAL_LISTENER_LOG_DIR
+# env vars) still wins. Default is "jupiter" so the live Jupiter campaign's
+# invocation (`python eval/jupiter/unified_eval_listener.py ...`, no --cluster)
+# is byte-for-behavior identical to before this flag existed.
+CLUSTER_DEFAULTS: Dict[str, Dict[str, str]] = {
+    "jupiter": {
+        "sbatch_script": "eval/jupiter/unified_eval_harbor.sbatch",
+        "log_dir": "eval/jupiter/logs",
+    },
+    "leonardo": {
+        "sbatch_script": "eval/leonardo/unified_eval_harbor.sbatch",
+        "log_dir": "eval/leonardo/logs",
+    },
+}
+DEFAULT_CLUSTER = os.getenv("EVAL_LISTENER_CLUSTER", "jupiter")
+
+# ---------------------------------------------------------------------------
 # Imports from database/unified_db
 # ---------------------------------------------------------------------------
 from database.unified_db.utils import (  # noqa: E402
@@ -936,11 +960,22 @@ Examples:
     g.add_argument("--preset", choices=list(PRESETS.keys()), help="Use a preset benchmark configuration")
     g.add_argument("--datasets", help="Comma/space separated list of HF dataset repos")
 
-    # Sbatch
+    # Cluster selection (sets per-cluster sbatch/log-dir defaults)
+    p.add_argument(
+        "--cluster",
+        choices=sorted(CLUSTER_DEFAULTS.keys()),
+        default=DEFAULT_CLUSTER,
+        help="Target cluster — selects the default --sbatch-script and --log-dir "
+             "for that cluster (jupiter -> eval/jupiter/..., leonardo -> eval/leonardo/...). "
+             "An explicit --sbatch-script / --log-dir (or EVAL_LISTENER_SBATCH / "
+             "EVAL_LISTENER_LOG_DIR) still overrides. Default: %(default)s.",
+    )
+
+    # Sbatch (default None -> resolved from --cluster post-parse; EVAL_LISTENER_SBATCH wins)
     p.add_argument(
         "--sbatch-script",
-        default=os.getenv("EVAL_LISTENER_SBATCH", "eval/jupiter/unified_eval_harbor.sbatch"),
-        help="Path to sbatch script (default: %(default)s)",
+        default=os.getenv("EVAL_LISTENER_SBATCH"),
+        help="Path to sbatch script (default: per --cluster). EVAL_LISTENER_SBATCH overrides.",
     )
 
     # Timing
@@ -999,7 +1034,9 @@ Examples:
     p.add_argument("--pre-download", action="store_true",
                    help="Pre-download all model weights on login node before submitting jobs. "
                         "Essential for no-internet compute nodes (Leonardo, Jupiter).")
-    p.add_argument("--log-dir", default=os.getenv("EVAL_LISTENER_LOG_DIR", "eval/jupiter/logs"))
+    # --log-dir default None -> resolved from --cluster post-parse; EVAL_LISTENER_LOG_DIR wins
+    p.add_argument("--log-dir", default=os.getenv("EVAL_LISTENER_LOG_DIR"),
+                   help="Listener log dir (default: per --cluster). EVAL_LISTENER_LOG_DIR overrides.")
 
     return p
 
@@ -1014,8 +1051,20 @@ def main() -> None:
     args = parser.parse_args()
     _VERBOSE = args.verbose
 
+    # Resolve per-cluster defaults for sbatch script + log dir. Precedence:
+    # explicit --sbatch-script / --log-dir (or their EVAL_LISTENER_* env vars,
+    # already folded into the argparse default) > --cluster default. This keeps
+    # the live Jupiter campaign (no --cluster -> "jupiter") behavior-identical
+    # while letting `--cluster leonardo` retarget the whole pipeline.
+    _cluster_defaults = CLUSTER_DEFAULTS[args.cluster]
+    if not args.sbatch_script:
+        args.sbatch_script = _cluster_defaults["sbatch_script"]
+    if not args.log_dir:
+        args.log_dir = _cluster_defaults["log_dir"]
+
     _load_secrets()
     _init_logging(args.log_dir)
+    log(f"Cluster: {args.cluster} (sbatch={args.sbatch_script}, log_dir={args.log_dir})")
 
     # Resolve datasets
     datasets: List[str] = []
