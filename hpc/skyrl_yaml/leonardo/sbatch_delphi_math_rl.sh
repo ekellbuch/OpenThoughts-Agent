@@ -97,6 +97,18 @@ export CONDA_BIN=$WORK/miniforge3/envs/otagent/bin
 export RAY_USAGE_STATS_ENABLED=0
 export VENV_PY=$VENV/bin/python
 
+# RAY socket-path guard (2026-06-20 infra fix). Ray builds an AF_UNIX socket at
+# $RAY_TMPDIR/.../session_<ts>_<pid>/sockets/plasma_store, which must stay <107 bytes.
+# The leonardo.env dotenv exports RAY_TMPDIR=$WORK/jobtmp/$ID/ray (a LONG $WORK path);
+# singularity does NOT --cleanenv, so that long var LEAKS into the container and Ray's
+# socket path blew past 107 → `OSError: AF_UNIX path length cannot exceed 107 bytes`,
+# which FAILED all 4 D3/D4 requeue cells (47470111-114) at ~3 min. (The 3 D1 cells that
+# happened to be submitted from a shell without RAY_TMPDIR set survived on Ray's default.)
+# FIX: pin a SHORT node-local RAY_TMPDIR (/tmp/...; ~79 bytes incl. the session+socket
+# suffix) and pass it EXPLICITLY into the --env block so it overrides any leaked value.
+export RAY_TMPDIR=/tmp/ray_${SLURM_JOB_ID:-$$}
+mkdir -p "$RAY_TMPDIR" || true
+
 # ---------------------------------------------------------------------------
 # LOAD-BEARING (RL_CONVENTION.md §2.3): delphi_v0 chat-template override.
 # Ported verbatim from delphi_eval.sbatch §"delphi chat-template override". The SFT
@@ -167,7 +179,7 @@ singularity exec --nv \
   --bind /leonardo_work:/leonardo_work,/leonardo_scratch:/leonardo_scratch \
   --pwd "$MARIN" \
   --env HOME=$CONTAINER_HOME,PATH=$CONDA_BIN:/usr/local/bin:/usr/bin:/bin,CC=$CONDA_BIN/gcc,CXX=$CONDA_BIN/g++ \
-  --env HF_HUB_OFFLINE=1,TRANSFORMERS_OFFLINE=1,HF_HOME=$HF_HOME,HF_HUB_CACHE=$HF_HUB_CACHE,WANDB_MODE=offline,VLLM_CACHE_ROOT=$VLLM_CACHE_ROOT,TRITON_CACHE_DIR=$TRITON_CACHE_DIR,FLASHINFER_WORKSPACE_BASE=$FLASHINFER_WORKSPACE_BASE,RAY_USAGE_STATS_ENABLED=0,DATA_DIR=$DATA_DIR,MODEL_PATH=$MODEL_PATH,NUM_GPUS=$NUM_GPUS,CKPT_DIR=$CKPT_DIR,RUN_NAME=$RUN_NAME,ENV_CLASS=$ENV_CLASS,LOGGER=console,VENV_PY=$VENV_PY \
+  --env HF_HUB_OFFLINE=1,TRANSFORMERS_OFFLINE=1,HF_HOME=$HF_HOME,HF_HUB_CACHE=$HF_HUB_CACHE,WANDB_MODE=offline,VLLM_CACHE_ROOT=$VLLM_CACHE_ROOT,TRITON_CACHE_DIR=$TRITON_CACHE_DIR,FLASHINFER_WORKSPACE_BASE=$FLASHINFER_WORKSPACE_BASE,RAY_USAGE_STATS_ENABLED=0,RAY_TMPDIR=$RAY_TMPDIR,TMPDIR=$RAY_TMPDIR,DATA_DIR=$DATA_DIR,MODEL_PATH=$MODEL_PATH,NUM_GPUS=$NUM_GPUS,CKPT_DIR=$CKPT_DIR,RUN_NAME=$RUN_NAME,ENV_CLASS=$ENV_CLASS,LOGGER=console,VENV_PY=$VENV_PY \
   "$SANDBOX" bash "$CFG/run_delphi_math_rl.sh" "${HYDRA_ARGS[@]}" \
   trainer.resume_mode=null trainer.ckpt_path="$CKPT_DIR" trainer.export_path="$CKPT_DIR/exports"
 
