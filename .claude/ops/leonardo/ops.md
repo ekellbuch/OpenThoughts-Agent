@@ -162,6 +162,38 @@ straight from the login node (login has direct internet, no kill policy).
 On Leonardo the same one-liner WILL die at ~100 s and leave a partial
 upload — use the sbatch template above instead.
 
+## Agentic Harbor eval IS feasible on Leonardo compute (via the SOCKS5 proxy) — 2026-06-20
+
+**Agentic terminus-2 eval runs end-to-end on Leonardo *compute* nodes** (no native internet) through the
+existing `eval/leonardo/start_proxy_tunnel.sh` SOCKS5 forward (compute→login05 dynamic SSH `-D` +
+proxychains4). Verified 2026-06-20 with a real smoke (job 47436018, Qwen3-1.7B × tb2 subset → Supabase
+`sandbox_jobs` row `d9eef9e5-525b-476a-b4bd-f8937bf1588b` `Finished`, 9 trials, 0 errors, traces on HF,
+benchmark auto-registered).
+
+**Why eval works on Leonardo but agentic RL does NOT:** for terminus-2 the LLM call is made by the
+**orchestrator process on the compute node** to the locally-served vLLM (`api_base=http://$MASTER_ADDR:8000`);
+the Daytona sandbox only runs shell commands and never reaches the model. So the only outbound traffic is
+orchestrator→Daytona-API + →HF, both carried by the proxy — **no pinggy / served-model tunnel needed.** The
+older "Daytona infeasible on Leonardo" statement is **eval-vs-RL specific** (RL's heavier cross-node/Daytona
+coupling), not absolute.
+
+**Single cross-cluster entrypoint:** `eval/jupiter/unified_eval_listener.py` now takes
+`--cluster {jupiter,leonardo}` (a `CLUSTER_DEFAULTS` table picking the per-cluster sbatch + log-dir;
+`EVAL_LISTENER_CLUSTER` / `EVAL_LISTENER_SBATCH` / `EVAL_LISTENER_LOG_DIR` env vars still win). **Default is
+`jupiter`, byte-for-behavior identical to the pre-flag invocation — the live Jupiter campaign is unaffected.**
+To launch a Leonardo agentic-eval campaign (in tmux on Leonardo, after the preamble):
+```bash
+python eval/jupiter/unified_eval_listener.py --cluster leonardo --preset <tb2|swebench|v2|...> \
+  --require-priority-list --priority-file <list> --pre-download --once --verbose
+```
+
+**Load-bearing gotcha:** `eval/leonardo/unified_eval_harbor.sbatch` MUST pass `--jobs-dir "$EVAL_JOBS_DIR"`
+to harbor (fixed 2026-06-20, commit `b56f9c1c`) — without it harbor writes trials to the wrong dir and the
+Supabase auto-register silently no-ops. Eval auto-registration to Supabase is BY DESIGN (the
+`enable_db_registration:false` guardrail applies to RL/SFT *training* YAMLs, not evals). Depends on the
+`~/.ssh/leonardo_daytona` step-ca cert being fresh (~12h; refresh per the pre-flight above) — a stale cert
+makes the proxy fail `Permission denied (publickey)`.
+
 ## vLLM 0.20.2rc0 cross-cluster twin — build decision (2026-06-16)
 
 Leonardo's analogue of Jupiter's prod `skyrl_megatron_vllm0202rc0_r3.sif` (vLLM fork
