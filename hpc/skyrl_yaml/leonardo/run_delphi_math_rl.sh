@@ -23,10 +23,23 @@ set -x
 : "${INFERENCE_BACKEND:=vllm}"
 : "${VENV_PY:=python}"
 
-# --- GOLD knobs (RL_CONVENTION.md §3); override only for a FLAGGED fallback cell ---
-: "${LR:=1.0e-5}"                      # GRPO knee (accuracy_grid winner)
+# --- FIX-recipe knobs (2026-06-20 entropy-explosion stabilization; supersedes the
+#     original RL_CONVENTION §3 GOLD defaults for the Delphi math cells). The original
+#     gold (lr=1e-5, use_entropy_loss=true coef=+0.01, max_grad_norm=1.0) drove a
+#     `policy/policy_entropy` EXPLOSION 0.13→~11.5 / reward→−1.0 on D1/D3/D4 (5/6 math
+#     cells diverged; D2/ifeval was healthy). The +0.01 entropy BONUS (loss subtracts
+#     entropy → pushes it UP) was the explosion driver. The stabilization sweep (cell
+#     gc05_lr3e6_e0, jobid 47447528) ran the full 101 steps with entropy bounded
+#     0.10–0.14 and reward −0.89→−0.09 / pass@8 0.25→0.68 using: max_grad_norm=0.5,
+#     lr=3e-6, entropy regularization OFF, NO KL. That is the PROVEN-SAFE default below.
+#     NOTE: lr=1e-5 (with clip 0.5, entropy off — sweep cell gc05_lr1e5_e0 / jobid
+#     47447531) is a PENDING-COMPLETION higher-reward candidate; once it lands clean it
+#     may be promoted. All knobs stay overridable via dotted-hydra `"$@"` passthrough.
+: "${LR:=3.0e-6}"                      # PROVEN-SAFE (sweep gc05_lr3e6_e0). 1e-5 = pending higher-reward candidate (gc05_lr1e5_e0)
+: "${MAX_GRAD_NORM:=0.5}"              # tightened from config default 1.0 — cheap insurance brake on the runaway
+: "${USE_ENTROPY_LOSS:=false}"         # entropy regularization OFF (the +0.01 bonus was the explosion driver)
 : "${N_SAMPLES:=8}"                    # GRPO group size (efficiency winner)
-: "${ENTROPY_COEF:=0.01}"              # anti-collapse stabilizer (combo_acc_stab)
+: "${ENTROPY_COEF:=0.0}"              # only applies if USE_ENTROPY_LOSS=true (kept 0 / OFF by default)
 : "${MAX_GEN_LEN:=3584}"              # 4k ceiling − 512 prompt; == held-out eval max_tokens
 : "${MAX_PROMPT_LEN:=512}"
 : "${TEMPERATURE:=0.7}"                # == held-out eval temp (rollout ≡ eval)
@@ -72,8 +85,9 @@ ENGINES=$(( NUM_GPUS / TP ))
   generator.sampling_params.top_p=$TOP_P \
   generator.max_num_batched_tokens=8192 \
   trainer.policy.optimizer_config.lr=$LR \
+  trainer.policy.optimizer_config.max_grad_norm=$MAX_GRAD_NORM \
   trainer.algorithm.use_kl_loss=false \
-  trainer.algorithm.use_entropy_loss=true \
+  trainer.algorithm.use_entropy_loss=$USE_ENTROPY_LOSS \
   trainer.algorithm.entropy_loss_coef=$ENTROPY_COEF \
   generator.backend=$INFERENCE_BACKEND \
   generator.run_engines_locally=true \
