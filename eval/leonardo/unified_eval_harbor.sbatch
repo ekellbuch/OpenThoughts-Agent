@@ -528,6 +528,7 @@ else
         --agent-kwarg "model_info=$MODEL_INFO_JSON" \
         --n-attempts 3 \
         --job-name "$RUN_TAG" \
+        --jobs-dir "$EVAL_JOBS_DIR" \
         --config "$HARBOR_CONFIG" \
         $EXTRA_HARBOR_ARGS
 fi
