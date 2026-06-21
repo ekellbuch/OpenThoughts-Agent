@@ -137,6 +137,7 @@ fi
   "${THINK_ARGS[@]}" \
   generator.enforce_eager=false \
   environment.env_class=$ENV_CLASS \
+  environment.skyrl_gym.aime.max_gen_length=$MAX_GEN_LEN \
   generator.n_samples_per_prompt=$N_SAMPLES \
   generator.gpu_memory_utilization=0.85 \
   generator.vllm_stats_interval=1 \
