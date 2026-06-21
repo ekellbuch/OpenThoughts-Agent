@@ -47,6 +47,8 @@ for arg in "$@"; do
     STAGE=*)      export STAGE="${arg#STAGE=}" ;;
     DATASET=*)    export DATASET="${arg#DATASET=}" ;;
     THINK=*)      export THINK="${arg#THINK=}" ;;
+    THINK_MODE=*) export THINK_MODE="${arg#THINK_MODE=}" ;;
+    DELPHI_TEMPLATE=*) export DELPHI_TEMPLATE="${arg#DELPHI_TEMPLATE=}" ;;
     *)            HYDRA_ARGS+=("$arg") ;;
   esac
 done
@@ -74,6 +76,13 @@ export RUN_NAME=${RUN_NAME:-delphi_${DATASET}_rl_think_mn}
 export STAGE=${STAGE:-sft}                                    # sft -> delphi_v0 template; base -> no template
 export NUM_GPUS=${NUM_GPUS:-4}                                # GPUs PER NODE (Leonardo A100x4)
 export THINK=${THINK:-true}                                   # thinking ON by default
+export THINK_MODE=${THINK_MODE:-kwarg}                        # kwarg (smoke: batched=false+kwarg) | forced (batched=true + prefill template)
+# In forced mode, bake the PREFILL template (delphi_v0_think) into the cached tokenizer so BOTH
+# the vLLM engine and the policy render the forced '<|start_think|>' (consistent). kwarg mode
+# keeps delphi_v0 (model-choice). Override DELPHI_TEMPLATE to pin a specific template.
+if [ "$THINK_MODE" = "forced" ]; then
+  export DELPHI_TEMPLATE=${DELPHI_TEMPLATE:-$WORK/code/OpenThoughts-Agent/chat_templates/delphi_v0_think.jinja2}
+fi
 
 # Fresh per-run ckpt dir on $WORK (scratch-fast quota is tight; ckpt OFF in the smoke anyway).
 export CKPT_DIR=$WORK/rl_ckpts/$RUN_NAME
@@ -176,7 +185,7 @@ SING_ENV="$SING_ENV,NCCL_SOCKET_IFNAME=ib0,GLOO_SOCKET_IFNAME=ib0,RAY_ADDRESS=$R
 SING_ENV="$SING_ENV,RAY_TMPDIR=$RAY_TMP,TMPDIR=$RAY_TMP"
 SING_ENV="$SING_ENV,DATA_DIR=$DATA_DIR,MODEL_PATH=$MODEL_PATH,NUM_GPUS=$NUM_GPUS,CKPT_DIR=$CKPT_DIR"
 SING_ENV="$SING_ENV,RUN_NAME=$RUN_NAME,ENV_CLASS=$ENV_CLASS,LOGGER=console,VENV_PY=$VENV_PY"
-SING_ENV="$SING_ENV,POLICY_NUM_NODES=$POLICY_NUM_NODES,THINK=$THINK"
+SING_ENV="$SING_ENV,POLICY_NUM_NODES=$POLICY_NUM_NODES,THINK=$THINK,THINK_MODE=$THINK_MODE"
 
 SING_BIND="/leonardo_work:/leonardo_work,/leonardo_scratch:/leonardo_scratch"
 
