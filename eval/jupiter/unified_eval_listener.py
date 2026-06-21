@@ -69,6 +69,12 @@ CLUSTER_DEFAULTS: Dict[str, Dict[str, str]] = {
     "leonardo": {
         "sbatch_script": "eval/leonardo/unified_eval_harbor.sbatch",
         "log_dir": "eval/leonardo/logs",
+        # Leonardo A100 (64GB) OOMs during vLLM cudagraph capture above ~0.85
+        # (see eval/leonardo/unified_eval_harbor.sbatch). The PRESETS gpu_memory_util
+        # values (0.95) are tuned for Jupiter GH200 (96GB); clamp them down here so a
+        # `--cluster leonardo` launch is safe by default. An explicit --gpu-memory-util
+        # still wins. (2026-06-21: 8 Leonardo legs OOM'd at the hardcoded 0.95.)
+        "gpu_memory_util_cap": "0.85",
     },
 }
 DEFAULT_CLUSTER = os.getenv("EVAL_LISTENER_CLUSTER", "jupiter")
@@ -1095,6 +1101,14 @@ def main() -> None:
     # CLI overrides take precedence
     n_concurrent = args.n_concurrent or preset_config.get("n_concurrent", 128)
     gpu_mem_util = args.gpu_memory_util or preset_config.get("gpu_memory_util", 0.95)
+    # Per-cluster gpu-mem cap (precedence: explicit --gpu-memory-util > cluster cap >
+    # preset). The preset values target Jupiter GH200 96GB; clamp DOWN for clusters
+    # whose GPUs OOM at that level (Leonardo A100 64GB → 0.85). Only clamps when the
+    # user did NOT pass --gpu-memory-util, and only downward.
+    _gpu_cap = _cluster_defaults.get("gpu_memory_util_cap")
+    if args.gpu_memory_util is None and _gpu_cap is not None and gpu_mem_util > float(_gpu_cap):
+        log(f"Clamping gpu_memory_util {gpu_mem_util} -> {_gpu_cap} (cluster '{args.cluster}' cap)")
+        gpu_mem_util = float(_gpu_cap)
     sbatch_env["EVAL_N_CONCURRENT"] = str(n_concurrent)
     # Only override gpu_mem_util if explicitly set via CLI or preset (don't clobber datagen)
     if args.gpu_memory_util is not None or "EVAL_GPU_MEMORY_UTIL" not in sbatch_env:
