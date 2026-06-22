@@ -62,6 +62,10 @@ set -x
 : "${TBS:=64}"                         # 64 prompts x n8 = 512 episodes/step; dp=8 -> 64 ep/GPU
 : "${EPOCHS:=20}"
 : "${MAX_STEPS:=10}"                   # SMOKE: a few steps to prove multi-node + thinking
+: "${HF_SAVE_INTERVAL:=20}"            # HF-format export every N steps. main_base already registers
+                                       # HFModelSaveCallback via DefaultCallbackHandler when >0 (-1=off was the
+                                       # silent default → the grid's empty exports/). 20: fast Leonardo steps,
+                                       # ~20GB per 9.7B export → keeps periodic models without flooding disk.
 : "${MICRO_FWD:=4}"
 : "${MICRO_TRAIN:=2}"
 : "${ENV_CLASS:=aime}"                 # boxed/answer-match (Minerva)
@@ -120,6 +124,7 @@ fi
   trainer.micro_forward_batch_size_per_gpu=$MICRO_FWD \
   trainer.micro_train_batch_size_per_gpu=$MICRO_TRAIN \
   trainer.ckpt_interval=999999 \
+  trainer.hf_save_interval=$HF_SAVE_INTERVAL \
   trainer.max_prompt_length=$MAX_PROMPT_LEN \
   generator.sampling_params.max_generate_length=$MAX_GEN_LEN \
   generator.sampling_params.temperature=$TEMPERATURE \

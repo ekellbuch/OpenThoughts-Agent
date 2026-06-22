@@ -49,6 +49,10 @@ set -x
 : "${TBS:=64}"                         # long-CoT batch (memory-safe at gen3584)
 : "${EPOCHS:=20}"                      # N=500 subsample ÷ tbs64 ≈ 7.8 steps/epoch → 20 ep > 100 steps (§2.2)
 : "${MAX_STEPS:=100}"                  # the issue's first RL pass (the binding cap)
+: "${HF_SAVE_INTERVAL:=20}"            # HF-format export every N steps. The base main_base entrypoint already
+                                       # registers HFModelSaveCallback via DefaultCallbackHandler when this is >0
+                                       # (-1=off=the old silent default → empty exports/). 20: Leonardo steps are
+                                       # fast + a 9.7B export is ~20GB, so 20 keeps periodic models without flooding disk.
 : "${MICRO_FWD:=4}"
 : "${MICRO_TRAIN:=2}"                  # lower to 1 if a larger ckpt OOMs
 : "${ENV_CLASS:=aime}"                 # aime = boxed/answer-match (D1/D3/D4); ifeval (D2) NOT yet wired
@@ -81,6 +85,7 @@ ENGINES=$(( NUM_GPUS / TP ))
   trainer.micro_forward_batch_size_per_gpu=$MICRO_FWD \
   trainer.micro_train_batch_size_per_gpu=$MICRO_TRAIN \
   trainer.ckpt_interval=20 \
+  trainer.hf_save_interval=$HF_SAVE_INTERVAL \
   trainer.max_prompt_length=$MAX_PROMPT_LEN \
   generator.sampling_params.max_generate_length=$MAX_GEN_LEN \
   generator.sampling_params.temperature=$TEMPERATURE \
