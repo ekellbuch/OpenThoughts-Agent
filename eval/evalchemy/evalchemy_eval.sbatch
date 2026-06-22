@@ -224,6 +224,7 @@ python -m eval.eval \
   --model vllm \
   --model_args "pretrained=${MODEL_REPO},tensor_parallel_size=${TP_SIZE},dtype=bfloat16,max_model_len=${MAX_MODEL_LEN},seed=42" \
   --tasks MATH500 \
+  --log_samples \
   ${CHAT_TEMPLATE_FLAG} \
   --batch_size auto \
   --max_tokens ${MAX_GEN_TOKS} \
@@ -236,6 +237,7 @@ python -m eval.eval \
 lm_eval --model vllm \
   --model_args "pretrained=${MODEL_REPO},tensor_parallel_size=${TP_SIZE},dtype=bfloat16,max_model_len=${MAX_MODEL_LEN},gpu_memory_utilization=0.9,seed=42" \
   --tasks gsm8k \
+  --log_samples \
   ${CHAT_TEMPLATE_FLAG} \
   --batch_size auto \
   --gen_kwargs "temperature=0.7,top_p=1.0,max_gen_toks=${MAX_GEN_TOKS}" \
@@ -258,6 +260,7 @@ if [ "${IFEVAL_ENABLE:-1}" = "1" ]; then
   lm_eval --model vllm \
     --model_args "pretrained=${MODEL_REPO},tensor_parallel_size=${TP_SIZE},dtype=bfloat16,max_model_len=${MAX_MODEL_LEN},gpu_memory_utilization=0.9,seed=42" \
     --tasks ifeval \
+    --log_samples \
     ${CHAT_TEMPLATE_FLAG} \
     --batch_size auto \
     --gen_kwargs "temperature=0.7,top_p=1.0,max_gen_toks=${MAX_GEN_TOKS}" \
@@ -271,6 +274,7 @@ for S in 42 43 44 45 46 47 48 49 50 51; do
     --model vllm \
     --model_args "pretrained=${MODEL_REPO},tensor_parallel_size=${TP_SIZE},dtype=bfloat16,max_model_len=${MAX_MODEL_LEN},seed=${S}" \
     --tasks AIME24 \
+    --log_samples \
     ${CHAT_TEMPLATE_FLAG} \
     --batch_size auto \
     --max_tokens ${MAX_GEN_TOKS} \
