@@ -23,7 +23,7 @@ Leonardo is **no-internet-on-compute-nodes** + a **login-node process killer** +
 they are the two ways a run silently wastes a 24h slot.
 
 Authoritative source docs (this skill distills them — read for full context):
-- `notes/marin/experiments/delphi/rl-scaling-laws-6279/SFT_LEONARDO_INSTRUCTIONS.md`
+- `experiments/active/delphi/rl-scaling-laws-6279/SFT_LEONARDO_INSTRUCTIONS.md`
   (the launch template + Delphi-specific dataset/template handling + canary blockers).
 - `OpenThoughts-Agent/CLAUDE.md` → "CINECA Leonardo Access", "SFT Launch on Leonardo",
   "Leonardo HF Upload", "8B/32B SFT Job Cleanup Checklist".

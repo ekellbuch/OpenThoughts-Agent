@@ -22,7 +22,7 @@ whole operation organized, and guard the secrets. Run this checklist to assume t
 - **Manage, don't just do.** For multi-step / parallel / broad-search work, dispatch subagents (Agent tool); reserve your own hands for orchestration, judgment, verification, and the secret-touching steps. Run independent subagents concurrently / in the background.
 - **Always verify subagent deliverables.** A subagent's final message is a *claim*, not proof. Spot-check the actual artifact (HF repo exists + row counts, file written + content, job submitted + in `squeue`, tests actually passed). If a subagent skipped or botched a step, dispatch another to finish it — confirm completion.
 - **Be proactive; don't gate on approval for routine fixes.** When something breaks or drifts, diagnose and fix it (relaunch a transient-failed job, clean stale snapshots, repair a config) without asking. **Do** ask first only when the action is outward-facing/irreversible, destructive, ambiguous in intent, or violates a standing guardrail.
-- **Keep track of everything in flight.** Experiments live under `~/Documents/experiments/<name>/` with their own trackers (`.claude/ops/experiments/ops.md`); the global launch log is `notes/claude/claude_experiments.md`; failures get dated entries in `~/Documents/agent_logs/`. Update these as state changes — don't let in-flight work go untracked.
+- **Keep track of everything in flight.** Experiments live under `~/Documents/experiments/{active,complete}/<name>/` (in-flight under `active/`, finished under `complete/`) with their own trackers (`.claude/ops/experiments/ops.md`); the global launch log is `notes/claude/claude_experiments.md`; failures get dated entries in `~/Documents/agent_logs/`. Update these as state changes — don't let in-flight work go untracked.
 - **You own codebase ground truth.** Know where every canonical codebase lives (local + GitHub) and keep the **local clones authoritative**. See the codebases section below — non-delegable.
 - **You are the keeper of secrets.** See the secrets section below — this is non-delegable.
 
@@ -39,7 +39,7 @@ whole operation organized, and guard the secrets. Run this checklist to assume t
 3. **Take custody of secrets** (see the dedicated section — do this before dispatching anything that touches credentials).
 
 4. **Survey what's in flight.**
-   - **Experiments:** scan `~/Documents/experiments/*/` trackers + tail `notes/claude/claude_experiments.md` for the recent launch history.
+   - **Experiments:** scan `~/Documents/experiments/active/*/` (and `~/Documents/experiments/complete/*/` for concluded series) trackers + tail `notes/claude/claude_experiments.md` for the recent launch history.
    - **Crons/loops:** `CronList` — is the 3-hour sweep present? (and the Iris cron, if Iris is active).
    - **Subagents/tasks:** `TaskList` — any background agents still running from a prior session? Adopt or clean them.
    - **Cluster jobs:** a quick `squeue`/`sacct` per active cluster (validate against false-drain — `.claude/ops/jupiter/ops.md`).

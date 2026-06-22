@@ -7,7 +7,7 @@ description: >-
   delphi_eval.sbatch invocation + RUN_NAME/STAGE convention, the load-bearing gotchas (chat-template
   override, 4k context, TP per head-count, MATH500/gsm8k split), and the SCORES.md tracker update.
   HF-upload-only — NEVER DB-register. Use when asked to eval Delphi #6279 SFT cells / update the
-  scaling-laws score grid. Refs: notes/marin/experiments/delphi/rl-scaling-laws-6279/.
+  scaling-laws score grid. Refs: experiments/active/delphi/rl-scaling-laws-6279/.
 ---
 
 # eval-standard-launch
@@ -18,7 +18,7 @@ AIME24 (10-seed mean±se) + gsm8k (strict+flex)** via `evalchemy`/`lm_eval` on L
 only — these are NEVER DB-registered** (per `project_delphi_sft_hf_only_no_db`).
 
 ## 0. Reference files (read these first — they are the source of truth)
-Local notes dir: `/Users/benjaminfeuer/Documents/notes/marin/experiments/delphi/rl-scaling-laws-6279/`
+Local notes dir: `/Users/benjaminfeuer/Documents/experiments/active/delphi/rl-scaling-laws-6279/`
 - **`EVAL_CONVENTION.md`** — the fixed eval protocol (suites, seeds, naming §3.4, chat-template §2.5).
 - **`delphi_eval.sbatch`** — the ONE eval job (all gotchas baked in; cluster copy under
   `/leonardo_work/AIFAC_5C0_290/bfeuer00/…`). The skill below summarizes it — but it is canonical.

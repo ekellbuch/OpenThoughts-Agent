@@ -131,7 +131,7 @@ path works again, but `--local-dataset` on a fresh extract is still the fast pat
 
 6. **Record in the tracker.** Add the new repo to
    `notes/RL/a3/a3_rl_tracker.md` (and, for datagen rows, the MiniMax tracker
-   `notes/marin/experiments/datagen/minimax-m2.7-tt/tracker.md`): the new HF id,
+   `experiments/active/datagen/minimax-m2.7-tt/tracker.md`): the new HF id,
    the before→after snapshot count, and the smoke-test infra/solve rates. Write a
    dated log to `/Users/benjaminfeuer/Documents/agent_logs/`.
 

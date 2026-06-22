@@ -93,7 +93,7 @@ ONE table.** Extraction pointers:
   Each sweep, advance whichever leg is pending (catch up backlog: completed-SFT-not-uploaded, uploaded-not-evaled, evaled-not-recorded). Idempotent — skip done legs. **This chain applies to BOTH the `main_sft_evals` (27 midtrained cells) AND the `base_sft_evals` (9 base × 2 recipes = 18 cells) series** — both are HF-only `enable_db_registration: false`.
 - **Standalone eval-grid trackers (self-describing — harvest pending rows every sweep, no asking):** any tracker
   markdown that holds `⏳ pending` rows with a recorded `eval job` id — e.g.
-  `experiments/delphi/rl-scaling-laws-6279/baseline_evals/grid.md` (Qwen3 dense-family baseline), `…/base_sft_evals/grid.md`
+  `experiments/active/delphi/rl-scaling-laws-6279/baseline_evals/grid.md` (Qwen3 dense-family baseline), `…/base_sft_evals/grid.md`
   (the 18-cell base-model SFT grid, #6279 rows 2&4), `…/pass_at_k_sft_evals/grid.md`, and `…/main_sft_evals/SCORES.md`. For each pending row: `sacct -j <jobid> --format=State` → on `COMPLETED`, harvest
   per the convention's §5.2 D/E (rsync the per-task `results_*.json` to the tracker's `<RUN>/` dir, **verify the
   JSON has numeric scores — a COMPLETED job can carry an empty `results:{}`**, extract MATH500/AIME24-mean±se/gsm8k,

@@ -49,7 +49,7 @@ use **`sft-job-cleanup`**.
 HF-only SFT cells exist to be **evaluated then recorded**. The standing autonomous chain (run it without asking, every sweep):
 1. **SFT completes → HF upload** (this skill; no DB).
 2. **upload completes → `eval-standard-launch`** on the series' eval grid for the newly-uploaded cell(s).
-3. **eval completes → record scores in the experiment tracker** — for Delphi, append the cell's result to **`/Users/benjaminfeuer/Documents/experiments/delphi/rl-scaling-laws-6279/main_sft_evals/SCORES.md`** (the tracker relocated here from `notes/marin/...`; that older path is stale). Pull the score from the completed `delphi-eval/<RUN>/` output + the eval job's metrics.
+3. **eval completes → record scores in the experiment tracker** — for Delphi, append the cell's result to **`/Users/benjaminfeuer/Documents/experiments/active/delphi/rl-scaling-laws-6279/main_sft_evals/SCORES.md`** (the tracker relocated here from `notes/marin/...`; that older path is stale). Pull the score from the completed `delphi-eval/<RUN>/` output + the eval job's metrics.
 
 Each leg also catches up backlog: any COMPLETED-SFT-not-uploaded, uploaded-not-evaled, or evaled-not-in-SCORES cell gets advanced. Idempotent — skip legs already done.
 

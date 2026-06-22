@@ -21,7 +21,7 @@ that launcher; for the agentic terminal-bench path (Harbor traces + Supabase) us
 instead — do **not** cross the two.
 
 ## 0. Reference files (source of truth — derive the flow from these)
-Local notes dir: `/Users/benjaminfeuer/Documents/notes/marin/experiments/delphi/rl-scaling-laws-6279/`
+Local notes dir: `/Users/benjaminfeuer/Documents/experiments/active/delphi/rl-scaling-laws-6279/`
 - **`eval-standard-launch`** skill — the launch + `delphi_eval.sbatch` + the per-model output layout it
   produces (`…/experiments/delphi-eval/<RUN_NAME>/seed{42..51}/`). Read it for what's already on the cluster.
 - **`main_sft_evals/SCORES.md`** — the master tracker for the 54-run main grid; its header describes the
@@ -48,7 +48,7 @@ Pull **only** the per-task `results_*.json` (the `examples` payloads live inside
 skip the multi-MB trace subdirs). For the main grid the destination is `main_sft_evals/<basename>/`:
 ```bash
 RUN=delphi-9e19-p33m67-k0p20-lr83-a002-magpie_lr1e5-sft   # = the SFT model basename, maps 1:1 to the row
-DEST=/Users/benjaminfeuer/Documents/notes/marin/experiments/delphi/rl-scaling-laws-6279/main_sft_evals/$RUN
+DEST=/Users/benjaminfeuer/Documents/experiments/active/delphi/rl-scaling-laws-6279/main_sft_evals/$RUN
 mkdir -p "$DEST"
 rsync -avz --prune-empty-dirs --include='*/' --include='results_*.json' --exclude='*' \
   Leonardo:/leonardo_work/AIFAC_5C0_290/bfeuer00/experiments/delphi-eval/$RUN/ "$DEST/"
