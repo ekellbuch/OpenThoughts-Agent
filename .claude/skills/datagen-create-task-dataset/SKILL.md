@@ -51,6 +51,11 @@ Classify the input and jump to the right stage. The stages are idempotent, so yo
 
 Write the chosen entry + why in the dated log. If the input is ambiguous (e.g. a repo that's both a generator AND ships a dataset), inspect it before committing to a stage; ASK the user if genuinely unclear.
 
+**Compatibility pre-check (run BEFORE committing to a stage — reject incompatible sources at triage, not 3 stages in):** confirm the source can become a Harbor task at all:
+1. **Binary-verifiable reward?** Harbor's verifier is pass/fail — `tests/test_state.py` asserts `/logs/verifier/reward.txt == "1"`, and the oracle gate needs a gold solution that deterministically scores a pass. If the source's reward is inherently **continuous/graded** (a 0–1 quality ratio, an optimization score that never hits 1.0) or **open-ended** (no deterministic gold solution — "heuristic approaches expected"), it does NOT fit the binary contract. → STOP at triage, surface to the user: building it requires redefining "pass" as a score threshold (a graded-reward design change), not a pipeline run.
+2. **Single-container environment?** Daytona builds ONE container per unique `environment/Dockerfile` — no `docker-compose`, no sidecar/judge services, no `privileged`, no host bind-mounts (no existing dataset uses compose). If the source's verification needs a multi-container topology, it can't run in the snapshot model without re-engineering the judge to run in-container. → STOP at triage and surface it.
+Both checks passing is the green light to proceed; either failing is a go/no-go for the user (graded-reward / vendored-judge redesign), not something to grind through the stages.
+
 ## Stage 1 — GENERATE seed material (generator-codebase / synthetic only)
 - **Generator codebase:** clone to a scratch dir (NOT inside the repo), read its README + entrypoint, install its deps in a throwaway venv, and run it to emit its native output (problems + tests + reference solutions). Capture the raw output; do NOT yet force it into Harbor shape. Note its license + any API/teacher it calls.
 - **NL-only / synthetic:** use a teacher (API via `data/generation` `InferenceEngine`, or a vLLM endpoint) to generate problem statements + reference solutions + tests, capped per the sizing rule.
