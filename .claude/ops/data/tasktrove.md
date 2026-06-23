@@ -57,7 +57,8 @@ The Harbor agentic coding/SWE task sets — the `exp_rpt_*` (repo-PR-test), `exp
 | laion__exp_rle_github_issue-v3 | 264 | |
 | laion__exp_rle_heavy_padding-v2 | 784 | |
 | laion__exp_rle_minimal_instructions-v3 | 233 | |
-| laion__exp_rpt_codenet-python-v2 | 10,000 | |
+| laion__exp_rpt_codenet-python-v2 | 10,000 | **BROKEN — zero-byte test I/O (all reward 0). FIXED → use `laion/exp_rpt_codenet-python-v3`.** |
+| laion__exp_rpt_codenet-python-v3 | 10,000 | **v2 fix (2026-06-23).** v1/v2 parquet→tasks extraction dropped the test I/O (empty `tests/inputs`+`tests/outputs` → EOFError, reward always 0); problem_id was also dropped. Recovered authoritative I/O from real CodeNet (`windchimeran/codenet_python`, 2861 problems) via `text-embedding-3-small` NN match (9,756/10k at sim≥0.7); each matched task now ships CodeNet clean stdin/stdout + a reference-code oracle `solution/solve.sh` + restored `problem_id`. Daytona oracle 27/29 (93%), smoke 0%, 1 snapshot. Code: `data/codenet_python_v3/`. |
 | laion__exp_rpt_crosscodeeval-csharp-v4 | 1,768 | |
 | laion__exp_rpt_defects4j-v3-v4 | 216 | |
 | laion__exp_rpt_exercism-python-v2 | 133 | |
