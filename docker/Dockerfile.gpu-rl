@@ -35,10 +35,29 @@
 #       PINNED to commit 76259c63a45e57c0d1cbaca3480aae52ebbfccd1 (NOT a floating
 #       branch). Same commit the Jupiter/Leonardo envs build.
 #   - torchvision 0.26.0  : skyrl-train `vllm` extra + fork requirements/cuda.txt.
-#   - flash-attn 2.6.3    : skyrl-train `vllm` extra (paired with torch 2.11;
-#       the CP path uses SDPA, flash-attn is only the non-CP fallback). vLLM
-#       serving uses its OWN bundled vllm_flash_attn (built from the fork source),
-#       not this standalone package.
+#   - flash-attn 2.8.3    : COMPILED FROM SOURCE against this image's torch
+#       2.11.0+cu128 / cp312 / x86_64 so its CUDA extension (`flash_attn_2_cuda`)
+#       is PRESENT (the prior image installed 2.6.3 with
+#       FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE -> the extension was ABSENT, and a
+#       smoke test proved BOTH vLLM's RotaryEmbedding find_spec-guarded import AND
+#       the MarinSkyRL FSDP policy's transformers FA2 path require it).
+#       WHY 2.8.3 (not skyrl-train's nominal 2.6.3 pin): flash-attn 2.6.3 is
+#       mid-2024 and does NOT build cleanly against torch 2.11 (late-2025 ABI).
+#       2.8.3 (Jan-2026, the latest release) is the version the community torch-2.11
+#       wheel efforts target (Dao-AILab flash-attention issues #2299/#2425,
+#       mjun0812/flash-attention-prebuild-wheels v0.9.34 -> torch 2.10/2.11/2.12)
+#       AND the version already proven across the Leonardo stack (otagent torch
+#       2.9.1 + MarinSkyRL-RL torch 2.8.0 both ship flash_attn 2.8.3; see
+#       .claude/ops/leonardo/ENVIRONMENT_MAP.md). API-COMPAT verified: MarinSkyRL
+#       only imports `unpad_input`/`pad_input` (bert_padding) +
+#       `cross_entropy_loss` (ops.triton) and stars the unpad tail (`*_`) to be
+#       version-agnostic across the 2.6 4-tuple / 2.7+ 5-tuple return shapes, so
+#       2.8.3 is a drop-in. No prebuilt wheel for torch-2.11 ships on PyPI, and we
+#       compile from OUR Dockerfile rather than pull a third-party fork wheel for
+#       provenance/ABI safety. (CP path still uses SDPA; flash-attn is the non-CP
+#       fallback; vLLM serving uses its OWN bundled vllm_flash_attn built from the
+#       fork source — but transformers FA2 + vLLM's rotary find_spec guard both
+#       need this extension to actually exist.)
 #   - ray 2.51.1          : skyrl-train base deps.
 #   - transformers        : fork requirements/common.txt
 #       (>=4.56.0, !=5.0..5.4, !=5.5.0); skyrl-train base requires >=4.51.0.
@@ -189,17 +208,32 @@ RUN . $RL_ENV_DIR/bin/activate && \
         "transformers>=4.56.0,!=5.0.*,!=5.1.*,!=5.2.*,!=5.3.*,!=5.4.*,!=5.5.0" \
         "setuptools_scm" "setuptools>=77.0.3,<81.0.0" "wheel" "packaging" "ninja" "cmake" "psutil"
 
-# (2) flash-attn 2.6.3: no prebuilt wheel for torch2.11/cu128/cp312, so it builds
-# from source — install it ALONE with --no-build-isolation (sees the torch above)
-# and FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE so it installs WITHOUT a multi-hour CUDA
-# kernel compile. This mirrors MarinSkyRL skyrl-train/pyproject.toml exactly:
-#   [tool.uv.extra-build-dependencies] flash-attn = [{requirement="torch", match-runtime=true}]
-#   [tool.uv.extra-build-variables]    flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
-# (flash-attn is only the non-CP fallback; CP uses SDPA and vLLM serving uses its
-#  OWN bundled vllm_flash_attn built from source in step 3 below.)
+# (2) flash-attn 2.8.3: COMPILE THE CUDA EXTENSION FROM SOURCE against the torch
+# 2.11.0 installed above, so `import flash_attn_2_cuda` actually succeeds. We do
+# NOT pass FLASH_ATTENTION_SKIP_CUDA_BUILD (that flag is what left the prior image
+# without the extension). Build notes:
+#   - --no-build-isolation: reuse the torch installed in step (1); flash-attn's
+#     build backend imports torch at build time and cannot see it in an isolated env.
+#   - FLASH_ATTENTION_FORCE_BUILD=TRUE: never silently fall back to a (nonexistent)
+#     prebuilt torch-2.11 wheel — always compile here.
+#   - TORCH_CUDA_ARCH_LIST="8.0;9.0": build the A100 + Hopper kernels only (skip
+#     the dozens of other arches flash-attn compiles by default -> far less wall
+#     time / RAM on the builder).
+#   - MAX_JOBS/NVCC_THREADS bound parallelism: flash-attn's setup.py auto-sizes
+#     MAX_JOBS from free RAM (~5GB/nvcc-job) and OVER-allocates on a big builder ->
+#     OOM-kills the compile. We pin it explicitly (MAX_JOBS=8, NVCC_THREADS=2) to
+#     trade wall-time for RAM headroom. The cxx11-ABI is taken from the installed
+#     torch automatically (torch 2.11 cu128 wheels are cxx11abiTRUE), so no
+#     FLASH_ATTENTION_FORCE_CXX11_ABI override is needed.
+# (flash-attn is the non-CP fallback; CP uses SDPA and vLLM serving uses its OWN
+#  bundled vllm_flash_attn built from source in step 3 below — but transformers
+#  FA2 + vLLM's rotary find_spec guard both require this extension to EXIST.)
 RUN . $RL_ENV_DIR/bin/activate && \
-    FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE \
-        uv pip install "flash-attn==2.6.3" --no-build-isolation
+    MAX_JOBS=$MAX_JOBS NVCC_THREADS=$NVCC_THREADS \
+        TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" \
+        FLASH_ATTENTION_FORCE_BUILD=TRUE \
+        uv pip install "flash-attn==2.8.3" --no-build-isolation --no-cache && \
+    python -c "import flash_attn, flash_attn_2_cuda; print('flash_attn', flash_attn.__version__, '+ flash_attn_2_cuda OK')"
 
 # (3) build the vLLM FORK from source against the installed torch 2.11.0.
 RUN . $RL_ENV_DIR/bin/activate && \
@@ -218,7 +252,8 @@ RUN . $RL_ENV_DIR/bin/activate && \
     uv pip install -e "$SKYRL_HOME/skyrl-train" --no-build-isolation && \
     uv pip install Jinja2 pyyaml omegaconf "hydra-core>=1.3.2" wandb && \
     uv pip install -e /opt/openthoughts && \
-    python -c "import torch, vllm, skyrl_train; print('torch', torch.__version__, 'vllm', vllm.__version__)"
+    python -c "import torch, vllm, skyrl_train, flash_attn, flash_attn_2_cuda; print('torch', torch.__version__, 'vllm', vllm.__version__, 'flash_attn', flash_attn.__version__, '+ flash_attn_2_cuda OK')" && \
+    echo "baked MarinSkyRL HEAD: $(git -C $SKYRL_HOME rev-parse HEAD)"
 
 # Set up PYTHONPATH for MarinSkyRL.
 # `/sky/workdir` (runtime-synced source) is prepended by the launcher so it wins;
