@@ -1,5 +1,13 @@
 # JSC Jupiter Access
 
+> **⛔ HARD DOWNTIME — MDC maintenance Jun 23 → Jul 12, 2026** (per live MOTD, recorded 2026-06-23; "Critical
+> Incident" / data-center acceptance testing). ALL login nodes (login01–04) print "This node is in maintenance"
+> and **close the connection before any command runs** — Jupiter is fully inaccessible, not merely queue-gated.
+> Sweeps should **skip Jupiter** until access is re-verified (~Jul 12; re-check, downtimes can shift). Stranded
+> while down: the EP/R3 debug chain (953566 EPDIAG2 → `sel_rows`) and 7 flawed-summ campaign resumes
+> (953480/82/88/91, 953500/03/11) — all preserve valid trials, re-resume when Jupiter returns (do NOT migrate
+> mid-flight). R3-OFF remains the working RL fallback meanwhile.
+
 **SSH**: `ssh Jupiter` (alias in `~/.ssh/config`). User `feuer1`, group `jureap59`. If the alias isn't
 configured, IPv4 is required: `ssh -i ~/.ssh/id_ed25519_jsc feuer1@login01.jupiter.fz-juelich.de -4`.
 
