@@ -600,6 +600,10 @@ def get_vllm_env_overrides(hf_model: str, configs: Dict[str, Dict]) -> Dict[str,
         env["EVAL_VLLM_EXTRA_ARGS"] = os.path.expandvars(cfg["extra_args"])
     if cfg.get("hf_overrides"):
         env["EVAL_VLLM_HF_OVERRIDES"] = cfg["hf_overrides"]
+    if cfg.get("limit_mm_per_prompt"):
+        # Forwarded as its own env var (NOT folded into extra_args) so the JSON
+        # object string reaches vLLM intact — see eval/build_vllm_cmd.sh.
+        env["EVAL_VLLM_LIMIT_MM_PER_PROMPT"] = cfg["limit_mm_per_prompt"]
 
     return env
 

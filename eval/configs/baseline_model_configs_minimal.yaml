@@ -225,14 +225,16 @@ models:
     tensor_parallel_size: 4
     max_model_len: 32768
     swap_space: 32
-    extra_args: "--limit-mm-per-prompt image=0,video=0"
+    # JSON object string — fork-vLLM json.loads() this. Routed via its own field
+    # (NOT extra_args) so the quotes survive shell word-splitting.
+    limit_mm_per_prompt: '{"image":0,"video":0}'
 
   "allenai/tmax-27b":
     conda_env: eval-qwen35
     tensor_parallel_size: 4
     max_model_len: 32768
     swap_space: 32
-    extra_args: "--limit-mm-per-prompt image=0,video=0"
+    limit_mm_per_prompt: '{"image":0,"video":0}'
 
   # ethanlshen Qwen3-32B SERA reproductions — Pattern A paper-parity flags
   # (mirror allenai/SERA-32B: hermes + enforce-eager + disable-cascade-attn + seed 42).

@@ -39,6 +39,7 @@ build_vllm_cmd() {
     local reasoning_parser="${EVAL_VLLM_REASONING_PARSER:-}"
     local extra_args="${EVAL_VLLM_EXTRA_ARGS:-}"
     local hf_overrides="${EVAL_VLLM_HF_OVERRIDES:-}"
+    local limit_mm="${EVAL_VLLM_LIMIT_MM_PER_PROMPT:-}"
 
     # Build command array
     VLLM_CMD=(
@@ -82,6 +83,16 @@ build_vllm_cmd() {
     # HF model config overrides (JSON string, properly quoted)
     if [ -n "$hf_overrides" ]; then
         VLLM_CMD+=(--hf-overrides "$hf_overrides")
+    fi
+
+    # Multimodal per-prompt caps (e.g. serve a VL arch text-only). Passed as a
+    # SINGLE array element so the JSON value survives intact — recent vLLM
+    # json.loads() this arg, so it MUST be a JSON object string
+    # ('{"image":0,"video":0}'). Do NOT route this through EVAL_VLLM_EXTRA_ARGS:
+    # that is word-split unquoted and the JSON quotes get stripped → invalid JSON
+    # → "Value ... cannot be converted to <loads>" and the serve exits 2.
+    if [ -n "$limit_mm" ]; then
+        VLLM_CMD+=(--limit-mm-per-prompt "$limit_mm")
     fi
 
     # Append extra args (space-separated string)
