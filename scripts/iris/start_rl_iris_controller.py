@@ -52,6 +52,24 @@ import time
 RENDEZVOUS_FILENAME = "ray_head.json"
 DONE_FILENAME = "ray_head.done"
 
+
+def _ray_bin() -> str:
+    """Resolve the ``ray`` CLI from the SAME venv as the running interpreter.
+
+    The launcher runs this controller via the RL venv python by absolute path
+    (e.g. /opt/openthoughts/envs/rl/bin/python), but iris's uv-sync setup
+    activates a DIFFERENT venv (/app/.venv) and leaves only that on $PATH — which
+    has no `ray`. So a bare `ray` command resolves to nothing (FileNotFoundError).
+    Use the `ray` binary that sits next to this interpreter; fall back to PATH.
+    """
+    import shutil
+
+    candidate = os.path.join(os.path.dirname(sys.executable), "ray")
+    if os.path.exists(candidate):
+        return candidate
+    found = shutil.which("ray")
+    return found or "ray"
+
 # Cold GPU nodes (image pull + setup) can take several minutes to reach the
 # rendezvous, so these are generous.
 DEFAULT_RENDEZVOUS_TIMEOUT = 1800
@@ -210,7 +228,7 @@ def clear_rendezvous(rendezvous_dir: str) -> None:
 
 def ray_start_head(head_ip: str, ray_port: int) -> None:
     cmd = [
-        "ray", "start", "--head",
+        _ray_bin(), "start", "--head",
         f"--node-ip-address={head_ip}",
         f"--port={ray_port}",
         "--dashboard-host=0.0.0.0",
@@ -221,7 +239,7 @@ def ray_start_head(head_ip: str, ray_port: int) -> None:
 
 def ray_start_worker(head_ip: str, ray_port: int, node_ip: str) -> None:
     cmd = [
-        "ray", "start",
+        _ray_bin(), "start",
         f"--address={head_ip}:{ray_port}",
         f"--node-ip-address={node_ip}",
     ]
@@ -231,7 +249,7 @@ def ray_start_worker(head_ip: str, ray_port: int, node_ip: str) -> None:
 
 def ray_stop() -> None:
     try:
-        subprocess.run(["ray", "stop", "--force"], check=False, timeout=60)
+        subprocess.run([_ray_bin(), "stop", "--force"], check=False, timeout=60)
     except subprocess.TimeoutExpired:
         _log("Warning: 'ray stop' timed out")
 
