@@ -72,6 +72,71 @@ for tag, exp in EVALS:
 acceptable evidence of completeness (it hides errored trials). Flag any eval whose ERRORED rate is high
 (≳10–15%) as a re-run candidate + note the score may be deflated if those errors scored 0.
 
+### Check 4 — resuming the errored trials (`resume_chunked.py`; Cat-3 swe-agent needs the Pinggy tunnel)
+Resume re-runs only the errored trials of the SAME run dir (keeps valid trials). The standard chunked driver
+is **`eval/resume_chunked.py`**, which fires one `unified_eval_listener.py --resume-only --force-reeval`
+invocation per chunk. **You MUST restate the same sizing/yaml/conda-env/Pinggy you used on the original
+fire** — the per-chunk listener flag set must match the original or Harbor errors on the `config.json`
+conflict.
+
+- **`--force-reeval` (NOT `--force-eval`)** is what resume mode uses, and it is a **distinct flag** from the
+  launch-time `--force-eval` (gotcha #6 in `eval-agentic-launch` — that one bypasses the *dedup* in
+  `should_start_job`). `--force-reeval` bypasses the DB status check (re-submits even on a `Finished`/`Started`
+  row) AND, as of PR #31, **bypasses the `active_pairs` resume filter** — needed when an active job for the
+  same `(model, dataset)` uses a *different scaffold* than the resume target, so the pair-collision would
+  otherwise be a false positive that silently drops the resume. `resume_chunked.py` always passes it.
+- **`--once` + `--batch-size` interaction (PR #31 fix):** in `--once` mode with many models per priority file,
+  freshly-submitted JIDs are now folded into `active_ids` as they submit, so the sliding-window `--batch-size`
+  dependency chain actually takes effect. Before the fix `active_ids` was snapshotted before the submit loop,
+  so `--batch-size` was silently a no-op in `--once` mode.
+
+**Cat-3 swe-agent (installed-harness) resume — MUST start a Pinggy tunnel.** Cat-3 = a preferred-harness
+reproduction (`dcagent_eval_config_swe_agent.yaml`, swe-agent/openhands/mini-swe-agent) where the sandboxed
+agent calls back to the served model over a public **Pinggy** tunnel. The OLD resume path only sed-rewrote
+the stale Pinggy URL into the dir's `config.json` but **did not start a tunnel** → every post-resume trial
+hit `[Errno 111] Connection refused` (100% trial failure; pre-resume ~50% → post-resume ~0%, confirmed on
+JIDs 581168/581169/581170 and 668150/158/165). **PR #31 fixes this:** the resume branch of
+`unified_eval_harbor.sbatch` now starts the Pinggy SSH tunnel (gated on `EVAL_PINGGY_URL`) and exports
+`OPENAI_API_BASE`/`OPENAI_BASE_URL` (+ openhands `LLM_BASE_URL`/`LLM_API_KEY`, mini-swe-agent
+`MSWEA_*`/`HOSTED_VLLM_API_BASE`) so the sandboxed agent uses the PUBLIC tunnel URL, not the localhost
+`api_base` saved in `config.json`. **So a Cat-3 resume MUST pass the four passthroughs** so the tunnel +
+agent config survive into the new fire (these are `resume_chunked.py` args, forwarded to the listener;
+note the hyphens — distinct from the launch-mode underscored `--pinggy_persistent_url`/`--pinggy_token`):
+```bash
+# otagent env, in tmux. Single Pinggy pair PER invocation (one chunk per free pair for multi-model batches).
+python eval/resume_chunked.py \
+  --csv /tmp/resume_cands.csv --preset swebench --org eval \
+  --tp-size 2 --dp-size 2 --timeout-multiplier 16.0 \
+  --jobs-dir <EVAL_JOBS_DIR> --conda-env <env> \
+  --tag-prefix <orig_run_tag_prefix> \
+  --pinggy-url <free-pair URL, e.g. dadccqeqqf.a.pinggy.link> \
+  --pinggy-token <free-pair token> \
+  --config-yaml dcagent_eval_config_swe_agent.yaml \
+  --agent-parser '' \
+  --chunk-size 4 --sleep-between 120
+```
+- `--config-yaml` = the Harbor config (scaffold/parser selection); `--agent-parser ''` (empty string) =
+  disable the parser for swe-agent (it doesn't use one). Both flow to the sbatch on resume.
+- Pinggy pair URL+token are privileged — read a FREE pair from `.claude/secret.md` / `pinggy_bank.md`
+  (`eval-agentic-launch` §2). `resume_chunked.py` is single-pair per invocation; fire one chunk per pair.
+- **terminus-2 resumes leave `EVAL_PINGGY_URL` empty** → the tunnel block is a no-op for them (they reach
+  the model via the normal sbatch path); only Cat-3 installed-harness resumes set the Pinggy flags.
+
+> **swe-agent retry-policy change (PR #31, `dcagent_eval_config_swe_agent.yaml`) — changes swe-agent scoring.**
+> Aligned to the M1 parity run (SERA-32B 48.67%): `ContextLengthExceededError` / `BadRequestError` /
+> `AgentEnvironmentTimeoutError` / `SummarizationTimeout` are now **RETRIED** (no longer terminal) — important
+> for long-output SERA checkpoints that overflow 32k context then recover on retry. Newly **terminal**:
+> `VerifierOutputParseError` / `RewardFileEmptyError` / `RewardFileNotFoundError`. A wrapup-era drift had made
+> the first set terminal, which suppressed scores vs the parity run; this restores M1 parity. So a swe-agent
+> resume scored under the new policy is NOT directly comparable to one scored under the old (drifted) config.
+
+> **Offline-first pre-download (PR #31):** the sbatch now tries `snapshot_download(local_files_only=True)`
+> first (the HF cache may be read-only for the current user when the Hub HEAD advanced past the cached
+> snapshot — fetching into a foreign-owned cache dir fails with `PermissionError`) and only falls back to an
+> online fetch if the model isn't cached. The Pinggy SSH-out is prefixed with proxychains so it can egress
+> from no-internet compute nodes. If you previously saw a ~300s pre-download hang, the listener's pre-download
+> wedge fix (ThreadPoolExecutor `shutdown(wait=False)`, `etag_timeout=120`, 600s hard cap) addresses it.
+
 ---
 # Remediations — the §0 audit scopes which to run (idempotent; re-run §0 after to confirm ✅)
 The §0 audit is read-only; the steps below **do write** — and that's expected: **HF trace upload + Supabase

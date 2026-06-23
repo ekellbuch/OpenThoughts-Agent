@@ -90,6 +90,13 @@ default** (the user keeps 1–7 for sibling experiments; confirm before borrowin
 > **`.claude/secret.md`** (untracked) or the canonical source of truth
 > `/Users/benjaminfeuer/Documents/notes/ot-agent/pinggy_bank.md` (assignments shift — re-read before launch).
 
+> **RESUMING a Cat-3 (installed-harness) eval also needs the tunnel — see `eval-agentic-cleanup` check 4.**
+> The resume path runs through `eval/resume_chunked.py` (not this listener launch flow), and as of PR #31 it
+> MUST forward four passthroughs — `--pinggy-url` / `--pinggy-token` / `--config-yaml` / `--agent-parser` —
+> so the resume sbatch starts a Pinggy tunnel (gated on `EVAL_PINGGY_URL`) instead of leaving the sandboxed
+> agent pointing at a dead URL → `[Errno 111] Connection refused`. Full resume command + the swe-agent
+> retry-policy change live in **`eval-agentic-cleanup`** (don't duplicate here).
+
 ## 3. Launch (in tmux — the listener is long-running)
 
 > **🚧 SUBMIT FROM THE REPO DIR WITH `DCFT` SET — the sbatch WORKDIR guard hard-fails otherwise.**
@@ -208,6 +215,7 @@ Three traps that each silently break a launch — check these first when an eval
    - **FORCE (`--force-eval`)** — the user explicitly asks for a re-run / parity test / repeatability check, or you must overwrite a known-bad-but-non-cleared score. ALWAYS pair with `--require-priority-list` + `--priority-file <single-model list>` so only the intended model(s) are forced (without it, `--force-eval` would resubmit *every* model in the lookback window, including already-scored ones — a queue flood).
    - **RESPECT the skip (no flag)** — normal cohort/sweep fill, where `reason=job finished` correctly means "already have this number, don't waste GPUs". This is the default and should stay the default.
    - Alternative (only if you genuinely want to *replace* an existing **own** row's metrics rather than add a sibling): clear that row's `metrics` to null (→ listener returns `(True, "finished but metrics cleared")`) via `crud-otagent-supabase`, FK-safe and **own-rows-only** (`.eq("username","bfeuer00")`). `--force-eval` is preferred — it needs no DB mutation and works regardless of row ownership.
+   - **Don't confuse `--force-eval` with `--force-reeval`** — they are two different flags. `--force-eval` (this gotcha) bypasses the `should_start_job` *dedup* on a fresh launch. **`--force-reeval`** bypasses the DB *status check* and (PR #31) the `active_pairs` *resume filter*; it's the flag the RESUME path uses (`resume_chunked.py` passes it automatically). Use `--force-reeval` only when deliberately re-submitting/resuming — see `eval-agentic-cleanup` check 4.
 
 7. **`hosted_vllm/<org>/<model>` evals need TWO things from harbor commit #339 (`e44d3822`, 2025-12-29), or every trial dies.** That commit added two hard gates to `harbor/agents/terminus_2` for `hosted_vllm/` models; org-model evals worked before it. Both fail FAST (~9 min, **0 vLLM POST 200s, 0 trajectories**, all N trials raise identically — looks like a silent infra death, not a model problem):
    - **(a) Org-qualified name rejection** — `validate_hosted_vllm_model_config` (`llms/utils.py`) demanded exactly one `/`, so `hosted_vllm/laion/<model>` (2 slashes) raised `ValueError: hosted_vllm model names must contain exactly one '/'`. **FIXED** in harbor commit **`0f5a6e9e`** (relax to allow `hosted_vllm/<model>` *and* `hosted_vllm/<org>/<model>`; pulled to the cluster editable install). If it recurs, confirm that commit is in the cluster's harbor clone.
