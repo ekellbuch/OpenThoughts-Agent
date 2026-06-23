@@ -2811,7 +2811,10 @@ class EvalListener:
 
             # v6: Filter out (model, dataset) pairs currently running in squeue.
             # This prevents resuming old dirs when a job for the same model+dataset is active.
-            if active_pairs:
+            # Bypassed by --force-reeval (mirrors the fresh-fire path behavior at the active_pairs
+            # check earlier — needed e.g. when an active job uses a different scaffold than the
+            # resume target, so the (model, dataset) collision is a false positive).
+            if active_pairs and not self.config.force_reeval:
                 before = len(resume_candidates)
                 resume_candidates = [rc for rc in resume_candidates
                                      if (rc["hf_model"], rc.get("dataset", "")) not in active_pairs]
@@ -2984,17 +2987,29 @@ class EvalListener:
                 hf_cache = os.environ.get("HF_HUB_CACHE", _cc_path("hf_cache", _FALLBACK_HF_CACHE))
                 log(f"  Pre-downloading model {hf_model} to {hf_cache}...")
                 try:
-                    # Run snapshot_download in a subprocess thread with timeout
-                    # to avoid indefinite hangs on network issues
+                    # Run snapshot_download in a worker thread with a hard wall
+                    # timeout. etag_timeout=120 + max_workers=8 keep slow HF
+                    # metadata/file fetches from stalling (the default 10s etag
+                    # retries serially and wedged an entire fire for hours on a
+                    # slow link — 2026-06 ablation batch). Critically, we drive
+                    # the executor manually and shutdown(wait=False) in finally:
+                    # the old `with ThreadPoolExecutor()` block's implicit
+                    # shutdown(wait=True) re-blocked on the still-running (un-
+                    # killable) download thread AFTER the 300s timeout fired,
+                    # which was the actual indefinite hang.
                     import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    try:
                         future = executor.submit(
-                            snapshot_download, repo_id=hf_model, repo_type="model", cache_dir=hf_cache
+                            snapshot_download, repo_id=hf_model, repo_type="model",
+                            cache_dir=hf_cache, etag_timeout=120, max_workers=8,
                         )
-                        path = future.result(timeout=300)  # 5 minute timeout
-                    log(f"  Cached at {path}")
+                        path = future.result(timeout=600)  # 10 minute hard cap
+                        log(f"  Cached at {path}")
+                    finally:
+                        executor.shutdown(wait=False)
                 except concurrent.futures.TimeoutError:
-                    log(f"  WARNING: Pre-download of {hf_model} timed out after 300s, skipping (will retry next iteration)")
+                    log(f"  WARNING: Pre-download of {hf_model} timed out after 600s, skipping (will retry next iteration)")
                 except Exception as e:
                     log(f"  WARNING: Failed to download {hf_model}: {e}")
                 downloaded_models.add(hf_model)
@@ -3093,6 +3108,7 @@ class EvalListener:
                     "EVAL_API_KEY_ENV": api_cfg["api_key_env"] or "",
                     "EVAL_API_AGENT_KWARGS": ak_string,
                     "EVAL_N_CONCURRENT": str(n_eff),
+                    "EVAL_DB_MODEL_NAME": hf_model,
                 })
                 log(f"  [API] {hf_model} → {sbatch_model_override} "
                     f"(api_base={api_cfg['api_base']}, key_env={api_cfg['api_key_env']}, "
@@ -3153,6 +3169,13 @@ class EvalListener:
                     log(f"  -> Submitted as SLURM job {slurm_job_id} (job_name={job_name})")
                     self._submitted_jobs.add(slurm_job_id)
                     self._dep_chain.append(slurm_job_id)
+                    # Fold freshly-submitted JID into active_ids so later jobs in
+                    # the same iteration see it when computing sliding-window deps.
+                    # Without this, --batch-size silently has no effect in --once
+                    # mode with many models per priority file (active_ids was
+                    # snapshotted before this loop began).
+                    if batch_size and batch_size > 0:
+                        active_ids.add(slurm_job_id)
                 submitted += 1
             else:
                 log(f"  -> Submission failed")
