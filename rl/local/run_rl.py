@@ -315,10 +315,17 @@ class LocalRLRunner:
         - Single-node local: start a local Ray cluster spanning this node's GPUs
           (unchanged default behavior).
         """
-        # Multi-node: a controller already stood up the cluster and exported
-        # RAY_ADDRESS. SkyRL's initialize_ray() calls bare ray.init(), which
-        # honors RAY_ADDRESS — so we run the driver directly without touching Ray.
-        external_ray = bool(os.environ.get("RAY_ADDRESS")) and self.config.num_nodes > 1
+        # Externally-managed Ray: a controller already stood up the cluster and
+        # exported RAY_ADDRESS. SkyRL's initialize_ray() calls bare ray.init(),
+        # which honors RAY_ADDRESS — so we run the driver directly without
+        # touching Ray. This is the iris path for BOTH 1-node and multi-node:
+        # start_rl_iris_controller.py always starts a Ray head (even on a
+        # single-node slice) and exports RAY_ADDRESS. We must NOT call our own
+        # ray.init(num_cpus=, num_gpus=) here — connecting to an existing
+        # cluster forbids passing num_cpus/num_gpus (raises ValueError).
+        # The old `and num_nodes > 1` guard wrongly excluded the 1-node iris
+        # slice, which then crashed in the local ray.init() below.
+        external_ray = bool(os.environ.get("RAY_ADDRESS"))
         if external_ray:
             print(f"\nAttaching to external Ray cluster at {os.environ['RAY_ADDRESS']} "
                   f"(num_nodes={self.config.num_nodes}, gpus_per_node={self._gpus_per_node()})")
