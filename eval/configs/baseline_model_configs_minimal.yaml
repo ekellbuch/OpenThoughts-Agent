@@ -210,6 +210,30 @@ models:
     tool_call_parser: hermes
     extra_args: "--enforce-eager --disable-cascade-attn --seed 42"
 
+  # Allen AI tmax-9b / tmax-27b — model_type: qwen3_5 (Qwen3_5ForConditionalGeneration,
+  # dense, NOT MoE; verified 2026-06-23 for BOTH sizes). The default otagent vLLM
+  # 0.16.0 has NO qwen3_5 impl and transformers 4.x can't parse the config, so these
+  # MUST serve from the eval-qwen35 env (fork-vLLM @ 76259c63a + transformers 5.12.1;
+  # ENVIRONMENT_MAP §2f). conda_env triggers the Leonardo sbatch to activate eval-qwen35
+  # + export the §2f load-bearing serve env (VLLM_USE_FLASHINFER_SAMPLER=0,
+  # VLLM_ATTENTION_BACKEND=FLASH_ATTN, LIBRARY_PATH stubs, conda libstdc++ on LD path).
+  # tmax is a VL arch shipping no preprocessor_config.json → serve text-only via
+  # --limit-mm-per-prompt image=0,video=0. TP=4 serve-smoke-verified for 9b (job 47715931);
+  # 27b is dense ~54GB bf16 → fits 4xA100-64GB at TP=4. Context 32k.
+  "allenai/tmax-9b":
+    conda_env: eval-qwen35
+    tensor_parallel_size: 4
+    max_model_len: 32768
+    swap_space: 32
+    extra_args: "--limit-mm-per-prompt image=0,video=0"
+
+  "allenai/tmax-27b":
+    conda_env: eval-qwen35
+    tensor_parallel_size: 4
+    max_model_len: 32768
+    swap_space: 32
+    extra_args: "--limit-mm-per-prompt image=0,video=0"
+
   # ethanlshen Qwen3-32B SERA reproductions — Pattern A paper-parity flags
   # (mirror allenai/SERA-32B: hermes + enforce-eager + disable-cascade-attn + seed 42).
   # Size ladder: 316, 1000, 3160 (converted from broken FSDP upload), 10000 rows.

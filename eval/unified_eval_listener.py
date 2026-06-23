@@ -2544,6 +2544,13 @@ def submit_eval(
     otagent_dir = CONDA_ENV_PATHS.get(conda_env)
     if otagent_dir:
         env_vars["OTAGENT_DIR"] = otagent_dir
+    # Always forward the conda env NAME too. Clusters whose sbatch activates by
+    # env name under a known miniforge prefix (Leonardo) — rather than by the
+    # CONDA_ENV_PATHS->OTAGENT_DIR prefix path (Jupiter) — read EVAL_CONDA_ENV.
+    # This is what lets a per-model `conda_env:` override (e.g. eval-qwen35 for
+    # qwen3_5 tmax models) reach the Leonardo serve without a --cluster-config.
+    if conda_env:
+        env_vars["EVAL_CONDA_ENV"] = conda_env
     # Merge extra env vars (e.g. EVAL_VLLM_PORT from pack-jobs port planner)
     if extra_env:
         env_vars.update(extra_env)

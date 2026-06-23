@@ -85,13 +85,31 @@ DCFT="${WORK}/code/OpenThoughts-Agent"
 # Reset PYTHONPATH
 unset PYTHONPATH
 
-# Conda activation (x86_64 — no LD_LOADER wrapper needed)
+# Conda activation (x86_64 — no LD_LOADER wrapper needed).
+# Per-model conda env override (listener sets EVAL_CONDA_ENV from a
+# baseline_model_configs `conda_env:` entry). Default otagent; eval-qwen35 is
+# the env that vLLM-serves qwen3_5/3.6 (tmax-9b/27b) — see ENVIRONMENT_MAP §2f.
+EVAL_CONDA_ENV="${EVAL_CONDA_ENV:-otagent}"
 source "${WORK}/miniforge3/etc/profile.d/conda.sh"
-conda activate otagent
+conda activate "$EVAL_CONDA_ENV"
+echo "Conda env: $EVAL_CONDA_ENV (prefix $CONDA_PREFIX)"
 
 # All build deps (CUDA, libstdc++, etc.) managed via conda — no module loads.
 # Prepend conda's lib to ensure its libstdc++ wins over any system/module versions.
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# eval-qwen35 LOAD-BEARING serve flags (ENVIRONMENT_MAP §2f). Without these the
+# fork-vLLM serve crashes: CXXABI_1.3.15 (bundled vllm_flash_attn needs conda
+# gcc-14 libstdc++ ahead on the path — already prepended above), the flashinfer
+# sampler JIT-link fails `-lcuda` (disable it), and the libcuda stub must be on
+# LIBRARY_PATH for any runtime JIT link. tmax is a VL arch served text-only via
+# --limit-mm-per-prompt image=0,video=0 (passed through EVAL_VLLM_EXTRA_ARGS).
+if [ "$EVAL_CONDA_ENV" = "eval-qwen35" ]; then
+    export VLLM_USE_FLASHINFER_SAMPLER=0
+    export LIBRARY_PATH="${CONDA_PREFIX}/targets/x86_64-linux/lib/stubs${LIBRARY_PATH:+:$LIBRARY_PATH}"
+    export VLLM_ATTENTION_BACKEND=FLASH_ATTN
+    echo "[eval-qwen35] serve env: VLLM_USE_FLASHINFER_SAMPLER=0 VLLM_ATTENTION_BACKEND=FLASH_ATTN LIBRARY_PATH=$LIBRARY_PATH"
+fi
 
 # Strip inherited LD_PRELOAD (proxychains from login node).
 # The proxied() helper re-adds it only for commands that need external access.
