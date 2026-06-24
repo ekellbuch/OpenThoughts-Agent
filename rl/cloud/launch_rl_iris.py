@@ -243,6 +243,15 @@ def create_parser() -> argparse.ArgumentParser:
              "Defaults to $OT_AGENT_SECRETS_ENV, else ~/Documents/secrets.env.",
     )
     parser.add_argument(
+        "--skyrl-ref", "--skyrl_ref", dest="skyrl_ref", default=None,
+        help="If set, `git fetch && git checkout <ref>` the baked MarinSkyRL clone at "
+             "/opt/skyrl BEFORE running, so the live editable install picks up a newer "
+             "(or pinned) commit than the one baked into the image. Use to apply a "
+             "MarinSkyRL fix that landed AFTER the image was built without waiting for an "
+             "image rebuild (deps are baked, but skyrl-train is an editable git clone, so "
+             "a checkout is live). Default: unset = use whatever commit the image baked.",
+    )
+    parser.add_argument(
         "--dry-run", "--dry_run", dest="dry_run", action="store_true", default=False,
         help="Print the resolved config + in-container command without submitting.",
     )
@@ -337,8 +346,21 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # live /app + skyrl-train win over the image's baked copies. Use the absolute
     # RL venv python (set above) — independent of iris's activated venv.
     pythonpath = f"{APP_DIR}:{SKYRL_HOME}/skyrl-train"
+    # Optional: refresh the baked MarinSkyRL editable clone to a newer/pinned commit
+    # before running (deps are baked, but skyrl-train is `pip install -e` over a git
+    # clone, so a checkout is live without reinstall). Fetch is best-effort but the
+    # checkout MUST succeed (the ref is the whole point), so it's under `set -e`.
+    skyrl_refresh = ""
+    if args.skyrl_ref:
+        ref = shlex.quote(args.skyrl_ref)
+        skyrl_refresh = (
+            f"git -C {shlex.quote(SKYRL_HOME)} fetch --quiet --all || true; "
+            f"git -C {shlex.quote(SKYRL_HOME)} checkout {ref}; "
+            f"echo \"[rl-iris] MarinSkyRL now at $(git -C {shlex.quote(SKYRL_HOME)} rev-parse HEAD)\"; "
+        )
     bash = (
         f"set -e; cd {APP_DIR}; "
+        f"{skyrl_refresh}"
         f"export SKYRL_HOME={shlex.quote(SKYRL_HOME)}; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "
         f"export VLLM_USE_V1=1; "
