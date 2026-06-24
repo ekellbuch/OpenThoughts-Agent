@@ -41,6 +41,16 @@ agents:
       proactive_summarization_threshold: 2048
       metrics_endpoint: https://replace-with-vllm-host/metrics
       metrics_timeout_sec: 10
+      # litellm PER-REQUEST timeout (seconds). Raised 600 (litellm default) -> 1800
+      # for the tmax-27b DP2xTP2 ID-eval relaunch (2026-06-24). The default 600s
+      # aborted a single 16k-token thinking generation that needed ~1,550s at the
+      # old TP=4 per-stream rate (~10 tok/s) -> ~2,900 litellm timeouts + a
+      # summarization spiral. terminus-2's `llm_kwargs` flows into LiteLLM(**kwargs)
+      # -> spread into every litellm.acompletion() call (harbor llms/lite_llm.py
+      # _build_base_kwargs). 1800 is a safe headroom for slow large-model decode and
+      # harmless for fast small models (they finish well under it).
+      llm_kwargs:
+        timeout: 1800
       model_info:
         max_input_tokens: 32768
         max_output_tokens: 16384

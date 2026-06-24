@@ -229,9 +229,19 @@ models:
     # (NOT extra_args) so the quotes survive shell word-splitting.
     limit_mm_per_prompt: '{"image":0,"video":0}'
 
+  # 27b ID-eval reconfigured TP=4 -> DATA-PARALLEL on the single 4-GPU A100-64GB
+  # node (2026-06-24): 2 replicas x 2-way TP = 4 GPUs. TP=4 made each of 32-128
+  # concurrent decode streams crawl (~10 tok/s) → a 16k-token thinking gen needed
+  # ~1,550s >> the 600s litellm timeout → ~2,900 timeouts + a summarization spiral
+  # (serve was NOT overloaded: KV 29-47%, empty queue, no preemption). DP2xTP2
+  # splits weights 2-way (~27GB/card → ~37GB free for KV at 32k) and ~2x's the
+  # per-stream speed. Pair with EVAL_N_CONCURRENT=16 (~16 concurrent keeps each
+  # stream fast). Do NOT use DP4/TP1 at 32k — 54GB weights on 64GB leaves only
+  # ~7-10GB KV (~27k tokens), KV-starved (fallback only if max_model_len drops).
   "allenai/tmax-27b":
     conda_env: eval-qwen35
-    tensor_parallel_size: 4
+    tensor_parallel_size: 2
+    data_parallel_size: 2
     max_model_len: 32768
     swap_space: 32
     limit_mm_per_prompt: '{"image":0,"video":0}'

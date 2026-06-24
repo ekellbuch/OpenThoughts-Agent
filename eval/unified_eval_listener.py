@@ -584,6 +584,11 @@ def get_vllm_env_overrides(hf_model: str, configs: Dict[str, Dict]) -> Dict[str,
     env: Dict[str, str] = {}
     if cfg.get("tensor_parallel_size") is not None:
         env["EVAL_VLLM_TENSOR_PARALLEL_SIZE"] = str(cfg["tensor_parallel_size"])
+    if cfg.get("data_parallel_size") is not None:
+        # Per-model native data-parallel replicas (total GPUs = TP × DP). Read back
+        # into effective_dp at submit time so the --gres GPU count is correct, and
+        # flows to build_vllm_cmd.sh as --data-parallel-size. Mirrors TP above.
+        env["EVAL_VLLM_DATA_PARALLEL_SIZE"] = str(cfg["data_parallel_size"])
     if cfg.get("max_model_len") is not None:
         env["EVAL_VLLM_MAX_MODEL_LEN"] = str(cfg["max_model_len"])
     if cfg.get("swap_space") is not None:
@@ -2485,6 +2490,8 @@ def submit_eval(
             if vllm_overrides and "EVAL_VLLM_TENSOR_PARALLEL_SIZE" in vllm_overrides:
                 effective_tp = int(vllm_overrides["EVAL_VLLM_TENSOR_PARALLEL_SIZE"])
             effective_dp = sbatch_params.dp_size
+            if vllm_overrides and "EVAL_VLLM_DATA_PARALLEL_SIZE" in vllm_overrides:
+                effective_dp = int(vllm_overrides["EVAL_VLLM_DATA_PARALLEL_SIZE"])
             total_gpus = effective_tp * effective_dp
             cmd.extend(["--gres", f"gpu:{total_gpus}"])
             cc = _CLUSTER_CONFIG or {}
@@ -3130,6 +3137,8 @@ class EvalListener:
                 if vllm_overrides and "EVAL_VLLM_TENSOR_PARALLEL_SIZE" in vllm_overrides:
                     effective_tp = int(vllm_overrides["EVAL_VLLM_TENSOR_PARALLEL_SIZE"])
                 effective_dp = self.config.dp_size
+                if vllm_overrides and "EVAL_VLLM_DATA_PARALLEL_SIZE" in vllm_overrides:
+                    effective_dp = int(vllm_overrides["EVAL_VLLM_DATA_PARALLEL_SIZE"])
                 total_gpus = effective_tp * effective_dp
                 # Find a node with enough free GPU slots
                 while pack_node_idx < len(pack_node_list):
