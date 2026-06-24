@@ -2,7 +2,7 @@
 name: eval-agentic-launch
 description: >-
   Launch agentic Harbor evals through the OT-Agent unified eval listener
-  (eval/jupiter/unified_eval_listener.py) on any cluster: select models (query_unevaled_models.py /
+  (eval/unified_eval_listener.py) on any cluster: select models (query_unevaled_models.py /
   priority lists), wire the pinggy served-model tunnel, submit with the right preset + flags in tmux,
   then VERIFY the launch actually works via the 15-min infra sanity check (pinggy auth, Daytona→cluster
   api_base, vLLM POSTs, trial progression — catches "RUNNING but silently dead" jobs). Cluster-AGNOSTIC:
@@ -13,7 +13,7 @@ description: >-
 
 # eval-agentic-launch
 
-Launch agentic evals via the **unified eval listener** (`eval/jupiter/unified_eval_listener.py`, shared
+Launch agentic evals via the **unified eval listener** (`eval/unified_eval_listener.py`, shared
 across clusters). This skill is the **cluster-agnostic process**; for the cluster you're on, read its
 ops notes first.
 
@@ -108,18 +108,29 @@ default** (the user keeps 1–7 for sibling experiments; confirm before borrowin
 > that FATAL in an eval `.out`, the listener was started from the wrong place — re-run the preamble and
 > relaunch.
 
-General shape (fill the cluster-specific values from `ops/<cluster>/ops.md`):
+General shape — use the **canonical unified listener `eval/unified_eval_listener.py` with a
+`--cluster-config`** (NOT the legacy `eval/unified_eval_listener.py`: it lacks the
+`conda_env` / `limit_mm_per_prompt` / `--config-yaml` / `--enable-thinking` / `--agent-parser`
+wiring and will mis-serve per-model-conda_env models — e.g. the qwen3_5 tmax models would fall back
+to `otagent`/vLLM-0.16 and crash). The cluster config (`eval/clusters/<cluster>.yaml`) supplies
+sbatch_script / hardware / conda_envs / paths, so you no longer pass `--sbatch-script` /
+`--n-concurrent` / `--gpu-memory-util`:
 ```bash
 # inside a tmux session (the listener runs minutes/model — pre-download; nohup/disown are unreliable)
-python eval/jupiter/unified_eval_listener.py \
+python eval/unified_eval_listener.py \
+  --cluster-config eval/clusters/<cluster>.yaml \
+  --baseline-model-configs eval/configs/baseline_model_configs_minimal.yaml \
   --preset <preset> \
-  --sbatch-script <ops/<cluster> value> \
   --require-priority-list --priority-file eval/lists/<file>.txt \
-  --n-concurrent <ops value> --gpu-memory-util <ops value> \
-  --harbor-config hpc/harbor_yaml/eval/<ctx>.yaml \
-  [--pre-download] [--pinggy_persistent_url <URL> --pinggy_token <TOKEN>] \
-  --once --verbose --batch-size <N> 2>&1 | tee eval/<cluster>/logs/<preset>_listener_$(date +%Y%m%d_%H%M%S).log
+  --config-yaml dcagent_eval_config_no_override.yaml \
+  --enable-thinking [--agent-parser json] [--max-output-tokens 16384] \
+  [--pre-download] [--force-reeval] [--pinggy_persistent_url <URL> --pinggy_token <TOKEN>] \
+  --once --verbose 2>&1 | tee eval/<cluster>/logs/<preset>_listener_$(date +%Y%m%d_%H%M%S).log
 ```
+Per-model serve settings (`conda_env` — e.g. `eval-qwen35` for qwen3_5 — `tensor_parallel_size`,
+`data_parallel_size`, `max_model_len`, `limit_mm_per_prompt`) come from `--baseline-model-configs`;
+the preset forwards `--config-yaml dcagent_eval_config_no_override.yaml` so harbor inherits per-task
+sandbox sizes (no per-cluster config). Presets default `--enable-thinking` on.
 
 ## 3b. Timeout multiplier policy (automatic, config-by-size selection — usually nothing to do)
 
@@ -134,7 +145,7 @@ listener **selects the config by model size**, so a normal launch gets the right
 | **32B-class** (~28–42B; includes MoE like `30b-a3b`) | `hpc/harbor_yaml/eval/dcagent_eval_defaults_32b.yaml` | **16×** (in the file) |
 | out-of-band (e.g. 70B / 80B) **or no size token in the name** | base default (`dcagent_eval_defaults.yaml`) | 2× + a logged note (set one explicitly if you want more) |
 
-**Where it's set:** `eval/jupiter/unified_eval_listener.py` — `select_harbor_config()` / `resolve_model_eval()`,
+**Where it's set:** `eval/unified_eval_listener.py` — `select_harbor_config()` / `resolve_model_eval()`,
 applied per-model in the gathering pass. It reads the **param-count size token from the HF model name**
 (largest `\dB` token wins, so MoE `…-30b-a3b` → 30B → 32B band). The selected config path flows as
 `EVAL_HARBOR_CONFIG` into the sbatch, and its `timeout_multiplier` flows as `EVAL_TIMEOUT_MULTIPLIER`
@@ -211,7 +222,7 @@ Three traps that each silently break a launch — check these first when an eval
 
 4. **On Jupiter, pass `--reservation reformo` or eval jobs starve behind RL.** `unified_eval_harbor.sbatch` sets `--account reformo` but **no** `#SBATCH --reservation`, so without the flag the job lands in the *general* booster pool — which is empty because the `reformo` reservation holds ~128 nodes (`IGNORE_JOBS`), leaving the eval `PENDING Reason=Priority` indefinitely even while ~90 reservation nodes sit free. The listener already supports it: `--reservation reformo` (or env `EVAL_LISTENER_RESERVATION=reformo`), wired to the `sbatch --reservation=` line. **So Jupiter ID-eval launches should always pass `--reservation reformo`** — *until the reservation expires* (currently `EndTime=2026-06-21`; after that, `scontrol show reservation` for the live name, or drop the flag if none is active — passing a dead reservation name errors the submit). Rescue already-PENDING jobs without resubmitting: `scontrol update jobid=<j> reservation=reformo` (flips them to RUNNING immediately if the reservation has free nodes).
 
-6. **A `Finished`+metrics row makes the listener Skip with `reason=job finished` — that is correct for cohort fill, but blocks an intentional re-eval. Force it with `--force-eval`.** `should_start_job()` returns `(False, "job finished")` for any benchmark that already has a `Finished` row carrying non-null `metrics`. Crucially, **`--stale-started-hours` does NOT override this** — that flag only re-ages `Started` (in-progress) rows; a *completed* eval is never "stale". So for a deliberate **re-eval / parity test** (re-running a benchmark that already has a real score), there is exactly one launch-time flag: **`--force-eval`** (`eval/jupiter/unified_eval_listener.py`). It bypasses ALL dedup (`should_start_job(..., force=True) → (True, "force-eval (dedup bypassed)")`) and submits a **fresh** `sandbox_jobs` row — it does **not** touch the existing row, so no metrics-clearing and no cross-user DB write is needed (important when the prior row is owned by another user — clearing it would violate the FK-safe / own-rows-only guardrail). **When to force vs respect the skip:**
+6. **A `Finished`+metrics row makes the listener Skip with `reason=job finished` — that is correct for cohort fill, but blocks an intentional re-eval. Force it with `--force-eval`.** `should_start_job()` returns `(False, "job finished")` for any benchmark that already has a `Finished` row carrying non-null `metrics`. Crucially, **`--stale-started-hours` does NOT override this** — that flag only re-ages `Started` (in-progress) rows; a *completed* eval is never "stale". So for a deliberate **re-eval / parity test** (re-running a benchmark that already has a real score), there is exactly one launch-time flag: **`--force-eval`** (`eval/unified_eval_listener.py`). It bypasses ALL dedup (`should_start_job(..., force=True) → (True, "force-eval (dedup bypassed)")`) and submits a **fresh** `sandbox_jobs` row — it does **not** touch the existing row, so no metrics-clearing and no cross-user DB write is needed (important when the prior row is owned by another user — clearing it would violate the FK-safe / own-rows-only guardrail). **When to force vs respect the skip:**
    - **FORCE (`--force-eval`)** — the user explicitly asks for a re-run / parity test / repeatability check, or you must overwrite a known-bad-but-non-cleared score. ALWAYS pair with `--require-priority-list` + `--priority-file <single-model list>` so only the intended model(s) are forced (without it, `--force-eval` would resubmit *every* model in the lookback window, including already-scored ones — a queue flood).
    - **RESPECT the skip (no flag)** — normal cohort/sweep fill, where `reason=job finished` correctly means "already have this number, don't waste GPUs". This is the default and should stay the default.
    - Alternative (only if you genuinely want to *replace* an existing **own** row's metrics rather than add a sibling): clear that row's `metrics` to null (→ listener returns `(True, "finished but metrics cleared")`) via `crud-otagent-supabase`, FK-safe and **own-rows-only** (`.eq("username","bfeuer00")`). `--force-eval` is preferred — it needs no DB mutation and works regardless of row ownership.
