@@ -428,3 +428,7 @@ data/nemotron_gym/output_v2/
 # Track the .claude experiments ops doc (override the broad `experiments/` ignore above)
 !.claude/ops/experiments/
 !.claude/ops/experiments/**
+
+# agent_logs belong at the ABSOLUTE ~/Documents/agent_logs/, never in-repo.
+# A relative agent_logs/ here is the recurring relative-path bug — ignore it so it can never be committed.
+/agent_logs/
