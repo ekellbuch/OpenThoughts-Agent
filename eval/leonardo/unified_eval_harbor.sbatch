@@ -156,6 +156,18 @@ export TORCH_HOME="${WORK}/torch_home"
 export XDG_CACHE_HOME="${WORK}/.cache"
 export TORCHINDUCTOR_CACHE_DIR="${WORK}/.cache/torchinductor"
 export HOME="${WORK}"
+# --- Pin NETRC to avoid the aiohttp Path.home() segfault (Leonardo, 2026-06-23) ---
+# Under high harbor concurrency (the v2 preset's --n-concurrent 128) many aiohttp
+# client sessions concurrently call _get_netrc_auth -> netrc_from_env() ->
+# Path.home().expanduser()/stat on GPFS. That native path is not thread-safe at
+# scale and SIGSEGVs the harbor orchestrator ~9 min in (jobs 47674124 a1-codeelo/v2,
+# 47675130 a1-codeforces/v2 — Fatal Python error: Segmentation fault, current thread
+# in aiohttp/helpers.py:210 netrc_from_env -> pathlib home() -> posixpath expanduser).
+# Setting NETRC makes netrc_from_env() take the `netrc_env is not None` branch and
+# skip Path.home() entirely (see aiohttp/helpers.py). The file is intentionally a
+# no-op placeholder (we never use .netrc auth — model API auth is via headers).
+export NETRC="${WORK}/.netrc_eval_placeholder"
+touch "$NETRC" 2>/dev/null || true
 export HYDRA_FULL_ERROR=1
 export HF_HUB_OFFLINE=0  # Login nodes pre-downloaded; set to 1 after download
 
