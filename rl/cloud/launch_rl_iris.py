@@ -74,7 +74,32 @@ from hpc.iris_launch_utils import IrisLauncher  # reused only for the secrets-en
 
 # Defaults for the CoreWeave H100 GPU cluster.
 DEFAULT_CLUSTER = "cw-us-east-02a"
-DEFAULT_RL_DOCKER_IMAGE = "ghcr.io/open-thoughts/openthoughts-agent:gpu-rl"
+# Pin the RL image by IMMUTABLE DIGEST, not the floating ``:gpu-rl`` tag.
+#
+# WHY (the floating-tag stale-cache trap): the iris k8s backend always stamps
+# the task pod with ``imagePullPolicy: IfNotPresent``
+# (marin lib/iris .../backends/k8s/tasks.py) and we cannot override it from here.
+# With a FLOATING tag, IfNotPresent means a node that already has *some* image
+# under that tag name will NOT re-pull when the tag is later retagged to new
+# bytes — so a node that cached an OLD ``:gpu-rl`` keeps running stale code
+# (observed: a launcher run executed MarinSkyRL 4c668f4 with NO flash_attn_2_cuda
+# while the freshly-retagged ``:gpu-rl`` pointed at the good build).
+#
+# A content-addressed ``@sha256:`` reference is self-verifying: IfNotPresent only
+# treats the cache as a hit when the cached bytes hash to exactly this digest, so
+# it always runs the intended image regardless of node cache state — sidestepping
+# the stale-tag problem entirely without needing imagePullPolicy: Always.
+#
+# This digest == the immutable gitsha tag ``:gpu-rl-1b5a82d6`` (OT-Agent commit
+# 1b5a82d6, "flash_attn 2.8.3 compiled from source"): flash_attn 2.8.3 +
+# flash_attn_2_cuda present, /opt/skyrl baked at MarinSkyRL 6f945cd. Verified on
+# an H100 (real forward) and by a digest-pinned CPU probe on cw-us-east-02a.
+# When the gpu-rl image is rebuilt, bump this digest (use the immutable
+# ``:gpu-rl-<gitsha>`` tag's digest, never the floating ``:gpu-rl``).
+DEFAULT_RL_DOCKER_IMAGE = (
+    "ghcr.io/open-thoughts/openthoughts-agent"
+    "@sha256:f571b88a3487b140ef6edfebb617fee8cb4a271bac4d95485c01f5a03efff2fb"
+)
 DEFAULT_GPU_VARIANT = "H100"
 DEFAULT_GPUS_PER_NODE = 8           # gd-8xh100ib-i128 = 8x H100-80GB + IB
 DEFAULT_CPU_PER_NODE = 64.0
