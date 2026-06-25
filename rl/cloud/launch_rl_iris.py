@@ -456,6 +456,16 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         skyrl_refresh = (
             f"git -C {shlex.quote(SKYRL_HOME)} fetch --quiet --all || true; "
             f"git -C {shlex.quote(SKYRL_HOME)} checkout {ref}; "
+            # Purge baked bytecode after the checkout. The gpu-rl image bakes
+            # `.pyc` for the editable skyrl-train at its build-time commit; if those
+            # were compiled with hash-based (UNCHECKED_HASH) invalidation, Python
+            # does NOT recompile when `git checkout` swaps the `.py` underneath, so
+            # a `--skyrl-ref` checkout SILENTLY runs the stale baked bytecode (proven
+            # 2026-06-25: the norm_topk_prob fix at 518179d checked out, but the pod
+            # raised at the pre-fix line numbers). Delete the cache so the live `.py`
+            # is recompiled. Best-effort (|| true) — must not block on a read-only fs.
+            f"find {shlex.quote(SKYRL_HOME)}/skyrl-train -name '*.pyc' -delete 2>/dev/null || true; "
+            f"find {shlex.quote(SKYRL_HOME)}/skyrl-train -name __pycache__ -type d -prune -exec rm -rf {{}} + 2>/dev/null || true; "
             f"echo \"[rl-iris] MarinSkyRL now at $(git -C {shlex.quote(SKYRL_HOME)} rev-parse HEAD)\"; "
         )
     bash = (
