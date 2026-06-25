@@ -229,6 +229,55 @@ aws s3 sync /scratch/08134/negin/dc-agent-shared/dc-agent/eval/tacc/jobs/to_uplo
 aws s3 sync s3://oumi-science-donotdelete/benjamin/<run_dir> ../evaltraces/<run_dir> --only-show-errors
 ```
 
+## Agentic eval on Vista (unified v6 listener)
+
+TACC Vista is wired into the unified v6 eval listener (added 2026-06-25). Files:
+`eval/clusters/tacc.yaml` (cluster config), `eval/tacc/eval_harbor.sbatch` (serve+Harbor+Daytona
+driver), `eval/clusters/tacc_baseline_model_configs.yaml` (per-model serve overrides, all TP=1).
+
+**The Vista-specific particulars (vs Leonardo):**
+
+- **Daytona connectivity is DIRECT — NO proxy / SSH-SOCKS5 / step-ca cert.** Vista compute nodes have
+  **full direct internet egress** (verified: `huggingface.co`, `app.daytona.io`, generic all return 200
+  from a compute node). The terminus-2 LLM call is made by the harbor orchestrator ON the compute node to
+  the LOCAL vLLM (`localhost:8000`) — the Daytona sandbox only runs terminal commands and never calls the
+  model — so the only external dependency is compute-node → Daytona API, which works directly. The TACC
+  sbatch has NO `proxied()` wrapper, NO `start_proxy_tunnel.sh`, NO model pre-download (compute node
+  downloads from HF directly). This is the big simplification over Leonardo.
+- **GPUs are NOT a SLURM gres** (`scontrol show node` → `Gres=(null)`) and **RealMemory is misreported as
+  1 (MB)**. So `--gres gpu:N` and `--mem=<MB>` both FAIL. The listener handles this via the new
+  `hardware.gpu_gres: false` flag in `tacc.yaml` → it requests whole NODES (`--nodes
+  ceil(TP*DP / gpus_per_node)`) with NO `--gres` / `--mem` / `--cpus-per-task` (the node is allocated
+  exclusively, CPUAlloc=72). **1 GH200 (96GB) per node** → a 32B serves at **TP=1** on one GPU (a
+  multi-GPU TP would need a multi-node vLLM). The TACC baseline config pins the 32B family to TP=1.
+- **Do NOT use `--pre-download` on the listener.** It runs HF snapshot_download on the shared login node,
+  whose Rust-based HF transfer OOMs (`memory allocation of N bytes failed` → `Aborted (core dumped)`),
+  killing the listener. Drop `--pre-download`; the sbatch downloads the model directly on the compute node
+  (188GB RAM, direct egress).
+- **The `gh` partition is heavily contended** (~100 pending jobs, est. start ~6h out as of 2026-06-25).
+  For a quick infra-canary use **`-p gh-dev`** (2h wall cap, 1 running job, ~5 idle nodes) by overriding
+  `--partition gh-dev --time 02:00:00` on the sbatch (keep `tacc.yaml` default = `gh` for production).
+- **Secrets**: `$SCRATCH/keys.env` (= `DC_AGENT_SECRET_ENV`) must exist with `SUPABASE_URL` /
+  `SUPABASE_ANON_KEY` (the listener's model-discovery query is FATAL without Supabase) + `HF_TOKEN` +
+  `DAYTONA_API_KEY`. It is the local `/Users/benjaminfeuer/Documents/secrets.env` synced over. `HF_TOKEN`
+  is also set in `~/.bashrc`. The Daytona org keys are also hardcoded in the sbatch (same bank as Leonardo).
+- **Benign serve noise**: terminus-2 hits the vLLM `/tokenize` endpoint for token-counting, and the fork
+  wheel's Qwen3 chat-template renderer raises `IndexError: list index out of range` there (`hf.py:682
+  safe_apply_chat_template`). This is **NON-FATAL** — `/v1/chat/completions` generations succeed (real
+  `<think>` responses, ~25s/gen), trials advance through multiple episodes, and the agent falls back from
+  the failed tokenize. Do NOT treat the `/tokenize` errors as a launch failure. (Canary 2026-06-25 job
+  787344: serve READY, Daytona `_DaytonaDirect` sandboxes up, 34 trials, 17 multi-episode, vLLM
+  `Running: ~29 reqs` — fully progressing.)
+- **Launch (from `$SCRATCH/OpenThoughts-Agent`, `export PYTHONPATH="$PWD:$PYTHONPATH"`, secrets sourced):**
+  ```bash
+  python eval/unified_eval_listener.py --cluster-config eval/clusters/tacc.yaml \
+    --baseline-model-configs eval/clusters/tacc_baseline_model_configs.yaml \
+    --preset tb2 --require-priority-list --priority-file <list> \
+    --config-yaml dcagent_eval_config_no_override.yaml --enable-thinking --force-reeval --once --verbose
+  ```
+  (NOT `eval/configs/baseline_model_configs_minimal.yaml` — that pins Qwen3-32B to TP=2, which on Vista's
+  1-GPU nodes would need multi-node vLLM. Use the TACC baseline config.)
+
 ## VS Code remote tunnel
 
 ```bash
@@ -258,9 +307,6 @@ setfacl -R -d -m o::--- /path/to/dir
   `MaxTime=UNLIMITED`.
 - **GH200 memory is not always reclaimable.** A crashed job can leave a node unusable until reboot;
   if `srun`/`idev` lands on such a node, exit and request a fresh allocation.
-- **No `eval/clusters/tacc.yaml` or `eval/tacc/` sbatch template exists yet.** TACC eval currently uses
-  the legacy `eval/tacc/*_eval_listener.py` scripts (if present) or manual `harbor jobs start`. A cluster
-  config + unified_eval_harbor.sbatch port is pending.
 - **SkyRL TACC setup**: <https://github.com/NovaSky-AI/SkyRL/blob/arm/skyrl-train/scripts/tacc_setup.sh>
   (the `arm` branch has TACC-specific setup).
 - **SUs expire 2025-12-31.** Check `bbalance` periodically; request renewal if running low.
