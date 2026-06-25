@@ -357,6 +357,19 @@ trainer:
       # leave HBM for the 131k activations. See MEMORY (B).
       cpu_offload: true
       reshard_after_forward: true
+      # FSDP wrap policy — PIN the transformer layer class explicitly. The auto-
+      # detect reads the model's `_no_split_modules`, which for the MULTIMODAL
+      # Qwen3_5MoeForConditionalGeneration is ['Qwen3_5MoeDecoderLayer',
+      # 'Qwen3_5MoeVisionBlock'] (probed on Leonardo eval-qwen35 / transformers
+      # 5.12.1). On the TEXT-ONLY policy backbone, `Qwen3_5MoeVisionBlock` is not
+      # present, so get_fsdp_wrap_policy's get_module_class_from_name raised
+      # "Could not find the transformer layer class to wrap" (killed v1/v2/v3).
+      # The hybrid arch (10 full-attn + 30 GatedDeltaNet layers) uses a SINGLE
+      # decoder-layer class `Qwen3_5MoeDecoderLayer` (it switches attn type
+      # internally per layer) — so pinning that one class wraps every decoder
+      # layer; the vision tower is correctly excluded (text-only RL).
+      wrap_policy:
+        transformer_layer_cls_to_wrap: Qwen3_5MoeDecoderLayer
       # MESH: EP=8 x FSDP=4 = 32 policy GPU = 4 CoreWeave nodes. CP=1 (NO CP).
       # MoE dim-0 guard (num_experts//EP)%FSDP==0: 256/EP8=32; 32/FSDP4=8 -> VALID.
       fsdp_size: 4
@@ -377,6 +390,10 @@ trainer:
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
+      # Mirror the policy wrap-policy pin (see policy.fsdp_config above) — inert
+      # here (no RefWorker built), but kept consistent.
+      wrap_policy:
+        transformer_layer_cls_to_wrap: Qwen3_5MoeDecoderLayer
       fsdp_size: 4
       expert_model_parallel_size: 8
       moe_router_replay: true
