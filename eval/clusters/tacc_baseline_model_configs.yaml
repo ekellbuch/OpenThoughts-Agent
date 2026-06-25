@@ -1,0 +1,44 @@
+# TACC Vista per-model vLLM serving overrides.
+#
+# Derived from eval/configs/baseline_model_configs_minimal.yaml, but every TP is
+# pinned to 1 because Vista has exactly ONE 96GB GH200 GPU per node (GPUs are not
+# SLURM-gres-tracked; a multi-GPU TP would need a multi-node vLLM). A 32B bf16
+# (~64GB weights) fits a single 96GB GH200 at TP=1 with ~30GB KV headroom at 32k.
+#
+# Use via --baseline-model-configs eval/clusters/tacc_baseline_model_configs.yaml
+# (or implicitly via tacc.yaml's `baseline_model_configs:` key).
+#
+# Format: models (exact HF name -> config), patterns (regex fallback, first match).
+
+models:
+  # Qwen3-32B — terminus-2 Pattern D (NO tool_call_parser / reasoning_parser:
+  # both hijack the plain-JSON output terminus-2 parses client-side). TP=1 on the
+  # 96GB GH200. trust_remote_code permission-only. prefix-caching = pure win.
+  "Qwen/Qwen3-32B":
+    tensor_parallel_size: 1
+    max_model_len: 32768
+    swap_space: 32
+    trust_remote_code: true
+    extra_args: "--enable-prefix-caching"
+
+  # Qwen3-8B baseline control.
+  "Qwen/Qwen3-8B":
+    tensor_parallel_size: 1
+    max_model_len: 32768
+    trust_remote_code: true
+    extra_args: "--enable-prefix-caching"
+
+# Pattern fallbacks — all force TP=1 (single GH200/node) + prefix-caching.
+patterns:
+  - match: "(?i)32[Bb]"
+    trust_remote_code: true
+    tensor_parallel_size: 1
+    max_model_len: 32768
+    swap_space: 32
+    extra_args: "--enable-prefix-caching"
+
+  - match: ".*"
+    trust_remote_code: true
+    tensor_parallel_size: 1
+    max_model_len: 32768
+    extra_args: "--enable-prefix-caching"

@@ -2494,16 +2494,31 @@ def submit_eval(
             if vllm_overrides and "EVAL_VLLM_DATA_PARALLEL_SIZE" in vllm_overrides:
                 effective_dp = int(vllm_overrides["EVAL_VLLM_DATA_PARALLEL_SIZE"])
             total_gpus = effective_tp * effective_dp
-            cmd.extend(["--gres", f"gpu:{total_gpus}"])
             cc = _CLUSTER_CONFIG or {}
             hw = cc.get("hardware", {})
             gpus_per_node = int(hw.get("gpus_per_node", 8))
-            cpus_per_node = int(hw.get("cpus_per_node", 96))
-            mem_per_node_mb = int(hw.get("mem_per_node_mb", 1860000))
-            cpus_needed = (cpus_per_node * total_gpus) // gpus_per_node
-            mem_needed = (mem_per_node_mb * total_gpus) // gpus_per_node
-            cmd.extend(["--cpus-per-task", str(cpus_needed)])
-            cmd.extend(["--mem", f"{mem_needed}M"])
+            # Some clusters (e.g. TACC Vista GH200) do NOT track GPUs as a SLURM
+            # gres — `scontrol show node` reports Gres=(null), each node has 1
+            # whole-node-allocated GPU, and RealMemory is misreported (1M) so
+            # --mem/--cpus-per-task would fail. For those, set hardware.gpu_gres:
+            # false: request whole nodes (ceil(total_gpus/gpus_per_node)) with no
+            # --gres/--mem/--cpus-per-task — the node is allocated exclusively.
+            gpu_gres = hw.get("gpu_gres", True)
+            if not gpu_gres:
+                import math
+                nodes_needed = max(1, math.ceil(total_gpus / max(1, gpus_per_node)))
+                # Only set --nodes here if the caller didn't already (DP path below
+                # passes dp_nodes via the explicit --nodes append).
+                if dp_nodes <= 0:
+                    cmd.extend(["--nodes", str(nodes_needed)])
+            else:
+                cmd.extend(["--gres", f"gpu:{total_gpus}"])
+                cpus_per_node = int(hw.get("cpus_per_node", 96))
+                mem_per_node_mb = int(hw.get("mem_per_node_mb", 1860000))
+                cpus_needed = (cpus_per_node * total_gpus) // gpus_per_node
+                mem_needed = (mem_per_node_mb * total_gpus) // gpus_per_node
+                cmd.extend(["--cpus-per-task", str(cpus_needed)])
+                cmd.extend(["--mem", f"{mem_needed}M"])
     # Override sbatch --output to use cluster-configured log dir
     cc_logs = (_CLUSTER_CONFIG or {}).get("paths", {}).get("eval_logs_dir", _FALLBACK_EVAL_LOGS_DIR)
     cmd.extend(["--output", f"{cc_logs}/%x_%j.out"])
