@@ -9,8 +9,9 @@ description: >-
   the gang/leafgroup/Kueue multi-node Ray rendezvous, the iris config-authoring rules (NO container block,
   load-bearing top-level `extra_env:` forwarding, disaggregated placement + explicit `num_inference_engines`,
   SIF→Docker env translation), and the bring-up gotchas learned this week (`--cpu 48`, `--max-retries ≥1`).
-  Use when asked to launch / relaunch an agentic SkyRL RL run on Iris / CoreWeave. Reference:
-  rl/cloud/launch_rl_iris.py, scripts/iris/start_rl_iris_controller.py, .claude/ops/iris/iris_job_lifecycle.md.
+  Use when asked to launch / relaunch an agentic SkyRL RL run on Iris / CoreWeave. Cluster access/hardware
+  particulars live in .claude/ops/iris/coreweave_gpu_ops.md (this skill defers to it). Reference:
+  rl/cloud/launch_rl_iris.py, scripts/iris/start_rl_iris_controller.py, .claude/ops/iris/coreweave_gpu_ops.md.
 ---
 
 # rl-agentic-launch-iris
@@ -27,37 +28,37 @@ generator). The target is Marin's **CoreWeave `cw-us-east-02a`** cluster — **8
 node**, whole-node exclusive, gang/leafgroup-coscheduled (NOT SLURM, NOT TPU). The **gpu-rl Docker image IS
 the runtime** — there is no Apptainer SIF and no `hpc.launch`.
 
-This skill is the GPU/CoreWeave analog of `rl-agentic-launch-jupiter`. Generic Iris job lifecycle (monitor /
-teardown / preemption / Daytona-cap mechanics) lives in **`.claude/ops/iris/iris_job_lifecycle.md`** — that
-doc is TPU-centric (datagen/eval); this skill is the GPU-RL launch path it does not yet cover. *(GAP: there
-is no `.claude/ops/iris/ops.md` general access doc — kubeconfig / `iris job` cluster particulars are folded
-into §1 here and into iris_job_lifecycle.md.)*
+This skill is the GPU/CoreWeave analog of `rl-agentic-launch-jupiter`, and like the Jupiter/Leonardo launch
+skills it **defers cluster-access/hardware particulars to its ops doc** —
+**`.claude/ops/iris/coreweave_gpu_ops.md`** (kubeconfig/access, the H100 node shape + NCCL rationale,
+gang/Kueue/rendezvous mechanics, and the binding `--cpu 48` / `--max-retries` gotchas). This skill keeps the
+launch HOW-TO (flag set, config-authoring rules, bring-up checklist). The TPU-centric Iris job lifecycle
+(datagen/eval monitor / teardown / preemption / Daytona-cap) is a DIFFERENT cluster — see
+`.claude/ops/iris/iris_job_lifecycle.md`.
 
 ## 1. Prereqs (the pre-launch preamble)
+
+> **Cluster access, hardware, and scheduling particulars → `.claude/ops/iris/coreweave_gpu_ops.md`**
+> (kubeconfig `~/.kube/coreweave-iris-gpu`, the `cw-us-east-02a` cluster + access-verify commands, the H100
+> node shape + NCCL-defaults rationale, gang/Kueue/`s3://`-rendezvous mechanics, the gpu-rl image's
+> deps-only/source-synced model, and the binding `--cpu 48` / `--max-retries` gotchas). Read it once; this
+> section keeps only what you type to launch.
 
 Launch from the local Mac, **otagent py3.12 conda env**:
 ```bash
 source /Users/benjaminfeuer/Documents/secrets.env     # HF_TOKEN, WANDB_*, DAYTONA_* (forwarded into the pod)
-export KUBECONFIG=~/.kube/coreweave-iris-gpu           # the CoreWeave GPU cluster kubeconfig
+export KUBECONFIG=~/.kube/coreweave-iris-gpu           # the CoreWeave GPU cluster kubeconfig (see ops doc)
 # otagent python = /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python (symlinks fail in the sandbox)
 ```
-- **Cluster config** is auto-resolved to the marin repo's `lib/iris/config/cw-us-east-02a.yaml`
-  (`~/Documents/marin/lib/iris/config/...`); override with `--cluster-config` only if it moved.
-- **Confirm access** before submitting (synchronous calls only — no background `iris`/`kubectl`):
-  ```bash
-  /Users/benjaminfeuer/Documents/marin/.venv/bin/iris --cluster=cw-us-east-02a query \
-    "SELECT job_id,state FROM jobs WHERE state IN (1,2,3) AND job_id LIKE '/benjaminfeuer/%'" -f csv
-  # live H100 headroom: how many of the 36 nodes are free (the gang needs N whole free nodes)
-  kubectl get nodes -l ... | ...    # or the cluster's workers table; ~36 H100 nodes total
-  ```
-- **What the gpu-rl image bakes** (pinned by **immutable `@sha256:` digest** in
-  `rl/cloud/launch_rl_iris.py:DEFAULT_RL_DOCKER_IMAGE` — `:gpu-rl-<gitsha>`, NOT the floating `:gpu-rl` tag):
-  the **RL conda venv** at `/opt/openthoughts/envs/rl` (torch 2.11 + the **vLLM fork built from source** +
-  flash-attn 2.8.3 incl. `flash_attn_2_cuda`), **MarinSkyRL editable** at `/opt/skyrl` (`pip install -e`
-  over a git clone → a `--skyrl-ref` checkout is live without reinstall), and **harbor** baked in. The digest
-  must point at the build with the trials_dir + reward-zeroing fixes (current pin = OT-Agent 8bc5bdb4 =
-  MarinSkyRL 2d9feef + harbor 342729d5). **When the image is rebuilt, bump the digest** (use the immutable
-  `:gpu-rl-<gitsha>` tag's digest — the floating tag gets stale-cached by `imagePullPolicy: IfNotPresent`).
+- **Confirm access** before submitting (synchronous `iris`/`kubectl` only — never background them; commands
+  + the ~36-node H100 headroom check are in the ops doc's "Verify access").
+- **Cluster config** auto-resolves to `~/Documents/marin/lib/iris/config/cw-us-east-02a.yaml`; override with
+  `--cluster-config` only if it moved.
+- **gpu-rl image:** deps-only (RL venv `/opt/openthoughts/envs/rl` + vLLM fork + MarinSkyRL editable
+  `/opt/skyrl` + harbor), **pinned by immutable `@sha256:` digest** in
+  `rl/cloud/launch_rl_iris.py:DEFAULT_RL_DOCKER_IMAGE` (NOT the floating `:gpu-rl` tag — it stale-caches).
+  Source is synced at runtime so first-party edits live without a rebuild; **bump the digest** on an image
+  rebuild (full rationale in the ops doc).
 
 ## 2. The canonical launch
 
@@ -209,10 +210,10 @@ These were paid for this week (`agent_logs/2026-06-25_coreweave_131k_cpdcp2r3_re
   resolving sharded safetensors online) a single rank can hit a transient HF Hub HTTP/EOF failure →
   transformers reports the generic `… does not appear to have a file named model.safetensors`; with
   `max_retries=0` that one rank kills the whole gang (Ray SIGKILLs it). `--max-retries 1` re-brings-up the
-  gang on that failure (time-only cost). *(A first-party retry-wrapper around the weight resolution is being
-  added to MarinSkyRL to mitigate this; the DURABLE fix is to pre-stage the model into the image's HF cache /
-  a shared snapshot before the FSDP workers start, or raise `HF_HUB_DOWNLOAD_TIMEOUT` + retry in the
-  controller — cross-reference the MarinSkyRL fix when it lands and drop the `--max-retries` workaround.)*
+  gang on that failure (time-only cost). A first-party retry-wrapper around the weight resolution has landed
+  in MarinSkyRL (commit `0b2b05b`); keep `--max-retries ≥1` as belt-and-suspenders. *(DURABLE alternative:
+  pre-stage the model into the image's HF cache / a shared snapshot before the FSDP workers start, or raise
+  `HF_HUB_DOWNLOAD_TIMEOUT`. Particulars: `.claude/ops/iris/coreweave_gpu_ops.md §Binding gotchas`.)*
 - **TP=8 must place intra-node on an 8-GPU node** (NVLink decode) — guaranteed by `--gpus_per_node 8` + the
   per-engine STRICT_PACK PG; do not split a TP=8 engine across nodes.
 - **DCP / CP / R3 / EPDIAG env must reach the pod** — that's the `extra_env:` forwarding (§4). After a launch,
