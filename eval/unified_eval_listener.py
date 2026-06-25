@@ -2075,8 +2075,9 @@ def check_daytona_resources(sandbox_limit: int, warning_buffer: float) -> bool:
 def _resolve_agent_name_from_config_yaml(config_yaml: str) -> Optional[str]:
     """Return agents[0].name from a harbor eval config YAML, or None if not resolvable.
 
-    Mirrors the sbatch's own yaml resolution (eval/configs/, eval/<cluster>/, eval/MBZ/)
-    so the listener and sbatch always agree on the runtime agent name.
+    Mirrors the sbatch's own yaml resolution (hpc/harbor_yaml/eval/configs/,
+    eval/<cluster>/, eval/MBZ/) so the listener and sbatch always agree on the
+    runtime agent name.
     """
     if not config_yaml:
         return None
@@ -2085,7 +2086,7 @@ def _resolve_agent_name_from_config_yaml(config_yaml: str) -> Optional[str]:
         candidates.append(config_yaml)
     else:
         cluster_name = (_CLUSTER_CONFIG or {}).get("cluster_name")
-        for base in ("eval/configs", f"eval/{cluster_name}" if cluster_name else None, "eval/MBZ"):
+        for base in ("hpc/harbor_yaml/eval/configs", f"eval/{cluster_name}" if cluster_name else None, "eval/MBZ"):
             if base:
                 candidates.append(os.path.join(base, config_yaml))
     for path in candidates:
@@ -3591,7 +3592,7 @@ Examples:
     parser.add_argument(
         "--config-yaml",
         help="Override Harbor eval config YAML filename (e.g. 'ablation_interleaved_true_16k.yaml'). "
-             "Overrides preset default. Resolved from eval/configs/ on the compute node.",
+             "Overrides preset default. Resolved from hpc/harbor_yaml/eval/configs/ on the compute node.",
     )
     parser.add_argument(
         "--max-output-tokens",

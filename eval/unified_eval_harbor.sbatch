@@ -777,10 +777,10 @@ fi
 # ==============================================================================
 set +e
 
-# Resolve config path: check eval/configs/ (canonical), then legacy per-cluster dirs
+# Resolve config path: check hpc/harbor_yaml/eval/configs/ (canonical), then legacy per-cluster dirs
 if [[ "$CONFIG_YAML" != /* ]]; then
-    if [ -f "$DCFT/eval/configs/$CONFIG_YAML" ]; then
-        HARBOR_CONFIG="$DCFT/eval/configs/$CONFIG_YAML"
+    if [ -f "$DCFT/hpc/harbor_yaml/eval/configs/$CONFIG_YAML" ]; then
+        HARBOR_CONFIG="$DCFT/hpc/harbor_yaml/eval/configs/$CONFIG_YAML"
     elif [ -f "$DCFT/eval/${CLUSTER_NAME}/$CONFIG_YAML" ]; then
         HARBOR_CONFIG="$DCFT/eval/${CLUSTER_NAME}/$CONFIG_YAML"
     elif [ -f "$DCFT/eval/MBZ/$CONFIG_YAML" ]; then

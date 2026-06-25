@@ -25,7 +25,7 @@
 #   EVAL_N_CONCURRENT       (default: 64)
 #   EVAL_GPU_MEMORY_UTIL    (default: 0.85 — Leonardo A100 64GB OOMs at 0.90+)
 #   EVAL_DAYTONA_THRESHOLD  (default: 3)
-#   EVAL_CONFIG_YAML        (default: dcagent_eval_config_no_override.yaml; resolved from eval/configs/)
+#   EVAL_CONFIG_YAML        (default: dcagent_eval_config_no_override.yaml; resolved from hpc/harbor_yaml/eval/configs/)
 #   EVAL_ENABLE_THINKING    (default: false)   EVAL_AGENT_PARSER (default: "")
 #   EVAL_DB_JOB_ID          (optional, pre-created Pending job ID)
 # ==============================================================================
@@ -94,18 +94,18 @@ WORK="/leonardo_work/AIFAC_5C0_290/bfeuer00"
 DCFT="${WORK}/code/OpenThoughts-Agent"
 
 # Resolve the harbor config path from CONFIG_YAML (mirrors the canonical
-# eval/unified_eval_harbor.sbatch resolution: eval/configs/ -> eval/leonardo/ -> eval/MBZ/).
-# Presets forward dcagent_eval_config_no_override.yaml (in eval/configs/).
+# eval/unified_eval_harbor.sbatch resolution: hpc/harbor_yaml/eval/configs/ -> eval/leonardo/ -> eval/MBZ/).
+# Presets forward dcagent_eval_config_no_override.yaml (in hpc/harbor_yaml/eval/configs/).
 if [[ "$CONFIG_YAML" == /* ]]; then
     HARBOR_CONFIG="$CONFIG_YAML"
-elif [ -f "$DCFT/eval/configs/$CONFIG_YAML" ]; then
-    HARBOR_CONFIG="$DCFT/eval/configs/$CONFIG_YAML"
+elif [ -f "$DCFT/hpc/harbor_yaml/eval/configs/$CONFIG_YAML" ]; then
+    HARBOR_CONFIG="$DCFT/hpc/harbor_yaml/eval/configs/$CONFIG_YAML"
 elif [ -f "$DCFT/eval/leonardo/$CONFIG_YAML" ]; then
     HARBOR_CONFIG="$DCFT/eval/leonardo/$CONFIG_YAML"
 elif [ -f "$DCFT/eval/MBZ/$CONFIG_YAML" ]; then
     HARBOR_CONFIG="$DCFT/eval/MBZ/$CONFIG_YAML"
 else
-    echo "ERROR: Harbor config not found: $CONFIG_YAML (looked in eval/configs, eval/leonardo, eval/MBZ)"
+    echo "ERROR: Harbor config not found: $CONFIG_YAML (looked in hpc/harbor_yaml/eval/configs, eval/leonardo, eval/MBZ)"
     exit 1
 fi
 echo "Resolved harbor config: $HARBOR_CONFIG"
