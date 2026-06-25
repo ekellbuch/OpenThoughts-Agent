@@ -1,0 +1,42 @@
+# Harbor eval config — SWE-agent (installed agent, uses hosted_vllm/ prefix)
+# Full SWE-agent framework (SWE-agent/SWE-agent). Installed inside the sandbox
+# via install-swe-agent.sh.j2, reads SWEAGENT_CONFIG (URL or local path) from
+# host env for agent behavior, and OPENAI_BASE_URL for routing to vLLM.
+# For hosted_vllm models the agent auto-sets per_instance_cost_limit=0,
+# total_cost_limit=0, max_input_tokens=0 — no CLI flags needed by default.
+n_attempts: 3
+timeout_multiplier: 1.0
+orchestrator:
+  type: local
+  n_concurrent_trials: 16
+  quiet: false
+  plain_output: true
+  retry:
+    max_retries: 10
+    exclude_exceptions:
+      # Aligned to the M1 parity run 7d05ffbf (2026-04-22, SERA-32B 48.67%).
+      # That run RETRIED ContextLengthExceededError / BadRequestError /
+      # AgentEnvironmentTimeoutError (they are NOT terminal here) — important for
+      # long-output SERA checkpoints (e.g. 47K overflowing 32k context, then
+      # recovering on retry). The later wrapup snapshot had drifted to make these
+      # terminal, which suppressed scores vs the parity run.
+      - VerifierTimeoutError
+      - SummarizationTimeoutError
+      - AgentTimeoutError
+      - VerifierOutputParseError
+      - RewardFileEmptyError
+      - RewardFileNotFoundError
+    wait_multiplier: 1.0
+    min_wait_sec: 1.0
+    max_wait_sec: 60.0
+environment:
+  type: daytona
+  force_build: false
+verifier:
+  max_timeout_sec: 14400
+agents:
+  - name: swe-agent
+    max_timeout_sec: 7200
+    kwargs: {}
+datasets:
+  - path: examples/tasks
