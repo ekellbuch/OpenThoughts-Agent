@@ -1,21 +1,26 @@
 # =============================================================================
-# Qwen3.6-35B-A3B — CoreWeave/Iris RL @ 131k (seqnorm + TIS, EP+FSDP, NO CP/DCP/R3)
+# Qwen3.6-35B-A3B — CoreWeave/Iris RL @ 131k (seqnorm + TIS + R3, EP+FSDP, NO CP/DCP)
 # =============================================================================
 # Target: Qwen/Qwen3.6-35B-A3B  (model_type: qwen3_5_moe ; arch
 #   Qwen3_5MoeForConditionalGeneration). NEW LINE OF INQUIRY. Runs the proven
-#   seqnorm+TIS recipe at 131072 context with NO CP and NO DCP — the HYBRID
-#   architecture (only 10/40 layers are full-attention; the other 30 are
-#   GatedDeltaNet linear-attn with constant recurrent state) makes long-context
-#   KV cheap, so CP/DCP should not be needed (memory math below + in the plan).
+#   seqnorm + TIS + R3 (router-replay) recipe at 131072 context with NO CP and
+#   NO DCP — the HYBRID architecture (only 10/40 layers are full-attention; the
+#   other 30 are GatedDeltaNet linear-attn with constant recurrent state) makes
+#   long-context KV cheap, so CP/DCP are not needed (memory math below + plan).
 #   On CoreWeave (cw-us-east-02a, 8x H100-80GB + IB per node).
-# UNLAUNCHED. Companion plan: notes/ot-agent/qwen3_6_35b_a3b_rl_plan.md
-#   (read it — multimodal/MTP text-only load = Rung-0 validation; CP/DCP/R3
-#    sequencing, success criterion, and concurrency remain OPEN DECISIONS).
+# UNLAUNCHED. Companion plan: notes/ot-agent/qwen3_6_35b_a3b_rl_plan.md (read it).
 #
 # SUPERVISOR-RESOLVED (2026-06-25):
 #   * DATASET = DCAgent/exp_rpt_pymethods2test-large (same set the 30B line uses;
 #     entrypoint stays the agentic terminal_bench path). Wired via --train_data.
 #   * CONTEXT = 131072, WITHOUT CP or DCP (context_parallel_size 1, dcp 1).
+#   * R3 ON (TIS on a MoE essentially requires R3 to keep pi_old == pi_train):
+#     moe_router_replay true, enable_return_routed_experts true, RAY executor
+#     (mp_backend false), async_scheduling false, moe_grouped_gemm true.
+#   * Multimodal/MTP -> TEXT-ONLY backbone (Rung-0 load-validation; untrodden —
+#     no prior RL on Qwen 3.5/3.6). SUCCESS = 10 RL steps without exploding.
+#   * PREREQ: the gpu-rl image MUST ship `torchtitan` before any EP>1 launch
+#     (apply_ep needs it for expert_model_parallel_size=8; else ModuleNotFound).
 #
 # -----------------------------------------------------------------------------
 # FETCHED ARCHITECTURE (from HF config.json, transformers 4.57.1 — TRUSTED, not
@@ -69,8 +74,18 @@
 #
 # -----------------------------------------------------------------------------
 # GEOMETRY (8 CoreWeave nodes = 64 H100, colocate_all: false, disaggregated):
-#   seqnorm + TIS (proven off-policy corrector). EP + FSDP policy mesh, plain TP=4
-#   generation. NO CP / NO DCP / NO R3 (router-replay) / NO YaRN.
+#   seqnorm + TIS + R3 (router-replay). EP + FSDP policy mesh, TP=4 generation
+#   on the RAY executor (R3-mandatory). NO CP / NO DCP / NO YaRN.
+#   *** R3 ON (supervisor 2026-06-25): TIS on a MoE essentially REQUIRES R3 —
+#   router-replay keeps pi_old == pi_train (the train forward replays the EXACT
+#   experts vLLM sampled), so the TIS importance ratios stay sane. Without R3,
+#   the recompute uses native/sentinel routing != the rollout routing and the
+#   log_ratio explodes (the failure the 80B hit). R3 capture is arch-agnostic
+#   in the vLLM fork (hooks at FusedMoE via routed_experts_capturer; qwen3_5_moe
+#   routes its Qwen3NextSparseMoeBlock through FusedMoE — same path as the
+#   validated 80B-A3B/Qwen3-Next R3 arm). DCP stays 1, so VLLM_ALLOW_ROUTED_
+#   EXPERTS_DCP is NOT needed (DCP>1 only). EPDIAG probe stays OFF (this is the
+#   minimal R3 config, not the EP-deadlock-debug vehicle). ***
 #
 #   Policy/Ref FSDP mesh:  EP=8 x FSDP=4 = 32 policy GPU = 4 nodes (CP=1).
 #   Generation:            8 engines x TP=4 = 32 gen GPU = 4 nodes.
@@ -214,11 +229,11 @@ terminal_bench:
       - VerifierOutputParseError
       - VerifierRuntimeError
 
-    # 150 concurrent trials — at 131k each resident trajectory holds a large
-    # rollout working set; 150 is the long-ctx host-RAM-safe value the 30B/80B
-    # 131k arms run (R3 is OFF here so there is no per-token routing-array
-    # inflation, but the long-ctx trajectory+logprob footprint alone warrants
-    # the lower cap). Drop toward 100 if a RolloutCoordinator OOMs.
+    # 150 concurrent trials — the long-ctx host-RAM-safe value the 30B/80B 131k
+    # R3 arms run. At 131k each resident trajectory holds a large rollout working
+    # set AND (R3 ON) per-token routing arrays [gen_len x 40 MoE layers x top-8]
+    # in host RAM on its RolloutCoordinator — the 150 cap is the documented R3
+    # host-RAM ceiling. Drop toward 100 if a RolloutCoordinator OOMs.
     n_concurrent_trials: 150
 
     log_level: INFO
@@ -278,10 +293,15 @@ trainer:
     eps_clip_high: 0.05
     # seqnorm: global length-unbiased sequence-level normalizer.
     loss_reduction: seq_mean_token_sum_norm_global
-    # Truncated Importance Sampling: bounds the off-policy ratio created by the
-    # vLLM(generation) vs FSDP(recompute) logprob gap. The off-policy corrector
-    # here — R3 router-replay is OFF, so TIS carries the MoE-routing correction
-    # (clamp(exp(old-rollout), cap)). REQUIRES collect_rollout_details.
+    # Truncated Importance Sampling: bounds the residual off-policy ratio from
+    # the vLLM(generation) vs FSDP(recompute) bf16 logprob gap. PAIRED WITH R3:
+    # R3 router-replay (fsdp_config.moe_router_replay below) makes the train
+    # forward replay the EXACT experts vLLM sampled (pi_old == pi_train for the
+    # MoE routing) so the importance ratio is well-conditioned; TIS then clamps
+    # the small remaining bf16 gap (clamp(exp(old-rollout), cap)). On a MoE,
+    # TIS essentially REQUIRES R3 — without router-replay the recompute uses
+    # native/sentinel routing != the rollout routing and the ratio explodes.
+    # REQUIRES collect_rollout_details (above).
     use_tis: true
     tis_imp_ratio_cap: 2.0
 
@@ -343,9 +363,11 @@ trainer:
       expert_model_parallel_size: 8
       # CP OFF (context_parallel_size omitted => default 1) — the hybrid arch's
       # cheap long-ctx KV/activations make CP unnecessary at 131k (see MEMORY).
-      # R3 OFF: moe_router_replay FALSE. TIS carries the off-policy correction.
-      # grouped-GEMM ON (fused per-expert FFN, vLLM-loadable names).
-      moe_router_replay: false
+      # R3 ON: moe_router_replay TRUE — the train forward replays the EXACT
+      # rollout routing (pi_old == pi_train for the MoE) so TIS's importance
+      # ratio stays sane on this MoE. grouped-GEMM ON (fused per-expert FFN,
+      # vLLM-loadable per-expert names — required by the router-replay path).
+      moe_router_replay: true
       moe_grouped_gemm: true
       ep_comm_backend: torch
   ref:
@@ -357,7 +379,7 @@ trainer:
       reshard_after_forward: true
       fsdp_size: 4
       expert_model_parallel_size: 8
-      moe_router_replay: false
+      moe_router_replay: true
       moe_grouped_gemm: true
       ep_comm_backend: torch
 
@@ -414,11 +436,13 @@ generator:
   # it is intentionally OFF here (see plan: layer DCP only if a later rung needs it).
   inference_engine_decode_context_parallel_size: 1
 
-  # mp EXECUTOR (multiprocessing) — R3 is OFF, so the Ray Compiled-DAG R3 deadlock
-  # class does NOT apply; mp is the simpler/faster path and ran the 80B-A3B hybrid
-  # arm cleanly at TP=4. Requires colocate_all=false. (When R3 is layered LATER,
-  # switch to the RAY executor + async_scheduling=false per the R3 guard.)
-  inference_engine_mp_backend: true
+  # RAY EXECUTOR (mp_backend FALSE) — R3-MANDATORY. R3 routed-experts capture
+  # requires the ray executor path (the mp executor cannot emit per-token routing
+  # over /chat/completions for the FSDP2 replay hook). The ray backend splits
+  # TP=4 into 4x{GPU:1} bundles (STRICT_PACK on one node). Requires
+  # colocate_all=false (set above). async_scheduling is disabled below to satisfy
+  # vLLM's R3 guard.
+  inference_engine_mp_backend: false
 
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
@@ -462,9 +486,17 @@ generator:
     # Disable vLLM custom CUDA all-reduce (safe vs the NCCL weight-sync deadlock
     # class; carried from the validated arms). Safe at TP=4.
     disable_custom_all_reduce: true
-    # R3 OFF — do NOT set enable_return_routed_experts (TIS carries the off-policy
-    # correction). async_scheduling left default (only force-disabled under the
-    # RAY executor for the R3 guard).
+    # R3 ON: emit per-token expert routing over /chat/completions, consumed by
+    # the FSDP2 router-replay hook (moe_router_replay above). Capture is
+    # arch-agnostic in the vLLM fork — it hooks at the FusedMoE layer
+    # (routed_experts_capturer), and qwen3_5_moe routes its Qwen3NextSparseMoeBlock
+    # through FusedMoE (same path as the validated 80B-A3B/Qwen3-Next R3 arm), so
+    # enable_return_routed_experts is supported for Qwen3_5MoeForConditionalGeneration.
+    enable_return_routed_experts: true
+    # MUST be false under the RAY executor (trips vLLM's R3 guard otherwise).
+    async_scheduling: false
+    # DCP=1 => VLLM_ALLOW_ROUTED_EXPERTS_DCP is NOT needed (that guard-lift env is
+    # only for DCP>1). Intentionally absent from extra_env.
 
 # Data paths (set via CLI --train_data / --val_data)
 data:
@@ -507,6 +539,15 @@ extra_env:
   TORCH_FR_BUFFER_SIZE: "2000"
   TORCH_NCCL_TRACE_CPP_STACK: "1"
   TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /tmp/nccl_fr_rank
-  # NO R3/DCP guard env (VLLM_ALLOW_ROUTED_EXPERTS_DCP etc.) and NO EPDIAG probe
-  # env — R3 and DCP are OFF. They get ADDED only if a later rung layers R3/DCP
-  # (see plan), carried verbatim from the 30B 131k config.
+  # --- R3 (router-replay) transport env — the R3 routed_experts side-message
+  #     plumbing (carried from the 30B 131k config). Sized for the worst-case
+  #     per-step routing payload at 131k. ---
+  # Widen the shm message-queue chunk above the R3 routed_experts worst case at 131k.
+  VLLM_MQ_MAX_CHUNK_BYTES_MB: "160"
+  # Timeout to dequeue the deferred R3 routed_experts side-message.
+  VLLM_ROUTED_EXPERTS_SIDE_TIMEOUT_SECONDS: "1200"
+  # Per-step model-execute RPC timeout (headroom for the long 131k first-prefill).
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "900"
+  # NOTE: VLLM_ALLOW_ROUTED_EXPERTS_DCP is INTENTIONALLY ABSENT — that guard-lift
+  # is only needed at DCP>1, and DCP=1 here. NO EPDIAG probe env — this is the
+  # minimal R3 config, not the EP-deadlock-debug vehicle (the 30B SeqNum=145 line).
