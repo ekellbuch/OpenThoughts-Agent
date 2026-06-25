@@ -123,8 +123,15 @@ in the cluster.
 
 - **~128 CPU cores per node, BUT ~64–68 cores are persistent system/daemonset overhead**
   → only ~48–60 cores are actually free per node. This is THE reason `--cpu 48` admits a
-  multi-node gang and `--cpu 64` does not (see Scheduling below). Memory is ~2 TB
-  allocatable/node → the `512GB` request is fine.
+  multi-node gang and `--cpu 64` does not (see Scheduling below).
+- **Whole-node-exclusive ⇒ REQUEST ALL the node's allocatable resources** (no co-tenants, so
+  under-requesting is wasted capacity AND a footgun). Node allocatable ≈ **128 CPU / ~2014 GiB
+  mem / 8 GPU**. The launcher defaults (`launch_rl_iris.py`) now request the full node: **`--cpu 48`**
+  (the max-admittable — >~60 fails the IB gang), **`--memory 1800GB`** (≈ the full ~2 TB, leaving
+  daemonset headroom), **`--gpus_per_node 8`**, `--disk 512GB` (rendezvous/ckpts go to R2, not
+  node-local). ⚠ The old **`--memory 512GB`** default was a CGROUP-OOM footgun: the FSDP weight-load
+  on an EP=8 + `cpu_offload` policy rank peaks above 512 GB while the NODE sits <200 GB used → the
+  *container* OOM-killer fires though the node has ~1.8 TB free. Always request ~the full node.
 - **NVLink intra-node + InfiniBand inter-node.** This is the headline difference from
   Jupiter's GH200 4-GPU nodes: a TP=8 vLLM engine places **intra-node on ONE 8-GPU node**
   over NVLink (decode), with no cross-node TP — exactly the placement Jupiter's 4-GPU

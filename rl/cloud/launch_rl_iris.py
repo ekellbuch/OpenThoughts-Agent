@@ -128,8 +128,17 @@ DEFAULT_RL_DOCKER_IMAGE = (
 )
 DEFAULT_GPU_VARIANT = "H100"
 DEFAULT_GPUS_PER_NODE = 8           # gd-8xh100ib-i128 = 8x H100-80GB + IB
-DEFAULT_CPU_PER_NODE = 64.0
-DEFAULT_MEMORY_PER_NODE = "512GB"
+# These H100 nodes are requested WHOLE-NODE-EXCLUSIVE (no co-tenants) — so request ALL the
+# node's allocatable resources; don't under-request (wasted capacity + a too-low --memory
+# caused a container-cgroup OOM at FSDP weight-load on the 30B run). Node allocatable ≈ 128
+# CPU / ~2014 GiB mem / 8 GPU.
+#   - CPU 48 (NOT 64): ~64-68 of the 128 cores are persistent daemonset reservation, so a
+#     request >~60 FAILS the single-IB-leaf gang admission (observed: 64 unplaceable, 48 admits).
+#   - MEMORY 1800GB ≈ the full node (1800 decimal ≈ 1676 GiB, leaving ~340 GiB daemonset/system
+#     headroom under the 2014 GiB allocatable). 512GB was the cgroup-OOM under-request.
+#   - DISK 512GB is adequate (rendezvous/checkpoints/traces go to R2/s3, not node-local disk).
+DEFAULT_CPU_PER_NODE = 48.0
+DEFAULT_MEMORY_PER_NODE = "1800GB"
 DEFAULT_DISK_PER_NODE = "512GB"
 DEFAULT_PRIORITY = "interactive"
 # The gpu-rl image's RL venv (deps-only: torch 2.11 + vLLM fork + skyrl editable).
