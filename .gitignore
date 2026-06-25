@@ -440,3 +440,11 @@ data/nemotron_gym/output_v2/
 # agent_logs belong at the ABSOLUTE ~/Documents/agent_logs/, never in-repo.
 # A relative agent_logs/ here is the recurring relative-path bug — ignore it so it can never be committed.
 /agent_logs/
+
+# Recurring transient cluster artifacts (Leonardo working-tree junk that keeps reappearing).
+# A file literally named "&1" is a botched `2>&1` redirect that wrote to a file — never real output.
+/&1
+# Grid launch manifests under hpc/skyrl_yaml/leonardo/ are generated launch-logs (one line per
+# submitted cell, from launch_*_grid.sh) — ephemeral run output, not curated inputs (those are the
+# tracked *_grid_cells.txt). Regenerate by relaunching the grid.
+hpc/skyrl_yaml/leonardo/*_manifest.txt
