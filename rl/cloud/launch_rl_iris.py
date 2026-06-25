@@ -288,6 +288,46 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
+    """Read a top-level ``extra_env:`` mapping from the RL config YAML.
+
+    On the SLURM/Apptainer path the runtime env lives under ``container.extra_env``
+    and is emitted as shell ``export`` lines (hpc/rl_launch_utils.py). The Iris path
+    has NO ``container:`` block (the gpu-rl Docker image is the runtime), so that
+    plumbing never runs — without this, env declared in the YAML is silently
+    dropped and only the launcher's hardcoded passthrough (HF/WANDB/DAYTONA) reaches
+    the pod. This forwards a top-level ``extra_env:`` block (and, defensively,
+    ``container.extra_env`` if a ported config still carries one) into the iris
+    EnvironmentSpec so e.g. EPDIAG probe arms + R3/DCP guard env take effect.
+
+    Values are coerced to str (YAML may parse "1"/true as int/bool). Returns {} if
+    the file is unreadable or declares no extra_env (byte-identical behavior for the
+    existing extra_env-less iris configs).
+    """
+    try:
+        full = PROJECT_ROOT / rl_config_path
+        path = full if full.exists() else Path(rl_config_path)
+        import yaml
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[rl-iris] WARNING: could not read extra_env from {rl_config_path}: {exc}",
+              file=sys.stderr)
+        return {}
+    extra = dict(raw.get("extra_env") or {})
+    container_env = (raw.get("container") or {}).get("extra_env") or {}
+    for k, v in container_env.items():
+        extra.setdefault(k, v)
+    out: dict[str, str] = {}
+    for k, v in extra.items():
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            v = int(v)
+        out[str(k)] = str(v)
+    return out
+
+
 def normalize(args: argparse.Namespace) -> None:
     """Validate + normalize. Keep rl_config repo-relative so it resolves on /app."""
     # Resolve rl_config to a repo-relative path (it must exist on the synced
@@ -469,6 +509,14 @@ def main() -> int:
     # Env: secrets file values + the standard RL/iris-serve signals. iris injects
     # IRIS_TASK_ID / IRIS_NUM_TASKS / IRIS_ADVERTISE_HOST per task automatically.
     env_vars: dict[str, str] = {}
+    # Forward the RL config YAML's top-level `extra_env:` block (the Iris analog of
+    # the SLURM container.extra_env exports — see load_config_extra_env). Seeded
+    # FIRST so the launcher's own signals (rendezvous/secrets, below) win on any
+    # collision.
+    config_extra_env = load_config_extra_env(args.rl_config)
+    if config_extra_env:
+        env_vars.update(config_extra_env)
+        print(f"[rl-iris] Config extra_env: {', '.join(sorted(config_extra_env))}", flush=True)
     if args.rendezvous_dir:
         env_vars["OT_AGENT_IRIS_RENDEZVOUS_DIR"] = args.rendezvous_dir
     env_vars["OT_AGENT_IRIS_RAY_PORT"] = str(args.ray_port)
