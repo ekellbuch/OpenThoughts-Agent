@@ -2536,7 +2536,13 @@ def submit_eval(
         job_prefix = "res_dp_" if dp_nodes > 0 else "res_"
     else:
         job_prefix = "eval_dp_" if dp_nodes > 0 else "eval_"
-    slurm_job_name = os.environ.get("EVAL_SLURM_JOB_NAME", "data")
+    # Self-describing default so PENDING jobs are readable in squeue (the sbatch
+    # otherwise only renames "data" → eval_<model> at RUN time, so a queued backlog
+    # all reads "data" and looks broken). EVAL_SLURM_JOB_NAME still overrides. This is
+    # the job NAME only — the `--output data_<jobid>.out` log convention the monitoring
+    # relies on (monitor-job-tables) is a SEPARATE sbatch directive, untouched here.
+    _short_model = hf_model_name.split("/")[-1][:28]
+    slurm_job_name = os.environ.get("EVAL_SLURM_JOB_NAME") or f"{job_prefix}{_short_model}_{bench_tag}"
     cmd.extend(["--job-name", slurm_job_name])
     cmd.append(sbatch_script)
     # For API mode the sbatch arg is the LiteLLM-prefixed name (e.g.
