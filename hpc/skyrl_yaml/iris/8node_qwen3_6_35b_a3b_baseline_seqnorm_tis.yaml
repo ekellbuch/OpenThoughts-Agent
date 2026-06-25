@@ -1,0 +1,466 @@
+# =============================================================================
+# Qwen3.6-35B-A3B — CoreWeave/Iris RL BASELINE (seqnorm + TIS, EP+FSDP, NO CP/DCP/R3)
+# =============================================================================
+# Target: Qwen/Qwen3.6-35B-A3B  (model_type: qwen3_5_moe ; arch
+#   Qwen3_5MoeForConditionalGeneration). NEW LINE OF INQUIRY — this is the
+#   FIRST-RUNG baseline config whose ONLY job is to prove the brand-new
+#   qwen3_5_moe arch PLACES + TRAINS one step on CoreWeave (cw-us-east-02a,
+#   8x H100-80GB + IB per node), BEFORE layering 131k / CP / DCP / R3.
+# UNLAUNCHED. Companion plan: notes/ot-agent/qwen3_6_35b_a3b_rl_plan.md
+#   (read it — the training DATASET, CONTEXT LENGTH, and CP/DCP/R3 sequencing
+#    are OPEN DECISIONS that need supervisor input before launch).
+#
+# -----------------------------------------------------------------------------
+# FETCHED ARCHITECTURE (from HF config.json, transformers 4.57.1 — TRUSTED, not
+# assumed equal to Qwen3-Coder-30B-A3B; key numbers differ materially):
+#   HYBRID linear/full attention MoE (same FAMILY as Qwen3-Next-80B-A3B):
+#     num_hidden_layers      40  (layer_types: every 4th = full_attention =>
+#                                 10 full_attention + 30 linear_attention/GDN)
+#     full_attention_interval 4
+#     hidden_size            2048
+#     num_attention_heads    16   ; num_key_value_heads 2  (GQA group 8)
+#     head_dim               256  ; partial_rotary_factor 0.25 ; attn_output_gate true
+#     LINEAR-attn (GatedDeltaNet): linear_num_key_heads 16 / value_heads 32,
+#       key/value_head_dim 128, conv_kernel_dim 4, mamba_ssm_dtype float32.
+#     MoE: num_experts 256 ; num_experts_per_tok 8 ; moe_intermediate_size 512 ;
+#          shared_expert_intermediate_size 512 ; router_aux_loss_coef 0.001.
+#     vocab_size 248320 ; tie_word_embeddings FALSE ; dtype bfloat16.
+#     max_position_embeddings 262144 (NATIVE) ; rope_theta 1e7 ; mrope_interleaved
+#       true, mrope_section [11,11,10], rope_type "default" (NO YaRN in the
+#       shipped config => any ctx <= 262144 needs NO rope_scaling / hf_overrides).
+#     MULTIMODAL: top-level config carries vision_config + image/video tokens;
+#       arch is Qwen3_5MoeForConditionalGeneration. MTP: mtp_num_hidden_layers 1.
+#   PARAM COUNT (computed from the above): total ~34.4 B / active ~3.2 B per token
+#     => the "35B-A3B" name checks out (A3B = ~3B active).
+#
+#   STRUCTURAL DELTAS vs Qwen3-Coder-30B-A3B (the model behind our 131k config):
+#     * HYBRID linear+full attention (NOT 48 dense-attn layers). Only 10/40
+#       layers grow a length-scaling KV cache; the 30 GDN layers carry small
+#       FIXED recurrent/conv state => KV pressure is FAR lower than the dense 30B
+#       (this is why a TP=4 engine is comfortable, like the 80B-A3B).
+#     * num_key_value_heads = 2 (NOT 4) -> the DCP ceiling is TIGHTER
+#       (dcp <= tp/num_kv_heads): a future DCP=2 needs tp>=4 (vs tp>=8 on the 30B).
+#     * 256 experts top-8 (NOT 128 top-8) ; moe_intermediate_size 512 (small).
+#     * Multimodal + MTP head (the 30B-Coder is text-only, no MTP).
+#   This config is therefore modeled on the Qwen3-Next-80B-A3B HYBRID arm
+#   (hpc/skyrl_yaml/jupiter/extra/128GPU_qwen3_next_80b_a3b.yaml), NOT on the
+#   dense-attention 30B 131k config — it is the closest validated precedent.
+#
+# -----------------------------------------------------------------------------
+# STACK-SUPPORT NOTE (de-risk this BEFORE launch — see plan OPEN DECISIONS):
+#   * vLLM fork DOES register Qwen3_5MoeForConditionalGeneration (vllm model file
+#     vllm/model_executor/models/qwen3_5.py — GatedDeltaNetAttention +
+#     Qwen3NextSparseMoeBlock, shared with qwen3_next). SkyRL moe_weight_remap.py
+#     is literally ported from prime-rl converting_qwen3_5_moe.py.
+#   * GDN linear-attention training path uses SKYRL_GDN_MASK_FLA=1 (force the
+#     proven pure-torch Gated-DeltaNet path; the fla wheel is broken) — SET BELOW.
+#   * UNVERIFIED on this exact checkpoint at config-authoring time: (a) the
+#     vision/MTP heads load cleanly under FSDP (we want the TEXT backbone only);
+#     (b) transformers 4.57.1 in the gpu-rl RL venv resolves qwen3_5_moe
+#     AutoConfig/AutoModel; (c) the mamba/SSM cache + GDN kernels run in the
+#     baked vLLM. The Step-0/Step-1 rungs in the plan exist to prove exactly this.
+#
+# -----------------------------------------------------------------------------
+# GEOMETRY (8 CoreWeave nodes = 64 H100, colocate_all: false, disaggregated):
+#   START SIMPLE: EP + FSDP policy mesh, plain TP=4 generation, NO CP / NO DCP /
+#   NO R3 (router-replay) / NO YaRN. seqnorm + TIS recipe (the proven baseline
+#   off-policy corrector) — same algorithm block as 56GPU_seqnorm_tis + the 80B.
+#
+#   Policy/Ref FSDP mesh:  EP=8 x FSDP=4 = 32 policy GPU = 4 nodes.
+#   Generation:            8 engines x TP=4 = 32 gen GPU = 4 nodes.
+#   Total = policy 32 + ref 0 (inert, use_kl_loss=false) + inference 32
+#         = 64 = 8 nodes.  LAUNCH MUST PASS --num-nodes 8.
+#   The launcher's --gpus_per_node 8 FORCES policy/ref_num_gpus_per_node = 8
+#   (build_skyrl_hydra_args overrides them); policy_num_nodes / ref_num_nodes
+#   are honored from this YAML. num_inference_engines is set EXPLICITLY (8) —
+#   the (num_nodes*8)//tp = 8*8//4 = 16 derivation would be WRONG (4 of the 8
+#   nodes are policy-only).
+#
+#   DIVISIBILITY / CEILING CHECKS (all hard constraints — VERIFIED):
+#     * EP divides num_experts: 256 % EP(8) == 0  -> 32 experts/EP-rank. VALID.
+#     * MoE dim-0 guard (num_experts//EP) % FSDP == 0:
+#         256/EP8 = 32 ; 32 % FSDP4 = 0  -> VALID (8 experts/FSDP-rank).
+#     * EP x FSDP = 8 x 4 = 32 = policy GPU count. VALID. (NO CP factor: CP=1.)
+#     * vLLM TP=4 divides num_attention_heads 16 (4 heads/GPU). VALID.
+#     * GQA: num_key_value_heads 2 < TP 4 => the 2 KV heads are REPLICATED across
+#       the 4 TP ranks (standard vLLM GQA when tp>num_kv_heads). LEGAL.
+#     * TP=4 divides num_experts 256 (64 experts/GPU). VALID.
+#     * DCP OFF (dcp=1) => the dcp <= tp/num_kv_heads ceiling does NOT apply here.
+#       (When DCP is layered LATER: num_kv_heads=2 means dcp<=tp/2, so dcp=2 needs
+#        tp>=4 — already satisfied by TP=4; see the plan's CP/DCP rung.)
+#     * Batch (fully-async): train_batch_size == policy_mini_batch_size == 64;
+#       64 % 64 == 0 -> OK. train_batch_size(64) >= policy DP size -> OK.
+#
+# -----------------------------------------------------------------------------
+# MEMORY (35B total / 3B active on H100-80GB):
+#   Sharded FSDP2 state (bf16 weights + fp32 grads + Adam m,v + fp32 master) for
+#   34.4B params ~= 34.4e9 * (2+4+8+4) B ~= 620 GB, sharded over 32 policy GPUs
+#   ~= 19 GB/GPU of persistent state. With cpu_offload TRUE the params+optimizer
+#   live in CoreWeave node RAM (~2 TB/node) and only the active shard +
+#   activations sit in HBM -> comfortable headroom on 80 GB. cpu_offload kept ON
+#   for the baseline (turn OFF later if step time is bound by the offload H2D/D2H
+#   and HBM allows). gradient_checkpointing ON (use_reentrant=false, recompute-
+#   safe) — cheap insurance for the first bring-up; the active-param FFN is only
+#   3B so the backward is light, but the GDN recurrent state + 10 full-attn
+#   layers' activations still benefit at the chosen context.
+#   vLLM (per TP=4 engine, 4 GPUs): 34.4 GB bf16 weights / 4 = ~8.6 GB/GPU for
+#   weights. The hybrid arch's 30 GDN layers carry only small fixed recurrent
+#   state; only 10/40 layers grow KV with length, so KV pressure is LOW. At
+#   gpu_memory_utilization 0.85 there is ample KV headroom at 32768 ->
+#   max_num_seqs 24 is safe. OOM fallbacks (in order): gpu_mem 0.85->0.80->0.75,
+#   then max_num_seqs 24->16; on the policy side micro_forward 4->2 then reduce
+#   train_batch_size. (See plan §OOM fallbacks.)
+#
+# CONTEXT LENGTH = 32768 for the baseline (OPEN DECISION — supervisor may want a
+#   different native/modest value; see plan). WELL within native 262144 => NO
+#   YaRN / rope_scaling / hf_overrides (do NOT add). max_generate_length 4096.
+#
+# -----------------------------------------------------------------------------
+# Launch (UNLAUNCHED — supervisor pushes + launches after resolving OPEN DECISIONS):
+#   source /Users/benjaminfeuer/Documents/secrets.env
+#   python -m rl.cloud.launch_rl_iris \
+#     --rl_config hpc/skyrl_yaml/iris/8node_qwen3_6_35b_a3b_baseline_seqnorm_tis.yaml \
+#     --model_path Qwen/Qwen3.6-35B-A3B \
+#     --train_data '["<DATASET — OPEN DECISION>"]' \
+#     --num-nodes 8 \
+#     --gpus_per_node 8 \
+#     --cpu 48 \
+#     --max-retries 1 \
+#     --rendezvous-dir s3://marin-na/iris/rl-q36-35b-baseline/<run> \
+#     --job-name rl-q36-35b-baseline --priority interactive --no-wait
+# =============================================================================
+
+entrypoint: examples.terminal_bench.entrypoints.main_tbench
+
+# Hydra config groups (+ prefix in CLI)
+config_groups:
+  terminal_bench_config: terminal_bench
+
+# Terminal bench / agentic environment settings
+terminal_bench:
+  trials_dir: null
+
+  harbor:
+    name: terminus-2
+    max_episodes: 999999
+    enable_summarize: false
+    store_all_messages: true
+    trajectory_config:
+      raw_content: true
+    enable_episode_logging: false
+    record_terminal_session: false
+    enable_pane_logging: false
+
+    strict_json_parser: true
+
+    interleaved_thinking: true
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: true
+    # 1800s — the 35B is slower per agent step than the 8B; longer ceiling lets
+    # boundary samples finish rather than truncating. AgentTimeoutError stays
+    # PASSTHROUGH. Tune down only if driver host-memory pressure shows up.
+    override_timeout_sec: 1800
+
+    override_cpus: 1
+    override_memory_mb: 2048
+    override_storage_mb: 2048
+
+    auto_snapshot: true
+
+    verifier_override_timeout_sec: 120
+
+    max_retries: 3
+    min_wait_sec: 60.0
+    max_wait_sec: 600.0
+    wait_multiplier: 2.0
+
+    exclude_exceptions:
+      - VerifierTimeoutError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - VerifierOutputParseError
+      - VerifierRuntimeError
+
+    # 300 concurrent trials — R3 is OFF in the baseline, so there is NO per-token
+    # routing-array host-RAM inflation (the 150 cap on the R3 arms). 300 is the
+    # pre-R3 production value; drop toward 150 if a RolloutCoordinator OOMs.
+    n_concurrent_trials: 300
+
+    log_level: INFO
+
+    enable_reward_shaping: false
+
+    # collect_rollout_details=true -> per-token rollout logprobs REQUIRED for
+    # trainer.algorithm.use_tis (the trainer asserts non-null rollout_logprobs).
+    collect_rollout_details: true
+
+    enable_error_classification: true
+    mask_exceptions:
+      - DaytonaError
+      - EnvironmentStartTimeoutError
+      - NetworkError
+      - ConnectionError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - AgentEnvironmentTimeoutError
+    default_error_treatment: zero
+    passthrough_exceptions:
+      - AgentTimeoutError
+      - ContextLengthExceededError
+
+  # 32000 = 768-token buffer below max_model_len 32768 (litellm token-counter
+  # drift guard; matches the dense-baseline configs).
+  model_info:
+    max_input_tokens: 32000
+    max_output_tokens: 4096
+
+  archiving:
+    enabled: false
+
+  trace_upload:
+    enabled: true
+    repo_org: DCAgent
+    episodes: last
+    dataset_type: SFT
+    cleanup: true
+
+# =============================================================================
+# Trainer configuration
+# =============================================================================
+trainer:
+  strategy: fsdp2
+  # NO CP in the baseline => keep the default flash-attn forward (faster than
+  # ring-SDPA). attn_backend / flash_attn left at SkyRL defaults (flash-attn ON).
+  # Gradient checkpointing ON (recompute-safe) — see header MEMORY note.
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+  algorithm:
+    advantage_estimator: rloo_n
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    eps_clip_low: 0.2
+    eps_clip_high: 0.05
+    # seqnorm: global length-unbiased sequence-level normalizer.
+    loss_reduction: seq_mean_token_sum_norm_global
+    # Truncated Importance Sampling: bounds the off-policy ratio created by the
+    # vLLM(generation) vs FSDP(recompute) logprob gap. The BASELINE off-policy
+    # corrector — R3 router-replay is OFF, so TIS carries the MoE-routing
+    # correction (clamp(exp(old-rollout), cap)). REQUIRES collect_rollout_details.
+    use_tis: true
+    tis_imp_ratio_cap: 2.0
+
+  epochs: 2
+  max_steps: 80
+  update_epochs_per_batch: 1
+
+  train_batch_size: 64
+  policy_mini_batch_size: 64
+  eval_batch_size: 64
+
+  # micro_train 1 (the sharded all-gather + MoE expert FFN backward dominates);
+  # micro_forward 4 (forward-only rollout/logprob pass has no optimizer state
+  # resident). Fall back to micro_forward 2 on first-step activation OOM.
+  micro_forward_batch_size_per_gpu: 4
+  micro_train_batch_size_per_gpu: 1
+
+  max_prompt_length: 999999
+
+  # NO CP => sample packing is allowed (the SkyRL _validate_cp_cfg packed-varlen
+  # restriction only applies under CP>1). Left at the SkyRL default.
+
+  eval_interval: 999999
+  eval_before_train: false
+  # ckpt_interval=1: bank step-1 so a walltime/transient kill never resumes from 0.
+  ckpt_interval: 1
+  resume_mode: latest
+  hf_save_interval: 5
+  hf_hub_repo_id: null
+  hf_hub_private: false
+  hf_hub_revision: main
+
+  enable_db_registration: false
+
+  project_name: OpenThoughts-Agent
+  log_level: INFO
+  tracker_commit_each_step: true
+  logger: console
+
+  run_name: null
+  ckpt_path: null
+  export_path: null
+
+  # Policy optimizer — production hparams (lr 8e-6, max_grad_norm 0.9 collapse guard).
+  policy:
+    optimizer_config:
+      lr: 8e-6
+      weight_decay: 0.0
+      adam_betas: [0.9, 0.999]
+      max_grad_norm: 0.9
+    fsdp_config:
+      # REQUIRED for the 35B optimizer state to fit (offload to node RAM). See
+      # header MEMORY note. reshard_after_forward frees the gathered shard.
+      cpu_offload: true
+      reshard_after_forward: true
+      # MESH: EP=8 x FSDP=4 = 32 policy GPU = 4 CoreWeave nodes. NO CP.
+      # MoE dim-0 guard (num_experts//EP)%FSDP==0: 256/EP8=32; 32/FSDP4=8 -> VALID.
+      fsdp_size: 4
+      expert_model_parallel_size: 8
+      # CP OFF (baseline). context_parallel_size omitted => default 1.
+      # R3 OFF (baseline): moe_router_replay FALSE. TIS carries the off-policy
+      # correction. grouped-GEMM ON (fused per-expert FFN, vLLM-loadable names).
+      moe_router_replay: false
+      moe_grouped_gemm: true
+      ep_comm_backend: torch
+  ref:
+    # INERT (use_kl_loss=false -> no RefWorker built). Mirror for config-consistency.
+    model:
+      path: Qwen/Qwen3.6-35B-A3B
+    fsdp_config:
+      cpu_offload: true
+      reshard_after_forward: true
+      fsdp_size: 4
+      expert_model_parallel_size: 8
+      moe_router_replay: false
+      moe_grouped_gemm: true
+      ep_comm_backend: torch
+
+  # Disaggregated placement: policy+ref share 4 nodes / 32 GPUs (FSDP), the 4
+  # generation nodes (8 TP=4 engines) are allocated separately.
+  # policy/ref_num_gpus_per_node are forced to 8 by --gpus_per_node 8; listed for
+  # documentation. policy_num_nodes / ref_num_nodes are honored from the YAML.
+  placement:
+    colocate_all: false
+    policy_num_nodes: 4
+    ref_num_nodes: 4
+    policy_num_gpus_per_node: 8
+    ref_num_gpus_per_node: 8
+    # Reserve the 4 policy nodes (STRICT_SPREAD) BEFORE the vLLM PG is created so
+    # policy claims its nodes first and the 8 TP=4 engines land on the disjoint 4
+    # gen nodes (prevents the policy-FSDP-lands-on-an-engine-GPU init OOM).
+    policy_strict_spread_pg: true
+    # One {GPU:1,CPU:1} bundle PER policy GPU -> each EP/FSDP actor pins to a
+    # distinct physical GPU (prevents GPU-0-stacking init OOM in the EP layout).
+    policy_per_gpu_bundles: true
+    policy_force_cvd_mask: true
+
+  fully_async:
+    max_staleness_steps: 16
+    num_parallel_generation_workers: 256
+
+# =============================================================================
+# Generator configuration (vLLM)
+# =============================================================================
+generator:
+  backend: vllm
+  timeout_multiplier: 1.0
+  model_dtype: bfloat16
+
+  # TP=4 — the Qwen3-Next/3.5 hybrid-MoE model-card recommendation. Divides 16
+  # attn heads (4/GPU) + 256 experts (64/GPU); 2 KV heads replicated across TP
+  # (GQA, legal). 8 engines x TP=4 = 32 gen GPU = 4 nodes. A TP=4 engine places
+  # intra-node on 4 of the 8 GPUs of one CoreWeave node (NVLink decode).
+  inference_engine_tensor_parallel_size: 4
+  # 8 TP=4 engines = 32 inference GPU = 4 nodes. Set EXPLICITLY (not null): the
+  # launcher derivation (num_nodes*8)//tp = 8*8//4 = 16 would be WRONG (4 of the
+  # 8 nodes are policy-only). 8 is authoritative.
+  num_inference_engines: 8
+
+  # EP off on the engine side (TP=4 already shards 256 experts 64/GPU). Enable
+  # later (inference_engine_expert_parallel_size>1) only if routing load
+  # imbalance becomes the gen bottleneck (UNVALIDATED on qwen3_5_moe in vLLM).
+  inference_engine_expert_parallel_size: 1
+
+  # mp EXECUTOR (multiprocessing) — R3 is OFF in the baseline, so the Ray
+  # Compiled-DAG R3 deadlock class does NOT apply; mp is the simpler/faster path
+  # and ran the 80B-A3B hybrid arm cleanly at TP=4 (no DAG). Requires
+  # colocate_all=false. (When R3 is layered LATER, switch to the RAY executor
+  # + async_scheduling=false per the R3 guard — see the plan's R3 rung.)
+  inference_engine_mp_backend: true
+
+  n_samples_per_prompt: 8
+  eval_n_samples_per_prompt: 8
+
+  # 0.85 — the hybrid arch keeps KV pressure low (only 10/40 layers grow KV).
+  # Drop 0.85->0.80->0.75 on first-launch KV-bind OOM. (See plan OOM fallbacks.)
+  gpu_memory_utilization: 0.85
+
+  max_num_seqs: 24
+  max_num_batched_tokens: 16384
+
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  enable_http_endpoint: true
+  enable_ray_prometheus_stats: false
+  vllm_stats_interval: 1
+  append_eos_token_after_stop_str_in_multi_turn: true
+  max_turns: 999999
+
+  sampling_params:
+    max_generate_length: 4096
+    temperature: 0.7
+    top_p: 0.95
+    top_k: 20
+
+  engine_init_kwargs:
+    # 32768 — WELL within native 262144 => NO YaRN rope_scaling / hf_overrides
+    # (do NOT add). Raise toward native (up to 262144) directly for a long-ctx
+    # variant — still no rope_scaling needed below native length.
+    max_model_len: 32768
+    # Interleaved-thinking template; relative path resolved against /app (synced repo).
+    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
+    # Disable vLLM custom CUDA all-reduce (safe vs the NCCL weight-sync deadlock
+    # class; carried from the validated arms). Safe at TP=4.
+    disable_custom_all_reduce: true
+    # R3 OFF in the baseline — do NOT set enable_return_routed_experts here
+    # (TIS carries the off-policy correction). async_scheduling left default
+    # (it is only force-disabled under the RAY executor for the R3 guard).
+
+# Data paths (set via CLI --train_data / --val_data)
+data:
+  train_data: []
+  val_data: []
+
+# K-actor rollout fan-out — ON (breaks the single-event-loop GIL ceiling).
+rollout:
+  fanout:
+    enabled: true
+    num_coordinators: 4
+    cpus_per_coordinator: 8
+
+# =============================================================================
+# Runtime env (forwarded into every task pod via the launcher's EnvironmentSpec
+# from this TOP-LEVEL extra_env: block — LOAD-BEARING; the Iris path has no
+# container: block, so without this the YAML env is SILENTLY DROPPED).
+# CoreWeave-Docker translation: NO APPTAINERENV_* / SIF-only vars; NO GH200 NCCL
+# P2P disables (would cripple the intra-node TP=4 NVLink all-reduce); NO
+# HF_HUB_OFFLINE (CoreWeave has egress).
+# =============================================================================
+extra_env:
+  # GatedDeltaNet linear-attention training path: force the proven pure-torch GDN
+  # (the fla wheel is broken). LOAD-BEARING for the 30 linear_attention layers.
+  SKYRL_GDN_MASK_FLA: "1"
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  # --- vLLM serve flags ---
+  VLLM_USE_FLASHINFER_SAMPLER: "0"
+  VLLM_ATTENTION_BACKEND: FLASH_ATTN
+  # gpu-rl RL conda env prefix. Hardcoded literal (NOT $CONDA_PREFIX/lib): k8s
+  # does NOT shell-expand $VAR in injected env.
+  LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib
+  # --- NCCL: H100+IB DEFAULTS (do NOT disable P2P). Observability + raised timeouts. ---
+  NCCL_DEBUG: INFO
+  SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "1800"
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "1800"
+  TORCH_NCCL_ENABLE_MONITORING: "1"
+  TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+  TORCH_FR_BUFFER_SIZE: "2000"
+  TORCH_NCCL_TRACE_CPP_STACK: "1"
+  TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /tmp/nccl_fr_rank
+  # NO R3/DCP guard env (VLLM_ALLOW_ROUTED_EXPERTS_DCP etc.) and NO EPDIAG probe
+  # env in the baseline — R3 and DCP are OFF. They get ADDED at the R3/DCP rung
+  # (see plan), carried verbatim from the 30B 131k config.
