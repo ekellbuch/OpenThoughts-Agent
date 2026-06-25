@@ -36,7 +36,7 @@ source hpc/dotenv/jupiter.env
 
 **Key paths**:
 - Code (`$DCFT`): `/e/scratch/jureap59/feuer1/OpenThoughts-Agent` — experiments in `experiments/`, eval logs
-  in `eval/jupiter/logs/`, dotenv `hpc/dotenv/jupiter.env`.
+  in `eval/logs/` (per `eval/clusters/jupiter.yaml`'s `eval_logs_dir`), dotenv `hpc/dotenv/jupiter.env`.
 - Harbor: `/e/scratch/jureap59/feuer1/harbor`
 - Conda env: `/e/scratch/jureap59/feuer1/miniforge3/envs/otagent/`
 - **Personal data root (`$DCFT_DATA`) — USE THIS**: `/e/data1/datasets/playground/ot-baf`

@@ -177,13 +177,12 @@ orchestrator→Daytona-API + →HF, both carried by the proxy — **no pinggy / 
 older "Daytona infeasible on Leonardo" statement is **eval-vs-RL specific** (RL's heavier cross-node/Daytona
 coupling), not absolute.
 
-**Single cross-cluster entrypoint:** `eval/jupiter/unified_eval_listener.py` now takes
-`--cluster {jupiter,leonardo}` (a `CLUSTER_DEFAULTS` table picking the per-cluster sbatch + log-dir;
-`EVAL_LISTENER_CLUSTER` / `EVAL_LISTENER_SBATCH` / `EVAL_LISTENER_LOG_DIR` env vars still win). **Default is
-`jupiter`, byte-for-behavior identical to the pre-flag invocation — the live Jupiter campaign is unaffected.**
+**Single cross-cluster entrypoint:** the canonical v6 listener `eval/unified_eval_listener.py` takes
+`--cluster-config eval/clusters/<cluster>.yaml` (each cluster-config carries its own `sbatch_script` + log-dir;
+the Leonardo config points `sbatch_script` at `eval/leonardo/unified_eval_harbor.sbatch`).
 To launch a Leonardo agentic-eval campaign (in tmux on Leonardo, after the preamble):
 ```bash
-python eval/jupiter/unified_eval_listener.py --cluster leonardo --preset <tb2|swebench|v2|...> \
+python eval/unified_eval_listener.py --cluster-config eval/clusters/leonardo.yaml --preset <tb2|swebench|v2|...> \
   --require-priority-list --priority-file <list> --pre-download --once --verbose
 ```
 

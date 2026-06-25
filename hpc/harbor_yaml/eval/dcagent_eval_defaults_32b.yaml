@@ -6,7 +6,7 @@
 # median 900s) and scores ~0. Everything else is byte-identical to the defaults — keep
 # the body in sync with dcagent_eval_defaults.yaml; only the timeout_multiplier differs.
 #
-# Selected automatically by eval/jupiter/unified_eval_listener.py for 32B-class models
+# Selected automatically by eval/unified_eval_listener.py for 32B-class models
 # (param-count size token in the ~28-42B band); <=14B models get dcagent_eval_defaults.yaml.
 #
 # Runtime-injected (placeholders overwritten by the launcher CLI): agents[0].model_name

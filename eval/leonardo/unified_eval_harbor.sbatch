@@ -13,7 +13,7 @@
 # Unified Eval Harbor — Leonardo Cluster (CINECA A100-64GB)
 #
 # Starts vLLM, runs Harbor eval, checks errors, uploads results.
-# Adapted from eval/jupiter/unified_eval_harbor.sbatch for Leonardo x86_64.
+# Adapted from the canonical eval/unified_eval_harbor.sbatch for Leonardo x86_64.
 #
 # Positional args:
 #   $1 = MODEL (HF model name, e.g. mlfoundations-dev/some_model)
@@ -493,7 +493,7 @@ else
     else
         echo "Dataset not pre-downloaded, attempting proxied download..."
         DOWNLOAD_LOG=$(mktemp /tmp/download_XXXXXX.log)
-        proxied $PYTHON_BIN "$DCFT/eval/jupiter/snapshot_download.py" "$REPO_ID" --local-dir "$DATASET_LOCAL_DIR" > "$DOWNLOAD_LOG" 2>&1
+        proxied $PYTHON_BIN "$DCFT/eval/snapshot_download.py" "$REPO_ID" --local-dir "$DATASET_LOCAL_DIR" > "$DOWNLOAD_LOG" 2>&1
         DOWNLOAD_EXIT=$?
         cat "$DOWNLOAD_LOG"
         DATASET_PATH=$(grep DATASET_PATH "$DOWNLOAD_LOG" | tail -n 1 | cut -d'=' -f2)
@@ -501,7 +501,7 @@ else
         if [ $DOWNLOAD_EXIT -ne 0 ] || [ -z "${DATASET_PATH:-}" ]; then
             echo "ERROR: Failed to get dataset path (exit code: $DOWNLOAD_EXIT)"
             echo "Hint: pre-download the dataset on the login node first:"
-            echo "  python eval/jupiter/snapshot_download.py $REPO_ID --local-dir $DATASET_LOCAL_DIR"
+            echo "  python eval/snapshot_download.py $REPO_ID --local-dir $DATASET_LOCAL_DIR"
             exit 1
         fi
     fi
