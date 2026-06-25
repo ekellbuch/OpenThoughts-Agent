@@ -92,6 +92,31 @@ SSH tunnel (offline + pre-cached); only the pre-download touches the network.
    with (scale × mix) at each of the two starting points (does a strong-vs-weak math start change the
    midtraining ranking).
 
+## 5b. Evaluate a (post-RL) checkpoint on the Delphi eval suite (reusable)
+The *same* harness scores ANY standard Delphi checkpoint — base / post-SFT / **post-RL** — on the fixed
+suite (`EVAL_CONVENTION.md` §1.2: **MATH500** 1-seed + **AIME24** 10-seed mean±se + **gsm8k** strict/flex,
+pass@1, temp 0.7). `rl-standard-job-cleanup` defers to THIS section as its final step after the post-RL ckpt
+is HF-uploaded. The only deltas from §2 are the **STAGE token** and the **tracker the result lands in**:
+1. **Point it at the HF-uploaded ckpt.** The ckpt is `laion/<run_name>-<BEST>-<size>B` (the repo
+   `rl-standard-job-cleanup` §6 just published — weights at root). Pre-cache it on the login node first (§3),
+   same as any cell. (A local export works too, but the canonical input is the public `laion/` repo.)
+2. **STAGE = `rl`** (chat-template ON — same delphi_v0 override as `sft`; only `base` skips it):
+   ```bash
+   RUN=<run_name>-<BEST>-<size>B
+   sbatch --job-name="delphi-eval-$RUN" \
+     /leonardo_work/AIFAC_5C0_290/bfeuer00/experiments/delphi-eval/delphi_eval.sbatch laion/$RUN $RUN rl
+   ```
+   Auto-TP=2 for the 30-head 9.7B Delphi Qwen3; `max_model_len=4096` / `max_gen_toks=3584`; all the §4
+   gotchas (template override, 4k context, MATH500/gsm8k split, AIME24 10-seed pass) apply unchanged — they
+   are baked into the canonical `delphi_eval.sbatch`. **One node / 4 GPU / 8h / `evalchemy-marin` env.**
+3. **Results land in the RL tracker, not the SFT one.** Per-model output is
+   `…/experiments/delphi-eval/<RUN>/seed{42..51}` + `meta.env`; the consolidated scores go to
+   **`main_rl_evals/SCORES.md`** (the post-RL tracker — keyed by (scale, mix, start-point) so SFT-vs-RL
+   deltas line up against `main_sft_evals/`), via the same harvest path as §5 / `eval-standard-cleanup`.
+   **HF-upload-only — NEVER DB** (the Delphi RL series is HF-only by policy; the post-RL ckpt has no models
+   DB row and this eval doesn't create one). After submit, add the row to `main_rl_evals/SCORES.md` set to
+   `🚀 eval submitted` with the Leonardo job id; harvest per `eval-standard-cleanup`.
+
 ## 6. Leonardo SSH quoting traps (these bite repeatedly)
 - Do NOT use parentheses inside a `bash -lc "..."` double-quoted string.
 - Do NOT use single quotes inside the outer `ssh '...'` arg (a single quote closes it). Use escaped

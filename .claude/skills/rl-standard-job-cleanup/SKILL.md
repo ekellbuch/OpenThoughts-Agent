@@ -7,8 +7,9 @@ description: >-
   the trailing-5 EMA of reward via `parse_skyrl_metrics.py --format standard` (chain-aware, capped at the
   latest saved step), flatten weights to repo root, secret-scan, `hf upload` (Leonardo sbatch-tunnel) to
   laion/<run>-<step>-<size>B with the size suffix DERIVED FROM THE EXPORTED WEIGHTS (never the base-model
-  name), DB register (--training-type RL + cross-user FK pre-check) ONLY for DB-registerable cells, and
-  clean up. The ONLY artifacts are the model + the metric CSVs/report — there is NO trace dataset. Use when
+  name), DB register (--training-type RL + cross-user FK pre-check) ONLY for DB-registerable cells, clean up,
+  and fire the Delphi downstream eval suite on the post-RL ckpt (defers to eval-standard-launch §5b). The ONLY
+  artifacts are the model + the metric CSVs/report + the tracker scores — there is NO trace dataset. Use when
   a standard/non-agentic GRPO RL run finishes and needs uploading + (maybe) registering. DISTINCT from
   rl-job-cleanup, which is the AGENTIC (Harbor/Daytona) path with a companion trace dataset.
 ---
@@ -213,6 +214,21 @@ nohup rm -rf $WORK/rl_ckpts/<RUN_NAME> >/dev/null 2>&1 &   # detached; keep $UPL
 ```
 Keep `$WORK/rl_cleanup/<RUN_NAME>/` (staging + metrics) until you've confirmed the HF repo lists the
 weights + `training_logs/`, then remove it too.
+
+## 9. Fire the Delphi eval suite on the post-RL checkpoint
+Once the ckpt is HF-uploaded (§6) and verified, score it on the lab's fixed downstream suite. **This step
+DEFERS to `eval-standard-launch` → "§5b. Evaluate a (post-RL) checkpoint on the Delphi eval suite"** — the
+home for the method; do not re-document it here. That section runs the canonical `delphi_eval.sbatch`
+(MATH500 / AIME24 10-seed / gsm8k, pass@1, temp 0.7, delphi_v0 template, STAGE=`rl`) on Leonardo against the
+uploaded `laion/` repo. One-line invocation (pre-cache the repo on the login node first, per that skill §3):
+```bash
+RUN=<run_name>-<BEST>-<size>B   # the repo §6 just published
+sbatch --job-name="delphi-eval-$RUN" \
+  /leonardo_work/AIFAC_5C0_290/bfeuer00/experiments/delphi-eval/delphi_eval.sbatch laion/$RUN $RUN rl
+```
+Add the submitted row to **`main_rl_evals/SCORES.md`** (`🚀 eval submitted` + job id); harvest the scores via
+`eval-standard-cleanup`. **HF-upload-only, NEVER DB** — same series rule as §7; the eval records scalar scores
+in the tracker, it does NOT create or require a models DB row.
 
 ---
 
