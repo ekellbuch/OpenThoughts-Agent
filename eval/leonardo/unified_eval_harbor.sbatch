@@ -371,7 +371,31 @@ MODEL_INFO_JSON="{\"max_input_tokens\":${MI_MAX_MODEL_LEN},\"max_output_tokens\"
 echo "[model_info] $MODEL_INFO_JSON"
 
 # Serve under the per-model env prefix (eval-qwen35 §2f vars; empty for otagent).
-srun --overlap --gres=gpu:4 "${SERVE_ENV_PREFIX[@]}" "${VLLM_CMD[@]}" \
+#
+# --- GRES sizing for the serve srun (FIX 2026-06-24) ---
+# The job-level allocation is set by the listener at submit time to TP×DP GPUs
+# (eval/unified_eval_listener.py: `--gres gpu:{total_gpus}`), which OVERRIDES the
+# stale `#SBATCH --gres=gpu:4` default in this script's header. For a TP=1 8B
+# campaign model the job therefore holds only 1 GPU, but a hardcoded
+# `srun --overlap --gres=gpu:4` then requests 4 → "Invalid generic resource (gres)
+# specification" → vLLM never starts → the leg aborts (~52min, exit 1:0). Derive
+# the serve GPU count from the TP×DP the listener already passed (falling back to
+# the live SLURM allocation, then 4) so the inner srun matches the actual job
+# allocation for BOTH TP=1 (1 GPU) and TP=4 (4 GPU, 32B) evals.
+SERVE_TP="${EVAL_VLLM_TENSOR_PARALLEL_SIZE:-}"
+SERVE_DP="${EVAL_VLLM_DATA_PARALLEL_SIZE:-1}"
+if [ -n "$SERVE_TP" ]; then
+    SERVE_GPU_COUNT=$(( SERVE_TP * SERVE_DP ))
+elif [ -n "${SLURM_GPUS_ON_NODE:-}" ]; then
+    SERVE_GPU_COUNT="$SLURM_GPUS_ON_NODE"
+elif [ -n "${SLURM_GPUS_PER_NODE:-}" ]; then
+    SERVE_GPU_COUNT="$SLURM_GPUS_PER_NODE"
+else
+    SERVE_GPU_COUNT=4
+fi
+echo "[serve] gres=gpu:${SERVE_GPU_COUNT} (TP=${SERVE_TP:-<unset>} DP=${SERVE_DP} SLURM_GPUS_ON_NODE=${SLURM_GPUS_ON_NODE:-<unset>})"
+
+srun --overlap --gres=gpu:${SERVE_GPU_COUNT} "${SERVE_ENV_PREFIX[@]}" "${VLLM_CMD[@]}" \
     > "$RUN_DIR/vllm.log" 2>&1 &
 VLLM_PID=$!
 
