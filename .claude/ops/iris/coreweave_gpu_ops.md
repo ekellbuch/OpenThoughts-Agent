@@ -33,8 +33,17 @@ launch immediately — no push-then-pull, there is no Iris clone to pull).
 **Pre-launch preamble:**
 ```bash
 source /Users/benjaminfeuer/Documents/secrets.env   # HF_TOKEN, WANDB_*, DAYTONA_* — forwarded into the pod
-export KUBECONFIG=~/.kube/coreweave-iris-gpu         # the CoreWeave GPU cluster kubeconfig
+export KUBECONFIG=~/.kube/coreweave-iris-gpu         # REQUIRED — the CoreWeave GPU cluster kubeconfig
 ```
+- **`export KUBECONFIG=~/.kube/coreweave-iris-gpu` is a HARD PREREQUISITE for every
+  CoreWeave job/query — set it in the same shell before any `iris`/`kubectl`/watcher
+  call.** This Mac's **default `KUBECONFIG` (`~/.kube/config`) points at a DIFFERENT
+  context** (TPU/`marin`/other), so without the export, `kubectl` inspects the wrong
+  cluster and `iris` cw commands open the tunnel against the wrong backend — you can get
+  misleading "0 pods / not found" / auth errors that look like a dead job but are really
+  the wrong kubeconfig. Exporting it explicitly is also a good general safeguard even when
+  the default happens to be benign. (It's `export`ed into the shell env, so it persists for
+  the whole session; re-export in any fresh shell or background call.)
 - **`~/.kube/coreweave-iris-gpu`** is the CoreWeave GPU cluster's kubeconfig (distinct
   from any TPU/`marin` context). `kubectl` reads it via `KUBECONFIG`; the `iris` SDK
   reaches the cluster through the controller tunnel it opens from the cluster YAML (the
