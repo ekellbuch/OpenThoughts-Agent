@@ -109,9 +109,9 @@ default** (the user keeps 1–7 for sibling experiments; confirm before borrowin
 > relaunch.
 
 General shape — use the **canonical unified listener `eval/unified_eval_listener.py` with a
-`--cluster-config`** (NOT the legacy `eval/unified_eval_listener.py`: it lacks the
+`--cluster-config`** (the retired pre-v6 per-cluster listener subsystem has been removed; it lacked the
 `conda_env` / `limit_mm_per_prompt` / `--config-yaml` / `--enable-thinking` / `--agent-parser`
-wiring and will mis-serve per-model-conda_env models — e.g. the qwen3_5 tmax models would fall back
+wiring and would mis-serve per-model-conda_env models — e.g. the qwen3_5 tmax models would fall back
 to `otagent`/vLLM-0.16 and crash). The cluster config (`eval/clusters/<cluster>.yaml`) supplies
 sbatch_script / hardware / conda_envs / paths, so you no longer pass `--sbatch-script` /
 `--n-concurrent` / `--gpu-memory-util`:

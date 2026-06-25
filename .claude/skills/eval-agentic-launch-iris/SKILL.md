@@ -28,8 +28,9 @@ Covers launch → monitor → manual cleanup. For **datagen/tracegen** jobs use 
 3. `harbor_config` — an eval harbor YAML from `hpc/harbor_yaml/eval/` (REQUIRED).
    - **`dcagent_eval_defaults.yaml` — USE THIS BY DEFAULT.** It is an exact,
      Iris-adapted port of the eval team's canonical config
-     (`eval/configs/dcagent_eval_config.yaml`, the SLURM listener's default
-     `EVAL_CONFIG_YAML`): terminus-2, `timeout_multiplier: 1.0`, `n_attempts: 3`,
+     (`hpc/harbor_yaml/eval/configs/dcagent_eval_config.yaml`, the SLURM listener's default
+     `EVAL_CONFIG_YAML`; the old `eval/configs/` path is now a symlink into it):
+     terminus-2, `timeout_multiplier: 1.0`, `n_attempts: 3`,
      agent `max_timeout_sec: 7200`, verifier `max_timeout_sec: 14400`. Using it
      means our Iris numbers match the eval team's SLURM numbers. (The only
      deviation from their file is `force_build: true` — required because Iris
