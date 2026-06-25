@@ -1211,7 +1211,7 @@ class ListenerConfig:
     pack_jobs: bool = False  # Pack multiple jobs onto same node via --nodelist
     # DP: data-parallel multi-node eval
     dp_nodes: int = 0  # 0 = single-node (default), >0 = use DP sbatch with N nodes
-    dp_sbatch_script: str = "eval/jupiter/eval_harbor_dp.sbatch"
+    dp_sbatch_script: str = "eval/jupiter/eval_harbor.sbatch"
     # Inherit: seed _submitted_jobs from previous listener logs
     inherit_log: Optional[List[str]] = None
     # Cluster config (loaded from --cluster-config YAML)
@@ -3965,7 +3965,7 @@ def build_config(args: argparse.Namespace) -> ListenerConfig:
     jobs_dirs = args.jobs_dir or [os.environ.get("EVAL_JOBS_DIR", fallback_jobs_dir)]
 
     # Resolve DP sbatch script: Cluster config > Default
-    dp_sbatch_script = _cc_p("dp_sbatch_script", "eval/jupiter/eval_harbor_dp.sbatch")
+    dp_sbatch_script = _cc_p("dp_sbatch_script", "eval/jupiter/eval_harbor.sbatch")
 
     # agent_envs: resolve from preset. Format: "KEY_NAME,KEY_NAME=ENVVAR,KEY=literal"
     # - "SERPAPI_API_KEY" → reads os.environ["SERPAPI_API_KEY"], passes as SERPAPI_API_KEY=<value>
