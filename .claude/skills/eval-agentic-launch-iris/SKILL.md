@@ -29,7 +29,8 @@ Covers launch → monitor → manual cleanup. For **datagen/tracegen** jobs use 
    - **`dcagent_eval_defaults.yaml` — USE THIS BY DEFAULT.** It is an exact,
      Iris-adapted port of the eval team's canonical config
      (`hpc/harbor_yaml/eval/configs/dcagent_eval_config.yaml`, the SLURM listener's default
-     `EVAL_CONFIG_YAML`; the old `eval/configs/` path is now a symlink into it):
+     `EVAL_CONFIG_YAML` — resolved directly from `hpc/harbor_yaml/eval/configs/`; the old
+     `eval/configs/` symlinks were deleted in `b355163f`):
      terminus-2, `timeout_multiplier: 1.0`, `n_attempts: 3`,
      agent `max_timeout_sec: 7200`, verifier `max_timeout_sec: 14400`. Using it
      means our Iris numbers match the eval team's SLURM numbers. (The only
@@ -92,7 +93,7 @@ preset sets the dataset, concurrency, and agent parser; you do not pass
 
 Both still require `--harbor_config hpc/harbor_yaml/eval/dcagent_eval_defaults.yaml`
 (terminus-2 @ 32k, eval-team default budget — the Cat 1 "reg eval" harness per
-`eval/EVAL_GUIDE.md`), fit a v6e-4 for an 8B model, and should be launched
+`docs/EVAL_GUIDE.md`), fit a v6e-4 for an 8B model, and should be launched
 **with `--upload_to_database`** (Supabase sync, below). For full parity with the
 eval team's SLURM runs, pass `--n_concurrent 128` (their CLI default).
 
@@ -170,7 +171,7 @@ Flag notes:
   harbor's `--export-push`); omit it if you only want local/GCS outputs.
 - `--model` is optional only when `--datagen_config` is given (model inferred);
   otherwise it's required.
-- See `eval/EVAL_GUIDE.md` for the benchmark/harness catalog and
+- See `docs/EVAL_GUIDE.md` for the benchmark/harness catalog and
   `scripts/iris/EVAL_GUIDE.md`/`README.md` for eval-analysis tooling.
 
 Confirm placement (same as datagen):

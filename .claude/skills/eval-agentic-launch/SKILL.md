@@ -188,7 +188,7 @@ with what actually ran (a 32B's 16.0 row dedups against 16.0, an 8B's against 2.
 default (2×) are applied automatically (1.5B is *covered* by the base 2× config; 80B / 70B fall to the base
 default with a logged note). To give an out-of-band model a deliberate multiplier, add a per-model entry in
 `baseline_model_configs.yaml`. For a one-off manual `harbor jobs start`, point `--config` at
-`dcagent_eval_defaults.yaml` (8B) / `dcagent_eval_defaults_32b.yaml` (32B) (see `eval/EVAL_GUIDE.md`).
+`dcagent_eval_defaults.yaml` (8B) / `dcagent_eval_defaults_32b.yaml` (32B) (see `docs/EVAL_GUIDE.md`).
 
 ## 4. VERIFY the launch — the 15-min infra sanity check (do NOT trust "RUNNING")
 A job can report RUNNING while nothing happens (pinggy locked, launcher missing `--pinggy_*`, dead vLLM

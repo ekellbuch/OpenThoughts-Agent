@@ -1,7 +1,7 @@
 # Pinggy persistent tunnels — how to invoke & test
 
 Written 2026-06-23. Ground truth = `hpc/pinggy_utils.py`, `eval/unified_eval_harbor.sbatch`,
-`eval/EVAL_GUIDE.md` §3, and `scripts/inference/serve_public.py`. The bank of 10 pairs
+`docs/EVAL_GUIDE.md` §3, and `scripts/inference/serve_public.py`. The bank of 10 pairs
 lives at `~/Documents/notes/ot-agent/pinggy_bank.md`.
 
 > **A pinggy "pair" is NOT an HTTP service you can GET to test liveness.** It is an
