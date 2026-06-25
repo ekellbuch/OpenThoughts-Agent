@@ -1382,7 +1382,8 @@ def main():
     parser.add_argument(
         "log_folder",
         type=str,
-        help="Path to folder containing log files"
+        help="Path to a FOLDER of logs (globbed by --pattern) or a single log file. "
+             "NOT a list of files: pass ONE folder, stage the .out chain links into it first."
     )
     parser.add_argument(
         "output_folder",

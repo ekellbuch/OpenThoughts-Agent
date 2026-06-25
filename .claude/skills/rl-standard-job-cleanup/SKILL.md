@@ -67,24 +67,53 @@ ls -lt *<RUN_NAME>*_*.out      # collect ALL links of the chain (sorted by jobid
 The tool computes the **trailing-5 EMA of `reward/avg_raw_reward`** (α=1/3), intersects it with the
 on-disk `exports/global_step_<N>/` set, and caps the choice at `latest_ckpt_global_step.txt`. It ALSO emits
 the full metric surface (`metrics.csv`, `vllm_metrics.csv`, `report.md`, `reward_plot.png` — reward +
-entropy/grad_norm collapse overlay). Run it from the **otagent** env:
+entropy/grad_norm collapse overlay). Run it from the **otagent** env.
+
+**Tool-presence pre-check (the cluster clone may predate `--format standard`).** This tool only landed
+recently; a cluster clone can be older, and a full `git pull` here risks CONFLICTING with live-applied local
+edits (e.g. a running eval's `eval/leonardo/unified_eval_harbor.sbatch`). Confirm the flag exists, and if it
+does NOT, sync **only this one file** — never a full `git pull`:
 ```bash
+cd $WORK/code/OpenThoughts-Agent
+scripts/analysis/parse_skyrl_metrics.py --help 2>/dev/null | grep -q 'standard' || \
+  grep -q "format" scripts/analysis/parse_skyrl_metrics.py || echo "MISSING --format standard"
+# If missing, surgically fetch JUST the tool (does NOT touch any other live-applied edit):
+git fetch origin penfever/working
+git checkout origin/penfever/working -- scripts/analysis/parse_skyrl_metrics.py
+```
+
+**The CLI takes a single `log_folder` + a single `output_folder` positional** (it globs `log_folder` by
+`--pattern`, default `*.out`) — it does **NOT** accept individual `.out` files as multiple positionals. So
+**stage the run's real `.out` chain links into a clean folder first**, then pass that folder. Staging into a
+dedicated `outlogs/` also conveniently excludes the tiny per-worker `*_rayw*.out` / `*_rayhead*.out` logs
+(which would otherwise be globbed and pollute the parse):
+```bash
+OUTLOGS=$WORK/rl_cleanup/<RUN_NAME>/outlogs
 OUT=$WORK/rl_cleanup/<RUN_NAME>/metrics
+mkdir -p $OUTLOGS
+# Copy ALL real chain-link TRAINING .out logs (one per restart link) — NOT the _rayw*/_rayhead worker logs:
+cd $WORK/code/OpenThoughts-Agent/hpc/skyrl_yaml/leonardo
+for f in *<RUN_NAME>*_*.out; do
+  case "$f" in *_rayw*|*_rayhead*) continue;; esac   # skip per-worker logs
+  cp "$f" $OUTLOGS/
+done
+ls $OUTLOGS/      # sanity: only the real <JobName>_<jobid>.out training links
+
 /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/envs/otagent/bin/python \
   scripts/analysis/parse_skyrl_metrics.py \
   --format standard \
   --run_dir $RUN_DIR \
   --save_every 20 \
-  $WORK/code/OpenThoughts-Agent/hpc/skyrl_yaml/leonardo/<JobName>_<jobid_a>.out \
-  $WORK/code/OpenThoughts-Agent/hpc/skyrl_yaml/leonardo/<JobName>_<jobid_b>.out \
+  $OUTLOGS \
   $OUT
 ```
 - **`--save_every`** MUST equal the run's `trainer.hf_save_interval` (Delphi default **20** — the first save
   is `global_step_20`; selection excludes the first save and starts at `2*save_every`). Verify it in the
   `.out` launch line (`trainer.hf_save_interval=…`) before trusting the cap.
-- **CHAIN-AWARE — feed ALL real `.out` links of the chain**, not one. A chain's first link(s) often have **0
-  train lines** (engine bring-up only); a single mid-chain `.out` under-covers the EMA window and can pick
-  the wrong step. The selector takes `first-seen-wins` per step, so overlapping links are safe to include.
+- **CHAIN-AWARE — stage ALL real `.out` links of the chain into `$OUTLOGS`**, not one. A chain's first
+  link(s) often have **0 train lines** (engine bring-up only); a single mid-chain `.out` under-covers the EMA
+  window and can pick the wrong step. The selector takes `first-seen-wins` per step, so overlapping links are
+  safe to include. Stage the training links ONLY — exclude the `*_rayw*` / `*_rayhead*` per-worker logs.
 - The tool prints the EMA table + `CHOSEN STEP: <best>` and writes the same into `report.md`. Record
   `BEST=<best>`; the export to publish is `$RUN_DIR/exports/global_step_<BEST>/policy/`.
 - If it reports **NO STEP CHOSEN** (e.g. only `global_step_20` exists, or no reward lines parsed), inspect
@@ -238,4 +267,6 @@ in the tracker, it does NOT create or require a models DB row.
 - **No `trial_stats.csv` / `batch_errors`** — those come from per-trial `result.json` (agentic only); the
   parser's trace/batch emitters cleanly no-op under `--format standard`.
 - **No `cp trainer_log.jsonl`** — `logger=console`, so the file is never written. The `.out` chain is the
-  log of record; `metrics.csv`/`report.md`/`reward_plot.png` are the published metric artifacts.
+  log of record; `metrics.csv`/`vllm_metrics.csv`/`report.md`/`reward_plot.png` are the published metric
+  artifacts. **`vllm_metrics.csv` IS produced + uploaded** under `--format standard` (the vLLM stat-logger
+  extraction is format-agnostic and rides along into the upload's `training_logs/`).
