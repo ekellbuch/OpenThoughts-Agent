@@ -280,25 +280,12 @@ The launcher will construct a per-run YAML in `"$experiments_dir/configs"`, gene
 
 Everything you need to evaluate models lives under `eval/`. Pick the mode that fits how much infrastructure you have available:
 
-1. **Terminal-Bench smoke tests (local or Daytona).** `eval/example_tbench.py` wraps the `terminal_bench` CLI so you can point Harbor at a hosted vLLM endpoint. Start (or SSH-tunnel to) a VLLM server first (`python eval/start_ray.py` spins up a Ray Serve-backed OpenAI-compatible endpoint bound to `127.0.0.1:8000`). Then run:
+1. **Terminal-Bench smoke tests (local or Daytona).** `eval/example_tbench.py` wraps the `terminal_bench` CLI so you can point Harbor at a hosted vLLM endpoint. Point it at an already-running (or SSH-tunneled) OpenAI-compatible vLLM server, then run:
    ```bash
    python eval/example_tbench.py \
      # tweak dataset_name/version, backend, agent, model_name, agent_kwargs, n_concurrent_trials
    ```
    This creates a run with Daytona sandboxes and prints the aggregated score. Use it to verify that your model + Harbor wiring works before touching HPC.
-
-2. **HF RL task batches.** `eval/example_rltasks_eval.py` downloads a HuggingFace dataset, optionally slices it, and launches Harbor with your preferred agent + model:
-```bash
-python eval/example_rltasks_eval.py \
-  --model openai/gpt-5-chat-latest \
-  --dataset DCAgent/nl2bash \
-  --agent terminus-2 \
-  --n-tasks 100 \
-  --n-concurrent 8 \
-  --n-attempts 3 \
-  --env daytona
-```
-The script converts parquet task dumps via `scripts/sandboxes/tasks_parquet_converter.py`, stages results under `./jobs`, and accepts `--job-name`/`--output` so you can checkpoint multiple experimental runs.
 
 1. **Cluster-scale Harbor eval (TACC template).** The `eval/tacc/` subtree packages the scripts we use on TACC GH nodes:
    - Drop database + HF credentials into `eval/tacc/secret.env` (see `eval/tacc/README.md` for the expected keys) and make sure the shared conda env in that README is accessible from your account.
@@ -307,7 +294,6 @@ The script converts parquet task dumps via `scripts/sandboxes/tasks_parquet_conv
    - Logs land in `experiments/logs/` and full Harbor outputs go under `jobs/<RUN_TAG>/`. `eval/tacc/README.md` documents troubleshooting tips plus alternate sbatch variants (`tacc_eval_multi_gpu.sbatch`, `tb2_eval_harbor.sbatch`, SweBench listeners, etc.).
 
 2. **Other clusters/benchmarks.** The remaining files in `eval/` are copyable templates:
-   - `run_tb_wx.sbatch` and the `run_tb_vllm_wx_qwen3_t*.sbatch` scripts schedule Terminal-Bench runs with hosted vLLM models.
    - `JSC/launch_tbench.sh` shows how to adapt the flow to JSC (interactive SLURM allocation + reverse tunnel + Apptainer).
    Reuse these when porting eval to a new site—each script labels the environment variables and SLURM resources you will likely need to swap out.
 
