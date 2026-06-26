@@ -98,8 +98,12 @@ preset sets the dataset, concurrency, and agent parser; you do not pass
 
 | Benchmark | Command | preset sets |
 |---|---|---|
-| SWE-bench-verified (random 100) | `--preset swebench` | `DCAgent2/swebench-verified-random-100-folders`, n_concurrent 32, `parser=xml`, thinking (via `agent_kwargs`) |
-| terminal-bench 2.0 | `--preset tb2` | `DCAgent2/terminal_bench_2`, n_concurrent 32, thinking (via `agent_kwargs`) |
+| SWE-bench-verified (random 100) | `--preset swebench` | `DCAgent2/swebench-verified-random-100-folders`, n_concurrent 32, `parser=xml` |
+| terminal-bench 2.0 | `--preset tb2` | `DCAgent2/terminal_bench_2`, n_concurrent 32 |
+
+> The presets do **not** set thinking (it's not a preset property) — see the **Thinking on Iris** note
+> above: thinking comes from the served model's template default (Qwen3 = on), or pass
+> `--agent_kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'` for a default-OFF model.
 
 Both still require `--harbor_config hpc/harbor_yaml/eval/dcagent_eval_defaults.yaml`
 (terminus-2 @ 32k, eval-team default budget — the Cat 1 "reg eval" harness per
