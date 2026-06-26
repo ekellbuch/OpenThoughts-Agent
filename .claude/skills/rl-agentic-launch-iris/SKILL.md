@@ -281,6 +281,33 @@ These were paid for this week (`agent_logs/2026-06-25_coreweave_131k_cpdcp2r3_re
   **"no controller record AND 0 pods" as a TERMINAL `absent` verdict**, the case the old content-watch missed.
   Importable: `from scripts.iris.watch_job_state import get_job_state, watch`. (A supervising agent should use
   `watch(...)` / `get_job_state(...)` as the watch primitive.)
+
+> **⚠ FRESH-LAUNCH 15-MIN + 30-MIN CHECK-INS MUST PARSE THE ROLLOUT LOGS — lifecycle state is necessary but
+> NOT sufficient.** `watch_job_state` says `running, pods=8, failure_count=0` for a job that is **silently dead**:
+> a *throughput-starvation wedge* (engines decode but an oversubscribed queue never drains → the step-0 batch
+> never assembles — the original `rl-131k-cpdcp2r3` failure), *node-local data starvation* (a rank-0-only
+> task-dataset stage → 7 ranks see empty task dirs → every rollout `reward 0`, compute looks green), or vLLM
+> simply never serving. State-polling alone will report all of these as "healthy." **So for ANY fresh Iris RL
+> launch, the 15-min AND 30-min check-ins capture + parse the logs, not just poll state.** Procedure:
+> ```bash
+> # capture finelog + per-rank pod logs (our RL jobs use a REMOTE s3 trials_dir, so peek's ls/cat/grep bail —
+> # `pull` still grabs the logs, which is where the live bring-up signal is). Override IRIS_BIN: the script
+> # defaults to the marin .venv iris, which CANNOT drive cw (broken kubernetes import).
+> IRIS_BIN=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris \
+>   bash scripts/iris/peek_rl_rollouts.sh <pod-name-substring> pull     # → ~/Documents/experiments/traces/<job>_<stamp>/logs/iris_finelog.log
+> ```
+> Then grep the finelog for the milestone ladder — each rung **rules out a specific silent-death mode**:
+> 1. **`[rl-iris] MarinSkyRL now at <sha>`** (+ `HEAD is now at <sha>`) — confirms `--skyrl-ref` took (the fix is live). Absent ⇒ you forgot the flag / it failed → stale baked code.
+> 2. **`Staging train_data on this node (rank N/8)` for ALL N ranks** — else node-local data starvation → silent `reward 0`. Must see every rank.
+> 3. **`Ray nodes alive: N/N`** — rendezvous complete.
+> 4. **HF weight load:** an `OSError … does not appear to have a file named model.safetensors` that is FOLLOWED by `load_pretrained_with_retry … retrying` → engine init = the `0b2b05b` retry **catching** it (BENIGN). The SAME error with **no** retry wrapper + a task failure ~70s in = the stale-image `build_models` crash. (MoE arm: an `AttributeError: … 'norm_topk_prob'` is the *other* stale-image crash — must be ABSENT.)
+> 5. **vLLM ACTUALLY GENERATING** = `loggers.py … Avg generation throughput: >0 tokens/s, Running: R reqs, Waiting: W` recurring. This is the literal "is vLLM firing" check. **`Waiting` persistently ≫ `Running` with flat throughput = the throughput-starvation WEDGE** (de-oversubscribe: lower `n_concurrent_trials` / raise `max_num_seqs`). `Waiting ≈ 0` = queue draining = healthy.
+> 6. **MoE DCP arm only:** `_validate_dcp_cfg VLLM_ALLOW_ROUTED_EXPERTS_DCP=1: allowing …` + `decode_context_parallel_size=2` — the R3+DCP guard engaged (the `Unknown vLLM environment variable` line is the benign whitelist note, NOT a no-op).
+> 7. **Train driver:** `Resumed training from global_step 0` + `TerminalBenchGenerator initialized … Concurrent trials: K` (Harbor RolloutCoordinator up; K×(#engines) = your `n_concurrent_trials`).
+> 8. **Trials completing:** first `result.json` / reward written + **`global_step` 0→1**. At 15/30 min a 131k arm usually has **ZERO** completed (episodes are long) — that is EXPECTED, but **report it as "rollouts executing, 0 trials completed yet," NEVER as "healthy/done."** Completed-trial artifacts land in the **remote** `s3://marin-na/iris/<job>/trace_jobs` (read via `aws s3 ls --endpoint-url <R2>`), not the pod.
+>
+> **Verdict rule:** rungs 1–7 green + generation throughput >0 + `Waiting≈0` ⇒ genuinely progressing (even with 0 completed trials). Generation throughput **0** after engines are up, or `Waiting≫Running`, or no RolloutCoordinator, or any rank missing its data-stage line ⇒ **escalate now** (wedge / starvation), do not wait for the next sweep. (Evidence: 2026-06-26 `think2507-r4` + `q36-35b-r3` relaunch — both showed rungs 1–7 + 33–75 tok/s, `Waiting 0`, `global_step 0`, 0 trials done at +30 min = correctly read as live, not wedged.)
+
 - **Manual state / logs** (synchronous calls only — no background `iris`/`kubectl`; use the **otagent** iris
   binary — the bare marin `.venv/bin/iris` lacks a working `kubernetes` for the cw k8s controller backend):
   ```bash
