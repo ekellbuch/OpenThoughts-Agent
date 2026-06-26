@@ -660,6 +660,78 @@ def get_baseline_agent_kwargs(hf_model: str, configs: Dict[str, Dict]) -> List[s
     return []
 
 
+# ---------------------------------------------------------------------------
+# Per-model timeout-multiplier inference
+# ---------------------------------------------------------------------------
+# Restored from the retired eval/jupiter listener (commit 9040cb29) and generalized:
+# the size signal is taken from the eval model's own name when it carries a size
+# token, ELSE from the Supabase base model (models.base_model_id). Finetunes such as
+# DCAgent/a1-* carry no size token in their own name, but their base (Qwen/Qwen3-8B)
+# does — so an 8B finetune resolves to 2.0 automatically without a per-model entry.
+_SIZE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)\s*[bB](?![A-Za-z0-9])")
+_BASE_MODEL_NAME_CACHE: Dict[str, Optional[str]] = {}
+
+
+def infer_size_timeout_multiplier(name: str) -> Optional[float]:
+    """Infer a harbor timeout multiplier from a model-name size token.
+
+    Largest size token wins (handles MoE "30b-a3b"). Returns 2.0 for <=~14B,
+    16.0 for ~30-40B, or None when no size token is present / the size is
+    out-of-band (caller then leaves harbor at its default and logs).
+    """
+    sizes = [float(m) for m in _SIZE_TOKEN_RE.findall(name or "")]
+    if not sizes:
+        return None
+    b = max(sizes)
+    if b <= 14.0:
+        return 2.0
+    if 28.0 <= b <= 42.0:
+        return 16.0
+    return None
+
+
+def resolve_base_model_name(hf_model: str) -> Optional[str]:
+    """Resolve the *base* model name for an eval model via Supabase.
+
+    Looks up the eval model's `models` row, follows ``base_model_id`` (a
+    self-FK), and returns the base model's ``name`` (which carries the size
+    token finetune names lack). Cached per process. Returns None on any miss
+    (no row / null base / Supabase unavailable) so callers degrade to the eval
+    model's own name then the 1.0 default.
+    """
+    if hf_model in _BASE_MODEL_NAME_CACHE:
+        return _BASE_MODEL_NAME_CACHE[hf_model]
+    base_name: Optional[str] = None
+    try:
+        client = get_supabase_client()
+        rows = (
+            client.table("models").select("id,name,base_model_id")
+            .eq("name", hf_model).limit(1).execute().data
+        )
+        if rows and rows[0].get("base_model_id"):
+            base = (
+                client.table("models").select("name")
+                .eq("id", rows[0]["base_model_id"]).limit(1).execute().data
+            )
+            if base:
+                base_name = base[0].get("name")
+    except Exception as e:
+        log(f"WARNING: base-model lookup failed for {hf_model}: {e}")
+    _BASE_MODEL_NAME_CACHE[hf_model] = base_name
+    return base_name
+
+
+def get_baseline_timeout_multiplier(hf_model: str, configs: Dict[str, Dict]) -> Optional[float]:
+    """Per-model ``timeout_multiplier`` from the baseline config (exact/group,
+    then pattern). Returns the float, or None if the model declares none."""
+    cfg = configs.get(hf_model)
+    if not cfg:
+        cfg = _match_pattern_config(hf_model)
+    if cfg and cfg.get("timeout_multiplier") is not None:
+        return float(cfg["timeout_multiplier"])
+    return None
+
+
 def merge_agent_kwargs(*kwarg_lists: List[str]) -> List[str]:
     """Merge agent-kwarg `key=value` lists with first-wins precedence by key.
 
@@ -1224,7 +1296,13 @@ class ListenerConfig:
     daytona_sandbox_limit: int = DEFAULT_DAYTONA_SANDBOX_LIMIT
     daytona_warning_buffer: float = DEFAULT_DAYTONA_WARNING_BUFFER
     # v3 Enhancement 5: Timeout-config-sensitive dedup
+    # timeout_multiplier = the effective GLOBAL multiplier (CLI value if passed, else
+    # 1.0), used for sbatch_params + the pending DB stub. cli_timeout_multiplier holds
+    # ONLY the explicit CLI value (None when unset) so the per-model submit point can
+    # apply the hybrid precedence CLI > per-model baseline > size-inferred > 1.0 without
+    # mistaking the 1.0 default for an explicit override. See _resolve_timeout_multiplier().
     timeout_multiplier: float = DEFAULT_TIMEOUT_MULTIPLIER
+    cli_timeout_multiplier: Optional[float] = None
     timeout_aware: bool = False
     # Config YAML for harbor (overrides vs no-overrides)
     config_yaml: str = "dcagent_eval_config.yaml"
@@ -2726,6 +2804,36 @@ class EvalListener:
             self.config.preset_agent_kwargs,
         )
 
+    def _resolve_timeout_multiplier(self, hf_model: str, baseline_configs: Dict[str, Dict]) -> float:
+        """Resolve the harbor timeout multiplier for ONE model.
+
+        Precedence (most specific first):
+            CLI --timeout-multiplier
+            > per-model baseline `timeout_multiplier`
+            > size-inferred (eval model's own size token, else the Supabase base model's)
+            > DEFAULT_TIMEOUT_MULTIPLIER (1.0)
+
+        Finetunes whose own name lacks a size token (e.g. DCAgent/a1-*) take their
+        size from the base model via Supabase, so an 8B finetune resolves to 2.0
+        automatically. Returns the global default (1.0) only when every layer is
+        silent — and logs a WARN in that case so a never-inferred model is visible.
+        """
+        if self.config.cli_timeout_multiplier is not None:
+            return self.config.cli_timeout_multiplier
+        per_model = get_baseline_timeout_multiplier(hf_model, baseline_configs)
+        if per_model is not None:
+            return per_model
+        size_tm = infer_size_timeout_multiplier(hf_model)
+        if size_tm is None:
+            base = resolve_base_model_name(hf_model)
+            if base:
+                size_tm = infer_size_timeout_multiplier(base)
+        if size_tm is not None:
+            return size_tm
+        log(f"  WARNING: no timeout_multiplier inferred for {hf_model} "
+            f"(no CLI/baseline/size signal) — using default {DEFAULT_TIMEOUT_MULTIPLIER}")
+        return DEFAULT_TIMEOUT_MULTIPLIER
+
     def run_iteration(self) -> int:
         """
         Run one check iteration.
@@ -3220,6 +3328,19 @@ class EvalListener:
             target_node = None
             pack_port = None
             extra_env: Dict[str, str] = {}
+            # Per-model timeout multiplier (harbor-level, applies to both vLLM and
+            # API paths). Hybrid precedence CLI > per-model baseline > size-inferred
+            # (own name, else Supabase base model) > 1.0. When the resolved value
+            # differs from the shared sbatch_params global (e.g. an 8B finetune
+            # inferring 2.0 while the global default stays 1.0), override
+            # EVAL_TIMEOUT_MULTIPLIER in extra_env (merged last, after to_env()),
+            # which the sbatch forwards as harbor --timeout-multiplier (CLI wins over
+            # the harbor config YAML's value). See _resolve_timeout_multiplier().
+            model_tm = self._resolve_timeout_multiplier(hf_model, baseline_configs)
+            if model_tm != self.config.timeout_multiplier:
+                extra_env["EVAL_TIMEOUT_MULTIPLIER"] = str(model_tm)
+                log(f"  Per-model timeout_multiplier for {hf_model}: {model_tm} "
+                    f"(global {self.config.timeout_multiplier})", verbose_only=True)
             # Per-model agent kwargs override (vLLM path only). The shared
             # sbatch_params carries the global merge(CLI, preset); when THIS model
             # declares its own baseline agent_kwargs, override EVAL_AGENT_KWARGS in
@@ -4064,7 +4185,11 @@ def build_config(args: argparse.Namespace) -> ListenerConfig:
         else DEFAULT_DAYTONA_WARNING_BUFFER
     )
 
-    # Enhancement 5: Timeout-config-sensitive dedup
+    # Enhancement 5: Timeout-config-sensitive dedup.
+    # cli_timeout_multiplier preserves whether the flag was EXPLICITLY passed (None
+    # if not) so the per-model hybrid resolution can let CLI win without treating the
+    # 1.0 global default as an override. timeout_multiplier is the effective global.
+    cli_timeout_multiplier = args.timeout_multiplier
     timeout_multiplier = (
         args.timeout_multiplier
         if args.timeout_multiplier is not None
@@ -4190,6 +4315,7 @@ def build_config(args: argparse.Namespace) -> ListenerConfig:
         daytona_warning_buffer=daytona_warning_buffer,
         # Enhancement 5
         timeout_multiplier=timeout_multiplier,
+        cli_timeout_multiplier=cli_timeout_multiplier,
         timeout_aware=timeout_aware,
         config_yaml=config_yaml,
         max_output_tokens=args.max_output_tokens,
