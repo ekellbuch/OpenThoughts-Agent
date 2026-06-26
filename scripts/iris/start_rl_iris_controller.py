@@ -83,6 +83,46 @@ def _log(msg: str) -> None:
     print(f"[start_rl_iris_controller] {msg}", flush=True)
 
 
+def stage_train_data(train_data_json: str) -> None:
+    """Extract the HF task dataset(s) to this NODE's local task dir on EVERY node.
+
+    WHY THIS EXISTS (the data-starvation bug, 2026-06-26): the agentic
+    terminal_bench task dataset (e.g. ``DCAgent/exp_rpt_pymethods2test-large``) is
+    an HF *parquet* repo that must be extracted into the on-disk
+    ``$DCFT/tasks/<repo>/<instance>/{instruction.md,task.toml,...}`` layout the
+    Harbor rollout reads. ``hpc.rl_launch_utils.resolve_rl_train_data`` does that
+    extraction, but on the iris/CoreWeave path it runs only inside rank-0's
+    ``run_rl.py`` driver, writing to ``$DCFT=/opt/openthoughts/tasks`` on the HEAD
+    pod's NODE-LOCAL filesystem. CoreWeave task pods do NOT share a filesystem (no
+    SLURM-style GPFS ``$SCRATCH``), so the Ray-scheduled rollout workers on ranks
+    1..N-1 saw an empty tasks dir and every rollout died with
+    ``FileNotFoundError: .../task.toml`` -> reward always 0 (doomed, data-starved).
+
+    Fix: the controller runs on EVERY node, so stage here (before Ray bootstrap)
+    using the SAME extraction routine. CoreWeave nodes have egress, so each pod
+    fetches+extracts to the identical node-local path; the path strings rank-0's
+    dataset object ships to the workers then resolve on every pod. Idempotent
+    (``on_exist=skip`` + the stat short-circuit in ``_fix_task_permissions``), so a
+    re-run / rank-0's later run_rl re-resolve is a cheap no-op.
+    """
+    import json as _json
+
+    try:
+        train_data = _json.loads(train_data_json)
+    except (ValueError, TypeError):
+        train_data = [train_data_json] if train_data_json else []
+    if not train_data:
+        return
+
+    # Reuse the exact, SLURM-proven staging logic. PYTHONPATH already includes
+    # /app (set by the launcher bootstrap), so hpc is importable.
+    from hpc.rl_launch_utils import resolve_rl_train_data
+
+    _log(f"Staging train_data on this node (rank {_rank()}/{_num_tasks()}): {train_data}")
+    resolved = resolve_rl_train_data(train_data, on_exist="skip", verbose=True)
+    _log(f"train_data staged to node-local paths: {resolved}")
+
+
 def _rank() -> int:
     # IRIS_TASK_ID is the full task path (e.g. "/user/job/0"); on retried tasks
     # iris appends a ":N" retry suffix. The rank is the trailing path segment
@@ -470,6 +510,13 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         default=DEFAULT_CLUSTER_JOIN_TIMEOUT,
         help=f"Seconds to wait for all nodes to join the Ray cluster (default {DEFAULT_CLUSTER_JOIN_TIMEOUT}).",
     )
+    parser.add_argument(
+        "--train-data",
+        default=os.environ.get("OT_AGENT_IRIS_TRAIN_DATA", ""),
+        help="JSON list of train_data HF dataset(s) to stage (extract to the node-local "
+        "task dir) on EVERY node before Ray starts. Required for agentic terminal_bench "
+        "rollouts on a multi-node slice with no shared filesystem.",
+    )
     args, train_argv = parser.parse_known_args()
     # argparse leaves the `--` separator out of train_argv; strip a leading one
     # if the shell passed it through.
@@ -493,6 +540,11 @@ def _print_env_snapshot() -> None:
 def main() -> None:
     args, train_argv = parse_args()
     _print_env_snapshot()
+    # Stage the task dataset on THIS node before Ray bootstrap (head + every worker).
+    # Without this, only rank-0 has the extracted tasks and the rollout workers die
+    # with FileNotFoundError on task.toml (see stage_train_data docstring).
+    if args.train_data:
+        stage_train_data(args.train_data)
     rank = _rank()
     if rank == 0:
         exit_code = run_head(args, train_argv)

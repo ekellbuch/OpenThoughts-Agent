@@ -439,6 +439,19 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     ]
     if args.rendezvous_dir:
         controller_cmd.extend(["--rendezvous-dir", args.rendezvous_dir])
+    # Per-NODE task-dataset staging. On a multi-node iris/CoreWeave slice each task
+    # pod has its OWN node-local filesystem ($DCFT=/opt/openthoughts in the gpu-rl
+    # image) — there is NO shared scratch like SLURM's GPFS. run_rl.py's
+    # resolve_rl_train_data() extracts the HF task dataset to /opt/openthoughts/tasks/
+    # but it runs ONLY on rank 0 (the head), so the Ray-scheduled rollout workers on
+    # ranks 1..N-1 find an empty tasks dir and every rollout dies with
+    # FileNotFoundError: .../task.toml -> reward always 0 (data-starved, doomed run).
+    # Fix: forward --train-data to the controller so it can run the SAME extraction
+    # on EVERY node before Ray starts, populating the identical node-local path on
+    # all pods. Idempotent (on_exist=skip) — rank-0's later run_rl re-resolve is a
+    # cheap no-op.
+    if args.train_data and args.train_data != "[]":
+        controller_cmd.extend(["--train-data", args.train_data])
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)
 
