@@ -163,8 +163,10 @@ if [ -f "$DC_AGENT_SECRET_ENV" ]; then
 fi
 
 # --- Daytona API key for evals (3:1 weighted: 3/4 org2, 1/4 org1) ---
-DAYTONA_KEY_ORG1="dtn_17868a1955b56a52cb367af6dd3c6e93ee531b2073df801784273435c0e0fc6c"
-DAYTONA_KEY_ORG2="dtn_ecfb759d2abcbf0f044413182677b3cc7624af495cb48409e8873b5283bda313"
+# Keys come from secrets.env (sourced above as $DC_AGENT_SECRET_ENV) — NEVER hardcode.
+# The two eval orgs are DAYTONA_API_KEY (org1) + DAYTONA_DATA_API_KEY (org2).
+DAYTONA_KEY_ORG1="${DAYTONA_API_KEY:?DAYTONA_API_KEY unset — source secrets.env ($DC_AGENT_SECRET_ENV) before launch}"
+DAYTONA_KEY_ORG2="${DAYTONA_DATA_API_KEY:?DAYTONA_DATA_API_KEY unset — source secrets.env ($DC_AGENT_SECRET_ENV) before launch}"
 if (( RANDOM % 4 == 0 )); then
     export DAYTONA_API_KEY="$DAYTONA_KEY_ORG1"
     echo "Selected Daytona org: org1 (${DAYTONA_API_KEY:0:12}...)"

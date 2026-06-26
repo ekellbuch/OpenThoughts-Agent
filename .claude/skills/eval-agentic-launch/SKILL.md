@@ -23,6 +23,15 @@ ops notes first.
 > paths, whether `--pre-download` is needed (no-internet clusters), and the **Daytona eval-org key**
 > (SWE-bench presets need the eval key, not the RL-org default — see ops/CLAUDE.md). Read it before launching.
 
+> **⚠ SECRETS COME FROM `secrets.env`, NEVER HARDCODED IN AN SBATCH/SCRIPT.** The eval `eval_harbor.sbatch`
+> (leonardo/tacc/jupiter) sources the secrets env (`$DC_AGENT_SECRET_ENV`, default `~/secrets.env` / TACC
+> `$SCRATCH/keys.env`) and reads the two Daytona eval-org keys from it: **`DAYTONA_API_KEY` (org1) +
+> `DAYTONA_DATA_API_KEY` (org2)**, 3:1-weighted (3/4 org2). The script fails loudly (`:?`) if either is unset —
+> so **ensure your secrets env is populated + sourced before launch** (same model as `hpc.launch`), never paste
+> a `dtn_…` key into a script/config/commit. (`data/sbatches/register_snapshots.py` reads the same two env vars.)
+> If you ever find a literal key committed, treat it as a leak: replace with the env read AND get the key
+> **rotated/revoked** — a fix-forward edit does not un-leak it from git history.
+
 ## 1. Select the models
 - **Priority list** (the default mode): a file in `eval/lists/` (`models_8b_*.txt`, `models_32b.txt`,
   `models_131k.txt`, …). Launch with `--require-priority-list --priority-file eval/lists/<file>`.
