@@ -29,7 +29,7 @@
 #   EVAL_DAYTONA_THRESHOLD  (default: 999999)
 #   EVAL_VLLM_MAX_RETRIES   (default: 20)
 #   EVAL_AGENT_PARSER       (default: "")
-#   EVAL_ENABLE_THINKING    (default: "false")
+#   EVAL_AGENT_KWARGS       (default: "")
 #   EVAL_AGENT_NAME         (default: "terminus-2")
 #   EVAL_STARTS_LOG         (optional, shared eval starts log)
 #   EVAL_TIMEOUT_MULTIPLIER (default: 1.0)
@@ -61,7 +61,7 @@ GPU_MEMORY_UTIL="${EVAL_GPU_MEMORY_UTIL:-0.95}"
 ERROR_THRESHOLD="${EVAL_DAYTONA_THRESHOLD:-999999}"
 VLLM_MAX_RETRIES="${EVAL_VLLM_MAX_RETRIES:-20}"
 AGENT_PARSER="${EVAL_AGENT_PARSER:-}"
-ENABLE_THINKING="${EVAL_ENABLE_THINKING:-false}"
+AGENT_KWARGS="${EVAL_AGENT_KWARGS:-}"
 AGENT_NAME="${EVAL_AGENT_NAME:-terminus-2}"
 EVAL_STARTS_LOG="${EVAL_STARTS_LOG:-}"
 TIMEOUT_MULTIPLIER="${EVAL_TIMEOUT_MULTIPLIER:-1.0}"
@@ -111,7 +111,7 @@ echo "Error threshold: $ERROR_THRESHOLD"
 echo "vLLM max retries: $VLLM_MAX_RETRIES"
 echo "Agent: $AGENT_NAME"
 echo "Agent parser: ${AGENT_PARSER:-<default>}"
-echo "Thinking: $ENABLE_THINKING"
+echo "Agent kwargs: ${AGENT_KWARGS:-<none>}"
 echo "Timeout multiplier: $TIMEOUT_MULTIPLIER"
 echo "Config YAML: $CONFIG_YAML"
 echo "DB Job ID (pending): ${DB_JOB_ID:-<none>}"
@@ -814,19 +814,6 @@ if [ -n "${EVAL_AUTO_SNAPSHOT:-}" ]; then
     EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --environment-kwarg auto_snapshot=$EVAL_AUTO_SNAPSHOT"
 fi
 
-# Build thinking args.
-# Thinking is a chat-template kwarg (client-specified, server-applied: vLLM
-# reads request.chat_template_kwargs -> apply_chat_template). Deliver it via the
-# SAME live nested extra_body mechanism the RL-rollout path uses, so it actually
-# reaches the request body. terminus-2 has an `extra_body` param that folds this
-# into _llm_call_kwargs["extra_body"]; a BARE `enable_thinking=true` kwarg has no
-# terminus-2 param and was silently discarded (dead path — removed).
-THINKING_ARGS=""
-if [ "$ENABLE_THINKING" = "true" ]; then
-    echo "Thinking enabled"
-    THINKING_ARGS='--agent-kwarg '"'"'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'"'"''
-fi
-
 # Build agent-parser args
 PARSER_ARGS=""
 if [ -n "$AGENT_PARSER" ]; then
@@ -1215,10 +1202,14 @@ print(agents[0].get('name', 'terminus-2') if agents else 'terminus-2')
         --debug
     )
     # Add optional args
-    if [ "$ENABLE_THINKING" = "true" ]; then
-        # Live nested form (see THINKING_ARGS comment above): terminus-2 reads
-        # extra_body and forwards chat_template_kwargs.enable_thinking to vLLM.
-        HARBOR_CMD+=(--agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}')
+    # Generic agent-kwarg passthrough (EVAL_AGENT_KWARGS, newline-separated).
+    # Thinking rides here as the live nested extra_body form — no enable_thinking
+    # flag. Array form keeps each kwarg one argv token regardless of content.
+    if [ -n "$AGENT_KWARGS" ]; then
+        while IFS= read -r _kw; do
+            [ -z "$_kw" ] && continue
+            HARBOR_CMD+=(--agent-kwarg "$_kw")
+        done <<< "$AGENT_KWARGS"
     fi
     if [ -n "$AGENT_PARSER" ]; then
         HARBOR_CMD+=(--agent-kwarg "parser=$AGENT_PARSER")
@@ -1270,7 +1261,7 @@ mkdir -p "$RUN_DIR"
     echo "GPU_MEMORY_UTIL=$GPU_MEMORY_UTIL"
     echo "AGENT_NAME=$AGENT_NAME"
     echo "AGENT_PARSER=${AGENT_PARSER:-}"
-    echo "ENABLE_THINKING=$ENABLE_THINKING"
+    echo "AGENT_KWARGS=$AGENT_KWARGS"
     echo "TIMEOUT_MULTIPLIER=$TIMEOUT_MULTIPLIER"
     echo "BENCHMARK_NAME=$BENCHMARK_NAME"
     echo "RESUME_COUNT=$RESUME_COUNT"

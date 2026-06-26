@@ -24,7 +24,7 @@ Each file is a flat mapping. `load_presets()` returns
 | `n_concurrent` | int | Harbor `--n-concurrent`. |
 | `error_threshold` | int | Max invalid errors before abort. (SLURM-only) |
 | `vllm_max_retries` | int | vLLM startup retries. (SLURM/serve-only) |
-| `enable_thinking` | bool | Gates thinking ON. Delivered as the harbor agent-kwarg `extra_body={"chat_template_kwargs":{"enable_thinking":true}}` (vLLM reads `request.chat_template_kwargs` → `apply_chat_template`; same path as RL rollouts). Affects results. |
+| `agent_kwargs` | list[str] | Extra harbor agent-kwargs as `key=value` strings, each forwarded as `--agent-kwarg key=value`. This is how thinking is turned on: `extra_body={"chat_template_kwargs":{"enable_thinking":true}}` (vLLM reads `request.chat_template_kwargs` → `apply_chat_template`; same path as RL rollouts). There is no dedicated `enable_thinking` flag. Affects results. |
 | `agent_parser` | str | Harbor agent-kwarg `parser=<value>` (e.g. `xml`). Affects results. |
 | `auto_snapshot` | bool | Pre-build Daytona snapshots. (SLURM-only) |
 | `config_yaml` | str | Listener eval config YAML. (SLURM-only) |
@@ -38,10 +38,10 @@ Each file is a flat mapping. `load_presets()` returns
 - **Applied (Iris analogs):** `datasets[0]` → `--dataset_path`,
   `n_concurrent` → `--n_concurrent`.
 - **Applied (result-affecting agent kwargs):** `agent_parser` → agent-kwarg
-  `parser=<value>`, `enable_thinking` → agent-kwarg
-  `extra_body={"chat_template_kwargs":{"enable_thinking":true}}` (the live
-  nested form vLLM applies to the chat template; a caller-supplied `extra_body=`
-  kwarg takes precedence and suppresses this).
+  `parser=<value>`, and every entry of `agent_kwargs` → its own `--agent-kwarg`
+  (e.g. the thinking form `extra_body={"chat_template_kwargs":{"enable_thinking":true}}`,
+  the live nested form vLLM applies to the chat template). A caller-supplied
+  `--agent-kwarg` with the same key takes precedence over the preset's.
 - **Ignored (SLURM/vLLM-serve-only, no Iris analog):** `slurm_time`,
   `vllm_max_retries`, `log_suffix`, `error_threshold`, `config_yaml`,
   `agent_envs`, `auto_snapshot`.

@@ -131,13 +131,20 @@ for preset in v2 swebench tb2; do
     --priority-file /tmp/list.txt \
     --baseline-model-config eval/configs/baseline_model_configs_minimal.yaml \
     --conda-env otagent-fix \
-    --enable-thinking --tp-size 2 --dp-size 2 --timeout-multiplier 2.0 \
+    --tp-size 2 --dp-size 2 --timeout-multiplier 2.0 \
     --slurm-partition <PARTITION> --slurm-time 24:00:00 \
     --max-jobs-submitted 32 --n-concurrent 32 \
     --no-disk-resume --auto-snapshot \
     --stagger-delay 2 --chain-batch-size 2 --once
 done
 ```
+
+> **Thinking** is on because each preset's `agent_kwargs` carries the live nested
+> `extra_body={"chat_template_kwargs":{"enable_thinking":true}}` form (vLLM reads
+> `request.chat_template_kwargs` → `apply_chat_template`). There is **no
+> `--enable-thinking` flag** — for a preset-less run, or to set it explicitly,
+> pass `--agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'`
+> (a CLI `--agent-kwarg` with the same key overrides the preset's).
 
 ### Cat 2 — OOD presets (aider / bfcl / medagentbench / gaia / financeagent / swebench_full)
 
@@ -152,7 +159,7 @@ python eval/unified_eval_listener.py \
   --priority-file /tmp/list.txt \
   --baseline-model-config eval/configs/baseline_model_configs_minimal.yaml \
   --conda-env otagent-fix \
-  --enable-thinking --tp-size 2 --dp-size 2 --timeout-multiplier 2.0 \
+  --tp-size 2 --dp-size 2 --timeout-multiplier 2.0 \
   --slurm-partition <PARTITION> --slurm-time 24:00:00 \
   --max-jobs-submitted 32 --n-concurrent 32 \
   --no-disk-resume --auto-snapshot \
@@ -188,7 +195,7 @@ python eval/unified_eval_listener.py \
   --conda-env otagent-fix \
   --config-yaml dcagent_eval_config_swe_agent.yaml \
   --agent-parser "" \
-  --enable-thinking --tp-size 2 --dp-size 2 --timeout-multiplier 2.0 \
+  --tp-size 2 --dp-size 2 --timeout-multiplier 2.0 \
   --slurm-partition <PARTITION> --slurm-time 24:00:00 \
   --max-jobs-submitted 1 --n-concurrent 32 \
   --no-disk-resume --no-auto-snapshot \

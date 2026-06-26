@@ -26,7 +26,7 @@
 #   EVAL_GPU_MEMORY_UTIL    (default: 0.85 — Leonardo A100 64GB OOMs at 0.90+)
 #   EVAL_DAYTONA_THRESHOLD  (default: 3)
 #   EVAL_CONFIG_YAML        (default: dcagent_eval_config_no_override.yaml; resolved from hpc/harbor_yaml/eval/configs/)
-#   EVAL_ENABLE_THINKING    (default: false)   EVAL_AGENT_PARSER (default: "")
+#   EVAL_AGENT_KWARGS       (default: "")     EVAL_AGENT_PARSER (default: "")
 #   EVAL_DB_JOB_ID          (optional, pre-created Pending job ID)
 # ==============================================================================
 
@@ -49,11 +49,11 @@ DAYTONA_ERROR_THRESHOLD="${EVAL_DAYTONA_THRESHOLD:-999999}"
 # Harbor config is listener/preset-driven via EVAL_CONFIG_YAML (resolved below,
 # after DCFT is set) — NOT a custom per-cluster file. The tb2/v2/swebench presets
 # forward dcagent_eval_config_no_override.yaml so harbor inherits each task's
-# declared (per-task) sandbox sizes. Thinking + agent parser are listener-driven
-# too (EVAL_ENABLE_THINKING / EVAL_AGENT_PARSER, mirroring the canonical
+# declared (per-task) sandbox sizes. Agent kwargs + agent parser are listener-driven
+# too (EVAL_AGENT_KWARGS / EVAL_AGENT_PARSER, mirroring the canonical
 # eval/jupiter/eval_harbor.sbatch), so no per-cluster config carries them.
 CONFIG_YAML="${EVAL_CONFIG_YAML:-dcagent_eval_config_no_override.yaml}"
-ENABLE_THINKING="${EVAL_ENABLE_THINKING:-false}"
+AGENT_KWARGS="${EVAL_AGENT_KWARGS:-}"
 AGENT_PARSER="${EVAL_AGENT_PARSER:-}"
 DB_JOB_ID="${EVAL_DB_JOB_ID:-}"
 
@@ -78,7 +78,7 @@ echo "Benchmark ID: ${BENCHMARK_ID:-<auto>}"
 echo "N concurrent: $N_CONCURRENT"
 echo "GPU memory util: $GPU_MEMORY_UTIL"
 echo "Config YAML: $CONFIG_YAML"
-echo "Thinking: $ENABLE_THINKING"
+echo "Agent kwargs: ${AGENT_KWARGS:-<none>}"
 echo "Agent parser: ${AGENT_PARSER:-<default>}"
 echo "Daytona threshold: $DAYTONA_ERROR_THRESHOLD"
 echo "DB Job ID (pending): ${DB_JOB_ID:-<none>}"
@@ -604,16 +604,17 @@ if [ -n "${EVAL_OVERRIDE_MEMORY_MB:-}" ]; then
     echo "Using memory override: ${EVAL_OVERRIDE_MEMORY_MB}MB"
     EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --override-memory-mb $EVAL_OVERRIDE_MEMORY_MB"
 fi
-# Thinking + agent parser are listener-driven (mirror eval/jupiter/eval_harbor.sbatch),
+# Agent kwargs + agent parser are listener-driven (mirror eval/jupiter/eval_harbor.sbatch),
 # replacing what the deprecated custom Leonardo config used to hardcode.
-if [ "$ENABLE_THINKING" = "true" ]; then
-    # Deliver thinking via the live nested extra_body chat-template kwarg (the
-    # same mechanism the RL-rollout path uses) so it reaches the vLLM request.
-    # A bare enable_thinking=true kwarg has no terminus-2 param and is silently
-    # discarded (dead path — removed). The JSON value is space-free, so it stays
-    # one token under the unquoted $EXTRA_HARBOR_ARGS word-split at invocation.
-    echo "Enabling thinking (--agent-kwarg extra_body chat_template_kwargs.enable_thinking)"
-    EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --agent-kwarg extra_body={\"chat_template_kwargs\":{\"enable_thinking\":true}}"
+# EVAL_AGENT_KWARGS is newline-separated; each entry is a space-free key=value
+# (e.g. the live nested extra_body thinking form — there is no enable_thinking
+# flag), so it stays one token under the unquoted $EXTRA_HARBOR_ARGS word-split.
+if [ -n "$AGENT_KWARGS" ]; then
+    while IFS= read -r _kw; do
+        [ -z "$_kw" ] && continue
+        echo "Adding agent-kwarg: $_kw"
+        EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --agent-kwarg $_kw"
+    done <<< "$AGENT_KWARGS"
 fi
 if [ -n "$AGENT_PARSER" ]; then
     echo "Using agent parser: $AGENT_PARSER"

@@ -68,11 +68,13 @@ What the Iris launcher does with each preset field:
   `eval/jupiter/eval_harbor.sbatch` does):**
   - `agent_parser` → harbor `--agent-kwarg parser=<value>` (e.g. `swebench` →
     `parser=xml`), unless you already passed a `parser=` `--agent_kwarg`.
-  - `enable_thinking: true` → harbor `--agent-kwarg
-    'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'` (the live
+  - each entry of the preset's `agent_kwargs` list → its own harbor
+    `--agent-kwarg key=value`. This is how thinking is turned on:
+    `extra_body={"chat_template_kwargs":{"enable_thinking":true}}` (the live
     nested chat-template-kwarg form vLLM applies; a bare `enable_thinking=true`
-    kwarg is DEAD — terminus-2 has no such param and silently drops it). Unless
-    you already passed an `extra_body=` `--agent_kwarg` (then yours wins).
+    kwarg is DEAD — terminus-2 has no such param and silently drops it). There is
+    no dedicated `enable_thinking` flag. A `--agent_kwarg` you pass with the same
+    key (e.g. your own `extra_body=`) overrides the preset's.
 - **Ignored (SLURM / vLLM-serve-only, no Iris analog):** `slurm_time`,
   `vllm_max_retries`, `gpu_memory_util`, `sbatch_script`, `check_hf_exists`,
   `log_suffix`, `error_threshold`, `config_yaml`, `agent_envs`, `auto_snapshot`.
@@ -91,8 +93,8 @@ preset sets the dataset, concurrency, and agent parser; you do not pass
 
 | Benchmark | Command | preset sets |
 |---|---|---|
-| SWE-bench-verified (random 100) | `--preset swebench` | `DCAgent2/swebench-verified-random-100-folders`, n_concurrent 32, `parser=xml`, enable_thinking |
-| terminal-bench 2.0 | `--preset tb2` | `DCAgent2/terminal_bench_2`, n_concurrent 32, enable_thinking |
+| SWE-bench-verified (random 100) | `--preset swebench` | `DCAgent2/swebench-verified-random-100-folders`, n_concurrent 32, `parser=xml`, thinking (via `agent_kwargs`) |
+| terminal-bench 2.0 | `--preset tb2` | `DCAgent2/terminal_bench_2`, n_concurrent 32, thinking (via `agent_kwargs`) |
 
 Both still require `--harbor_config hpc/harbor_yaml/eval/dcagent_eval_defaults.yaml`
 (terminus-2 @ 32k, eval-team default budget — the Cat 1 "reg eval" harness per

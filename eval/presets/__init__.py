@@ -1,7 +1,7 @@
 """Shared eval preset catalog.
 
 Each preset is a flat dict of eval-run defaults (datasets, n_concurrent,
-agent_parser, enable_thinking, etc.), stored as one ``<name>.yaml`` per preset
+agent_parser, agent_kwargs, etc.), stored as one ``<name>.yaml`` per preset
 in this package directory. Both the SLURM orchestrator
 (``eval/unified_eval_listener.py``) and the Iris launcher
 (``eval/cloud/launch_eval_iris.py``) load presets from here, so the two paths

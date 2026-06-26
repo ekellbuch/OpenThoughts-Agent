@@ -212,20 +212,25 @@ FLAG REFERENCE
     Agent name written to DB entries and used by Harbor for evaluation config.
     This determines which agent implementation Harbor uses to run the eval tasks.
 
---enable-thinking
-    Enable thinking/reasoning blocks in vLLM model inference. Most presets
-    enable this by default. Only disable if the model doesn't support thinking
-    or you want to test non-thinking mode.
+--agent-kwarg KEY=VALUE                          [repeatable]
+    Extra harbor agent kwarg, forwarded to every eval's harbor command as
+    `--agent-kwarg KEY=VALUE`. Merged with the chosen preset's `agent_kwargs`
+    list; a CLI key overrides the same key from the preset.
 
-    This flag GATES thinking on; delivery is via the harbor agent-kwarg
-    `extra_body={"chat_template_kwargs":{"enable_thinking":true}}` — the same
-    live mechanism the RL-rollout path uses (vLLM reads
-    `request.chat_template_kwargs` and forwards it to `apply_chat_template`).
-    terminus-2's `extra_body` param folds this into every LLM call's request
-    body. (The historical bare `--agent-kwarg enable_thinking=true` was DEAD:
-    terminus-2 has no `enable_thinking` param, so it was silently discarded and
-    never reached the request — it only "worked" for models like Qwen3 whose
-    template defaults thinking ON.)
+    Thinking is delivered through THIS generic mechanism — there is no dedicated
+    `--enable-thinking` flag anymore. To turn thinking on, pass the live nested
+    chat-template form (the same mechanism the RL-rollout path uses; vLLM reads
+    `request.chat_template_kwargs` and forwards it to `apply_chat_template`, and
+    terminus-2's `extra_body` param folds it into every LLM call's request body):
+
+        --agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
+
+    The standard eval presets already carry this in their `agent_kwargs`, so a
+    plain `--preset swebench` (etc.) still runs with thinking on. (The historical
+    bare `--agent-kwarg enable_thinking=true` was DEAD: terminus-2 has no
+    `enable_thinking` param, so it was silently discarded and never reached the
+    request — it only "worked" for models like Qwen3 whose template defaults
+    thinking ON.)
 
 --upload-username <str>                          [default: current OS user]
     Username recorded in DB entries and result uploads. Auto-detected from
@@ -1067,7 +1072,6 @@ DEFAULT_SLURM_TIME = "12:00:00"
 DEFAULT_AGENT_NAME = "terminus-2"
 DEFAULT_SLURM_PARTITION = "booster"
 DEFAULT_SLURM_ACCOUNT = ""  # empty = use sbatch header default
-DEFAULT_ENABLE_THINKING = False
 DEFAULT_TP_SIZE = 1
 DEFAULT_SBATCH_SCRIPT = "eval/jupiter/eval_harbor.sbatch"
 
@@ -1161,7 +1165,7 @@ class ListenerConfig:
     vllm_max_retries: int = DEFAULT_VLLM_MAX_RETRIES
     agent_parser: str = DEFAULT_AGENT_PARSER
     slurm_time: str = DEFAULT_SLURM_TIME
-    enable_thinking: bool = DEFAULT_ENABLE_THINKING
+    agent_kwargs: List[str] = field(default_factory=list)
     agent_name: str = DEFAULT_AGENT_NAME
     slurm_partition: str = DEFAULT_SLURM_PARTITION
     slurm_account: str = DEFAULT_SLURM_ACCOUNT
@@ -2142,7 +2146,7 @@ class SbatchParams:
     vllm_max_retries: int = DEFAULT_VLLM_MAX_RETRIES
     agent_parser: str = DEFAULT_AGENT_PARSER
     slurm_time: str = DEFAULT_SLURM_TIME
-    enable_thinking: bool = DEFAULT_ENABLE_THINKING
+    agent_kwargs: List[str] = field(default_factory=list)
     agent_name: str = DEFAULT_AGENT_NAME
     slurm_partition: str = DEFAULT_SLURM_PARTITION
     slurm_account: str = DEFAULT_SLURM_ACCOUNT
@@ -2180,7 +2184,10 @@ class SbatchParams:
             "EVAL_VLLM_MAX_RETRIES": str(self.vllm_max_retries),
             "EVAL_AGENT_PARSER": self.agent_parser,
             "EVAL_SLURM_TIME": self.slurm_time,
-            "EVAL_ENABLE_THINKING": "true" if self.enable_thinking else "false",
+            # Generic agent-kwarg passthrough (newline-separated; the sbatch
+            # splits on newlines and adds each as one --agent-kwarg). Thinking is
+            # delivered here as the live nested extra_body form, NOT a flag.
+            "EVAL_AGENT_KWARGS": "\n".join(self.agent_kwargs),
             "EVAL_AGENT_NAME": self.get_effective_agent_name(),
         }
         # Always send tp_size so build_vllm_cmd.sh doesn't fall back to its own default
@@ -2267,8 +2274,8 @@ class SbatchParams:
             parts.append(f"tp_size={self.tp_size}")
         if self.dp_size > 1:
             parts.append(f"dp_size={self.dp_size}")
-        if self.enable_thinking:
-            parts.append("enable_thinking=True")
+        if self.agent_kwargs:
+            parts.append(f"agent_kwargs={self.agent_kwargs}")
         if self.agent_name != DEFAULT_AGENT_NAME:
             parts.append(f"agent_name={self.agent_name}")
         if self.slurm_partition != DEFAULT_SLURM_PARTITION:
@@ -2382,7 +2389,7 @@ def submit_eval(
     Environment variables (from SbatchParams.to_env()):
       EVAL_N_CONCURRENT, EVAL_N_ATTEMPTS, EVAL_GPU_MEMORY_UTIL,
       EVAL_DAYTONA_THRESHOLD, EVAL_VLLM_MAX_RETRIES, EVAL_AGENT_PARSER,
-      EVAL_SLURM_TIME, EVAL_ENABLE_THINKING, EVAL_AGENT_NAME,
+      EVAL_SLURM_TIME, EVAL_AGENT_KWARGS, EVAL_AGENT_NAME,
       EVAL_STARTS_LOG (v3), EVAL_TIMEOUT_MULTIPLIER (v3)
 
     The Pending DB entry includes timeout_multiplier in its config dict
@@ -2967,7 +2974,7 @@ class EvalListener:
             vllm_max_retries=self.config.vllm_max_retries,
             agent_parser=self.config.agent_parser,
             slurm_time=self.config.slurm_time,
-            enable_thinking=self.config.enable_thinking,
+            agent_kwargs=self.config.agent_kwargs,
             agent_name=self.config.agent_name,
             slurm_partition=self.config.slurm_partition,
             slurm_account=self.config.slurm_account,
@@ -3287,7 +3294,7 @@ class EvalListener:
             vllm_max_retries=self.config.vllm_max_retries,
             agent_parser=self.config.agent_parser,
             slurm_time=self.config.slurm_time,
-            enable_thinking=self.config.enable_thinking,
+            agent_kwargs=self.config.agent_kwargs,
             agent_name=self.config.agent_name,
             slurm_partition=self.config.slurm_partition,
             slurm_account=self.config.slurm_account,
@@ -3547,9 +3554,15 @@ Examples:
              "across replicas internally. (default: 1)",
     )
     parser.add_argument(
-        "--enable-thinking",
-        action="store_true",
-        help="Enable thinking blocks for model inference (default: False)",
+        "--agent-kwarg",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Extra harbor agent kwarg as KEY=VALUE (repeatable). Forwarded to "
+             "every eval's harbor command as --agent-kwarg KEY=VALUE. To enable "
+             "thinking, pass the live nested chat-template form: --agent-kwarg "
+             "'extra_body={\"chat_template_kwargs\":{\"enable_thinking\":true}}'. "
+             "Merged with the preset's agent_kwargs (a CLI key overrides the preset).",
     )
     parser.add_argument(
         "--upload-username",
@@ -3927,7 +3940,16 @@ def build_config(args: argparse.Namespace) -> ListenerConfig:
     slurm_account = _resolve(args.slurm_account, "slurm_account", _cc("slurm_account", DEFAULT_SLURM_ACCOUNT))
     tp_size = _resolve(args.tp_size, "tp_size", DEFAULT_TP_SIZE)
     dp_size = args.dp_size if args.dp_size else 1
-    enable_thinking = args.enable_thinking or preset_config.get("enable_thinking", DEFAULT_ENABLE_THINKING)
+    # Generic --agent-kwarg list: CLI items first (they win), then the preset's
+    # agent_kwargs whose key isn't already supplied on the CLI. Thinking rides
+    # here as the live nested extra_body form — no dedicated --enable-thinking.
+    agent_kwargs = list(args.agent_kwarg or [])
+    _ak_keys = {kw.split("=", 1)[0] for kw in agent_kwargs}
+    for _kw in preset_config.get("agent_kwargs", []) or []:
+        _k = _kw.split("=", 1)[0]
+        if _k not in _ak_keys:
+            agent_kwargs.append(_kw)
+            _ak_keys.add(_k)
 
     # Resolve upload_username: CLI > ENV > current OS user
     upload_username = (
@@ -4065,7 +4087,7 @@ def build_config(args: argparse.Namespace) -> ListenerConfig:
         vllm_max_retries=vllm_max_retries,
         agent_parser=agent_parser,
         slurm_time=slurm_time,
-        enable_thinking=enable_thinking,
+        agent_kwargs=agent_kwargs,
         agent_name=agent_name,
         slurm_partition=slurm_partition,
         slurm_account=slurm_account,

@@ -32,7 +32,7 @@
 #   $4 = RUN_TAG_ARG (optional, override run tag)
 #
 # Env vars from listener: EVAL_N_CONCURRENT, EVAL_GPU_MEMORY_UTIL,
-#   EVAL_DAYTONA_THRESHOLD, EVAL_CONFIG_YAML, EVAL_ENABLE_THINKING,
+#   EVAL_DAYTONA_THRESHOLD, EVAL_CONFIG_YAML, EVAL_AGENT_KWARGS,
 #   EVAL_AGENT_PARSER, EVAL_DB_JOB_ID, EVAL_VLLM_* (serve overrides).
 # ==============================================================================
 
@@ -53,7 +53,7 @@ N_CONCURRENT="${EVAL_N_CONCURRENT:-32}"
 GPU_MEMORY_UTIL="${EVAL_GPU_MEMORY_UTIL:-0.90}"
 DAYTONA_ERROR_THRESHOLD="${EVAL_DAYTONA_THRESHOLD:-999999}"
 CONFIG_YAML="${EVAL_CONFIG_YAML:-dcagent_eval_config_no_override.yaml}"
-ENABLE_THINKING="${EVAL_ENABLE_THINKING:-false}"
+AGENT_KWARGS="${EVAL_AGENT_KWARGS:-}"
 AGENT_PARSER="${EVAL_AGENT_PARSER:-}"
 DB_JOB_ID="${EVAL_DB_JOB_ID:-}"
 
@@ -77,7 +77,7 @@ echo "Benchmark ID: ${BENCHMARK_ID:-<auto>}"
 echo "N concurrent: $N_CONCURRENT"
 echo "GPU memory util: $GPU_MEMORY_UTIL"
 echo "Config YAML: $CONFIG_YAML"
-echo "Thinking: $ENABLE_THINKING"
+echo "Agent kwargs: ${AGENT_KWARGS:-<none>}"
 echo "Agent parser: ${AGENT_PARSER:-<default>}"
 echo "Daytona threshold: $DAYTONA_ERROR_THRESHOLD"
 echo "DB Job ID (pending): ${DB_JOB_ID:-<none>}"
@@ -398,12 +398,14 @@ fi
 if [ -n "${EVAL_OVERRIDE_MEMORY_MB:-}" ]; then
     EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --override-memory-mb $EVAL_OVERRIDE_MEMORY_MB"
 fi
-if [ "$ENABLE_THINKING" = "true" ]; then
-    # Live nested extra_body chat-template kwarg (same path as RL rollouts) so
-    # thinking reaches the vLLM request; bare enable_thinking=true is dead
-    # (no terminus-2 param, silently discarded). JSON is space-free -> one token
-    # under the unquoted $EXTRA_HARBOR_ARGS word-split at invocation.
-    EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --agent-kwarg extra_body={\"chat_template_kwargs\":{\"enable_thinking\":true}}"
+# EVAL_AGENT_KWARGS is newline-separated; each entry is a space-free key=value
+# (e.g. the live nested extra_body thinking form — no enable_thinking flag), so
+# it stays one token under the unquoted $EXTRA_HARBOR_ARGS word-split.
+if [ -n "$AGENT_KWARGS" ]; then
+    while IFS= read -r _kw; do
+        [ -z "$_kw" ] && continue
+        EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --agent-kwarg $_kw"
+    done <<< "$AGENT_KWARGS"
 fi
 if [ -n "$AGENT_PARSER" ]; then
     EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --agent-kwarg parser=$AGENT_PARSER"

@@ -110,7 +110,7 @@ default** (the user keeps 1–7 for sibling experiments; confirm before borrowin
 
 General shape — use the **canonical unified listener `eval/unified_eval_listener.py` with a
 `--cluster-config`** (the retired pre-v6 per-cluster listener subsystem has been removed; it lacked the
-`conda_env` / `limit_mm_per_prompt` / `--config-yaml` / `--enable-thinking` / `--agent-parser`
+`conda_env` / `limit_mm_per_prompt` / `--config-yaml` / `--agent-kwarg` / `--agent-parser`
 wiring and would mis-serve per-model-conda_env models — e.g. the qwen3_5 tmax models would fall back
 to `otagent`/vLLM-0.16 and crash). The cluster config (`eval/clusters/<cluster>.yaml`) supplies
 sbatch_script / hardware / conda_envs / paths, so you no longer pass `--sbatch-script` /
@@ -128,14 +128,18 @@ python eval/unified_eval_listener.py \
   --preset <preset> \
   --require-priority-list --priority-file eval/lists/<file>.txt \
   --config-yaml dcagent_eval_config_no_override.yaml \
-  --enable-thinking [--agent-parser json] [--max-output-tokens 16384] \
+  [--agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'] [--agent-parser json] [--max-output-tokens 16384] \
   [--pre-download] [--force-reeval] [--pinggy_persistent_url <URL> --pinggy_token <TOKEN>] \
   --once --verbose 2>&1 | tee eval/<cluster>/logs/<preset>_listener_$(date +%Y%m%d_%H%M%S).log
 ```
 Per-model serve settings (`conda_env` — e.g. `eval-qwen35` for qwen3_5 — `tensor_parallel_size`,
 `data_parallel_size`, `max_model_len`, `limit_mm_per_prompt`) come from `--baseline-model-configs`;
 the preset forwards `--config-yaml dcagent_eval_config_no_override.yaml` so harbor inherits per-task
-sandbox sizes (no per-cluster config). Presets default `--enable-thinking` on.
+sandbox sizes (no per-cluster config). **Thinking** is on because each preset's
+`agent_kwargs` carries the live nested `extra_body={"chat_template_kwargs":{"enable_thinking":true}}`
+form — there is **no `--enable-thinking` flag** anymore. To set thinking explicitly
+(or for a preset-less run), pass `--agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'`
+(a CLI `--agent-kwarg` with the same key overrides the preset's).
 
 > **🚧 `--baseline-model-configs` is LOAD-BEARING — omitting it SILENTLY drops every per-model override.**
 > The flag has **no built-in default**; `load_baseline_model_configs(None)` returns `{}` with no error and

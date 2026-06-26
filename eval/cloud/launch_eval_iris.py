@@ -108,7 +108,7 @@ class EvalIrisLauncher(IrisLauncher):
             choices=sorted(load_presets().keys()),
             default=None,
             help="Eval preset from eval/presets/ (shared with the SLURM listener). "
-                 "Seeds --dataset_path, --n_concurrent, agent parser, and enable_thinking; "
+                 "Seeds --dataset_path, --n_concurrent, agent parser, and agent_kwargs; "
                  "explicit CLI flags always override preset values.",
         )
 
@@ -131,7 +131,7 @@ class EvalIrisLauncher(IrisLauncher):
         """Resolve a named preset onto the launcher args.
 
         CLI flags always win over preset values. Result-affecting fields
-        (agent parser, enable_thinking) become harbor agent-kwargs so the built
+        (agent parser, agent_kwargs) become harbor agent-kwargs so the built
         harbor command carries them. SLURM/serve-only fields are ignored with a
         one-line transparency log.
         """
@@ -164,8 +164,9 @@ class EvalIrisLauncher(IrisLauncher):
                 ignored["n_concurrent"] = preset["n_concurrent"]
 
         # Result-affecting agent kwargs → harbor --agent-kwarg, replicating how
-        # eval/jupiter/eval_harbor.sbatch maps them (parser=<v>, and thinking via
-        # the nested extra_body.chat_template_kwargs.enable_thinking form).
+        # eval/jupiter/eval_harbor.sbatch maps them (parser=<v>, plus the preset's
+        # generic agent_kwargs list — e.g. thinking via the live nested
+        # extra_body.chat_template_kwargs.enable_thinking form).
         existing_kwarg_keys = {kw.split("=", 1)[0] for kw in (args.agent_kwarg or [])}
 
         agent_parser = preset.get("agent_parser")
@@ -175,23 +176,22 @@ class EvalIrisLauncher(IrisLauncher):
             else:
                 args.agent_kwarg.append(f"parser={agent_parser}")
                 applied["agent_parser"] = f"parser={agent_parser}"
+                existing_kwarg_keys.add("parser")
 
-        if preset.get("enable_thinking"):
-            # Thinking is a chat-template kwarg (client-specified, server-applied:
-            # vLLM reads request.chat_template_kwargs -> apply_chat_template).
-            # Deliver it via the live nested extra_body mechanism — the same path
-            # the RL rollouts use — which terminus-2's `extra_body` param folds
-            # into the request. A bare enable_thinking=true kwarg has no
-            # terminus-2 param and is silently discarded (dead path — removed).
-            thinking_kwarg = (
-                'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
-            )
-            if "extra_body" in existing_kwarg_keys:
-                # Respect a caller-supplied extra_body rather than clobber it.
-                ignored["enable_thinking"] = True
+        # Generic preset agent-kwargs passthrough. Presets carry result-affecting
+        # kwargs as full `key=value` strings (e.g. thinking is delivered as the
+        # live nested extra_body form the RL rollouts use, which terminus-2's
+        # `extra_body` param folds into the request — there is no dedicated
+        # enable_thinking flag anymore). A caller-supplied --agent-kwarg with the
+        # same key always wins (not clobbered).
+        for kw in preset.get("agent_kwargs") or []:
+            key = kw.split("=", 1)[0]
+            if key in existing_kwarg_keys:
+                ignored.setdefault("agent_kwargs", []).append(kw)
             else:
-                args.agent_kwarg.append(thinking_kwarg)
-                applied["enable_thinking"] = thinking_kwarg
+                args.agent_kwarg.append(kw)
+                applied.setdefault("agent_kwargs", []).append(kw)
+                existing_kwarg_keys.add(key)
 
         for key, value in preset.items():
             if key in _PRESET_IGNORED_FIELDS:

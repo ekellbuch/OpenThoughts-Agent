@@ -118,8 +118,10 @@ LEONARDO CAMPAIGN DRIVER (the priority — drive it every sweep):
     python eval/unified_eval_listener.py --cluster-config eval/clusters/leonardo.yaml --preset <tb2|swebench|v2|...> \
       --baseline-model-configs eval/configs/baseline_model_configs_minimal.yaml \
       --require-priority-list --priority-file <list>.txt \
-      --config-yaml dcagent_eval_config_no_override.yaml --enable-thinking --force-reeval --once --verbose
-  (`--config-yaml dcagent_eval_config_no_override.yaml` resolves from `hpc/harbor_yaml/eval/configs/`; the cluster
+      --config-yaml dcagent_eval_config_no_override.yaml --force-reeval --once --verbose
+  (thinking comes from the preset's `agent_kwargs` — the live nested `extra_body={"chat_template_kwargs":{"enable_thinking":true}}`
+  form; there is no `--enable-thinking` flag, pass `--agent-kwarg 'extra_body={…}'` to set it explicitly.
+  `--config-yaml dcagent_eval_config_no_override.yaml` resolves from `hpc/harbor_yaml/eval/configs/`; the cluster
   sbatch is `eval/leonardo/eval_harbor.sbatch`. `--force-reeval` is REQUIRED — every campaign row has a prior
   Finished/deflated DB row; the "Failed to create Pending DB entry: Job already finished" warning is benign.)
   `--baseline-model-configs` is LOAD-BEARING — omitting it SILENTLY drops every per-model serve override (the

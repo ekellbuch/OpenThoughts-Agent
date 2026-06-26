@@ -1,5 +1,7 @@
 """Regression test: the eval Iris launcher delivers thinking via the LIVE
-nested ``extra_body`` agent-kwarg, never the dead bare ``enable_thinking=``.
+nested ``extra_body`` agent-kwarg, carried by the preset's generic
+``agent_kwargs`` list — never the dead bare ``enable_thinking=`` and never a
+dedicated ``--enable-thinking`` flag (both removed).
 
 Thinking is a chat-template kwarg — client-specified, server-applied (vLLM
 reads ``request.chat_template_kwargs`` and forwards it to
@@ -8,10 +10,11 @@ body through terminus-2 is the nested form
 ``extra_body={"chat_template_kwargs":{"enable_thinking":true}}`` (terminus-2's
 ``extra_body`` param folds it into every LLM call). A BARE
 ``enable_thinking=true`` agent-kwarg has no terminus-2 parameter and is silently
-discarded — that path is removed.
+discarded.
 
-This pins ``EvalIrisLauncher._apply_preset`` so it can never regress back to the
-dead bare kwarg.
+This pins ``EvalIrisLauncher._apply_preset`` so it can never regress to the dead
+bare kwarg, and pins the on-disk catalog so a preset can never silently lose its
+thinking agent-kwarg.
 """
 
 import argparse
@@ -20,6 +23,7 @@ import sys
 import pytest
 
 from eval.cloud.launch_eval_iris import EvalIrisLauncher
+from eval.presets import load_presets
 
 NESTED_THINKING_KWARG = (
     'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
@@ -50,10 +54,9 @@ def launcher(monkeypatch):
 
 
 def test_apply_preset_emits_nested_extra_body_thinking_kwarg(launcher, monkeypatch):
-    # Force a preset that gates thinking ON regardless of catalog changes.
     monkeypatch.setattr(
         "eval.cloud.launch_eval_iris.load_presets",
-        lambda: {"tb2": {"enable_thinking": True}},
+        lambda: {"tb2": {"agent_kwargs": [NESTED_THINKING_KWARG]}},
     )
     args = _make_args()
 
@@ -66,10 +69,10 @@ def test_apply_preset_emits_nested_extra_body_thinking_kwarg(launcher, monkeypat
     ), f"bare enable_thinking kwarg leaked: {args.agent_kwarg}"
 
 
-def test_apply_preset_skips_thinking_when_gate_off(launcher, monkeypatch):
+def test_apply_preset_no_agent_kwargs_emits_nothing(launcher, monkeypatch):
     monkeypatch.setattr(
         "eval.cloud.launch_eval_iris.load_presets",
-        lambda: {"tb2": {"enable_thinking": False}},
+        lambda: {"tb2": {}},
     )
     args = _make_args()
 
@@ -80,11 +83,11 @@ def test_apply_preset_skips_thinking_when_gate_off(launcher, monkeypatch):
 
 
 def test_apply_preset_respects_caller_supplied_extra_body(launcher, monkeypatch):
-    """A user-supplied extra_body kwarg suppresses the preset injection
+    """A user-supplied extra_body kwarg suppresses the preset's same-key kwarg
     (we must not clobber a deliberate caller override)."""
     monkeypatch.setattr(
         "eval.cloud.launch_eval_iris.load_presets",
-        lambda: {"tb2": {"enable_thinking": True}},
+        lambda: {"tb2": {"agent_kwargs": [NESTED_THINKING_KWARG]}},
     )
     user_kwarg = 'extra_body={"chat_template_kwargs":{"enable_thinking":false}}'
     args = _make_args(agent_kwarg=[user_kwarg])
@@ -93,3 +96,17 @@ def test_apply_preset_respects_caller_supplied_extra_body(launcher, monkeypatch)
 
     # Only the user's extra_body remains; the preset did not append a second one.
     assert args.agent_kwarg == [user_kwarg]
+
+
+@pytest.mark.parametrize("preset_name", ["swebench", "tb2", "aider", "v2"])
+def test_catalog_presets_carry_thinking_agent_kwarg(preset_name):
+    """The standard eval presets must keep delivering thinking via the live
+    nested form in their agent_kwargs — and must NOT carry the removed
+    enable_thinking key."""
+    preset = load_presets()[preset_name]
+    assert "enable_thinking" not in preset, (
+        f"{preset_name}: stale enable_thinking key — removed in favor of agent_kwargs"
+    )
+    assert NESTED_THINKING_KWARG in preset.get("agent_kwargs", []), (
+        f"{preset_name}: lost its thinking agent-kwarg: {preset.get('agent_kwargs')}"
+    )

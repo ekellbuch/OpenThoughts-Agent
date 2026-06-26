@@ -284,7 +284,7 @@ driver), `eval/clusters/tacc_baseline_model_configs.yaml` (per-model serve overr
   python eval/unified_eval_listener.py --cluster-config eval/clusters/tacc.yaml \
     --baseline-model-configs eval/clusters/tacc_baseline_model_configs.yaml \
     --preset tb2 --require-priority-list --priority-file <list> \
-    --config-yaml dcagent_eval_config_no_override.yaml --enable-thinking --force-reeval --once --verbose
+    --config-yaml dcagent_eval_config_no_override.yaml --force-reeval --once --verbose
   ```
   (NOT `eval/configs/baseline_model_configs_minimal.yaml` — that pins Qwen3-32B to TP=2, which on Vista's
   1-GPU nodes would need multi-node vLLM. Use the TACC baseline config.)
