@@ -453,3 +453,15 @@ wave*_jobids.txt
 # scripts/gen_only_delphi.py (round-1 relocated it to scripts/). Anchored to root so it never
 # re-enters git as a near-dup; the tracked scripts/ copy is unaffected.
 /gen_only_delphi.py
+
+# Round 3 (2026-06-26): the a1-* re-eval campaign auto-generates per-benchmark REFILL priority
+# lists in eval/lists/ each refill cycle (one model name per file, e.g. refill_tb2_a1-bugswarm.txt,
+# reeval_refill_java_swebench.txt). These are the eval/lists/ siblings of the already-ignored
+# repo-root reeval_priority_*.txt — ephemeral campaign scratch, regenerated every refill by the
+# active re-eval driver, NOT curated. The CURATED eval lists in eval/lists/ are tracked
+# individually and do NOT match these prefixes, so this is surgical.
+eval/lists/refill_tb2_a1-*.txt
+eval/lists/reeval_refill_*.txt
+# Also ignore the eval/lists/ copies of the reeval_priority_* campaign scratch (the existing
+# unanchored reeval_priority_*.txt already covers these, but kept explicit for clarity).
+eval/lists/reeval_priority_a1-*.txt
