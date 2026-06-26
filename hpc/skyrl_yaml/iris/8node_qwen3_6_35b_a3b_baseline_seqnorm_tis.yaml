@@ -236,7 +236,11 @@ terminal_bench:
     # set AND (R3 ON) per-token routing arrays [gen_len x 40 MoE layers x top-8]
     # in host RAM on its RolloutCoordinator — the 150 cap is the documented R3
     # host-RAM ceiling. Drop toward 100 if a RolloutCoordinator OOMs.
-    n_concurrent_trials: 150
+    # RETUNED 2026-06-26 (throughput-starvation fix): 150 -> 24. 150 is the value the
+    # 30B run2 proved FLOODS the engine queue (diverging backlog, zero completed steps);
+    # cut to ~engine generation slots (max_num_seqs 20 x 8 engines = 160) so trials get
+    # decode bandwidth instead of starving each other. Well under the R3 host-RAM ceiling.
+    n_concurrent_trials: 24
 
     log_level: INFO
 
@@ -499,7 +503,11 @@ generator:
 
   # 16 at 131k — under the ~20-concurrency ceiling from MEMORY (A), with prefill
   # headroom. Drop to 12 if the vLLM "Maximum concurrency" line comes in low.
-  max_num_seqs: 16
+  # RETUNED 2026-06-26 (throughput-starvation fix): 16 -> 20. Modest bump to the
+  # documented ~20-concurrency KV ceiling at gpu_mem 0.85 (NOT higher — 24 risks an
+  # OOM at KV bind per MEMORY (A)); more decode slots help drain the rollout. Drop back
+  # to 16->12 if the vLLM "Maximum concurrency" line comes in low / KV bind OOMs.
+  max_num_seqs: 20
   max_num_batched_tokens: 16384
 
   enable_prefix_caching: true

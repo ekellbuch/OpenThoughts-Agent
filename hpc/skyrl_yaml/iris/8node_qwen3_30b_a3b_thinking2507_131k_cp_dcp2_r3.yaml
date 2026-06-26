@@ -195,7 +195,10 @@ terminal_bench:
     # trials starved each other. 32 matches the engine's real 131k decode throughput
     # so the queue stays bounded and trials actually complete. Well under the host-RAM
     # ceiling, so R3 capture is unaffected.
-    n_concurrent_trials: 32
+    # RETUNED 2026-06-26 (run3 wedge fix): 32 -> 24 to match the engine generation
+    # slots (max_num_seqs 48 x ... ) — keep agents from starving each other in the
+    # queue. 24 trials vs 4 engines stops the standing backlog the capture showed.
+    n_concurrent_trials: 24
 
     log_level: INFO
 
@@ -400,7 +403,11 @@ generator:
   # RETUNED 2026-06-26 (run2 -> run3): 16 -> 24. run2 ran at KV ~36% with 16 seqs, so
   # there is headroom (~54% projected at 24); more decode slots speed the rollout drain
   # toward the first optimizer step. Drop back to 16 if KV bind OOMs.
-  max_num_seqs: 24
+  # RETUNED 2026-06-26 (run3 wedge fix): 24 -> 48. run3 capture showed KV only ~19%
+  # used at 24 seqs / 131k (DCP=2 shards the KV) — large headroom; doubling decode
+  # slots ~doubles aggregate tok/s to drain the rollout toward step 0. Drop 48->24->16
+  # if KV bind OOMs at gpu_mem 0.80 (then drop gpu_mem 0.80->0.75).
+  max_num_seqs: 48
   max_num_batched_tokens: 16384
 
   enable_prefix_caching: true
