@@ -28,6 +28,19 @@ models:
     trust_remote_code: true
     extra_args: "--enable-prefix-caching"
 
+  # allenai/tmax-9b — text-only weights in a Qwen3_5ForConditionalGeneration VL config
+  # (no preprocessor_config.json). The otagent fork-vLLM resolves the arch but eagerly
+  # loads the image processor -> OSError, fatal, WITHOUT limit_mm_per_prompt. Without an
+  # explicit entry here tmax falls to the catch-all `.*` (no MM-disable) -> the same crash
+  # at 32k; the _65k variant overrides max_model_len. limit_mm_per_prompt is its OWN field,
+  # NOT extra_args (JSON quotes survive word-splitting only there).
+  "allenai/tmax-9b":
+    tensor_parallel_size: 1
+    max_model_len: 32768
+    trust_remote_code: true
+    limit_mm_per_prompt: '{"image":0,"video":0}'
+    extra_args: "--enable-prefix-caching"
+
 # Pattern fallbacks — all force TP=1 (single GH200/node) + prefix-caching.
 patterns:
   - match: "(?i)32[Bb]"

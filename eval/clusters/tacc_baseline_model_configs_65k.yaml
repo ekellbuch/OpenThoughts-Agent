@@ -9,6 +9,13 @@ models:
     tensor_parallel_size: 1
     max_model_len: 65536
     trust_remote_code: true
+    # tmax is text-only weights in a Qwen3_5ForConditionalGeneration VL config (no
+    # preprocessor_config.json). The otagent fork-vLLM resolves the arch fine but, being a
+    # multimodal class, eagerly builds a MultiModalBudget -> get_image_processor() ->
+    # OSError (no preprocessor_config.json) -> fatal serve crash. This disables the
+    # image/video modality so it serves text-only (the flag TACC lacked vs Leonardo).
+    # OWN field, NOT extra_args (the JSON quotes only survive shell word-splitting here).
+    limit_mm_per_prompt: '{"image":0,"video":0}'
     extra_args: "--enable-prefix-caching"
 
   "Qwen/Qwen3-32B":
