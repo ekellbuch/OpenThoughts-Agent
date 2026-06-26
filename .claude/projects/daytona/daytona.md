@@ -3,6 +3,11 @@
 Daytona is the cloud sandbox backend Harbor uses for agentic RL rollouts and datagen trials. These are
 the service-side constraints that shape how we launch and monitor jobs. Folded out of memory 2026-06-14.
 
+**⚠ Two DISTINCT resources — never conflate them (separate count, cap, and cleanup tool each):**
+- **Snapshots** = the unique Docker *builds* (one per sandbox-environment hash, keyed by the task set), **reused across many sandboxes**. The **HARD org cap (40 RL / 60 default)** is on these — it's what BLOCKS a launch that needs a new env. Clean stale ones with **`scripts/daytona/daytona_snapshot_manager.py`** (audit → `--delete-stale`; see "Snapshot caps are HARD" below).
+- **Sandboxes** = the actual *compute instances* that host the running trials. They accumulate as trials run and are left behind after jobs finish. Clean stale ones (idle >60 min, across all 3 orgs) with **`scripts/daytona/cleanup_stale_sandboxes.py`** (the `utils-cleanup-stale-sandboxes` skill) to keep the running-sandbox count + cost down.
+- **Both** need monitoring, especially when scaling concurrency (more legs ⇒ more sandboxes AND possibly more new-env snapshots). Cleaning **sandboxes does NOT free snapshot-cap headroom**, and reclaiming snapshots does NOT reduce running sandboxes — use the right tool for the resource you're actually freeing.
+
 ---
 
 ## RL concurrency cap — ≤ 6 RUNNING RL jobs **per cluster**
