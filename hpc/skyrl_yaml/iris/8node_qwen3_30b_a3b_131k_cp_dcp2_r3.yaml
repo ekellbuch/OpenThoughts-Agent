@@ -175,7 +175,12 @@ terminal_bench:
 
     # AXIS 2 (R3): 150 = the R3-capture host-RAM ceiling (per-token routing arrays
     # held in host RAM on each RolloutCoordinator). Carried verbatim from Jupiter.
-    n_concurrent_trials: 150
+    # RETUNED 2026-06-26 (run2 -> run3): 150 FLOODED the max_num_seqs=24 engine at
+    # 131k -> diverging waiting queue (155->769 over ~4h) and zero completed steps;
+    # trials starved each other. 32 matches the engine's real 131k decode throughput
+    # so the queue stays bounded and trials actually complete. Well under the host-RAM
+    # ceiling, so R3 capture is unaffected.
+    n_concurrent_trials: 32
 
     log_level: INFO
 
@@ -375,9 +380,12 @@ generator:
   gpu_memory_utilization: 0.80
 
   # 16 at 131k. DCP=2 shards the KV, easing this. Verify against the vLLM "GPU KV cache
-  # size / Maximum concurrency" line; drop gpu_mem 0.80->0.75 then max_num_seqs 16->12
+  # size / Maximum concurrency" line; drop gpu_mem 0.80->0.75 then max_num_seqs 24->16->12
   # if it OOMs at bind.
-  max_num_seqs: 16
+  # RETUNED 2026-06-26 (run2 -> run3): 16 -> 24. run2 ran at KV ~36% with 16 seqs, so
+  # there is headroom (~54% projected at 24); more decode slots speed the rollout drain
+  # toward the first optimizer step. Drop back to 16 if KV bind OOMs.
+  max_num_seqs: 24
   max_num_batched_tokens: 16384
 
   enable_prefix_caching: true
