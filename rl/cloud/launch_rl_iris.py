@@ -260,6 +260,17 @@ def create_parser() -> argparse.ArgumentParser:
              "s3://marin-na/iris/rl-rdv/<job>; the cluster injects working R2 creds into "
              "every task pod (iris-task-env Secret), so no external creds are needed.",
     )
+    parser.add_argument(
+        "--trials-dir", "--trials_dir", dest="trials_dir", default="auto",
+        help="Where Harbor writes per-trial agentic-RL rollout artifacts "
+             "(terminal_bench_config.trials_dir). 'auto' (default) = "
+             "s3://marin-na/iris/<job_name>/trace_jobs — a DURABLE R2 path the cw-us-east-02a "
+             "pods reach via auto-injected creds, so rollouts survive pod GC and are inspectable "
+             "post-hoc. 'local'/'off' = keep the config default (node-local "
+             "/app/experiments/<run>/trace_jobs, EPHEMERAL — lost on GC, no shared FS/PVC). Or pass "
+             "an explicit s3://, gs://, or path URI. NOTE: cw uses R2 (s3://marin-na), NOT gs://; "
+             "ignored if you already set terminal_bench_config.trials_dir via --skyrl_override.",
+    )
 
     # --- Iris submission args (mirror launch_eval_iris.py / IrisLauncher) ---
     parser.add_argument(
@@ -439,6 +450,19 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         train_cmd.extend(["--val_data", args.val_data])
     for override in (args.skyrl_override or []):
         train_cmd.extend(["--skyrl_override", override])
+
+    # Durable Harbor rollout artifacts. The default (config trials_dir: null) resolves to a
+    # node-local path on the rank-0 pod (/app/experiments/<run>/trace_jobs); cw-us-east-02a has
+    # no shared FS/PVC and GCs pods on terminal, so those per-trial rollouts are lost when the
+    # job ends. Point terminal_bench_config.trials_dir at a remote R2 URI (the cluster injects
+    # working R2 creds, same store as the rendezvous) so rollouts persist + are inspectable
+    # post-hoc. Skip if the user opted out (--trials-dir local) or already set it explicitly.
+    trials_dir = (args.trials_dir or "auto").strip()
+    user_set_trials = any("terminal_bench_config.trials_dir=" in o for o in (args.skyrl_override or []))
+    if trials_dir.lower() not in ("local", "off", "none", "") and not user_set_trials:
+        if trials_dir.lower() == "auto":
+            trials_dir = f"s3://marin-na/iris/{args.job_name}/trace_jobs"
+        train_cmd.extend(["--skyrl_override", f"++terminal_bench_config.trials_dir={trials_dir}"])
 
     # The controller wraps the training command for the multi-node Ray bootstrap.
     controller_cmd: List[str] = [

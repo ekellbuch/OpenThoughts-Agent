@@ -88,6 +88,20 @@ For a fresh CoreWeave launch still in bring-up (gang/leafgroup Kueue admission, 
 resolving — `shm_broadcast …60s` + a transient ghcr ImagePullBackOff self-heal are BENIGN) put it in the
 buffer-filling table with `—` metrics until the first step lands.
 
+**Inspecting the literal CoreWeave RL rollouts (not just metrics):** `scripts/iris/peek_rl_rollouts.sh
+<pod-name-substr> [ls|cat|grep|cp]` exec's into the rank-0 pod and reads Harbor's per-trial `trace_jobs`
+(the literal agent trajectory + observations + `verifier_output` + `result.json` reward — same layout as
+datagen trials). ⚠️ With the default local `trials_dir` (`/app/experiments/<run>/trace_jobs`) these are
+pod-local + **EPHEMERAL**: they accumulate (harbor does NOT delete them) but live on the rank-0 pod's local
+disk, so they're lost when the pod is GC'd on terminal OR replaced on a preempt/restart (no shared FS/PVC).
+The helper therefore only works on a **live pod**; a transient empty/low read usually means the pod was
+recently (re)started or the current rollout batch hasn't been written yet — re-check during active
+generation, it's not a fault. Durable path: launch with `launch_rl_iris.py
+--trials-dir auto` (default) → `s3://marin-na/iris/<job>/trace_jobs` (R2, NOT gs://), then inspect post-hoc
+with `aws s3 --endpoint-url <R2>` + the harbor trace tooling (no pod exec). The helper forces the coreweave
+kubeconfig itself — don't rely on the shell's `$KUBECONFIG` (login default `~/.kube/lambdaconfig` is the wrong
+cluster); `<pod-name-substr>` matches the POD name, which can differ from the iris job_id display name.
+
 ### Metrics to track per RL run (priority order)
 **Core 5 (always):** `reward/avg_raw_reward` (primary), `reward/avg_pass_at_8` (less noisy than raw),
 `policy/policy_loss`, `policy/policy_entropy` (both direction + magnitude of change matter — pre-collapse),
