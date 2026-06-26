@@ -198,7 +198,7 @@ with what actually ran (a 32B's 16.0 row dedups against 16.0, an 8B's against 2.
    model (use it for 131k context / `openhands_*` installed-harness needs). Its `timeout_multiplier` is
    used as-is.
 2. **Per-model entry** — a `timeout_multiplier:` under a model (or pattern) in
-   `eval/baseline_model_configs.yaml`. Overrides the selected config's value. Use this for models whose
+   `eval/configs/baseline_model_configs_minimal.yaml`. Overrides the selected config's value. Use this for models whose
    **name has no size token** (e.g. `laion/GLM-4_7-swesmith-…` is really a Qwen3-8B → add an entry with
    `timeout_multiplier: 2.0`) or for out-of-band sizes you want a deliberate value for.
 3. **Size-based config selection** — the table above, derived from the name.
@@ -206,7 +206,7 @@ with what actually ran (a 32B's 16.0 row dedups against 16.0, an 8B's against 2.
 **Rule for sizes the table doesn't name:** ~28–42B → `_32b.yaml` (16×) and everything else → the base
 default (2×) are applied automatically (1.5B is *covered* by the base 2× config; 80B / 70B fall to the base
 default with a logged note). To give an out-of-band model a deliberate multiplier, add a per-model entry in
-`baseline_model_configs.yaml`. For a one-off manual `harbor jobs start`, point `--config` at
+`eval/configs/baseline_model_configs_minimal.yaml`. For a one-off manual `harbor jobs start`, point `--config` at
 `dcagent_eval_defaults.yaml` (8B) / `dcagent_eval_defaults_32b.yaml` (32B) (see `docs/EVAL_GUIDE.md`).
 
 ## 4. VERIFY the launch — the 15-min infra sanity check (do NOT trust "RUNNING")

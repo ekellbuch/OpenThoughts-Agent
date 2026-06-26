@@ -3,7 +3,7 @@
 # eval/build_vllm_cmd.sh — Shared vLLM command builder for eval scripts
 #
 # Reads EVAL_VLLM_* env vars (set by unified_eval_listener.py from
-# baseline_model_configs.yaml) and builds a vLLM launch command array.
+# eval/configs/baseline_model_configs_minimal.yaml) and builds a vLLM launch command array.
 #
 # Usage (source from any eval sbatch/pbs script):
 #

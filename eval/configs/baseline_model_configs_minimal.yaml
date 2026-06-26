@@ -1,24 +1,37 @@
-# Minimal vLLM serving config — treats 32B like 8B by default.
+# Baseline model vLLM serving configs — the SINGLE SOURCE OF TRUTH.
 #
-# Drop-in replacement for eval/baseline_model_configs.yaml.
-# Use via: --baseline-model-config eval/configs/baseline_model_configs_minimal.yaml
+# This is the canonical baseline-model serving config consumed by
+# eval/unified_eval_listener.py (load_baseline_model_configs). Every launch
+# command + skill points --baseline-model-configs here. The TACC variants
+# (eval/clusters/tacc_baseline_model_configs*.yaml) are DERIVED from this file.
 #
-# Differences from the original:
-#   - Removed `tool_call_parser: hermes` from the 32B group (hermes parser hijacks
+# Use via: --baseline-model-configs eval/configs/baseline_model_configs_minimal.yaml
+#
+# Design (treats 32B like 8B by default — no global hermes/redundant flags):
+#   - No `tool_call_parser: hermes` in the 32B group (hermes parser hijacks
 #     plain-text JSON output and breaks terminus-2 agents; confirmed on 30B-A3B).
-#   - Removed redundant flags (`--dtype bfloat16`, `--block-size 16`,
-#     `--enable-chunked-prefill`) which are already vLLM defaults.
-#   - Removed `--max-num-partial-prefills 1` (conservative, throughput-negative).
-#   - Kept `--enable-prefix-caching` (genuine win for agent evals with
+#     Set it per-model only where the scaffold needs native tool calling.
+#   - No redundant flags (`--dtype bfloat16`, `--block-size 16`,
+#     `--enable-chunked-prefill`) — already vLLM defaults.
+#   - No `--max-num-partial-prefills 1` (conservative, throughput-negative).
+#   - `--enable-prefix-caching` kept (genuine win for agent evals with
 #     byte-identical system prompts across trials).
-#   - Dropped `trust_remote_code: true` from the group — only needed per-model
-#     for custom-code archs; set it explicitly there.
+#   - `trust_remote_code: true` set per-model only (custom-code archs), not on
+#     the group.
 #   - Default `tensor_parallel_size: 2` for 32B (matches the listener default).
 #
-# Format (unchanged):
+# Format:
 #   models:      Per-model overrides (exact HF name -> config).
 #   groups:      Apply one config to many models. Per-model entries merge on top.
 #   patterns:    Regex fallback when no exact/group match. First match wins.
+#
+# Thinking (agent_kwargs): a thinking-capable model carries an optional
+#   `agent_kwargs:` list (each item a harbor `key=value` string, e.g. the live
+#   nested `extra_body={"chat_template_kwargs":{"enable_thinking":true}}` form).
+#   The listener merges a model's `agent_kwargs` into EVAL_AGENT_KWARGS with
+#   precedence CLI --agent-kwarg > per-model agent_kwargs > preset agent_kwargs
+#   (dedup by the key before the first `=`; more-specific wins). NON-thinking
+#   models (e.g. Qwen2.5-Coder finetunes) carry NO agent_kwargs.
 
 # --- Groups: many models sharing the same config ---
 # groups:
@@ -76,6 +89,11 @@ models:
     trust_remote_code: true
     tool_call_parser: hermes
     reasoning_parser: qwen3
+    # Qwen3-32B base → hybrid thinking via enable_thinking. Runs thinking-ON
+    # (Pattern B: reasoning_parser qwen3 strips <think>). The PREFERRED_HARNESS
+    # regression was a CUSTOM acc-thinking TEMPLATE, not enable_thinking itself.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching"
 
   # OpenSWE-32B (GAIR daVinci-Env paper, arxiv 2603.13023): vanilla Qwen2.5
@@ -149,6 +167,10 @@ models:
     trust_remote_code: true
     tool_call_parser: hermes
     reasoning_parser: qwen3
+    # Qwen3 dense hybrid-thinking model: enable_thinking toggles <think> via the
+    # chat template (vLLM chat_template_kwargs). Thinking ON.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching"
 
   # Qwen3-Coder-30B-A3B-Instruct (30B MoE, 3B active) — designed for tool calling.
@@ -179,6 +201,16 @@ models:
     trust_remote_code: true
     tool_call_parser: qwen3_coder
     reasoning_parser: nano_v3
+    # Nemotron-Nano v3 is a reasoning model, thinking ON. The HF model card's vLLM
+    # snippet uses the SAME chat_template_kwargs.enable_thinking key
+    # (`chat_template_kwargs={"enable_thinking": ...}`), so we deliver it that way.
+    # ⚠ VERIFY-ON-FIRST-RUN: a secondary source suggests the v3 toggle may instead
+    # be a system-prompt `/think` `/no_think` directive (not a kwarg). The model
+    # card form is taken as authoritative; if the kwarg is silently ignored at
+    # serve time, switch to the system-prompt directive. (It also supports a
+    # `reasoning_budget` to cap thinking length — left unset = model default.)
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: '--reasoning-parser-plugin ${DCFT}/eval/configs/nano_v3_reasoning_parser.py --chat-template ${DCFT}/eval/configs/nemotron_chat_template.jinja --enable-prefix-caching --override-generation-config {"temperature":0.6,"top_p":0.95}'
 
   # Qwen3-30B-A3B-Instruct-2507 (30B MoE, 3B active) — Pattern D for terminus-2.
@@ -199,6 +231,12 @@ models:
     swap_space: 32
     trust_remote_code: true
     tool_call_parser: hermes
+    # SERA is a Qwen3 finetune (paper: Qwen3 base) → inherits Qwen3's hybrid
+    # enable_thinking chat template. Thinking ON. (Pattern A intentionally has NO
+    # reasoning_parser — terminus-2 parses client-side; that's orthogonal to the
+    # enable_thinking chat-template toggle.)
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enforce-eager --disable-cascade-attn --seed 42"
 
   # Allen AI SERA-8B — mirror SERA-32B paper-parity flags, scaled for 8B.
@@ -208,6 +246,9 @@ models:
     swap_space: 32
     trust_remote_code: true
     tool_call_parser: hermes
+    # Qwen3 finetune → Qwen3 enable_thinking template (see SERA-32B). Thinking ON.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enforce-eager --disable-cascade-attn --seed 42"
 
   # Allen AI tmax-9b / tmax-27b — model_type: qwen3_5 (Qwen3_5ForConditionalGeneration,
@@ -228,6 +269,11 @@ models:
     # JSON object string — fork-vLLM json.loads() this. Routed via its own field
     # (NOT extra_args) so the quotes survive shell word-splitting.
     limit_mm_per_prompt: '{"image":0,"video":0}'
+    # tmax-9b is an allenai finetune ON Qwen3.5 (model_type qwen3_5) → inherits the
+    # Qwen3.5 HYBRID template, toggled by enable_thinking (HIGH conf on mechanism;
+    # the tmax-27b note below references "a 16k-token thinking gen"). Thinking ON.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
 
   # 27b ID-eval reconfigured TP=4 -> DATA-PARALLEL on the single 4-GPU A100-64GB
   # node (2026-06-24): 2 replicas x 2-way TP = 4 GPUs. TP=4 made each of 32-128
@@ -245,6 +291,10 @@ models:
     max_model_len: 32768
     swap_space: 32
     limit_mm_per_prompt: '{"image":0,"video":0}'
+    # tmax-27b is an allenai finetune ON Qwen3.6 (qwen3_5) → Qwen3.6 hybrid template,
+    # enable_thinking toggle (see tmax-9b). Thinking ON.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
 
   # Qwen3.6-35B-A3B / Qwen3.5-35B-A3B — model_type: qwen3_5_moe
   # (Qwen3_5MoeForConditionalGeneration). Verified from HF config.json (2026-06-25,
@@ -290,6 +340,11 @@ models:
     swap_space: 32
     trust_remote_code: true
     limit_mm_per_prompt: '{"image":0,"video":0}'
+    # Qwen3.5/3.6 35B-A3B are HYBRID thinking (thinking ON by default), toggled by
+    # the SAME chat_template_kwargs.enable_thinking key (Qwen3.5 dropped the
+    # /think soft-switch but keeps the enable_thinking chat-template kwarg).
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching"
 
   "Qwen/Qwen3.5-35B-A3B":
@@ -300,6 +355,9 @@ models:
     swap_space: 32
     trust_remote_code: true
     limit_mm_per_prompt: '{"image":0,"video":0}'
+    # Hybrid thinking 35B-A3B (see Qwen3.6 above). Thinking ON via enable_thinking.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching"
 
   # ethanlshen Qwen3-32B SERA reproductions — Pattern A paper-parity flags
@@ -311,6 +369,9 @@ models:
     swap_space: 32
     trust_remote_code: true
     tool_call_parser: hermes
+    # Qwen3-32B SERA finetune → Qwen3 enable_thinking template. Thinking ON.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enforce-eager --disable-cascade-attn --seed 42"
 
   "ethanlshen/Qwen3-32B-1000_sera_46_47000":
@@ -319,6 +380,9 @@ models:
     swap_space: 32
     trust_remote_code: true
     tool_call_parser: hermes
+    # Qwen3-32B SERA finetune → Qwen3 enable_thinking template. Thinking ON.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enforce-eager --disable-cascade-attn --seed 42"
 
   "ethanlshen/Qwen3-32B-3160_sera_46_47000-converted":
@@ -327,6 +391,9 @@ models:
     swap_space: 32
     trust_remote_code: true
     tool_call_parser: hermes
+    # Qwen3-32B SERA finetune → Qwen3 enable_thinking template. Thinking ON.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enforce-eager --disable-cascade-attn --seed 42"
 
   "ethanlshen/Qwen3-32B-10000_sera_46_47000":
@@ -335,6 +402,9 @@ models:
     swap_space: 32
     trust_remote_code: true
     tool_call_parser: hermes
+    # Qwen3-32B SERA finetune → Qwen3 enable_thinking template. Thinking ON.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enforce-eager --disable-cascade-attn --seed 42"
 
   "ethanlshen/Qwen3-32B-31600_sera_46_47000_converted":
@@ -343,6 +413,9 @@ models:
     swap_space: 32
     trust_remote_code: true
     tool_call_parser: hermes
+    # Qwen3-32B SERA finetune → Qwen3 enable_thinking template. Thinking ON.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enforce-eager --disable-cascade-attn --seed 42"
 
   # ethanlshen Qwen3-32B-47000-46 — SERA Pattern A (mirror 31600/SERA-32B).
@@ -352,6 +425,9 @@ models:
     swap_space: 32
     trust_remote_code: true
     tool_call_parser: hermes
+    # Qwen3-32B SERA finetune → Qwen3 enable_thinking template. Thinking ON.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enforce-eager --disable-cascade-attn --seed 42"
 
   # GLM-4_7 swesmith 131k-fixthink 8B — model name contains "131k" which triggers
@@ -361,6 +437,11 @@ models:
     tensor_parallel_size: 1
     max_model_len: 32768
     swap_space: 32
+    # GLM-4.7-swesmith SFT on a Qwen3-8B student (cf. the timeout-multiplier note
+    # "really a Qwen3-8B") → Qwen3 enable_thinking template; "fixthink" = a
+    # thinking variant. Thinking ON.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching"
 
   # SWE-bench/SWE-agent-LM-32B — trained for swe-agent scaffold, needs hermes parser.
@@ -386,6 +467,10 @@ models:
     max_model_len: 32768
     swap_space: 32
     trust_remote_code: true
+    # GLM-4.5+ are hybrid reasoning models; vLLM toggles thinking via the SAME
+    # chat_template_kwargs.enable_thinking key (thinking ON by default in vLLM).
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching"
 
   # QuantTrio/GLM-4.{6,7}-AWQ — 358B Glm4MoeForCausalLM AWQ INT4
@@ -406,6 +491,9 @@ models:
     max_model_len: 32768
     swap_space: 8
     trust_remote_code: true
+    # GLM-4.6 hybrid reasoning → enable_thinking chat-template kwarg. Thinking ON.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-expert-parallel --enable-prefix-caching --enable-chunked-prefill --max-num-seqs 64 --max-num-batched-tokens 32768 --dtype bfloat16 --kv-cache-dtype fp8"
 
   # NB: 504964 (fp16 KV) saturated at 32 concurrent trials (Waiting 1-7, KV
@@ -419,6 +507,9 @@ models:
     max_model_len: 32768
     swap_space: 4
     trust_remote_code: true
+    # GLM-4.7 hybrid reasoning → enable_thinking chat-template kwarg. Thinking ON.
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-expert-parallel --enable-prefix-caching --enable-chunked-prefill --max-num-seqs 52 --max-num-batched-tokens 32768 --dtype bfloat16 --kv-cache-dtype fp8"
 
   # Lite-Coder/LiteCoder-Terminal-30b-a3b-sft — 30B MoE (3B active), SFT for
@@ -430,6 +521,10 @@ models:
     max_model_len: 32768
     swap_space: 32
     trust_remote_code: true
+    # NON-THINKING (confirmed): SFT on Qwen3-30B-A3B-Instruct-2507, whose shipped
+    # template is the NON-thinking 2507 variant (no enable_thinking <think> block).
+    # Qwen3-MoE architecture but NON-thinking base → NO thinking kwarg. (This is the
+    # classic trap: classify by the shipped template, not the arch family.)
     extra_args: "--enable-prefix-caching"
 
   # Sera-4.5A-Full-T1-v2 Qwen3-8B finetunes — used with swe-agent SERA e2e config
@@ -440,24 +535,32 @@ models:
     trust_remote_code: true
     tool_call_parser: hermes
     reasoning_parser: qwen3
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching"
 
   "laion/Sera-4.5A-Full-T1-v2-1000__Qwen3-8B":
     trust_remote_code: true
     tool_call_parser: hermes
     reasoning_parser: qwen3
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching"
 
   "laion/Sera-4.5A-Full-T1-v2-3160__Qwen3-8B":
     trust_remote_code: true
     tool_call_parser: hermes
     reasoning_parser: qwen3
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching"
 
   "laion/Sera-4.5A-Full-T1-v2-10000__Qwen3-8B":
     trust_remote_code: true
     tool_call_parser: hermes
     reasoning_parser: qwen3
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
 
   # Sera-4.5A-Full-T1-v3-axolotl Qwen3-8B finetunes — axolotl-retrained
   # variants. Pattern A serving flags (enforce-eager, disable-cascade-attn,
@@ -469,6 +572,8 @@ models:
     swap_space: 32
     trust_remote_code: true
     tool_call_parser: hermes
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enforce-eager --disable-cascade-attn --seed 42"
 
   "laion/Sera-4.5A-Full-T1-v3-1000-axolotl__Qwen3-8B":
@@ -477,6 +582,8 @@ models:
     swap_space: 32
     trust_remote_code: true
     tool_call_parser: hermes
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enforce-eager --disable-cascade-attn --seed 42"
 
   # Sera-4.6-Lite-T2-v4-axolotl Qwen3-8B finetunes — Pattern B (hermes
@@ -485,18 +592,24 @@ models:
     trust_remote_code: true
     tool_call_parser: hermes
     reasoning_parser: qwen3
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching"
 
   "laion/Sera-4.6-Lite-T2-v4-1000-axolotl__Qwen3-8B":
     trust_remote_code: true
     tool_call_parser: hermes
     reasoning_parser: qwen3
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching"
 
   # CoderForge-Preview-v2-10000 — hermes confirmed correct parser (9.4% vs 0% on
   # qwen3_coder); kept here for potential future family fires.
   "laion/CoderForge-Preview-v2-10000__Qwen3-8B":
     tool_call_parser: hermes
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
 
   # CoderForge-Preview-v3-axolotl Qwen3-8B finetunes — Pattern B (hermes
   # tool-call parser + qwen3 reasoning parser + prefix-caching). Handles the
@@ -506,12 +619,16 @@ models:
     trust_remote_code: true
     tool_call_parser: hermes
     reasoning_parser: qwen3
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching"
 
   "laion/CoderForge-Preview-v3-1000-axolotl__Qwen3-8B":
     trust_remote_code: true
     tool_call_parser: hermes
     reasoning_parser: qwen3
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching"
 
   # Qwen/Qwen3-8B (base instruct) — baseline control for 8B openhands native tools.
@@ -520,6 +637,8 @@ models:
     tool_call_parser: hermes
     reasoning_parser: qwen3
     trust_remote_code: true
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
 
   # SWE-Lego/SWE-Lego-Qwen3-8B — mirror Qwen/Qwen3-8B for openhands native tools.
   # SWE-Lego authors run plain vLLM (no tool_call_parser, no reasoning_parser)
@@ -529,6 +648,8 @@ models:
   # expected). Paper 42.2% at 163k; structural floor at 32k ~25-30%.
   "SWE-Lego/SWE-Lego-Qwen3-8B":
     trust_remote_code: true
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: '--enable-prefix-caching --override-generation-config {"temperature":0.0,"top_p":1.0,"top_k":-1}'
 
 # Pattern-based configs: matched by regex when no exact/group match is found.

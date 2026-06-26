@@ -642,6 +642,42 @@ def get_conda_env_override(hf_model: str, configs: Dict[str, Dict]) -> Optional[
     return None
 
 
+def get_baseline_agent_kwargs(hf_model: str, configs: Dict[str, Dict]) -> List[str]:
+    """Get the per-model `agent_kwargs` list for a model from the baseline config.
+
+    Tries exact/group match first, then pattern match. Returns the list of
+    `key=value` harbor agent-kwarg strings declared on the model's entry (e.g.
+    the live nested thinking form), or [] if none. Thinking-capable models carry
+    this; NON-thinking models (e.g. Qwen2.5-Coder finetunes) carry none.
+    """
+    cfg = configs.get(hf_model)
+    if not cfg:
+        cfg = _match_pattern_config(hf_model)
+    if cfg and cfg.get("agent_kwargs"):
+        return list(cfg["agent_kwargs"])
+    return []
+
+
+def merge_agent_kwargs(*kwarg_lists: List[str]) -> List[str]:
+    """Merge agent-kwarg `key=value` lists with first-wins precedence by key.
+
+    Earlier lists are more specific and win: pass them most-specific-first
+    (e.g. CLI/global config, then per-model). Dedups by the substring before the
+    first `=`, so the same key never appears twice. Mirrors the merge semantics
+    used in build_config() (CLI key overrides preset key) so behavior stays
+    consistent across the two merge points.
+    """
+    merged: List[str] = []
+    seen: set = set()
+    for kwargs in kwarg_lists:
+        for kw in kwargs or []:
+            key = kw.split("=", 1)[0]
+            if key not in seen:
+                merged.append(kw)
+                seen.add(key)
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # API model config mapping -- per-model serving config for hosted endpoints
 # (Together AI, OpenAI, Anthropic ...). Models matching this mapping are
@@ -1165,7 +1201,13 @@ class ListenerConfig:
     vllm_max_retries: int = DEFAULT_VLLM_MAX_RETRIES
     agent_parser: str = DEFAULT_AGENT_PARSER
     slurm_time: str = DEFAULT_SLURM_TIME
+    # Global (model-agnostic) agent kwargs = merge(cli_agent_kwargs, preset_agent_kwargs).
+    # cli_/preset_ are kept separately so the per-model submit point can splice the
+    # per-model baseline agent_kwargs into the MIDDLE of the precedence chain
+    # (CLI > per-model baseline > preset). See merge_agent_kwargs() + _resolve_agent_kwargs().
     agent_kwargs: List[str] = field(default_factory=list)
+    cli_agent_kwargs: List[str] = field(default_factory=list)
+    preset_agent_kwargs: List[str] = field(default_factory=list)
     agent_name: str = DEFAULT_AGENT_NAME
     slurm_partition: str = DEFAULT_SLURM_PARTITION
     slurm_account: str = DEFAULT_SLURM_ACCOUNT
@@ -2661,6 +2703,27 @@ class EvalListener:
                 log(f"[inherit-log] Inherited {len(inherited)} active job(s)")
                 log(f"[inherit-log] Inherited jobs: {','.join(sorted(inherited))}")
 
+    def _resolve_agent_kwargs(self, hf_model: str, baseline_configs: Dict[str, Dict]) -> List[str]:
+        """Resolve the final agent-kwarg list for ONE model.
+
+        Precedence (most specific first, dedup by the key before the first `=`):
+            CLI --agent-kwarg  >  per-model baseline agent_kwargs  >  preset agent_kwargs
+
+        The CLI and preset layers come pre-split off the config; the per-model
+        baseline layer is looked up here and spliced into the middle. When a model
+        has no per-model agent_kwargs this returns exactly self.config.agent_kwargs
+        (= merge(cli, preset)), so non-thinking models and the no-baseline-config
+        path are byte-identical to the global behavior.
+        """
+        per_model = get_baseline_agent_kwargs(hf_model, baseline_configs)
+        if not per_model:
+            return list(self.config.agent_kwargs)
+        return merge_agent_kwargs(
+            self.config.cli_agent_kwargs,
+            per_model,
+            self.config.preset_agent_kwargs,
+        )
+
     def run_iteration(self) -> int:
         """
         Run one check iteration.
@@ -3093,6 +3156,16 @@ class EvalListener:
             if model_conda_env != self.config.conda_env:
                 log(f"  Using conda env '{model_conda_env}' for {hf_model}")
 
+            # Per-model agent kwargs: splice the model's baseline `agent_kwargs`
+            # (e.g. the live nested thinking form for thinking-capable models)
+            # into the precedence chain CLI > per-model > preset. Differs from the
+            # shared sbatch_params.agent_kwargs ONLY when the model declares its
+            # own agent_kwargs; otherwise this equals self.config.agent_kwargs and
+            # the model rides the shared list (no override emitted below).
+            model_agent_kwargs = self._resolve_agent_kwargs(hf_model, baseline_configs)
+            if model_agent_kwargs != list(self.config.agent_kwargs):
+                log(f"  Per-model agent_kwargs for {hf_model}: {model_agent_kwargs}", verbose_only=True)
+
             # Build sliding-window dependency using persistent chain.
             # Look back batch_size positions in self._dep_chain. If that job is
             # still active (running/pending in squeue), depend on it. If it already
@@ -3145,6 +3218,14 @@ class EvalListener:
             target_node = None
             pack_port = None
             extra_env: Dict[str, str] = {}
+            # Per-model agent kwargs override (vLLM path only). The shared
+            # sbatch_params carries the global merge(CLI, preset); when THIS model
+            # declares its own baseline agent_kwargs, override EVAL_AGENT_KWARGS in
+            # extra_env (which submit_eval merges last, after to_env()) with the
+            # per-model resolution. Same newline-join contract as SbatchParams.to_env().
+            # API mode uses its own EVAL_API_AGENT_KWARGS channel — left untouched.
+            if not is_api_mode and model_agent_kwargs != list(self.config.agent_kwargs):
+                extra_env["EVAL_AGENT_KWARGS"] = "\n".join(model_agent_kwargs)
             sbatch_model_override: Optional[str] = None
             if is_api_mode:
                 actual_sbatch = self.config.api_sbatch_script
@@ -3614,7 +3695,7 @@ Examples:
     parser.add_argument(
         "--baseline-model-configs",
         help="Path to YAML mapping baseline models to vLLM serving params "
-             "(e.g., eval/baseline_model_configs.yaml)",
+             "(e.g., eval/configs/baseline_model_configs_minimal.yaml)",
     )
 
     # API model config (per-model serving config for Together / OpenAI / Anthropic)
@@ -3940,16 +4021,19 @@ def build_config(args: argparse.Namespace) -> ListenerConfig:
     slurm_account = _resolve(args.slurm_account, "slurm_account", _cc("slurm_account", DEFAULT_SLURM_ACCOUNT))
     tp_size = _resolve(args.tp_size, "tp_size", DEFAULT_TP_SIZE)
     dp_size = args.dp_size if args.dp_size else 1
-    # Generic --agent-kwarg list: CLI items first (they win), then the preset's
-    # agent_kwargs whose key isn't already supplied on the CLI. Thinking rides
-    # here as the live nested extra_body form — no dedicated --enable-thinking.
-    agent_kwargs = list(args.agent_kwarg or [])
-    _ak_keys = {kw.split("=", 1)[0] for kw in agent_kwargs}
-    for _kw in preset_config.get("agent_kwargs", []) or []:
-        _k = _kw.split("=", 1)[0]
-        if _k not in _ak_keys:
-            agent_kwargs.append(_kw)
-            _ak_keys.add(_k)
+    # Generic --agent-kwarg list. Two layers are resolved here (uniform across
+    # all models): CLI items (they win) merged over the preset's agent_kwargs.
+    # The PER-MODEL baseline agent_kwargs are merged in LATER, at submit time
+    # (see EvalListener.submit_*), between these two — precedence is
+    # CLI > per-model baseline > preset. We keep the CLI and preset lists
+    # SEPARATE on the config so that three-way precedence can be reconstructed
+    # per model. Thinking rides here as the live nested extra_body form — no
+    # dedicated --enable-thinking flag.
+    cli_agent_kwargs = list(args.agent_kwarg or [])
+    preset_agent_kwargs = list(preset_config.get("agent_kwargs", []) or [])
+    # Global (model-agnostic) list, used as the default for any model without a
+    # per-model agent_kwargs override: CLI wins over preset.
+    agent_kwargs = merge_agent_kwargs(cli_agent_kwargs, preset_agent_kwargs)
 
     # Resolve upload_username: CLI > ENV > current OS user
     upload_username = (
@@ -4088,6 +4172,8 @@ def build_config(args: argparse.Namespace) -> ListenerConfig:
         agent_parser=agent_parser,
         slurm_time=slurm_time,
         agent_kwargs=agent_kwargs,
+        cli_agent_kwargs=cli_agent_kwargs,
+        preset_agent_kwargs=preset_agent_kwargs,
         agent_name=agent_name,
         slurm_partition=slurm_partition,
         slurm_account=slurm_account,
