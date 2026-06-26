@@ -164,7 +164,8 @@ class EvalIrisLauncher(IrisLauncher):
                 ignored["n_concurrent"] = preset["n_concurrent"]
 
         # Result-affecting agent kwargs → harbor --agent-kwarg, replicating how
-        # eval/jupiter/eval_harbor.sbatch maps them (parser=<v>, enable_thinking=true).
+        # eval/jupiter/eval_harbor.sbatch maps them (parser=<v>, and thinking via
+        # the nested extra_body.chat_template_kwargs.enable_thinking form).
         existing_kwarg_keys = {kw.split("=", 1)[0] for kw in (args.agent_kwarg or [])}
 
         agent_parser = preset.get("agent_parser")
@@ -176,11 +177,21 @@ class EvalIrisLauncher(IrisLauncher):
                 applied["agent_parser"] = f"parser={agent_parser}"
 
         if preset.get("enable_thinking"):
-            if "enable_thinking" in existing_kwarg_keys:
+            # Thinking is a chat-template kwarg (client-specified, server-applied:
+            # vLLM reads request.chat_template_kwargs -> apply_chat_template).
+            # Deliver it via the live nested extra_body mechanism — the same path
+            # the RL rollouts use — which terminus-2's `extra_body` param folds
+            # into the request. A bare enable_thinking=true kwarg has no
+            # terminus-2 param and is silently discarded (dead path — removed).
+            thinking_kwarg = (
+                'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
+            )
+            if "extra_body" in existing_kwarg_keys:
+                # Respect a caller-supplied extra_body rather than clobber it.
                 ignored["enable_thinking"] = True
             else:
-                args.agent_kwarg.append("enable_thinking=true")
-                applied["enable_thinking"] = "enable_thinking=true"
+                args.agent_kwarg.append(thinking_kwarg)
+                applied["enable_thinking"] = thinking_kwarg
 
         for key, value in preset.items():
             if key in _PRESET_IGNORED_FIELDS:

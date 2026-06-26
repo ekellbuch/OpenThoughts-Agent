@@ -217,6 +217,16 @@ FLAG REFERENCE
     enable this by default. Only disable if the model doesn't support thinking
     or you want to test non-thinking mode.
 
+    This flag GATES thinking on; delivery is via the harbor agent-kwarg
+    `extra_body={"chat_template_kwargs":{"enable_thinking":true}}` — the same
+    live mechanism the RL-rollout path uses (vLLM reads
+    `request.chat_template_kwargs` and forwards it to `apply_chat_template`).
+    terminus-2's `extra_body` param folds this into every LLM call's request
+    body. (The historical bare `--agent-kwarg enable_thinking=true` was DEAD:
+    terminus-2 has no `enable_thinking` param, so it was silently discarded and
+    never reached the request — it only "worked" for models like Qwen3 whose
+    template defaults thinking ON.)
+
 --upload-username <str>                          [default: current OS user]
     Username recorded in DB entries and result uploads. Auto-detected from
     the OS user if not specified.

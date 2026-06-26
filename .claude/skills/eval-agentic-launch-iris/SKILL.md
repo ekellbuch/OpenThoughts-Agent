@@ -68,8 +68,11 @@ What the Iris launcher does with each preset field:
   `eval/jupiter/eval_harbor.sbatch` does):**
   - `agent_parser` → harbor `--agent-kwarg parser=<value>` (e.g. `swebench` →
     `parser=xml`), unless you already passed a `parser=` `--agent_kwarg`.
-  - `enable_thinking: true` → harbor `--agent-kwarg enable_thinking=true`, unless
-    you already passed an `enable_thinking=` `--agent_kwarg`.
+  - `enable_thinking: true` → harbor `--agent-kwarg
+    'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'` (the live
+    nested chat-template-kwarg form vLLM applies; a bare `enable_thinking=true`
+    kwarg is DEAD — terminus-2 has no such param and silently drops it). Unless
+    you already passed an `extra_body=` `--agent_kwarg` (then yours wins).
 - **Ignored (SLURM / vLLM-serve-only, no Iris analog):** `slurm_time`,
   `vllm_max_retries`, `gpu_memory_util`, `sbatch_script`, `check_hf_exists`,
   `log_suffix`, `error_threshold`, `config_yaml`, `agent_envs`, `auto_snapshot`.

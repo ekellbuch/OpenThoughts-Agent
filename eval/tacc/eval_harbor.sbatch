@@ -399,7 +399,11 @@ if [ -n "${EVAL_OVERRIDE_MEMORY_MB:-}" ]; then
     EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --override-memory-mb $EVAL_OVERRIDE_MEMORY_MB"
 fi
 if [ "$ENABLE_THINKING" = "true" ]; then
-    EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --agent-kwarg enable_thinking=true"
+    # Live nested extra_body chat-template kwarg (same path as RL rollouts) so
+    # thinking reaches the vLLM request; bare enable_thinking=true is dead
+    # (no terminus-2 param, silently discarded). JSON is space-free -> one token
+    # under the unquoted $EXTRA_HARBOR_ARGS word-split at invocation.
+    EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --agent-kwarg extra_body={\"chat_template_kwargs\":{\"enable_thinking\":true}}"
 fi
 if [ -n "$AGENT_PARSER" ]; then
     EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --agent-kwarg parser=$AGENT_PARSER"

@@ -814,11 +814,17 @@ if [ -n "${EVAL_AUTO_SNAPSHOT:-}" ]; then
     EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --environment-kwarg auto_snapshot=$EVAL_AUTO_SNAPSHOT"
 fi
 
-# Build thinking args
+# Build thinking args.
+# Thinking is a chat-template kwarg (client-specified, server-applied: vLLM
+# reads request.chat_template_kwargs -> apply_chat_template). Deliver it via the
+# SAME live nested extra_body mechanism the RL-rollout path uses, so it actually
+# reaches the request body. terminus-2 has an `extra_body` param that folds this
+# into _llm_call_kwargs["extra_body"]; a BARE `enable_thinking=true` kwarg has no
+# terminus-2 param and was silently discarded (dead path — removed).
 THINKING_ARGS=""
 if [ "$ENABLE_THINKING" = "true" ]; then
     echo "Thinking enabled"
-    THINKING_ARGS='--agent-kwarg "enable_thinking=true"'
+    THINKING_ARGS='--agent-kwarg '"'"'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'"'"''
 fi
 
 # Build agent-parser args
@@ -1210,7 +1216,9 @@ print(agents[0].get('name', 'terminus-2') if agents else 'terminus-2')
     )
     # Add optional args
     if [ "$ENABLE_THINKING" = "true" ]; then
-        HARBOR_CMD+=(--agent-kwarg "enable_thinking=true")
+        # Live nested form (see THINKING_ARGS comment above): terminus-2 reads
+        # extra_body and forwards chat_template_kwargs.enable_thinking to vLLM.
+        HARBOR_CMD+=(--agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}')
     fi
     if [ -n "$AGENT_PARSER" ]; then
         HARBOR_CMD+=(--agent-kwarg "parser=$AGENT_PARSER")

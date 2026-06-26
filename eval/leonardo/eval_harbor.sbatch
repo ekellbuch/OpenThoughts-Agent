@@ -607,8 +607,13 @@ fi
 # Thinking + agent parser are listener-driven (mirror eval/jupiter/eval_harbor.sbatch),
 # replacing what the deprecated custom Leonardo config used to hardcode.
 if [ "$ENABLE_THINKING" = "true" ]; then
-    echo "Enabling thinking (--agent-kwarg enable_thinking=true)"
-    EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --agent-kwarg enable_thinking=true"
+    # Deliver thinking via the live nested extra_body chat-template kwarg (the
+    # same mechanism the RL-rollout path uses) so it reaches the vLLM request.
+    # A bare enable_thinking=true kwarg has no terminus-2 param and is silently
+    # discarded (dead path — removed). The JSON value is space-free, so it stays
+    # one token under the unquoted $EXTRA_HARBOR_ARGS word-split at invocation.
+    echo "Enabling thinking (--agent-kwarg extra_body chat_template_kwargs.enable_thinking)"
+    EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --agent-kwarg extra_body={\"chat_template_kwargs\":{\"enable_thinking\":true}}"
 fi
 if [ -n "$AGENT_PARSER" ]; then
     echo "Using agent parser: $AGENT_PARSER"
