@@ -190,3 +190,14 @@ misalignment), `imp_ratio_capped_fraction≈0`. (3rd commit `d32022ee`: `concate
 re-aggregating via `get_rollout_metrics` (reward/len only) → dropped `generate/tis/*` on the fully-async
 path → never reached wandb; fixed via token-weighted merge.) Smoke config:
 `hpc/skyrl_yaml/jupiter/extra/tis_smoke_0p6b.yaml`.
+
+## Rollout/generate path is uniformly `AttributeError`-guarded → a deterministic rollout `AttributeError` is image/env, not first-party code
+
+Investigated 2026-06-23 (32/32 iris seqnorm+TIS smoke rollout episodes hit `generate/errors/AttributeError` → reward 0.0). Two independent traces found the ENTIRE agentic rollout/generate path is robustly guarded against `AttributeError`:
+- `examples/terminal_bench/terminal_bench_generator.py`: `_process_trial_result` extraction is wrapped in `except (KeyError, AttributeError, TypeError)` (~L1284); an outer handler (~L799, commit `fb102ed`) catches errors raised DURING processing (e.g. jinja2 `TemplateError` from `apply_chat_template`) and coerces them to masked.
+- `skyrl_train/generators/utils.py`: `get_response_ids_and_loss_mask_from_messages` (1031) uses dict-indexing/asserts; `extract_{logprobs,token_ids,routed_experts}_from_rollout_details` (757-895) are None/dict/object-safe via `getattr`+`isinstance`.
+- harbor `agents/terminus_2/terminus_2.py` + `llms/lite_llm.py`: `LLMResponse` fields all declared; response parsing is `getattr`/`.get`-safe; the TIS logprob diagnostic (commit `d16e8f49`) is in try/except.
+
+DECISIVE on that smoke: the vLLM GENERATION engine ran FLASH_ATTN v3 + enforce_eager (the smoke's `trainer.flash_attn=false` only touches the FSDP/TRAINING side, NOT the engine) → NOT on a degraded native-rotary path → rules out a missing flash/rotary engine attribute.
+
+**Heuristic:** a deterministic rollout `AttributeError` here is almost certainly raised inside a rollout DEPENDENCY (litellm / openai-SDK / daytona / uvloop) under the image's package pins, returned as an Exception from `asyncio.gather` and classified to `generate/errors/AttributeError`. Treat it as an IMAGE/env issue (a deps rebuild likely fixes it), NOT a MarinSkyRL/harbor source bug, unless a verbatim traceback points at first-party code. Confirm on the rebuilt gpu-rl image with rollout logs captured **live, in-window** — CoreWeave finelog retains only the init-phase log post-mortem.
