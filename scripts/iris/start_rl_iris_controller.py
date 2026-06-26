@@ -226,42 +226,51 @@ def clear_rendezvous(rendezvous_dir: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-# Ray port allocation on cw-us-east-02a — SHIFT the worker_ports range out of the
-# zone Ray draws its other (auto-assigned, RANDOM) system ports from.
+# Ray port allocation on cw-us-east-02a — PIN every named system port OUTSIDE the
+# worker_ports range so Ray's own randomized agent ports can never collide with it.
 #
-# THE BUG: with worker_ports left at Ray's DEFAULT 10002–19999, Ray also picks
-# RANDOM free ports for several system components (metrics_export,
-# runtime_env_agent, dashboard_agent_grpc, …) from the SAME ~10000–20000 ephemeral
-# zone. Those random picks nondeterministically land INSIDE 10002–19999 and Ray's
-# own pre-start validation then aborts the node:
+# THE BUG: Ray assigns several system components (metrics_export, runtime_env_agent,
+# dashboard_agent_grpc, dashboard_agent_listen, node/object_manager) by picking a
+# RANDOM free port. By default it draws them from the SAME ephemeral zone as the
+# default worker_ports range (10002–19999), and Ray's own pre-start validation then
+# aborts the node when a random agent port lands inside worker_ports:
 #   ValueError: Ray component worker_ports is trying to use a port number <N>
 #   that is used by other components.
-# Observed TWICE, on DIFFERENT components: the head died on metrics_export=19865
-# (grpmm-fix), and a WORKER died on runtime_env_agent=15731 (grpmm-fix3) — proving
-# pinning metrics_export ALONE (head-only) is insufficient: the collision can be ANY
-# of Ray's random system ports, on EITHER head or worker.
+# Observed on THREE different components across launches:
+#   - head:   metrics_export=19865        (grpmm-fix)
+#   - worker: runtime_env_agent=15731     (grpmm-fix3, head-only metrics pin in place)
+#   - worker: dashboard_agent_grpc=24543 + runtime_env_agent=28330  (grpmm-fix4)
+# grpmm-fix4 proved that merely SHIFTING worker_ports (to 20000–29999) does NOT help:
+# the random agent ports simply followed into the new range. The collision can be ANY
+# of Ray's randomized agent ports, on EITHER head or worker.
 #
-# THE FIX (deterministic, symmetric): move worker_ports to a HIGH dedicated range
-# (20000–29999, same 10000-wide span as Ray's default) on BOTH head and worker, so
-# the worker range can never overlap Ray's other system ports (which sit below 20000
-# or up in the ~49000+ ephemeral zone). Also keep metrics_export pinned to 8090
-# (outside both ranges; matches the repo precedent RAY_metrics_export_port=8090 in
-# scripts/torch/kimi-k2-tracegen-run-v2.sh) so that one component is fixed too.
-# 8090 is distinct from gcs(6379)/dashboard(8265)/client_server(10001) and from the
-# 20000–29999 worker range. MUST be applied on workers too (run_worker calls
-# ray_start_worker) — that is where grpmm-fix3 died.
+# THE FIX (deterministic, complete): keep worker_ports at Ray's DEFAULT 10002–19999
+# and PIN every agent port Ray would otherwise randomize to a fixed value in the low
+# 8xxx band — OUTSIDE 10002–19999 and distinct from gcs(6379)/dashboard(8265)/
+# client_server(10001). With no random port left to draw from the worker range, the
+# validation can never trip. Applied on BOTH head and worker (run_worker is where the
+# fix3/fix4 collisions hit). 8090 matches the repo precedent RAY_metrics_export_port=
+# 8090 in scripts/torch/kimi-k2-tracegen-run-v2.sh; the rest are adjacent free 8xxx.
 RAY_METRICS_EXPORT_PORT = 8090
-RAY_MIN_WORKER_PORT = 20000
-RAY_MAX_WORKER_PORT = 29999
+RAY_RUNTIME_ENV_AGENT_PORT = 8092
+RAY_DASHBOARD_AGENT_GRPC_PORT = 8093
+RAY_DASHBOARD_AGENT_LISTEN_PORT = 8094
+RAY_NODE_MANAGER_PORT = 8076
+RAY_OBJECT_MANAGER_PORT = 8077
 
 
 def _ray_port_flags() -> list[str]:
-    """Ray port flags shared by head + worker so the worker_ports range is shifted
-    out of the system-port zone on EVERY node (see the collision note above)."""
+    """Ray port flags shared by head + worker: pin EVERY named system port that Ray
+    would otherwise randomize to a fixed value OUTSIDE the default worker_ports range
+    (10002–19999), so no random agent port can ever collide with worker_ports (see the
+    collision note above). worker_ports is left at Ray's default."""
     return [
         f"--metrics-export-port={RAY_METRICS_EXPORT_PORT}",
-        f"--min-worker-port={RAY_MIN_WORKER_PORT}",
-        f"--max-worker-port={RAY_MAX_WORKER_PORT}",
+        f"--runtime-env-agent-port={RAY_RUNTIME_ENV_AGENT_PORT}",
+        f"--dashboard-agent-grpc-port={RAY_DASHBOARD_AGENT_GRPC_PORT}",
+        f"--dashboard-agent-listen-port={RAY_DASHBOARD_AGENT_LISTEN_PORT}",
+        f"--node-manager-port={RAY_NODE_MANAGER_PORT}",
+        f"--object-manager-port={RAY_OBJECT_MANAGER_PORT}",
     ]
 
 
