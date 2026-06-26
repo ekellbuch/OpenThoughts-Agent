@@ -83,7 +83,13 @@ srun -p gh -N 1 -n 1 -t 12:00:00 --pty bash -l
   vLLM wheel from source"); it **resolves `qwen3_5`** (the bare `0.16.0` pip wheel the env was
   created with was replaced — verified live in the 2026-06-25 tmax-9b serve log). A stale
   "vllm 0.16.0" here previously caused a mis-diagnosis that tmax couldn't serve on TACC.
-- transformers 4.57.3
+- **transformers 5.12.1** + **huggingface-hub 1.21.0** (bumped 2026-06-26 from 4.57.3 / 0.36.2).
+  This gives transformers NATIVE `qwen3_5` support and aligns the env with Leonardo's
+  `eval-qwen35` (which runs the SAME fork-vLLM + transformers 5.12.1) — so tmax/qwen3_5 serving
+  is now exact Leonardo parity. ⚠ It's a 4.x→5.x jump in the PRIMARY otagent env: eval/serving
+  is proven fine (the fork-vLLM runs on 5.12.1 on Leonardo), but the OTHER otagent workflows
+  (datagen / SFT-llamafactory / harbor) on this env should be re-smoke-tested before relying on
+  them, and the bump likely cascaded other deps (re-verify the rest of this block live).
 - harbor 0.8.0 (editable, `penfever/working` branch)
 - flashinfer-python 0.6.3
 - **SFT extras**: deepspeed 0.18.0, liger-kernel 0.8.0, peft 0.19.1, trl 1.6.0,
