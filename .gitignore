@@ -465,3 +465,11 @@ eval/lists/reeval_refill_*.txt
 # Also ignore the eval/lists/ copies of the reeval_priority_* campaign scratch (the existing
 # unanchored reeval_priority_*.txt already covers these, but kept explicit for clarity).
 eval/lists/reeval_priority_a1-*.txt
+# Repo-root per-sweep reeval REFILL scratch (dated, e.g. reeval_refill16_swe_20260626.txt /
+# reeval_refill_swe2_20260626.txt) — regenerated every refill (the eval/lists/ copies are ignored above).
+reeval_refill*.txt
+# One-off dated wave-launch scaffolding (launch_wave1.sh / wave4_launch.sh / wave4_prep.sh) —
+# transient per-wave campaign launchers; the durable launcher is eval/unified_eval_listener.py.
+launch_wave*.sh
+wave*_launch.sh
+wave*_prep.sh

@@ -593,19 +593,40 @@ def get_vllm_env_overrides(hf_model: str, configs: Dict[str, Dict]) -> Dict[str,
         cfg = _match_pattern_config(hf_model)
         if cfg:
             match_source = "pattern"
-    if not cfg:
-        return {}
-
-    log(f"  Baseline config [{match_source}] for {hf_model}: {cfg}")
+    cfg = cfg or {}
+    if match_source:
+        log(f"  Baseline config [{match_source}] for {hf_model}: {cfg}")
 
     env: Dict[str, str] = {}
+    # --- TP / DP: size-aware, NODE-FILLING default (explicit baseline cfg wins per-field) ---
+    # Use ALL of a node's GPUs instead of idling them. <=14B -> TP=1; >14B -> TP=2; DP then
+    # fills the node (dp = gpus_per_node // tp). On Leonardo's 4-GPU node: TP1/DP4 (<=14B),
+    # TP2/DP2 (>14B) — fixing the old TP1/DP1 that left 3 of 4 GPUs idle (~25% throughput). A
+    # whole-node 1-GPU cluster (TACC GH200, gpus_per_node=1) stays TP1/DP1. An explicit
+    # baseline-config tensor_parallel_size / data_parallel_size still wins per-field (e.g. a
+    # 32B cfg TP=4 -> dp fills the remainder, gpus_per_node//4).
+    gpus_per_node = int((_CLUSTER_CONFIG or {}).get("hardware", {}).get("gpus_per_node", 8) or 8)
+    size_b = _resolve_model_size_b(hf_model)
+    default_tp, _ = infer_size_tp_dp(hf_model, gpus_per_node)
     if cfg.get("tensor_parallel_size") is not None:
-        env["EVAL_VLLM_TENSOR_PARALLEL_SIZE"] = str(cfg["tensor_parallel_size"])
+        tp = int(cfg["tensor_parallel_size"])
+    else:
+        tp = default_tp
     if cfg.get("data_parallel_size") is not None:
-        # Per-model native data-parallel replicas (total GPUs = TP × DP). Read back
-        # into effective_dp at submit time so the --gres GPU count is correct, and
-        # flows to build_vllm_cmd.sh as --data-parallel-size. Mirrors TP above.
-        env["EVAL_VLLM_DATA_PARALLEL_SIZE"] = str(cfg["data_parallel_size"])
+        dp = int(cfg["data_parallel_size"])
+    else:
+        dp = max(1, gpus_per_node // max(1, tp))
+    env["EVAL_VLLM_TENSOR_PARALLEL_SIZE"] = str(tp)
+    if dp > 1:
+        # Native vLLM data-parallel replicas (total GPUs = TP × DP). Read back into
+        # effective_dp at submit time so the --gres GPU count is correct, and flows to
+        # build_vllm_cmd.sh as --data-parallel-size.
+        env["EVAL_VLLM_DATA_PARALLEL_SIZE"] = str(dp)
+    log(
+        f"  vLLM parallelism for {hf_model}: TP={tp} DP={dp} (gpus_per_node={gpus_per_node}, "
+        f"size={('%gB' % size_b) if size_b is not None else 'unknown→≤14B'}, "
+        f"TP from {'cfg' if cfg.get('tensor_parallel_size') is not None else 'size-default'})"
+    )
     if cfg.get("max_model_len") is not None:
         env["EVAL_VLLM_MAX_MODEL_LEN"] = str(cfg["max_model_len"])
     if cfg.get("swap_space") is not None:
@@ -719,6 +740,39 @@ def resolve_base_model_name(hf_model: str) -> Optional[str]:
         log(f"WARNING: base-model lookup failed for {hf_model}: {e}")
     _BASE_MODEL_NAME_CACHE[hf_model] = base_name
     return base_name
+
+
+def _resolve_model_size_b(hf_model: str) -> Optional[float]:
+    """Resolve a model's parameter count in BILLIONS for parallelism sizing.
+
+    Largest size token in the eval model's OWN name (handles MoE "30b-a3b"), else
+    the Supabase base model's name (finetune names like ``a1-ghactions`` carry no
+    size token; their base ``Qwen/Qwen3-8B`` does). Returns None when neither yields
+    a token (callers treat None as the small / <=14B default).
+    """
+    sizes = [float(m) for m in _SIZE_TOKEN_RE.findall(hf_model or "")]
+    if sizes:
+        return max(sizes)
+    base = resolve_base_model_name(hf_model)
+    if base:
+        bsizes = [float(m) for m in _SIZE_TOKEN_RE.findall(base)]
+        if bsizes:
+            return max(bsizes)
+    return None
+
+
+def infer_size_tp_dp(hf_model: str, gpus_per_node: int) -> Tuple[int, int]:
+    """Default (TP, DP) that FILLS a node, chosen by model size.
+
+    <=14B (or unknown) -> TP=1; >14B -> TP=2. DP then fills the node:
+    ``dp = gpus_per_node // tp``. On a 4-GPU node this yields TP1/DP4 (<=14B) and
+    TP2/DP2 (>14B); on a whole-node 1-GPU cluster it stays TP1/DP1. This is the
+    DEFAULT only — an explicit baseline-config TP/DP overrides it per-field.
+    """
+    size_b = _resolve_model_size_b(hf_model)
+    tp = 2 if (size_b is not None and size_b > 14.0) else 1
+    dp = max(1, int(gpus_per_node) // max(1, tp))
+    return tp, dp
 
 
 def get_baseline_timeout_multiplier(hf_model: str, configs: Dict[str, Dict]) -> Optional[float]:
