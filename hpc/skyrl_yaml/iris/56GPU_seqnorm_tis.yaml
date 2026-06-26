@@ -67,8 +67,11 @@ config_groups:
 
 # Terminal bench / agentic environment settings
 terminal_bench:
-  # trials_dir: Directory for Harbor trial artifacts (derived from experiments_dir if null)
-  trials_dir: null
+  # Persist per-trial Harbor rollout artifacts to R2 (s3://) so they survive pod
+  # GC/preempt; the cw-us-east-02a pods inject in-cluster R2 creds (iris-task-env
+  # Secret), so fsspec/UPath writes here. null would resolve to an EPHEMERAL
+  # pod-local path. launch_rl_iris.py --trials-dir auto overrides this per-job-name.
+  trials_dir: s3://marin-na/iris/rl-56gpu-seqnorm-tis/trace_jobs
 
   # Harbor configuration - schema-driven mapping to TrialConfig
   harbor:

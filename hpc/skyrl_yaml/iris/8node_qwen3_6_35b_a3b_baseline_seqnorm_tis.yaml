@@ -185,7 +185,9 @@ config_groups:
 
 # Terminal bench / agentic environment settings
 terminal_bench:
-  trials_dir: null
+  # R2 (s3://) so rollouts survive pod GC/preempt; cw pods inject R2 creds.
+  # null = ephemeral pod-local. launch_rl_iris.py --trials-dir auto overrides per-job.
+  trials_dir: s3://marin-na/iris/rl-8node-qwen3-6-35b-a3b-baseline-seqnorm-tis/trace_jobs
 
   harbor:
     name: terminus-2
