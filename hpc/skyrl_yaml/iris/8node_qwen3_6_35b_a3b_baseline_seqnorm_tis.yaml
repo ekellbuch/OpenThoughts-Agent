@@ -236,11 +236,13 @@ terminal_bench:
     # set AND (R3 ON) per-token routing arrays [gen_len x 40 MoE layers x top-8]
     # in host RAM on its RolloutCoordinator — the 150 cap is the documented R3
     # host-RAM ceiling. Drop toward 100 if a RolloutCoordinator OOMs.
-    # RETUNED 2026-06-26 (throughput-starvation fix): 150 -> 24. 150 is the value the
-    # 30B run2 proved FLOODS the engine queue (diverging backlog, zero completed steps);
-    # cut to ~engine generation slots (max_num_seqs 20 x 8 engines = 160) so trials get
-    # decode bandwidth instead of starving each other. Well under the R3 host-RAM ceiling.
-    n_concurrent_trials: 24
+    # RE-RETUNED 2026-06-26 (engine-STARVATION fix): 24 -> 96. The 150->24 cut over-corrected:
+    # at 24, the 8 TP4 engines (8 x max_num_seqs 20 = 160 gen slots) sat ~95% IDLE (4-7 reqs
+    # total, KV 0.7%) because trials are sandbox-bound between short turns -> only ~5 generate at
+    # once. 96 (< 160 slots, so it won't flood the queue like the 30B's 150 did) feeds ~19
+    # concurrent steady-state. Raise further if still underfed; drop toward 64 if a
+    # RolloutCoordinator OOMs the host-RAM ceiling.
+    n_concurrent_trials: 96
 
     log_level: INFO
 

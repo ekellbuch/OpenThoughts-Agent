@@ -403,11 +403,12 @@ generator:
   # RETUNED 2026-06-26 (run2 -> run3): 16 -> 24. run2 ran at KV ~36% with 16 seqs, so
   # there is headroom (~54% projected at 24); more decode slots speed the rollout drain
   # toward the first optimizer step. Drop back to 16 if KV bind OOMs.
-  # RETUNED 2026-06-26 (run3 wedge fix): 24 -> 48. run3 capture showed KV only ~19%
-  # used at 24 seqs / 131k (DCP=2 shards the KV) — large headroom; doubling decode
-  # slots ~doubles aggregate tok/s to drain the rollout toward step 0. Drop 48->24->16
-  # if KV bind OOMs at gpu_mem 0.80 (then drop gpu_mem 0.80->0.75).
-  max_num_seqs: 48
+  # RE-RETUNED 2026-06-26 (per-turn-latency fix): 48 -> 24. The 48 bump chased aggregate
+  # tok/s but made PER-TURN latency worse: ~700 tok/s shared across 48 long thinking turns
+  # = ~15 tok/s/req -> ~19 min/turn -> ZERO trials completed a task in 75 min (KV creeping
+  # toward 131k -> rollback loop, trace_jobs emptied). 24 ~doubles per-turn decode so a turn
+  # finishes (~5 min) and trials actually progress. Drop ->16 if KV bind OOMs at gpu_mem 0.80.
+  max_num_seqs: 24
   max_num_batched_tokens: 16384
 
   enable_prefix_caching: true
@@ -424,8 +425,11 @@ generator:
   max_turns: 999999
 
   sampling_params:
-    # AXIS 1 (131k): 16384 max generation.
-    max_generate_length: 16384
+    # AXIS 1 (131k): 8192 max generation (RE-RETUNED 2026-06-26, 16384->8192). A thinking-2507
+    # turn that spends the full 16384 on <think> at ~15 tok/s eager decode (R3 forces eager) never
+    # completes; 8192 halves turn length so turns finish AND context grows slower across the
+    # multi-turn episode (later turns hit the 131k ctx limit far less). Context length itself UNCHANGED.
+    max_generate_length: 8192
     temperature: 0.7
     top_p: 0.95
     top_k: 20
