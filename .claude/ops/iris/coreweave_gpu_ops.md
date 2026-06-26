@@ -212,6 +212,41 @@ in the cluster.
 > pre-stage the model into the image's HF cache / a shared snapshot before the FSDP workers
 > start, or raise `HF_HUB_DOWNLOAD_TIMEOUT`.)
 
+> **⚠ `--memory 1400GB`, NOT the `1800GB` full-node default, for gang admission.** `1800GB`
+> (≈1676 GiB) sits so close to node-allocatable (~2014 GiB) that after the daemonset +
+> persistent-reservation overhead a leafgroup (all-or-nothing, one IB leaf) gang can't fit
+> all its pods → Kueue `topology 'infiniband' allows to fit only K of N … excluded: resource
+> "memory"` → **SchedulingGated stall** (cost multiple 60–120 min stalls overnight
+> 2026-06-26 — a 1-GPU probe AND 8-node gangs). Right-size `--memory` to the real footprint:
+> **`1400GB` is validated** for the 8-node 131k EP8 run (admits + does the full weight-load
+> with no cgroup-OOM), `1000–1200GB` for 2-node smokes. The lever on an admission stall is
+> LOWERING `--memory` toward the real need, **never raising a cap**. (The old `512GB` default
+> was the opposite footgun — a weight-load cgroup-OOM; `1400GB` is the validated middle.)
+
+- **Ray agent ports collide with `worker_ports` nondeterministically — pin them all.** `ray
+  start` (head AND worker) lets Ray RANDOMIZE several system ports (`metrics_export`,
+  `runtime_env_agent`, `dashboard_agent_grpc`, …) from the ephemeral zone that overlaps the
+  default `worker_ports` range **10002–19999**. A random landing inside it aborts the node
+  (`ValueError: Ray component worker_ports is trying to use a port number <N> that is used by
+  other components`) — **nondeterministic** (passes or fails run-to-run on port luck; a
+  likely cause of intermittent "long build then die" CoreWeave deaths). A head-only or
+  single-port pin is INSUFFICIENT (the randomized port just moves to another agent). **Fix
+  (committed `beda7a7f`, `scripts/iris/start_rl_iris_controller.py:_ray_port_flags`):** pin
+  ALL of them outside the range on head+worker — `metrics_export=8090, runtime_env_agent=8092,
+  dashboard_agent_grpc=8093, dashboard_agent_listen=8094, node_manager=8076,
+  object_manager=8077`. Rides the `/app` upload (no rebuild).
+- **Nodes have NODE-LOCAL storage (no shared GPFS) → stage the agentic task dataset on EVERY
+  node.** Unlike the SLURM clusters (shared GPFS — one rank extracts, all nodes see it),
+  CoreWeave's `/opt/openthoughts/tasks` is node-local, so a rank-0-only `parquet→tasks`
+  extraction leaves the 7 workers with EMPTY task dirs → every rollout throws
+  `FileNotFoundError: /opt/openthoughts/tasks/<dataset>/<instance>/task.toml` → reward 0.
+  This is a SILENT data-starvation: the compute path looks green (grouped-mm/R3 fine, no
+  crash) but `avg_num_tokens≈1.0` and all rewards are 0 (cost a full doomed run + a misread
+  "the other model's rollouts worked" — neither did). **Fix (committed `7c135780`):** the
+  launcher forwards `--train-data` to the controller, which stages on every node before Ray
+  via `resolve_rl_train_data`. Verify in bring-up: each rank logs `Staging train_data on this
+  node (rank N/8)` → `[extract] … Done` before rollouts.
+
 - **Transient self-healing on bring-up is NORMAL, not a fault to salvage:** a `ghcr.io`
   blob EOF → `ImagePullBackOff` self-heals (kubelet retries); `shm_broadcast: No available
   shared memory broadcast block found in 60s` is **benign** (engines idle-wait while the
