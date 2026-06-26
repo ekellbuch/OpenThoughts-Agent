@@ -59,10 +59,10 @@ For big trees (conda envs, HF cache, thousands of eval trial dirs), the `find` +
 
 ```bash
 # TACC
-ssh TACCVista 'srun -p gh-dev -N 1 -n 1 -t 00:30:00 --account=CCR24067 bash -c "cd $SCRATCH/OpenThoughts-Agent && bash scripts/permissions/fix_permissions.sh $SCRATCH/miniconda3"'
+ssh TACCVista 'srun -p gh-dev -N 1 -n 1 -t 08:00:00 --account=CCR24067 bash -c "cd $SCRATCH/OpenThoughts-Agent && bash scripts/permissions/fix_permissions.sh $SCRATCH/miniconda3"'
 
 # Leonardo (idev or sbatch)
-ssh Leonardo 'srun -p boost --account=AIFAC_5C0_290 --time=00:30:00 -N 1 bash -c "cd $WORK/OpenThoughts-Agent && bash scripts/permissions/fix_permissions.sh $WORK"'
+ssh Leonardo 'srun -p boost --account=AIFAC_5C0_290 --time=08:00:00 -N 1 bash -c "cd $WORK/OpenThoughts-Agent && bash scripts/permissions/fix_permissions.sh $WORK"'
 ```
 
 ## Gotchas
