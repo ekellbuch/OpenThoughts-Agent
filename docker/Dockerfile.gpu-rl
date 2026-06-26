@@ -301,10 +301,17 @@ RUN . /opt/openthoughts/.venv/bin/activate && \
 ENV SKYRL_HOME=/opt/skyrl
 ENV SKYRL_BRANCH=penfever/working
 # Pin to a COMMIT (not the floating branch HEAD) for a deterministic image.
-# 2d9feef = "fix(tbench): pass trials_dir as raw str, not Path (preserve remote
-# s3://gs:// URIs)" — the trials_dir fix that previously had to be runtime-sed'd.
-# (It IS the current penfever/working HEAD; pinning makes the image reproducible.)
-ENV SKYRL_COMMIT=2d9feef617fba21d606d221a8ac43707404e3467
+# 78d83a5 = current penfever/working HEAD. Supersedes 2d9feef; the delta adds the
+# two fixes that deterministically crashed CoreWeave RL at build_models:
+#   - 518179d "fix(moe): default norm_topk_prob=True for Qwen3.5/3.6 MoE (config
+#     dropped the field; matches vLLM)" — the MoE 30B/35B arms no longer crash on
+#     the missing norm_topk_prob default.
+#   - 0b2b05b "fix(fsdp+megatron): retry-with-backoff around rank-0 HF weight-index
+#     resolution (transient EOF flake killed multi-node gangs)" — HF weight-
+#     resolution retry, so a transient EOF no longer kills a multi-node gang.
+# (Still includes 2d9feef's trials_dir raw-str fix; pinning keeps the image
+# reproducible.)
+ENV SKYRL_COMMIT=78d83a589760d561ff3510dcad0e66f9c24305f1
 
 RUN git clone --branch $SKYRL_BRANCH https://github.com/marin-community/MarinSkyRL.git $SKYRL_HOME && \
     git -C $SKYRL_HOME checkout $SKYRL_COMMIT
