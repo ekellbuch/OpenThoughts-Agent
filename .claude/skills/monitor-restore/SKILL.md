@@ -119,8 +119,9 @@ LEONARDO CAMPAIGN DRIVER (the priority — drive it every sweep):
       --baseline-model-configs eval/configs/baseline_model_configs_minimal.yaml \
       --require-priority-list --priority-file <list>.txt \
       --config-yaml dcagent_eval_config_no_override.yaml --force-reeval --once --verbose
-  (thinking comes from the preset's `agent_kwargs` — the live nested `extra_body={"chat_template_kwargs":{"enable_thinking":true}}`
-  form; there is no `--enable-thinking` flag, pass `--agent-kwarg 'extra_body={…}'` to set it explicitly.
+  (thinking is per-model authoritative — sourced from the baseline model config
+  `eval/configs/baseline_model_configs_minimal.yaml` per model; presets carry none, there is no
+  `--enable-thinking` flag. Override a model with `--agent-kwarg 'extra_body={…}'` (CLI > per-model > preset).
   `--config-yaml dcagent_eval_config_no_override.yaml` resolves from `hpc/harbor_yaml/eval/configs/`; the cluster
   sbatch is `eval/leonardo/eval_harbor.sbatch`. `--force-reeval` is REQUIRED — every campaign row has a prior
   Finished/deflated DB row; the "Failed to create Pending DB entry: Job already finished" warning is benign.)

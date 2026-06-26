@@ -3,8 +3,6 @@ auto_snapshot: true
 config_yaml: dcagent_eval_config_no_override.yaml
 datasets:
 - DCAgent/swebench-verified
-agent_kwargs:
-- extra_body={"chat_template_kwargs":{"enable_thinking":true}}
 error_threshold: 20
 log_suffix: swebench_full
 n_concurrent: 32

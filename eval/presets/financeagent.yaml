@@ -3,8 +3,6 @@ auto_snapshot: true
 config_yaml: dcagent_eval_config_no_override.yaml
 datasets:
 - DCAgent/financeagent_terminal
-agent_kwargs:
-- extra_body={"chat_template_kwargs":{"enable_thinking":true}}
 error_threshold: 10
 log_suffix: finance
 n_concurrent: 16

@@ -141,13 +141,16 @@ def test_non_thinking_model_resolution_has_no_thinking(baseline_configs):
     assert resolved == list(lst.config.agent_kwargs)
 
 
-def test_non_thinking_does_not_inherit_cli_loss(baseline_configs):
-    # A global CLI/preset thinking kwarg STILL applies to a non-thinking model
-    # (that's the uniform global layer); the per-model layer simply adds nothing.
-    lst = _listener(preset=[THINK])
+def test_explicit_cli_thinking_overrides_even_non_thinking(baseline_configs):
+    # Presets no longer carry thinking (it's per-model authoritative), so a
+    # non-thinking model gets none by default (see the two tests above). But an
+    # EXPLICIT CLI --agent-kwarg is a deliberate override and DOES apply to any
+    # model — the merge layer can ADD a key, it just never SUBTRACTS one. That is
+    # precisely why thinking lives in the per-model baseline config and NOT in
+    # presets: only an intentional CLI override can force it onto a non-thinker.
+    lst = _listener(cli=[THINK])
     resolved = lst._resolve_agent_kwargs("Qwen/Qwen2.5-Coder-32B-Instruct", baseline_configs)
-    # No per-model override → equals the global merge.
-    assert resolved == list(lst.config.agent_kwargs) == [THINK]
+    assert resolved == [THINK]
 
 
 # ---------------------------------------------------------------------------

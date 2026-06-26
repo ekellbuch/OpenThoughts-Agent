@@ -217,17 +217,19 @@ FLAG REFERENCE
     `--agent-kwarg KEY=VALUE`. Merged with the chosen preset's `agent_kwargs`
     list; a CLI key overrides the same key from the preset.
 
-    Thinking is delivered through THIS generic mechanism — there is no dedicated
-    `--enable-thinking` flag anymore. To turn thinking on, pass the live nested
-    chat-template form (the same mechanism the RL-rollout path uses; vLLM reads
+    Thinking is normally resolved PER-MODEL from the baseline model config (each
+    thinking-capable model carries the kwarg there) — there is no dedicated
+    `--enable-thinking` flag anymore, and presets do NOT carry thinking. Use this
+    only to OVERRIDE a model's resolved kwargs. The live nested chat-template form
+    (same mechanism the RL-rollout path uses; vLLM reads
     `request.chat_template_kwargs` and forwards it to `apply_chat_template`, and
     terminus-2's `extra_body` param folds it into every LLM call's request body):
 
         --agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
 
-    The standard eval presets already carry this in their `agent_kwargs`, so a
-    plain `--preset swebench` (etc.) still runs with thinking on. (The historical
-    bare `--agent-kwarg enable_thinking=true` was DEAD: terminus-2 has no
+    Precedence: CLI --agent-kwarg > per-model baseline agent_kwargs > preset
+    agent_kwargs (dedup by the key before `=`). (The historical bare
+    `--agent-kwarg enable_thinking=true` was DEAD: terminus-2 has no
     `enable_thinking` param, so it was silently discarded and never reached the
     request — it only "worked" for models like Qwen3 whose template defaults
     thinking ON.)

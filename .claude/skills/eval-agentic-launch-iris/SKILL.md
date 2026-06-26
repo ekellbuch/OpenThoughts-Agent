@@ -68,13 +68,18 @@ What the Iris launcher does with each preset field:
   `eval/jupiter/eval_harbor.sbatch` does):**
   - `agent_parser` → harbor `--agent-kwarg parser=<value>` (e.g. `swebench` →
     `parser=xml`), unless you already passed a `parser=` `--agent_kwarg`.
-  - each entry of the preset's `agent_kwargs` list → its own harbor
-    `--agent-kwarg key=value`. This is how thinking is turned on:
-    `extra_body={"chat_template_kwargs":{"enable_thinking":true}}` (the live
-    nested chat-template-kwarg form vLLM applies; a bare `enable_thinking=true`
-    kwarg is DEAD — terminus-2 has no such param and silently drops it). There is
-    no dedicated `enable_thinking` flag. A `--agent_kwarg` you pass with the same
-    key (e.g. your own `extra_body=`) overrides the preset's.
+  - each entry of the preset's generic `agent_kwargs` list → its own harbor
+    `--agent-kwarg key=value`. A `--agent_kwarg` you pass with the same key
+    overrides the preset's.
+  - **Thinking on Iris:** the Iris launcher does NOT read the SLURM baseline model
+    config, so thinking is NOT auto-applied per-model here. It comes from the
+    served model's chat-template default (Qwen3 = thinking ON) — so the usual
+    Qwen3/Qwen3-MoE de-risk models think with no flag. For a model whose template
+    defaults thinking OFF (e.g. Qwen3.5/3.6), pass it explicitly:
+    `--agent_kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'`
+    (the live nested chat-template-kwarg form vLLM applies; a bare
+    `enable_thinking=true` is DEAD — terminus-2 has no such param). There is no
+    `--enable-thinking` flag.
 - **Ignored (SLURM / vLLM-serve-only, no Iris analog):** `slurm_time`,
   `vllm_max_retries`, `gpu_memory_util`, `sbatch_script`, `check_hf_exists`,
   `log_suffix`, `error_threshold`, `config_yaml`, `agent_envs`, `auto_snapshot`.

@@ -139,12 +139,14 @@ for preset in v2 swebench tb2; do
 done
 ```
 
-> **Thinking** is on because each preset's `agent_kwargs` carries the live nested
-> `extra_body={"chat_template_kwargs":{"enable_thinking":true}}` form (vLLM reads
-> `request.chat_template_kwargs` → `apply_chat_template`). There is **no
-> `--enable-thinking` flag** — for a preset-less run, or to set it explicitly,
-> pass `--agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'`
-> (a CLI `--agent-kwarg` with the same key overrides the preset's).
+> **Thinking is per-model authoritative** — sourced from the baseline model config
+> (`eval/configs/baseline_model_configs_minimal.yaml`), where each thinking-capable
+> model carries `agent_kwargs: [extra_body={…enable_thinking:true}]` (vLLM reads
+> `request.chat_template_kwargs` → `apply_chat_template`). Presets do NOT carry
+> thinking, so they can't force it on a non-thinking model. There is **no
+> `--enable-thinking` flag** — to override a model's resolved kwargs, pass
+> `--agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'`
+> (precedence: CLI `--agent-kwarg` > per-model baseline > preset).
 
 ### Cat 2 — OOD presets (aider / bfcl / medagentbench / gaia / financeagent / swebench_full)
 

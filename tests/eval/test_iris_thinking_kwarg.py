@@ -99,14 +99,15 @@ def test_apply_preset_respects_caller_supplied_extra_body(launcher, monkeypatch)
 
 
 @pytest.mark.parametrize("preset_name", ["swebench", "tb2", "aider", "v2"])
-def test_catalog_presets_carry_thinking_agent_kwarg(preset_name):
-    """The standard eval presets must keep delivering thinking via the live
-    nested form in their agent_kwargs — and must NOT carry the removed
-    enable_thinking key."""
+def test_catalog_presets_do_not_carry_thinking(preset_name):
+    """Thinking is PER-MODEL authoritative — sourced from the baseline model
+    config, NOT the preset. Presets must carry no thinking kwarg (and no stale
+    enable_thinking key); otherwise a preset would force thinking on a
+    non-thinking model regardless of its baseline config."""
     preset = load_presets()[preset_name]
     assert "enable_thinking" not in preset, (
-        f"{preset_name}: stale enable_thinking key — removed in favor of agent_kwargs"
+        f"{preset_name}: stale enable_thinking key — thinking is per-model now"
     )
-    assert NESTED_THINKING_KWARG in preset.get("agent_kwargs", []), (
-        f"{preset_name}: lost its thinking agent-kwarg: {preset.get('agent_kwargs')}"
-    )
+    assert not any(
+        "enable_thinking" in kw for kw in preset.get("agent_kwargs", []) or []
+    ), f"{preset_name}: preset still injects thinking; it must be per-model: {preset.get('agent_kwargs')}"

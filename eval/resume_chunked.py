@@ -131,15 +131,13 @@ def build_listener_argv(
     # stuck-at-full DONE dirs" for rationale.
     if args.resume_error_threshold is not None:
         cmd += ["--resume-error-threshold", str(args.resume_error_threshold)]
-    # Pass agent kwargs through to the listener. resume_chunked historically
-    # defaulted thinking ON (the resume must match the original fire), so when
-    # --agent-kwarg is unset we inject the live nested thinking form — the
-    # dedicated --enable-thinking flag is gone. Pass --agent-kwarg explicitly
-    # (repeatable) to override.
-    agent_kwargs = args.agent_kwarg
-    if agent_kwargs is None:
-        agent_kwargs = ['extra_body={"chat_template_kwargs":{"enable_thinking":true}}']
-    for _kw in agent_kwargs:
+    # Pass agent kwargs through to the listener. Thinking is resolved PER-MODEL
+    # from the baseline config (the listener looks up each model's agent_kwargs),
+    # so the resume reproduces the original fire's per-model thinking on its own —
+    # do NOT inject a thinking kwarg here (a default would override the per-model
+    # config and force thinking on non-thinking models). Only forward an explicit
+    # --agent-kwarg the caller passed.
+    for _kw in (args.agent_kwarg or []):
         cmd += ["--agent-kwarg", _kw]
     # Cat 3 (preferred-harness reproduction): pass through Pinggy URL/token so the
     # sbatch opens a tunnel and the eval/jupiter/eval_harbor.sbatch resume sed-patch
@@ -241,9 +239,9 @@ def main() -> int:
     p.add_argument("--agent-kwarg", action="append", default=None,
                    metavar="KEY=VALUE",
                    help="Extra harbor agent kwarg KEY=VALUE (repeatable), passed through to "
-                        "the listener. Unset → the live nested thinking form "
-                        "(extra_body={\"chat_template_kwargs\":{\"enable_thinking\":true}}) "
-                        "to match the original fire's thinking-ON default.")
+                        "the listener. Thinking is resolved per-model from the baseline "
+                        "config, so leave this unset for a normal resume; pass it only to "
+                        "override a model's resolved agent-kwargs.")
     p.add_argument("--slurm-partition", default="booster")
     p.add_argument("--slurm-time", default="11:59:00")
     p.add_argument("--max-resume-count", type=int, default=1,

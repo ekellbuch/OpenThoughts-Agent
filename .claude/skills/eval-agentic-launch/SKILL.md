@@ -135,11 +135,13 @@ python eval/unified_eval_listener.py \
 Per-model serve settings (`conda_env` — e.g. `eval-qwen35` for qwen3_5 — `tensor_parallel_size`,
 `data_parallel_size`, `max_model_len`, `limit_mm_per_prompt`) come from `--baseline-model-configs`;
 the preset forwards `--config-yaml dcagent_eval_config_no_override.yaml` so harbor inherits per-task
-sandbox sizes (no per-cluster config). **Thinking** is on because each preset's
-`agent_kwargs` carries the live nested `extra_body={"chat_template_kwargs":{"enable_thinking":true}}`
-form — there is **no `--enable-thinking` flag** anymore. To set thinking explicitly
-(or for a preset-less run), pass `--agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'`
-(a CLI `--agent-kwarg` with the same key overrides the preset's).
+sandbox sizes (no per-cluster config). **Thinking is per-model authoritative** —
+sourced from the baseline model config (`eval/configs/baseline_model_configs_minimal.yaml`),
+where each thinking-capable model carries `agent_kwargs: [extra_body={…enable_thinking:true}]`;
+presets do NOT carry thinking, so a preset can never force thinking on a non-thinking
+model. There is **no `--enable-thinking` flag**. To override a model's resolved
+kwargs, pass `--agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'`
+(precedence: CLI `--agent-kwarg` > per-model baseline > preset).
 
 > **🚧 `--baseline-model-configs` is LOAD-BEARING — omitting it SILENTLY drops every per-model override.**
 > The flag has **no built-in default**; `load_baseline_model_configs(None)` returns `{}` with no error and
