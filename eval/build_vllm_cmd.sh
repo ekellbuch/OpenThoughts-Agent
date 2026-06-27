@@ -15,6 +15,7 @@
 # Env vars consumed (all optional, set by listener):
 #   EVAL_VLLM_TENSOR_PARALLEL_SIZE  (default: 4)
 #   EVAL_VLLM_MAX_MODEL_LEN         (default: unset = model native)
+#   EVAL_VLLM_MAX_NUM_SEQS          (default: unset = vLLM default; listener sets 256 for Qwen3.5/3.6 family)
 #   EVAL_VLLM_SWAP_SPACE            (default: 32)
 #   EVAL_VLLM_TRUST_REMOTE_CODE     (default: unset; set to "1" to enable)
 #   EVAL_VLLM_TOOL_CALL_PARSER      (default: unset)
@@ -40,6 +41,7 @@ build_vllm_cmd() {
     local extra_args="${EVAL_VLLM_EXTRA_ARGS:-}"
     local hf_overrides="${EVAL_VLLM_HF_OVERRIDES:-}"
     local limit_mm="${EVAL_VLLM_LIMIT_MM_PER_PROMPT:-}"
+    local max_num_seqs="${EVAL_VLLM_MAX_NUM_SEQS:-}"
 
     # Build command array
     VLLM_CMD=(
@@ -66,6 +68,10 @@ build_vllm_cmd() {
 
     if [ -n "$max_model_len" ]; then
         VLLM_CMD+=(--max-model-len "$max_model_len")
+    fi
+
+    if [ -n "$max_num_seqs" ]; then
+        VLLM_CMD+=(--max-num-seqs "$max_num_seqs")
     fi
 
     if [ "$trust_remote_code" = "1" ]; then

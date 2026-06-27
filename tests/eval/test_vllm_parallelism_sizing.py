@@ -89,3 +89,54 @@ def test_tacc_whole_node_one_gpu_unchanged(monkeypatch):
     env = mod.get_vllm_env_overrides("DCAgent/a1-x", {})
     assert env["EVAL_VLLM_TENSOR_PARALLEL_SIZE"] == "1"
     assert "EVAL_VLLM_DATA_PARALLEL_SIZE" not in env  # dp=1, single-GPU whole-node
+
+
+# ---- max_num_seqs: Qwen3.5/3.6 family default = 256 (cfg wins) ----------------
+# The listener sets vLLM --max-num-seqs=256 by default for the Qwen3.5/3.6 family
+# (model_type qwen3_5 / qwen3_5_moe), rather than leaving it at vLLM's default.
+# Detection is by the eval model's own name, else its Supabase base model's name.
+
+def test_is_qwen35_family_by_own_name(monkeypatch):
+    monkeypatch.setattr(mod, "resolve_base_model_name", lambda m: None)
+    assert mod._is_qwen35_family("Qwen/Qwen3.5-35B-A3B")
+    assert mod._is_qwen35_family("Qwen/Qwen3.6-35B-A3B")
+    assert mod._is_qwen35_family("some/qwen3_5_moe-finetune")  # model_type token
+    # plain Qwen3 (NOT 3.5/3.6) must NOT match
+    assert not mod._is_qwen35_family("Qwen/Qwen3-30B-A3B-Instruct")
+    assert not mod._is_qwen35_family("Qwen/Qwen3-8B")
+    assert not mod._is_qwen35_family("laion/run-32b")
+
+
+def test_is_qwen35_family_via_base_model(monkeypatch):
+    # A finetune whose own name lacks the token but whose base is Qwen3.5 (e.g. tmax-9b).
+    monkeypatch.setattr(
+        mod, "resolve_base_model_name",
+        lambda m: "Qwen/Qwen3.5-9B" if "tmax" in m else None,
+    )
+    assert mod._is_qwen35_family("allenai/tmax-9b")
+    assert not mod._is_qwen35_family("DCAgent/a1-ghactions")
+
+
+def test_qwen36_gets_max_num_seqs_256(leonardo, monkeypatch):
+    monkeypatch.setattr(mod, "resolve_base_model_name", lambda m: None)
+    env = mod.get_vllm_env_overrides("Qwen/Qwen3.6-35B-A3B", {})
+    assert env["EVAL_VLLM_MAX_NUM_SEQS"] == "256"
+
+
+def test_qwen35_gets_max_num_seqs_256(leonardo, monkeypatch):
+    monkeypatch.setattr(mod, "resolve_base_model_name", lambda m: None)
+    env = mod.get_vllm_env_overrides("Qwen/Qwen3.5-35B-A3B", {})
+    assert env["EVAL_VLLM_MAX_NUM_SEQS"] == "256"
+
+
+def test_non_qwen35_leaves_max_num_seqs_unset(leonardo, monkeypatch):
+    monkeypatch.setattr(mod, "resolve_base_model_name", lambda m: None)
+    env = mod.get_vllm_env_overrides("Qwen/Qwen3-30B-A3B-Instruct", {})
+    assert "EVAL_VLLM_MAX_NUM_SEQS" not in env
+
+
+def test_explicit_cfg_max_num_seqs_wins_over_family_default(leonardo, monkeypatch):
+    monkeypatch.setattr(mod, "resolve_base_model_name", lambda m: None)
+    cfg = {"Qwen/Qwen3.6-35B-A3B": {"max_num_seqs": 128}}
+    env = mod.get_vllm_env_overrides("Qwen/Qwen3.6-35B-A3B", cfg)
+    assert env["EVAL_VLLM_MAX_NUM_SEQS"] == "128"

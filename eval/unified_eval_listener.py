@@ -647,6 +647,12 @@ def get_vllm_env_overrides(hf_model: str, configs: Dict[str, Dict]) -> Dict[str,
         # Forwarded as its own env var (NOT folded into extra_args) so the JSON
         # object string reaches vLLM intact — see eval/build_vllm_cmd.sh.
         env["EVAL_VLLM_LIMIT_MM_PER_PROMPT"] = cfg["limit_mm_per_prompt"]
+    # max_num_seqs: explicit baseline cfg wins; else DEFAULT 256 for the Qwen3.5/3.6 family
+    # (these MoE/hybrid arches under-serve at vLLM's unset default); else leave unset.
+    if cfg.get("max_num_seqs") is not None:
+        env["EVAL_VLLM_MAX_NUM_SEQS"] = str(cfg["max_num_seqs"])
+    elif _is_qwen35_family(hf_model):
+        env["EVAL_VLLM_MAX_NUM_SEQS"] = "256"
 
     return env
 
@@ -782,6 +788,22 @@ def _resolve_model_size_b(hf_model: str) -> Optional[float]:
         if bsizes:
             return max(bsizes)
     return None
+
+
+# Qwen3.5 / Qwen3.6 architecture family (model_type qwen3_5 / qwen3_5_moe). Matches the dotted
+# repo names (Qwen3.5-…, Qwen3.6-…) and the underscored model_type token (qwen3_5 / qwen3_6).
+# Requires the . / _ separator so plain Qwen3 (e.g. Qwen3-30B-A3B) does NOT match.
+_QWEN35_FAMILY_RE = re.compile(r"qwen[\s\-_]?3[._][56]", re.IGNORECASE)
+
+
+def _is_qwen35_family(hf_model: str) -> bool:
+    """True for the Qwen3.5 / Qwen3.6 family — from the eval model's OWN name, else its
+    Supabase base model's name (so finetunes ON Qwen3.5/3.6, e.g. allenai/tmax-9b, are caught,
+    mirroring _resolve_model_size_b's base fallback)."""
+    if _QWEN35_FAMILY_RE.search(hf_model or ""):
+        return True
+    base = resolve_base_model_name(hf_model)
+    return bool(base and _QWEN35_FAMILY_RE.search(base))
 
 
 def infer_size_tp_dp(hf_model: str, gpus_per_node: int) -> Tuple[int, int]:
