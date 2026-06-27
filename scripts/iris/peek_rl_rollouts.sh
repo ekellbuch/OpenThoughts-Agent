@@ -52,7 +52,10 @@ if [ -z "$JOB" ]; then
 fi
 
 # rank-0 pod = the rank that owns the Harbor coordinator / trials_dir writes.
-POD=$(kubectl get pods -n "$NS" -o name 2>/dev/null | grep -E "iris-.*${JOB}.*-0-[0-9a-f]+-0$" | head -1 || true)
+# Match rank-0 of the LATEST generation: the pod-name suffix is the iris retry generation
+# (`-0` first attempt, `-1` after a --max-retries re-bring-up, …), so a hardcoded `-0$` misses
+# a retried job's live pod. Take the highest generation.
+POD=$(kubectl get pods -n "$NS" -o name 2>/dev/null | grep -E "iris-.*${JOB}.*-0-[0-9a-f]+-[0-9]+$" | sort | tail -1 || true)
 if [ -z "$POD" ]; then
   echo "[peek] no running rank-0 pod matching '*${JOB}*-0-*' in ns/$NS." >&2
   echo "[peek] (job terminal? then a node-local trials_dir is GC'd — only a REMOTE R2 trials_dir survives,"
@@ -65,7 +68,7 @@ echo "[peek] pod=$POD  ns=$NS  container=$CONTAINER"
 
 # Derive the iris job_id (/<user>/<jobname>) from the pod name for finelog + dest naming.
 USER_FROM_POD=$(printf '%s' "$POD" | sed -E 's/^iris-([a-z0-9]+)-.*/\1/')
-JOBNAME=$(printf '%s' "$POD" | sed -E 's/^iris-[a-z0-9]+-(.+)-[0-9]+-[0-9a-f]+-0$/\1/')
+JOBNAME=$(printf '%s' "$POD" | sed -E 's/^iris-[a-z0-9]+-(.+)-[0-9]+-[0-9a-f]+-[0-9]+$/\1/')
 JOBID="/${USER_FROM_POD}/${JOBNAME}"
 
 kexec() { kubectl exec -n "$NS" "$POD" -c "$CONTAINER" -- bash -lc "$1"; }
@@ -217,8 +220,8 @@ PYEOF
 
     # 2) Per-pod container stdout for every rank of this job (rank-0 = harbor coordinator).
     echo "[pull] capturing per-rank pod logs ..."
-    for p in $(kubectl get pods -n "$NS" -o name 2>/dev/null | grep -E "iris-.*${JOB}.*-[0-9]+-[0-9a-f]+-0$" | sed 's#pod/##'); do
-      rank=$(printf '%s' "$p" | sed -E 's/.*-([0-9]+)-[0-9a-f]+-0$/\1/')
+    for p in $(kubectl get pods -n "$NS" -o name 2>/dev/null | grep -E "iris-.*${JOB}.*-[0-9]+-[0-9a-f]+-[0-9]+$" | sed 's#pod/##' | sort); do
+      rank=$(printf '%s' "$p" | sed -E 's/.*-([0-9]+)-[0-9a-f]+-[0-9]+$/\1/')
       kubectl logs -n "$NS" "$p" -c "$CONTAINER" --tail=-1 > "$DEST/logs/pod_rank${rank}.log" 2>/dev/null &
     done
     wait
