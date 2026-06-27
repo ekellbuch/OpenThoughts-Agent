@@ -344,8 +344,19 @@ def ray_stop() -> None:
         _log("Warning: 'ray stop' timed out")
 
 
-def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int) -> None:
-    """Block until the Ray cluster reports ``expected_nodes`` alive nodes."""
+def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int, rewrite_cb=None) -> None:
+    """Block until the Ray cluster reports ``expected_nodes`` alive nodes.
+
+    ``rewrite_cb`` (head only): a no-arg callable invoked on every poll to RE-PUBLISH
+    the rendezvous so its ``written_at`` stays fresh. WHY: a worker pod on a cold node
+    can start >RENDEZVOUS_FRESHNESS_SLACK (60s) after the head wrote the rendezvous;
+    its ``poll_rendezvous(min_written_at=worker_start)`` then rejects the head's
+    one-shot rendezvous as "stale" and waits forever for a rewrite, while the head
+    waits forever for that 4th node — a mutual deadlock (observed: ep8 diag, task 3
+    started 3 min late on a cold node). Rewriting each poll keeps the timestamp ahead
+    of any late worker's freshness threshold without weakening the prior-ATTEMPT
+    protection (a stale file from a dead PRIOR attempt is still never refreshed).
+    """
     import ray
 
     deadline = time.time() + timeout
@@ -354,6 +365,11 @@ def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int) -> None:
     try:
         last_count = -1
         while time.time() < deadline:
+            if rewrite_cb is not None:
+                try:
+                    rewrite_cb()
+                except Exception as exc:
+                    _log(f"Warning: rendezvous rewrite failed (will retry): {exc}")
             alive = [n for n in ray.nodes() if n.get("Alive")]
             count = len(alive)
             if count != last_count:
@@ -394,7 +410,12 @@ def run_head(args: argparse.Namespace, train_argv: list[str]) -> int:
                 "(or OT_AGENT_IRIS_RENDEZVOUS_DIR) so worker ranks can find the head IP."
             )
         write_rendezvous(args.rendezvous_dir, head_ip, ray_port)
-        wait_for_nodes(ray_address, num_tasks, args.cluster_join_timeout)
+        # Re-publish the rendezvous each poll so a late cold-node worker never sees it
+        # as "stale" (see wait_for_nodes docstring — prevents the freshness deadlock).
+        wait_for_nodes(
+            ray_address, num_tasks, args.cluster_join_timeout,
+            rewrite_cb=lambda: write_rendezvous(args.rendezvous_dir, head_ip, ray_port),
+        )
     else:
         _log("Single-node slice: skipping rendezvous and multi-node wait.")
 
