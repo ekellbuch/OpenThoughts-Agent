@@ -41,6 +41,35 @@ models:
     limit_mm_per_prompt: '{"image":0,"video":0}'
     extra_args: "--enable-prefix-caching"
 
+  # Qwen3.6-35B-A3B / Qwen3.5-35B-A3B — model_type: qwen3_5_moe
+  # (Qwen3_5MoeForConditionalGeneration). ~34.4B total / ~3.2B active, bf16 ~69 GB.
+  # TP=1 on the 96GB GH200: ~69 GB weights → ~17 GB KV headroom at 32k (the hybrid
+  # arch grows KV on only 10/40 layers, so 32k is cheap). Fits comfortably.
+  # The otagent env's fork-vLLM (76259c63a) + transformers 5.12.1 resolves
+  # qwen3_5_moe natively — NO separate eval-qwen35 env needed (unlike Leonardo).
+  # VL arch (carries vision_config) → serve TEXT-only via limit_mm_per_prompt
+  # image=0,video=0 (mirrors the tmax qwen3_5 entries). Hybrid thinking ON via
+  # enable_thinking. NO tool_call_parser / reasoning_parser (Pattern D for terminus-2).
+  "Qwen/Qwen3.6-35B-A3B":
+    tensor_parallel_size: 1
+    max_model_len: 32768
+    swap_space: 32
+    trust_remote_code: true
+    limit_mm_per_prompt: '{"image":0,"video":0}'
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
+    extra_args: "--enable-prefix-caching"
+
+  "Qwen/Qwen3.5-35B-A3B":
+    tensor_parallel_size: 1
+    max_model_len: 32768
+    swap_space: 32
+    trust_remote_code: true
+    limit_mm_per_prompt: '{"image":0,"video":0}'
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
+    extra_args: "--enable-prefix-caching"
+
 # Pattern fallbacks — all force TP=1 (single GH200/node) + prefix-caching.
 patterns:
   - match: "(?i)32[Bb]"
