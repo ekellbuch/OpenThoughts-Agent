@@ -183,6 +183,10 @@ ONE table.** Extraction pointers:
   note the successor.
 - **Genuine FAILED** (exit≠0, not a wall TIMEOUT) → diagnose (read the first real traceback, often masked by
   the elastic summary) + a dated **`agent_logs/`** entry; recurring identical failures ≠ transient.
+- **Writing discipline for agent_logs + any ops edit this sweep:** lead with WHAT (the fact/state/change),
+  concise, no speculation or rationalization. Ops docs hold validated ground truth only — a doubted or
+  unvalidated claim goes to a dated `agent_logs/` entry with a ⚠ pointer left in the ops doc, NOT asserted as
+  fact; mark unvalidated assumptions AS unvalidated.
 - **RL collapse rule** (≥2 signals fire same step) → flag for cancel+salvage per `rl-agentic-job-cleanup`.
 - **New/untested RL → `monitor-rl-job-health` verdict.** When this tick deep-probed an unproven RL run (above),
   act on its recommendation: **NO-KILL** → note it + the watch-signal that would flip it; **KILL** → it is one
