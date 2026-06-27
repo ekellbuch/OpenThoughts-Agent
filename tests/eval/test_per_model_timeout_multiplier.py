@@ -7,8 +7,12 @@ landed at the harbor config's hardcoded 1.0. This restores it on the canonical p
 generalized to take the size signal from the Supabase BASE model when the eval model's
 own name carries no size token (e.g. DCAgent/a1-* finetunes whose base is Qwen/Qwen3-8B).
 
+The TIMEOUT keys on ACTIVE params (decode speed): an MoE "30B-A3B" times out like its 3B
+active (2.0), NOT its 30B total (16.0). Memory-bound TP/DP sizing stays on TOTAL (asserted).
+
 These tests pin (network-free — the base-model lookup is monkeypatched):
-  (a) infer_size_timeout_multiplier: 8B->2.0, 32/30B->16.0, no-token->None;
+  (a) infer_size_timeout_multiplier (ACTIVE-keyed): dense 8B->2.0, dense 32B->16.0,
+      MoE 30B-A3B->2.0 (active 3B, not total 30B), no-token->None;
   (b) per-model baseline timeout_multiplier resolves;
   (c) precedence CLI > per-model > size-inferred(own) > size-inferred(base) > 1.0;
   (d) a finetune with no own size token inherits 2.0 from its base model;
@@ -24,6 +28,7 @@ from eval.unified_eval_listener import (
     EvalListener,
     infer_size_timeout_multiplier,
     get_baseline_timeout_multiplier,
+    _resolve_model_size_b,
 )
 
 DEFAULT = L.DEFAULT_TIMEOUT_MULTIPLIER  # 1.0
@@ -73,9 +78,33 @@ def test_infer_32b_is_16x():
     assert infer_size_timeout_multiplier("laion/foo-32b-rl") == 16.0
 
 
-def test_infer_moe_largest_token_wins():
-    # MoE "30B-A3B": the 30 (>=28) governs, NOT the active-3B.
-    assert infer_size_timeout_multiplier("Qwen/Qwen3-30B-A3B-Instruct") == 16.0
+def test_infer_moe_uses_active_params():
+    # MoE "30B-A3B": the ACTIVE 3B governs the TIMEOUT (decode speed), NOT the 30B total.
+    # -> 2.0 (fast), the same bucket as a dense ~3B. (Was 16.0 under the old total-token rule.)
+    assert infer_size_timeout_multiplier("Qwen/Qwen3-30B-A3B-Instruct") == 2.0
+
+
+def test_infer_moe_35b_a3b_is_active_2x():
+    # 35B total / 3B active -> active governs -> 2.0 (was 16.0).
+    assert infer_size_timeout_multiplier("Qwen/Qwen3.6-35B-A3B") == 2.0
+
+
+def test_infer_dense_30b_still_16x():
+    # No active token -> total governs (unchanged): a 30B DENSE stays at 16.0.
+    assert infer_size_timeout_multiplier("laion/foo-30b-rl") == 16.0
+
+
+def test_infer_moe_large_active_out_of_band_is_none():
+    # 235B/A22B: active 22B lands in the documented 15-27B GAP -> None (caller falls back).
+    # Known limitation of the coarse buckets; no such model is currently in the eval set.
+    assert infer_size_timeout_multiplier("Qwen/Qwen3-235B-A22B") is None
+
+
+def test_tp_dp_sizing_stays_on_TOTAL_params_for_moe():
+    # INVARIANT: parallelism sizing is MEMORY-bound (all experts must fit in VRAM), so it
+    # must use TOTAL params even for an MoE — only the speed-bound TIMEOUT switched to active.
+    # If this flips to 3.0, someone "fixed" _resolve_model_size_b to active -> OOM risk.
+    assert _resolve_model_size_b("Qwen/Qwen3-30B-A3B-Instruct") == 30.0
 
 
 def test_infer_no_token_is_none():

@@ -690,20 +690,43 @@ def get_baseline_agent_kwargs(hf_model: str, configs: Dict[str, Dict]) -> List[s
 # DCAgent/a1-* carry no size token in their own name, but their base (Qwen/Qwen3-8B)
 # does — so an 8B finetune resolves to 2.0 automatically without a per-model entry.
 _SIZE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)\s*[bB](?![A-Za-z0-9])")
+# MoE ACTIVE-parameter token, e.g. the "A3B" in "Qwen3-30B-A3B" / "A22B" in "…-235B-A22B".
+# _SIZE_TOKEN_RE (TOTAL size) deliberately EXCLUDES this — its negative lookbehind rejects the
+# leading "A" — so the two regexes never collide. Active params drive DECODE SPEED (a 30B-A3B
+# generates at ~3B-dense speed), which is what a generation TIMEOUT should track.
+_ACTIVE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9.])[Aa](\d+(?:\.\d+)?)\s*[bB](?![A-Za-z0-9])")
 _BASE_MODEL_NAME_CACHE: Dict[str, Optional[str]] = {}
 
 
-def infer_size_timeout_multiplier(name: str) -> Optional[float]:
-    """Infer a harbor timeout multiplier from a model-name size token.
+def _resolve_active_size_b(name: str) -> Optional[float]:
+    """ACTIVE (compute) parameter count in BILLIONS from a model name.
 
-    Largest size token wins (handles MoE "30b-a3b"). Returns 2.0 for <=~14B,
-    16.0 for ~30-40B, or None when no size token is present / the size is
-    out-of-band (caller then leaves harbor at its default and logs).
+    For an MoE named like "30b-a3b" this is the "a3b" ACTIVE token (the decode-speed
+    proxy); for a dense model (no active token) it falls back to the largest TOTAL size
+    token. Returns None when neither is present. Used ONLY for the speed-bound generation
+    TIMEOUT — memory-bound TP/DP sizing stays on TOTAL params (see _resolve_model_size_b).
     """
-    sizes = [float(m) for m in _SIZE_TOKEN_RE.findall(name or "")]
-    if not sizes:
+    active = [float(m) for m in _ACTIVE_TOKEN_RE.findall(name or "")]
+    if active:
+        return max(active)
+    total = [float(m) for m in _SIZE_TOKEN_RE.findall(name or "")]
+    return max(total) if total else None
+
+
+def infer_size_timeout_multiplier(name: str) -> Optional[float]:
+    """Infer a harbor timeout multiplier from a model name, keyed on ACTIVE params.
+
+    Generation latency scales with ACTIVE parameters, so for an MoE the active token
+    governs: "Qwen3-30B-A3B" -> 3B active -> 2.0 (fast), NOT the 16.0 its 30B TOTAL would
+    imply. Dense models carry no active token -> their total size is used (unchanged).
+    Returns 2.0 for <=~14B active, 16.0 for ~30-40B active, or None when no size token is
+    present / the active size is out-of-band (caller then tries the base model, else the
+    1.0 default + logs). NOTE: memory-bound TP/DP sizing intentionally stays on TOTAL
+    params (_resolve_model_size_b) — only the speed-bound TIMEOUT keys on active.
+    """
+    b = _resolve_active_size_b(name)
+    if b is None:
         return None
-    b = max(sizes)
     if b <= 14.0:
         return 2.0
     if 28.0 <= b <= 42.0:
