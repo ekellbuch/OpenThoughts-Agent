@@ -403,6 +403,17 @@ fi
 if [ -n "${EVAL_OVERRIDE_MEMORY_MB:-}" ]; then
     EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --override-memory-mb $EVAL_OVERRIDE_MEMORY_MB"
 fi
+# auto_snapshot override from the listener (mirrors eval/jupiter/eval_harbor.sbatch:811-814
+# and eval/leonardo/eval_harbor.sbatch:616-618). WITHOUT this the TACC path never forwarded
+# EVAL_AUTO_SNAPSHOT -> harbor defaulted auto_snapshot=False -> the from-scratch IMAGE-build
+# sandbox path (non-ephemeral, auto_delete_interval=0, no server-side reaper) instead of the
+# harbor__* SNAPSHOT path -> every eval sandbox LEAKED forever. Forwarding it routes evals onto
+# the snapshot path -> ephemeral=True -> server-side auto-delete + restores the "snapshot"
+# leaderboard field. (2026-06-28 leak fix; uses SHARED snapshots, no cap impact.)
+if [ -n "${EVAL_AUTO_SNAPSHOT:-}" ]; then
+    echo "Auto snapshot override: $EVAL_AUTO_SNAPSHOT"
+    EXTRA_HARBOR_ARGS="$EXTRA_HARBOR_ARGS --environment-kwarg auto_snapshot=$EVAL_AUTO_SNAPSHOT"
+fi
 # EVAL_AGENT_KWARGS is newline-separated; each entry is a space-free key=value
 # (e.g. the live nested extra_body thinking form — no enable_thinking flag), so
 # it stays one token under the unquoted $EXTRA_HARBOR_ARGS word-split.
