@@ -233,7 +233,7 @@ trainer:
   project_name: OpenThoughts-Agent
   log_level: INFO
   tracker_commit_each_step: true
-  logger: console
+  logger: wandb  # CoreWeave has egress -> log to dogml/OpenThoughts-Agent (entity via WANDB_ENTITY, defaulted by launcher)
 
   # Paths
   run_name: null

@@ -699,6 +699,15 @@ def main() -> int:
     # VerificationNotCompletedError with reward 0 (observed zeroing an entire
     # reverify rollout). Mirror the base IrisLauncher passthrough set
     # (hpc/iris_launch_utils.py) so the same creds reach the RL worker.
+    #
+    # WANDB routing default: the iris RL configs log to wandb (trainer.logger: wandb;
+    # CoreWeave has egress). SkyRL's wandb.init passes project= but NOT entity=
+    # (MarinSkyRL tracking.py), so without WANDB_ENTITY the run silently lands in the
+    # API key's DEFAULT entity (e.g. nyu-dice-lab), not the team org. Default both to
+    # the OT-Agent team here (matches hpc/dotenv/perlmutter.env) so every run lands in
+    # dogml/OpenThoughts-Agent; an explicitly-set launch-host WANDB_ENTITY/PROJECT wins.
+    os.environ.setdefault("WANDB_ENTITY", "dogml")
+    os.environ.setdefault("WANDB_PROJECT", "OpenThoughts-Agent")
     for k in (
         "HF_TOKEN", "WANDB_API_KEY", "WANDB_ENTITY", "WANDB_PROJECT",
         "DAYTONA_API_KEY", "DAYTONA_JWT_TOKEN", "DAYTONA_ORGANIZATION_ID",
