@@ -431,6 +431,35 @@ echo "[DEBUG] EXTRA_HARBOR_ARGS=$EXTRA_HARBOR_ARGS"
 
 if [ -d "$RUN_DIR" ] && [ -f "$RUN_DIR/config.json" ]; then
     echo "Found existing job dir, resuming: $RUN_DIR"
+    # --- Refresh api_base in config.json to the LIVE serve node before resume ---
+    # `harbor jobs resume` has NO --agent-kwarg override (verified: cli/jobs.py
+    # resume() loads config.json into JobConfig verbatim — no kwarg merge). A
+    # same-run_tag job that resumes on a NEW SLURM node would otherwise reuse the
+    # PRIOR run's api_base baked into config.json (agents[].kwargs.api_base),
+    # dialing the DEAD predecessor node -> every LLM call fails "Cannot connect to
+    # host" (jobs 790834/835/836, 2026-06-28: 600+ conn-fails, 0 scores). Rewrite
+    # api_base to THIS allocation's MASTER_ADDR so the resume dials the live node.
+    NEW_API_BASE="http://${MASTER_ADDR}:8000/v1"
+    echo "Refreshing config.json api_base -> $NEW_API_BASE"
+    $PYTHON_BIN - "$RUN_DIR/config.json" "$NEW_API_BASE" <<'PY'
+import json, sys
+cfg_path, new_api_base = sys.argv[1], sys.argv[2]
+with open(cfg_path) as f:
+    cfg = json.load(f)
+changed = False
+for agent in cfg.get("agents", []):
+    kw = agent.get("kwargs")
+    if isinstance(kw, dict) and kw.get("api_base") != new_api_base:
+        print(f"  agent api_base {kw.get('api_base')!r} -> {new_api_base!r}")
+        kw["api_base"] = new_api_base
+        changed = True
+if changed:
+    with open(cfg_path, "w") as f:
+        json.dump(cfg, f, indent=2)
+    print("  config.json updated")
+else:
+    print("  api_base already current; no change")
+PY
     harbor jobs resume \
         -p "$RUN_DIR" \
         --filter-error-type EnvironmentStartTimeoutError \
