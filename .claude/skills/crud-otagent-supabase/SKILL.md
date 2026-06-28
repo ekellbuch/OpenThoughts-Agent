@@ -306,9 +306,14 @@ rows untouched.
 - The real "never populated" signals are **`metrics IS NULL`** (no score) **AND `stats IS NULL`**
   (no per-trial progress). Empirically every `Pending`/`Started` row has BOTH null; a live job
   that had begun scoring would have a non-null `stats`. (`ended_at` is also always null for these.)
-- **No table FKs `sandbox_jobs.id`** (checked the schema DDL): `sandbox_trial_model_usage` keys on
-  `trial_id`/`model_id`, not the job id. So deleting a `sandbox_jobs` row orphans nothing — the
-  cross-user risk is purely *deleting a row another user owns*, not breaking an FK.
+- **DELETE CASCADE — `sandbox_jobs.id` IS FK'd by a child chain (corrected 2026-06-28; the old "no table FKs
+  `sandbox_jobs.id`" claim was WRONG — a plain delete fails Postgres `23503` foreign-key-violation).** The
+  chain is `sandbox_trials.job_id → sandbox_jobs.id` (per-trial rows) and `sandbox_trial_model_usage.trial_id
+  → sandbox_trials.id` (grandchild). So to delete a `sandbox_jobs` row you MUST cascade **grandchild → child
+  → job**: delete its `sandbox_trial_model_usage` rows, then its `sandbox_trials` rows, then the `sandbox_jobs`
+  row (one real cleanup deleted 30 jobs → 4057 child + 4057 grandchild rows). The children carry NO `username`
+  — ownership is TRANSITIVE from the job, so once you've asserted you own the JOB (the cross-user pre-check
+  below), the whole cascade is FK-safe and yours. Still NEVER delete a job (or its cascade) you don't own.
 
 **A row qualifies for removal iff ALL hold:**
 1. `job_status IN ('Pending','Started')` — never `Finished`/a failure state.
@@ -368,11 +373,21 @@ for r in ours[:10]:                     # sample: id, user, model, benchmark, st
           f"{bm.get(r['benchmark_id'],'?')} | {r['job_status']} | {age_h(r['created_at']):.0f}h")
 
 # --- DELETE (ours only, idempotent, scoped id + username) — run AFTER reviewing the dry-run ---
+# ⚠️ CASCADE: sandbox_jobs.id IS FK'd — `sandbox_trials.job_id → sandbox_jobs.id` and
+# `sandbox_trial_model_usage.trial_id → sandbox_trials.id`. A plain sandbox_jobs delete FK-fails (23503);
+# delete grandchild → child → job. Children carry no username (ownership transitive from the job you own).
 DELETE = False                          # flip to True to execute
 if DELETE:
     for r in ours:
+        trial_ids = [t["id"] for t in
+                     c.table("sandbox_trials").select("id").eq("job_id", r["id"]).execute().data]
+        for i in range(0, len(trial_ids), 200):       # chunk to keep the IN() lists sane
+            chunk = trial_ids[i:i+200]
+            if chunk:
+                c.table("sandbox_trial_model_usage").delete().in_("trial_id", chunk).execute()  # grandchild
+        c.table("sandbox_trials").delete().eq("job_id", r["id"]).execute()                       # child
         c.table("sandbox_jobs").delete().eq("id", r["id"]).eq("username", r["username"]) \
-         .in_("job_status", ["Pending", "Started"]).execute()
+         .in_("job_status", ["Pending", "Started"]).execute()                                    # job (yours)
     # re-read: confirm gone + that NO Finished/scored row was touched
     left = c.table("sandbox_jobs").select("id").in_("id", [r["id"] for r in ours]).execute().data
     fin  = c.table("sandbox_jobs").select("id").eq("job_status", "Finished") \
@@ -381,9 +396,10 @@ if DELETE:
     print(f"DELETED {len(ours)} ours; OTHERS left for supervisor: {Counter(r['username'] for r in others)}")
 ```
 
-> Cross-user FK pre-check is satisfied structurally (no table FKs `sandbox_jobs.id`) **and**
-> by scope (`username` IN OURS on both the match and the delete `.eq`). Other users' stale rows
-> are reported with counts, never deleted. Never raise `CUTOFF_H` to sweep more aggressively.
+> Cross-user safety here is by SCOPE (`username` IN OURS on both the match and the job-delete `.eq`), and the
+> child cascade is FK-safe because children inherit ownership from the job. (The cascade is REQUIRED — `sandbox_jobs.id`
+> IS FK'd; see the DELETE-CASCADE note above.) Other users' stale rows are reported with counts, never deleted.
+> Never raise `CUTOFF_H` to sweep more aggressively.
 
 ## Quick recipes
 
