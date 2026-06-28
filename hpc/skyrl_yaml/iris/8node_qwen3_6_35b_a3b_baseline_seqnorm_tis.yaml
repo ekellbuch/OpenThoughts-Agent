@@ -577,6 +577,11 @@ extra_env:
   # (the fla wheel is broken). LOAD-BEARING for the 30 linear_attention layers
   # (and the long-ctx chunked scan whose peak we watch at step 1 — MEMORY (B)).
   SKYRL_GDN_MASK_FLA: "1"
+  # NCCL weight-sync deadlock mitigation (MarinSkyRL 216a3008): serialize the mixed-PG
+  # gathers (strided expert-gather on global PG vs sub-mesh full_tensor allgather) so they
+  # can't overlap the nranks=33 weight-broadcast → fixed the 2026-06-28 wedge. Default-OFF in
+  # code; ON here until the permanent per-group-gather fix lands.
+  SKYRL_WEIGHT_SYNC_SERIALIZE: "1"
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
   # --- vLLM serve flags ---
   VLLM_USE_FLASHINFER_SAMPLER: "0"

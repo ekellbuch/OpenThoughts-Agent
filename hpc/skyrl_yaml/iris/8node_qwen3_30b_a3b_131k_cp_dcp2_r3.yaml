@@ -453,6 +453,11 @@ extra_env:
   EPDIAG_SP: "1"
   # --- end [EPDIAG2] ---
   SKYRL_GDN_MASK_FLA: "1"
+  # NCCL weight-sync deadlock mitigation (MarinSkyRL 216a3008): serialize the mixed-PG
+  # gathers (strided expert-gather on global PG vs sub-mesh full_tensor allgather) so they
+  # can't overlap the nranks=33 weight-broadcast → fixed the 2026-06-28 wedge. Default-OFF in
+  # code; ON here until the permanent per-group-gather fix lands.
+  SKYRL_WEIGHT_SYNC_SERIALIZE: "1"
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
   # --- vLLM serve flags (gpu-rl image §2f) ---
   VLLM_USE_FLASHINFER_SAMPLER: "0"
