@@ -23,7 +23,12 @@ orchestrator:
 environment:
   type: daytona
   force_build: true
-  delete: false
+  # delete the sandbox on stop (2026-06-28 leak-fix safety net): the single-container Direct
+  # stop() skips delete() when this is false, so any sandbox that falls back to the non-snapshot
+  # image path (non-ephemeral, auto_delete_interval=0) would leak forever. The auto_snapshot
+  # forwarding in eval_harbor.sbatch is the primary fix (snapshot path -> ephemeral auto-delete);
+  # this is belt-and-suspenders for the from-scratch fallback.
+  delete: true
 verifier:
   max_timeout_sec: 14400
 agents:
