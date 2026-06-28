@@ -1,5 +1,7 @@
-laion/sft__g1_gptlong_top8_train_on_obs_fa3__40-0__Qwen3-32B
-EtashGuha/gptlong_continue_nemotron_terminal_step5400__Qwen3-32B
+# BLOCKED 2026-06-28 (deterministic vLLM-startup failure; resubmits 48009136/etc cancelled): tokenizer_config.json has extra_special_tokens as a LIST not a dict → transformers 4.57.6 AttributeError 'list' object has no attribute 'keys'. Re-add once the laion artifact is patched.
+# laion/sft__g1_gptlong_top8_train_on_obs_fa3__40-0__Qwen3-32B
+# BLOCKED 2026-06-28 (deterministic vLLM-startup failure; resubmits 48009139/etc cancelled): DP=2 DPLBAsyncMPClient engine-core init failure. NOT our org. Re-add once a DP=1/TP-only per-model serve override is set in baseline_model_configs_minimal.yaml.
+# EtashGuha/gptlong_continue_nemotron_terminal_step5400__Qwen3-32B
 EtashGuha/tezos100k_continue_gptlongtezos__Qwen3-32B
 EtashGuha/tezos100k_continue_gptlongtezos_step6010__Qwen3-32B
 EtashGuha/fresh_gptlongtezos__Qwen3-32B

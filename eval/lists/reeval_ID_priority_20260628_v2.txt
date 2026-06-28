@@ -1,4 +1,5 @@
-laion/sft__g1_gptlong_top8_train_on_obs_fa3__40-0__Qwen3-32B
+# BLOCKED 2026-06-28 (deterministic vLLM-startup failure; resubmits 48009864/etc cancelled): tokenizer_config.json has extra_special_tokens as a LIST not a dict → transformers 4.57.6 AttributeError 'list' object has no attribute 'keys'. Re-add once the laion artifact is patched.
+# laion/sft__g1_gptlong_top8_train_on_obs_fa3__40-0__Qwen3-32B
 DCAgent2/g1_top8_85k_gptlong_swegym_32b_step1200__Qwen3-32B
 DCAgent2/g1_top8_gptlong_dist_31600_3160_8b
 DCAgent2/g1_top8_gptlong_dist_31600_32b_step1200__Qwen3-32B
