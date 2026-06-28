@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
-Delete Daytona sandboxes in the RL org that have not had an event in over an hour.
+Reap leaked Daytona sandboxes — TWO buckets:
+  1. STALE-STARTED — running sandboxes idle past the threshold (orphaned active sandboxes).
+  2. TERMINAL-DEAD — ERROR / BUILD_FAILED sandboxes. These NEVER self-clear on the
+     non-snapshot (non-ephemeral, auto_delete_interval=0) eval path, and the
+     last-activity threshold structurally can't see them, so they accumulate forever
+     (org1+org2 had ~1700 dead-leaked, 2026-06-28). Reaped by default; --no-reap-dead to skip.
 
-Uses the official Daytona Python SDK (`daytona` package, v0.180+) to list all
-active sandboxes and delete any whose `lastActivityAt` (was: `updatedAt`)
-timestamp is older than the configured threshold.
+Uses the official Daytona Python SDK (`daytona` package, v0.180+). Deleting a sandbox
+INSTANCE never touches its `harbor__*` snapshot TEMPLATE, so the dead-reap is cap-safe.
 
 History:
+    * 2026-06-28 — added the TERMINAL-DEAD bucket (ERROR/BUILD_FAILED). The script
+      previously listed ONLY `states=[STARTED]` and keyed on last-activity, so it could
+      not reap the dead bucket (the dominant Leonardo-eval leak) at all.
     * 2026-05-18 — switched from the deprecated GET /api/sandbox/paginated
       (offset pagination) to GET /api/sandbox (cursor pagination) ahead of
       Daytona's 2026-05-24 breaking change.
@@ -63,6 +70,17 @@ from daytona import (
 # ---------------------------------------------------------------------------
 PAGE_LIMIT = 100  # per-page fetch size; SDK pages through automatically
 DEFAULT_THRESHOLD_MINUTES = 60
+
+# Terminal-dead states: failed sandboxes that NEVER self-clear on the non-snapshot
+# (non-ephemeral, auto_delete_interval=0) eval path — the dominant leak. The
+# last-activity threshold below structurally CANNOT catch these (the script only used
+# to list STARTED), so they accumulated forever (org1+org2 had ~1700 dead leaked,
+# 2026-06-28). They are unconditionally safe to delete: terminal state ⇒ no active
+# trial, no data loss. Deleting a sandbox INSTANCE never touches its `harbor__*`
+# snapshot TEMPLATE, so this is cap-safe. Built robustly from whatever the SDK enum
+# exposes (member names have drifted across SDK versions).
+_DEAD_STATE_NAMES = ("ERROR", "BUILD_FAILED", "BUILDFAILED")
+DEAD_STATES = [getattr(SandboxState, n) for n in _DEAD_STATE_NAMES if hasattr(SandboxState, n)]
 
 # Try to load secrets.env from a few common locations
 SECRET_ENV_PATH = os.environ.get("DC_AGENT_SECRET_ENV")
@@ -121,6 +139,19 @@ def list_started_sandboxes(client: Daytona) -> list:
     return list(client.list(query))
 
 
+def list_dead_sandboxes(client: Daytona) -> list:
+    """Fetch all sandboxes in terminal-dead states (ERROR / BUILD_FAILED).
+
+    These never self-clear on the non-snapshot eval path and the threshold-based
+    STARTED reap cannot see them, so they are the dominant leak. No staleness filter
+    is applied — a terminal state already means the sandbox is dead.
+    """
+    if not DEAD_STATES:
+        return []
+    query = ListSandboxesQuery(states=DEAD_STATES, limit=PAGE_LIMIT)
+    return list(client.list(query))
+
+
 def delete_sandbox(sb) -> bool:
     """Delete a single sandbox. Returns True on success."""
     try:
@@ -129,6 +160,22 @@ def delete_sandbox(sb) -> bool:
     except Exception as e:  # noqa: BLE001
         print(f"    error: {type(e).__name__}: {e}")
         return False
+
+
+def _delete_bucket(sandboxes: list, label: str) -> tuple[int, int]:
+    """Delete every sandbox in a bucket; return (success, failed). Rate-limited."""
+    print(f"\nDeleting {len(sandboxes)} {label} sandboxes …")
+    success = failed = 0
+    for i, sb in enumerate(sandboxes, 1):
+        if delete_sandbox(sb):
+            success += 1
+        else:
+            failed += 1
+            print(f"  FAILED to delete {sb.id}")
+        if i % 50 == 0 or i == len(sandboxes):
+            print(f"  Progress: {i}/{len(sandboxes)}  (ok={success}, fail={failed})")
+        time.sleep(0.05)  # avoid rate-limiting
+    return success, failed
 
 
 # ---------------------------------------------------------------------------
@@ -181,62 +228,62 @@ def main():
         default="DAYTONA_API_KEY",
         help="Environment variable name containing the API key (default: DAYTONA_API_KEY)",
     )
+    parser.add_argument(
+        "--no-reap-dead",
+        action="store_true",
+        help="Skip reaping terminal-dead (ERROR/BUILD_FAILED) sandboxes — by default they ARE reaped "
+             "(they never self-clear on the non-snapshot path and are the dominant leak).",
+    )
     args = parser.parse_args()
 
     api_key = get_api_key(args.api_key_env)
     client = Daytona(DaytonaConfig(api_key=api_key))
 
-    # 1. List all active sandboxes
+    # 1. STALE-STARTED bucket: running sandboxes idle past the threshold (orphaned).
     print("Fetching all started sandboxes …")
-    sandboxes = list_started_sandboxes(client)
-    print(f"  Found {len(sandboxes)} started sandboxes.")
+    started = list_started_sandboxes(client)
+    print(f"  Found {len(started)} started sandboxes.")
+    stale = find_stale_sandboxes(started, args.threshold)
+    print(f"  {len(stale)} are stale (no event in >{args.threshold} min).")
 
-    # 2. Find stale ones
-    stale = find_stale_sandboxes(sandboxes, args.threshold)
-    print(f"  {len(stale)} are stale (no event in >{args.threshold} min).\n")
+    # 2. DEAD bucket: terminal ERROR/BUILD_FAILED sandboxes — never self-clear, the dominant leak.
+    dead = [] if args.no_reap_dead else list_dead_sandboxes(client)
+    if not args.no_reap_dead:
+        print(f"  Found {len(dead)} terminal-dead sandboxes (ERROR/BUILD_FAILED) to reap.")
+    print()
 
-    if not stale:
+    if not stale and not dead:
         print("Nothing to clean up.")
         return
 
-    # 3. Print summary
-    print(f"{'ID':<40} {'Age (min)':>10}  {'Created':<26} {'Last Activity':<26}")
-    print("-" * 110)
-    for sb in stale:
-        created = sb.created_at or "n/a"
-        last_seen = _last_seen_ts(sb) or "n/a"
-        print(
-            f"{sb.id:<40} {sb._age_minutes:>10.1f}  "
-            f"{created:<26} {last_seen:<26}"
-        )
+    # 3. Report
+    if stale:
+        print(f"STALE-STARTED ({len(stale)}):")
+        print(f"  {'ID':<40} {'Age (min)':>10}  {'Created':<26} {'Last Activity':<26}")
+        print("  " + "-" * 108)
+        for sb in stale:
+            print(f"  {sb.id:<40} {sb._age_minutes:>10.1f}  {sb.created_at or 'n/a':<26} {_last_seen_ts(sb) or 'n/a':<26}")
+    if dead:
+        from collections import Counter
+        by_state = Counter(str(getattr(sb, "state", "?")) for sb in dead)
+        print(f"DEAD ({len(dead)}): " + ", ".join(f"{s}={n}" for s, n in by_state.items()))
 
     if not args.delete:
-        print(f"\nDry run — pass --delete to actually remove these {len(stale)} sandboxes.")
+        print(f"\nDry run — pass --delete to actually remove {len(stale)} stale + {len(dead)} dead sandboxes.")
         return
 
-    # 4. Delete
-    print(f"\nDeleting {len(stale)} stale sandboxes …")
-    success = 0
-    failed = 0
+    # 4. Delete both buckets
+    total_ok = total_fail = 0
+    for bucket, label in ((stale, "stale-started"), (dead, "terminal-dead")):
+        if not bucket:
+            continue
+        ok, failed = _delete_bucket(bucket, label)
+        total_ok += ok
+        total_fail += failed
 
-    for i, sb in enumerate(stale, 1):
-        ok = delete_sandbox(sb)
-        if ok:
-            success += 1
-        else:
-            failed += 1
-            print(f"  FAILED to delete {sb.id}")
-
-        # Progress every 50
-        if i % 50 == 0 or i == len(stale):
-            print(f"  Progress: {i}/{len(stale)}  (ok={success}, fail={failed})")
-
-        # Small delay to avoid rate-limiting
-        time.sleep(0.05)
-
-    print(f"\nDone. Deleted {success}/{len(stale)} sandboxes.")
-    if failed:
-        print(f"  {failed} deletions failed.")
+    print(f"\nDone. Deleted {total_ok} sandboxes ({len(stale)} stale + {len(dead)} dead).")
+    if total_fail:
+        print(f"  {total_fail} deletions failed.")
 
 
 if __name__ == "__main__":
