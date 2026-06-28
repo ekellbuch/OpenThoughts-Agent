@@ -1,0 +1,654 @@
+# =============================================================================
+# GRID CELL 35B-B  —  MoE sharding grid @ 131k  —  EP=8 × FSDP=2 × CP=2
+# Qwen3.6-35B-A3B — CoreWeave/Iris RL @ 131k (seqnorm + TIS + R3)
+# =============================================================================
+# AUTHORED FOR: ~/Documents/experiments/active/moe_sharding_grid_131k (the EP×FSDP×CP
+#   feasibility grid). VARIANT of 8node_qwen3_6_35b_a3b_baseline_seqnorm_tis.yaml
+#   (= cell 35B-A, EP8×FSDP4×CP1). ONLY the policy/ref mesh changed (FSDP 4→2, CP 1→2)
+#   + the CP-mandated ring-SDPA attn flip. Inference-engine block HELD FIXED (TP2/EP2/
+#   DCP1, num_inference_engines 16). Metric = memory-feasibility + throughput over 5
+#   steps, NOT reward. enable_db_registration stays false.
+# ⚠ This cell INTRODUCES CP on the HYBRID GDN arch — see the GDN+CP caveat at the
+#   policy fsdp_config below: feasibility-probe only, NOT numerically trainable as-is.
+# Launch: see the LAUNCH COMMAND block at the foot of this file.
+# =============================================================================
+# Target: Qwen/Qwen3.6-35B-A3B  (model_type: qwen3_5_moe ; arch
+#   Qwen3_5MoeForConditionalGeneration). NEW LINE OF INQUIRY. Runs the proven
+#   seqnorm + TIS + R3 (router-replay) recipe at 131072 context with NO CP and
+#   NO DCP — the HYBRID architecture (only 10/40 layers are full-attention; the
+#   other 30 are GatedDeltaNet linear-attn with constant recurrent state) makes
+#   long-context KV cheap, so CP/DCP are not needed (memory math below + plan).
+#   On CoreWeave (cw-us-east-02a, 8x H100-80GB + IB per node).
+# UNLAUNCHED. Companion plan: notes/ot-agent/qwen3_6_35b_a3b_rl_plan.md (read it).
+#
+# SUPERVISOR-RESOLVED (2026-06-25):
+#   * DATASET = DCAgent/exp_rpt_pymethods2test-large (same set the 30B line uses;
+#     entrypoint stays the agentic terminal_bench path). Wired via --train_data.
+#   * CONTEXT = 131072, WITHOUT CP or DCP (context_parallel_size 1, dcp 1).
+#   * R3 ON (TIS on a MoE essentially requires R3 to keep pi_old == pi_train):
+#     moe_router_replay true, enable_return_routed_experts true, RAY executor
+#     (mp_backend false), async_scheduling false, moe_grouped_gemm true.
+#   * Multimodal/MTP -> TEXT-ONLY backbone (Rung-0 load-validation; untrodden —
+#     no prior RL on Qwen 3.5/3.6). SUCCESS = 10 RL steps without exploding.
+#   * PREREQ: the gpu-rl image MUST ship `torchtitan` before any EP>1 launch
+#     (apply_ep needs it for expert_model_parallel_size=8; else ModuleNotFound).
+#
+# -----------------------------------------------------------------------------
+# FETCHED ARCHITECTURE (from HF config.json, transformers 4.57.1 — TRUSTED, not
+# assumed equal to Qwen3-Coder-30B-A3B; key numbers differ materially):
+#   HYBRID linear/full attention MoE (same FAMILY as Qwen3-Next-80B-A3B):
+#     num_hidden_layers      40  (layer_types: every 4th = full_attention =>
+#                                 10 full_attention + 30 linear_attention/GDN)
+#     full_attention_interval 4
+#     hidden_size            2048
+#     num_attention_heads    16   ; num_key_value_heads 2  (GQA group 8)
+#     head_dim               256  ; partial_rotary_factor 0.25 ; attn_output_gate true
+#     LINEAR-attn (GatedDeltaNet): linear_num_key_heads 16 / value_heads 32,
+#       key/value_head_dim 128, conv_kernel_dim 4, mamba_ssm_dtype float32.
+#     MoE: num_experts 256 ; num_experts_per_tok 8 ; moe_intermediate_size 512 ;
+#          shared_expert_intermediate_size 512 ; router_aux_loss_coef 0.001.
+#     vocab_size 248320 ; tie_word_embeddings FALSE ; dtype bfloat16.
+#     max_position_embeddings 262144 (NATIVE) ; rope_theta 1e7 ; mrope_interleaved
+#       true, mrope_section [11,11,10], rope_type "default" (NO YaRN in the
+#       shipped config => 131072 <= 262144 needs NO rope_scaling / hf_overrides).
+#     MULTIMODAL: top-level config carries vision_config + image/video tokens;
+#       arch is Qwen3_5MoeForConditionalGeneration. MTP: mtp_num_hidden_layers 1.
+#   PARAM COUNT (computed from the above): total ~34.4 B / active ~3.2 B per token
+#     => the "35B-A3B" name checks out (A3B = ~3B active).
+#
+#   STRUCTURAL DELTAS vs Qwen3-Coder-30B-A3B (the model behind our 131k config):
+#     * HYBRID linear+full attention (NOT 48 dense-attn layers). Only 10/40
+#       layers grow a length-scaling KV cache; the 30 GDN layers carry small
+#       FIXED recurrent/conv state => KV pressure is FAR lower than the dense 30B.
+#       THIS is why 131k fits WITHOUT CP/DCP here (the dense 30B needed both).
+#     * num_key_value_heads = 2 (NOT 4). Under TP=4 the 2 KV heads CANNOT shard
+#       to 4 ranks -> they are REPLICATED (each TP GPU holds the FULL KV). This
+#       matters for the KV math below (no /TP division on the KV cache).
+#     * 256 experts top-8 (NOT 128 top-8) ; moe_intermediate_size 512 (small).
+#     * Multimodal + MTP head (the 30B-Coder is text-only, no MTP).
+#   This config is therefore modeled on the Qwen3-Next-80B-A3B HYBRID arm
+#   (hpc/skyrl_yaml/jupiter/extra/128GPU_qwen3_next_80b_a3b.yaml), NOT on the
+#   dense-attention 30B 131k config — it is the closest validated precedent.
+#
+# -----------------------------------------------------------------------------
+# STACK-SUPPORT NOTE (de-risk this BEFORE launch — see plan Rung 0):
+#   * vLLM fork DOES register Qwen3_5MoeForConditionalGeneration (vllm model file
+#     vllm/model_executor/models/qwen3_5.py — GatedDeltaNetAttention +
+#     Qwen3NextSparseMoeBlock, shared with qwen3_next). SkyRL moe_weight_remap.py
+#     is literally ported from prime-rl converting_qwen3_5_moe.py.
+#   * GDN linear-attention training path uses SKYRL_GDN_MASK_FLA=1 (force the
+#     proven pure-torch Gated-DeltaNet path; the fla wheel is broken) — SET BELOW.
+#   * UNVERIFIED at config-authoring time: (a) the vision/MTP heads load cleanly
+#     under FSDP (we want the TEXT backbone only); (b) transformers 4.57.1 in the
+#     gpu-rl RL venv resolves qwen3_5_moe AutoConfig/AutoModel; (c) the mamba/SSM
+#     cache + GDN kernels run in the baked vLLM. Rung 0/1 prove exactly this.
+#
+# -----------------------------------------------------------------------------
+# GEOMETRY (8 CoreWeave nodes = 64 H100, colocate_all: false, disaggregated):
+#   seqnorm + TIS + R3 (router-replay). EP + FSDP policy mesh, TP=4 generation
+#   on the RAY executor (R3-mandatory). NO CP / NO DCP / NO YaRN.
+#   *** R3 ON (supervisor 2026-06-25): TIS on a MoE essentially REQUIRES R3 —
+#   router-replay keeps pi_old == pi_train (the train forward replays the EXACT
+#   experts vLLM sampled), so the TIS importance ratios stay sane. Without R3,
+#   the recompute uses native/sentinel routing != the rollout routing and the
+#   log_ratio explodes (the failure the 80B hit). R3 capture is arch-agnostic
+#   in the vLLM fork (hooks at FusedMoE via routed_experts_capturer; qwen3_5_moe
+#   routes its Qwen3NextSparseMoeBlock through FusedMoE — same path as the
+#   validated 80B-A3B/Qwen3-Next R3 arm). DCP stays 1, so VLLM_ALLOW_ROUTED_
+#   EXPERTS_DCP is NOT needed (DCP>1 only). EPDIAG probe stays OFF (this is the
+#   minimal R3 config, not the EP-deadlock-debug vehicle). ***
+#
+#   Policy/Ref FSDP mesh:  EP=8 x FSDP=4 = 32 policy GPU = 4 nodes (CP=1).
+#   Generation:            8 engines x TP=4 = 32 gen GPU = 4 nodes.
+#   Total = policy 32 + ref 0 (inert, use_kl_loss=false) + inference 32
+#         = 64 = 8 nodes.  LAUNCH MUST PASS --num-nodes 8.
+#   --gpus_per_node 8 FORCES policy/ref_num_gpus_per_node = 8; policy_num_nodes /
+#   ref_num_nodes honored from this YAML. num_inference_engines set EXPLICITLY (8)
+#   — the (num_nodes*8)//tp = 8*8//4 = 16 derivation would be WRONG (4 of 8 nodes
+#   are policy-only).
+#
+#   DIVISIBILITY / CEILING CHECKS (all hard constraints — VERIFIED):
+#     * EP divides num_experts: 256 % EP(8) == 0  -> 32 experts/EP-rank. VALID.
+#     * MoE dim-0 guard (num_experts//EP) % FSDP == 0:
+#         256/EP8 = 32 ; 32 % FSDP4 = 0  -> VALID (8 experts/FSDP-rank).
+#     * EP x FSDP x CP = 8 x 4 x 1 = 32 = policy GPU count. VALID. (CP=1.)
+#     * vLLM TP=4 divides num_attention_heads 16 (4 heads/GPU). VALID.
+#     * GQA: num_key_value_heads 2 < TP 4 => the 2 KV heads are REPLICATED across
+#       the 4 TP ranks (standard vLLM GQA when tp>num_kv_heads). LEGAL.
+#     * TP=4 divides num_experts 256 (64 experts/GPU). VALID.
+#     * DCP OFF (dcp=1) => the dcp <= tp/num_kv_heads ceiling does NOT apply.
+#     * Batch (fully-async): train_batch_size == policy_mini_batch_size == 64;
+#       64 % 64 == 0 -> OK. train_batch_size(64) >= policy DP size -> OK.
+#
+# =============================================================================
+# MEMORY BUDGET @ 131072 (the core question: does 131k fit WITHOUT CP/DCP?)
+# =============================================================================
+# --- (A) GENERATION / vLLM KV cache at 131k, TP=4 ---
+#   Only the 10 FULL-ATTENTION layers grow KV with length (the 30 GDN layers
+#   carry constant recurrent/conv state — NEGLIGIBLE, length-independent).
+#   KV bytes/token/full-attn-layer = 2(K,V) * num_kv_heads(2) * head_dim(256) *
+#       bf16(2) = 2048 B.
+#   KV bytes/token (all 10 full-attn layers) = 20480 B = 20 KiB/token.
+#   KV for ONE 131072-token sequence = 20480 * 131072 = ~2.68 GB.
+#   *** TP=4 but num_kv_heads=2 < 4 -> KV is REPLICATED, NOT sharded: each of the
+#       4 TP GPUs holds the FULL ~2.68 GB/seq (NO /TP division on KV). ***
+#   Per-GPU H100-80GB vLLM budget: bf16 weights / TP4 = 34.4/4 = ~8.6 GB.
+#   At gpu_memory_utilization 0.85: ~68 GB usable - 8.6 weights - ~6 GB CUDA/NCCL/
+#       activation reserve = ~53 GB KV pool -> ~53/2.68 = ~19-20 concurrent 131k
+#       seqs. PREDICTED vLLM "GPU KV cache size / Maximum concurrency" line ~= 19x.
+#   => max_num_seqs 16 is SAFE at 0.85 (under the ~20 concurrency ceiling, with
+#      headroom for prefill activations + chunked-prefill batches). The hybrid
+#      arch's low KV is exactly why 131k generation is comfortable without DCP.
+#
+# --- (B) TRAINING activation at 131k (THE BINDING CONSTRAINT, not KV) ---
+#   Mesh EP8xFSDP4, gradient_checkpointing TRUE (use_reentrant false), cpu_offload
+#   TRUE, micro_forward_batch_size_per_gpu 1 (one 131k seq/rank at a time).
+#   cpu_offload keeps params+optimizer in node RAM (~2 TB/node); only the active
+#   FSDP shard + the CURRENT microbatch activations sit in HBM.
+#   * Full-attn layers (flash/SDPA): NO materialized 131072x131072 score matrix.
+#     Under gradient checkpointing only the per-layer INPUT is stored
+#     (hidden_size 2048 * bf16 * 131072 tok = ~0.54 GB/layer), recomputed in the
+#     backward. Stored layer-inputs across all 40 layers ~= 21.5 GB/seq (1 micro).
+#     This is LIGHT — the 3B active-param FFN backward is cheap.
+#   * *** GatedDeltaNet CHUNKED-SCAN activation over a 131k sequence = THE REAL
+#     UNKNOWN (flagged explicitly). *** The 30 GDN layers run a chunked recurrent
+#     scan; the per-token hidden (~value_heads 32 * head_dim 128 * bf16 = 8192 B
+#     -> ~1.07 GB/layer over 131k) is bounded, but the chunked-scan kernel's PEAK
+#     transient (intermediate chunk states materialized during the scan, before
+#     checkpoint recompute frees them) depends on the chunk size and the pure-torch
+#     GDN path (SKYRL_GDN_MASK_FLA=1). This is NOT precisely predictable from the
+#     config — it is the EMPIRICAL risk to WATCH at the first training step.
+#   CONFIDENCE that 131k fits WITHOUT CP/DCP: MODERATE-HIGH for KV (A is solidly
+#     under budget) and the checkpointed full-attn activations (B-flash is small);
+#     the ONE caveat is the GDN chunked-scan peak (B-GDN). If the first step OOMs,
+#     it will be the GDN scan, not KV — fall back per the ladder below.
+#
+# --- (C) FALLBACK LADDER on a first-training-step OOM (turn ONE knob per rung) ---
+#   GENERATION OOM at KV bind:   gpu_memory_utilization 0.85 -> 0.80 -> 0.75,
+#                                then max_num_seqs 16 -> 12.
+#   TRAINING activation OOM (the GDN-scan risk): then walk the CONTEXT down:
+#       131072  ->  98304  ->  65536    (max_model_len + max_generate_length pair
+#       below + max_input_tokens kept consistent). At each ctx rung re-confirm the
+#       first step before proceeding. Only if 65536 still OOMs do we reconsider CP.
+#   (micro_forward is already 1; train micro is 1 — no microbatch knob left to
+#    turn before walking context.)
+# =============================================================================
+#
+# Launch (UNLAUNCHED — supervisor pushes + launches after Rung-0 + remaining OPEN DECISIONS):
+#   source /Users/benjaminfeuer/Documents/secrets.env
+#   python -m rl.cloud.launch_rl_iris \
+#     --rl_config hpc/skyrl_yaml/iris/8node_qwen3_6_35b_a3b_baseline_seqnorm_tis.yaml \
+#     --model_path Qwen/Qwen3.6-35B-A3B \
+#     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
+#     --num-nodes 8 \
+#     --gpus_per_node 8 \
+#     --cpu 48 \
+#     --max-retries 1 \
+#     --rendezvous-dir s3://marin-na/iris/rl-q36-35b-131k/<run> \
+#     --job-name rl-q36-35b-131k --priority interactive --no-wait
+# =============================================================================
+
+entrypoint: examples.terminal_bench.entrypoints.main_tbench
+
+# Hydra config groups (+ prefix in CLI)
+config_groups:
+  terminal_bench_config: terminal_bench
+
+# Terminal bench / agentic environment settings
+terminal_bench:
+  # R2 (s3://) so rollouts survive pod GC/preempt; cw pods inject R2 creds.
+  # null = ephemeral pod-local. launch_rl_iris.py --trials-dir auto overrides per-job.
+  trials_dir: s3://marin-na/iris/rl-8node-qwen3-6-35b-a3b-baseline-seqnorm-tis/trace_jobs
+
+  harbor:
+    name: terminus-2
+    max_episodes: 999999
+    enable_summarize: false
+    store_all_messages: true
+    trajectory_config:
+      raw_content: true
+    enable_episode_logging: false
+    record_terminal_session: false
+    enable_pane_logging: false
+
+    strict_json_parser: true
+
+    interleaved_thinking: true
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: true
+    # 1800s — the 35B is slower per agent step than the 8B; longer ceiling lets
+    # boundary samples finish rather than truncating. AgentTimeoutError stays
+    # PASSTHROUGH. Tune down only if driver host-memory pressure shows up.
+    override_timeout_sec: 1800
+
+    override_cpus: 1
+    override_memory_mb: 2048
+    override_storage_mb: 2048
+
+    auto_snapshot: true
+
+    verifier_override_timeout_sec: 120
+
+    max_retries: 3
+    min_wait_sec: 60.0
+    max_wait_sec: 600.0
+    wait_multiplier: 2.0
+
+    exclude_exceptions:
+      - VerifierTimeoutError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - VerifierOutputParseError
+      - VerifierRuntimeError
+
+    # 150 concurrent trials — the long-ctx host-RAM-safe value the 30B/80B 131k
+    # R3 arms run. At 131k each resident trajectory holds a large rollout working
+    # set AND (R3 ON) per-token routing arrays [gen_len x 40 MoE layers x top-8]
+    # in host RAM on its RolloutCoordinator — the 150 cap is the documented R3
+    # host-RAM ceiling. Drop toward 100 if a RolloutCoordinator OOMs.
+    # RE-RETUNED 2026-06-26 (engine-STARVATION fix): 24 -> 96. The 150->24 cut over-corrected:
+    # at 24, the 8 TP4 engines (8 x max_num_seqs 20 = 160 gen slots) sat ~95% IDLE (4-7 reqs
+    # total, KV 0.7%) because trials are sandbox-bound between short turns -> only ~5 generate at
+    # once. 96 (< 160 slots, so it won't flood the queue like the 30B's 150 did) feeds ~19
+    # concurrent steady-state. Raise further if still underfed; drop toward 64 if a
+    # RolloutCoordinator OOMs the host-RAM ceiling.
+    n_concurrent_trials: 96
+
+    log_level: INFO
+
+    enable_reward_shaping: false
+
+    # collect_rollout_details=true -> per-token rollout logprobs REQUIRED for
+    # trainer.algorithm.use_tis (the trainer asserts non-null rollout_logprobs).
+    collect_rollout_details: true
+
+    enable_error_classification: true
+    mask_exceptions:
+      - DaytonaError
+      - EnvironmentStartTimeoutError
+      - NetworkError
+      - ConnectionError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - AgentEnvironmentTimeoutError
+    default_error_treatment: zero
+    passthrough_exceptions:
+      - AgentTimeoutError
+      - ContextLengthExceededError
+
+  # 131k: input 130000 (+1072 headroom below max_model_len 131072) + 16384 output.
+  # Matches the 30B 131k config's caps (litellm token-counter drift guard).
+  model_info:
+    max_input_tokens: 130000
+    max_output_tokens: 16384
+
+  archiving:
+    enabled: false
+
+  trace_upload:
+    enabled: true
+    repo_org: DCAgent
+    episodes: last
+    dataset_type: SFT
+    cleanup: true
+
+# =============================================================================
+# Trainer configuration
+# =============================================================================
+trainer:
+  strategy: fsdp2
+  # GatedDeltaNet packing leak (tmax-aligned, REQUIRED for trustworthy metrics):
+  # SkyRL defaults use_sample_packing TRUE, but the GDN conv1d + chunked-delta-rule
+  # carry recurrent/conv state ACROSS packed-sequence boundaries (no seq_idx /
+  # cu_seqlens threaded into the GDN kernels), leaking state between independent
+  # sequences -> WRONG per-token logprobs + INFLATED KL. tmax measured
+  # vllm_vs_local_logprob_diff_mean ~0.21 WITH packing vs ~0.02 WITHOUT. Disabling
+  # packing is the minimal correct setting for this hybrid arch. (The alternative
+  # is porting tmax's qwen3_5_packing_patch.py to thread seq_idx/cu_seqlens through
+  # the GDN path; revisit only if packing throughput becomes necessary.)
+  use_sample_packing: false
+  # GRID CELL 35B-B (EP8×FSDP2×CP2). CP=2 ENABLED => MUST switch off flash-attn:
+  # SkyRL rejects flash-attn varlen under context parallel (model_wrapper.py
+  # resolve_attn_implementation G2 assert — CP>1 requires sdpa/flex). So unlike the
+  # CP=1 baseline (which used flash-attn), this CP cell pins ring-SDPA.
+  attn_backend: sdpa
+  flash_attn: false
+  # Gradient checkpointing ON (recompute-safe) — REQUIRED at 131k; see MEMORY (B).
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+  algorithm:
+    advantage_estimator: rloo_n
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    eps_clip_low: 0.2
+    eps_clip_high: 0.05
+    # seqnorm: global length-unbiased sequence-level normalizer.
+    loss_reduction: seq_mean_token_sum_norm_global
+    # Truncated Importance Sampling: bounds the residual off-policy ratio from
+    # the vLLM(generation) vs FSDP(recompute) bf16 logprob gap. PAIRED WITH R3:
+    # R3 router-replay (fsdp_config.moe_router_replay below) makes the train
+    # forward replay the EXACT experts vLLM sampled (pi_old == pi_train for the
+    # MoE routing) so the importance ratio is well-conditioned; TIS then clamps
+    # the small remaining bf16 gap (clamp(exp(old-rollout), cap)). On a MoE,
+    # TIS essentially REQUIRES R3 — without router-replay the recompute uses
+    # native/sentinel routing != the rollout routing and the ratio explodes.
+    # REQUIRES collect_rollout_details (above).
+    use_tis: true
+    tis_imp_ratio_cap: 2.0
+
+  epochs: 2
+  max_steps: 80
+  update_epochs_per_batch: 1
+
+  train_batch_size: 64
+  policy_mini_batch_size: 64
+  eval_batch_size: 64
+
+  # micro_train 1 (sharded all-gather + MoE expert FFN backward dominates).
+  # micro_forward 1 at 131k (one 131k seq/rank at a time — the conservative
+  # long-ctx activation choice; raise to 2 ONLY if the first step has HBM
+  # headroom after the GDN-scan peak is observed). See MEMORY (B)/(C).
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+
+  # 131072: prompts may use the full context (no internal truncation below ctx).
+  max_prompt_length: 131072
+
+  eval_interval: 999999
+  eval_before_train: false
+  # ckpt_interval=1: 131k 35B steps are slow; bank step-1 so a walltime/transient
+  # kill never resumes from 0.
+  ckpt_interval: 1
+  resume_mode: latest
+  hf_save_interval: 5
+  hf_hub_repo_id: null
+  hf_hub_private: false
+  hf_hub_revision: main
+
+  enable_db_registration: false
+
+  project_name: OpenThoughts-Agent
+  log_level: INFO
+  tracker_commit_each_step: true
+  logger: wandb  # CoreWeave has egress -> log to dogml/OpenThoughts-Agent (entity via WANDB_ENTITY, defaulted by launcher)
+
+  run_name: null
+  ckpt_path: null
+  export_path: null
+
+  # Policy optimizer — production hparams (lr 8e-6, max_grad_norm 0.9 collapse guard).
+  policy:
+    optimizer_config:
+      lr: 8e-6
+      weight_decay: 0.0
+      adam_betas: [0.9, 0.999]
+      max_grad_norm: 0.9
+    fsdp_config:
+      # REQUIRED for the 35B optimizer state to fit (offload to node RAM) AND to
+      # leave HBM for the 131k activations. See MEMORY (B).
+      cpu_offload: true
+      reshard_after_forward: true
+      # FSDP wrap policy — PIN the transformer layer class explicitly. The auto-
+      # detect reads the model's `_no_split_modules`, which for the MULTIMODAL
+      # Qwen3_5MoeForConditionalGeneration is ['Qwen3_5MoeDecoderLayer',
+      # 'Qwen3_5MoeVisionBlock'] (probed on Leonardo eval-qwen35 / transformers
+      # 5.12.1). On the TEXT-ONLY policy backbone, `Qwen3_5MoeVisionBlock` is not
+      # present, so get_fsdp_wrap_policy's get_module_class_from_name raised
+      # "Could not find the transformer layer class to wrap" (killed v1/v2/v3).
+      # The hybrid arch (10 full-attn + 30 GatedDeltaNet layers) uses a SINGLE
+      # decoder-layer class `Qwen3_5MoeDecoderLayer` (it switches attn type
+      # internally per layer) — so pinning that one class wraps every decoder
+      # layer; the vision tower is correctly excluded (text-only RL).
+      wrap_policy:
+        # MUST be a LIST (get_fsdp_wrap_policy iterates this value; a bare scalar
+        # string is iterated CHARACTER-BY-CHARACTER -> "Could not find the
+        # transformer layer class to wrap" — the v5 failure). The hybrid arch
+        # (10 full-attn + 30 GatedDeltaNet) uses the SINGLE Qwen3_5MoeDecoderLayer
+        # class. After the Stage-1 text-CausalLM unwrap (model_wrapper.py ->
+        # qwen3_5_vlm.unwrap_to_text_causal_lm) the decoder layers sit at the top
+        # level and _no_split_modules drops the vision class, so this pin (and the
+        # autodetect path) both resolve.
+        transformer_layer_cls_to_wrap: ["Qwen3_5MoeDecoderLayer"]
+      # MESH (GRID CELL 35B-B): EP=8 x FSDP=2 x CP=2 = 32 policy GPU = 4 CoreWeave nodes.
+      # MoE dim-0 guard (num_experts//EP)%FSDP==0: 256/EP8=32; 32/FSDP2=16 -> VALID.
+      fsdp_size: 2
+      expert_model_parallel_size: 8
+      # CP=2 (the "bump CP" escalation cell). Ring-SDPA over the 131k sequence.
+      # ⚠ GDN+CP CAVEAT: this 35B is a HYBRID arch (30 GatedDeltaNet linear-attn
+      # layers). SkyRL ACCEPTS CP>1 here, but there is NO CP-aware GDN kernel — the
+      # ring-SDPA sequence shard is correct for the 10 full-attn layers but the GDN
+      # chunked recurrence sees only its local block's state => numerically WRONG
+      # logprobs. This is a MEMORY/THROUGHPUT feasibility probe ONLY (the grid metric
+      # is memory-feasibility, NOT reward); do NOT treat a surviving cell as a
+      # trainable canonical config without a CP1-vs-CP2 logprob-parity smoke
+      # (tests/gpu/test_cp_logprob_parity.py). See tracker GRID DRIVER.
+      context_parallel_size: 2
+      cp_style: ring_sdpa
+      cp_rotate_method: allgather
+      # R3 ON: moe_router_replay TRUE — the train forward replays the EXACT
+      # rollout routing (pi_old == pi_train for the MoE) so TIS's importance
+      # ratio stays sane on this MoE. grouped-GEMM ON (fused per-expert FFN,
+      # vLLM-loadable per-expert names — required by the router-replay path).
+      moe_router_replay: true
+      moe_grouped_gemm: true
+      ep_comm_backend: torch
+  ref:
+    # INERT (use_kl_loss=false -> no RefWorker built). Mirror for config-consistency.
+    model:
+      path: Qwen/Qwen3.6-35B-A3B
+    fsdp_config:
+      cpu_offload: true
+      reshard_after_forward: true
+      # Mirror the policy wrap-policy pin (see policy.fsdp_config above) — inert
+      # here (no RefWorker built), but kept consistent.
+      wrap_policy:
+        # MUST be a LIST (get_fsdp_wrap_policy iterates this value; a bare scalar
+        # string is iterated CHARACTER-BY-CHARACTER -> "Could not find the
+        # transformer layer class to wrap" — the v5 failure). The hybrid arch
+        # (10 full-attn + 30 GatedDeltaNet) uses the SINGLE Qwen3_5MoeDecoderLayer
+        # class. After the Stage-1 text-CausalLM unwrap (model_wrapper.py ->
+        # qwen3_5_vlm.unwrap_to_text_causal_lm) the decoder layers sit at the top
+        # level and _no_split_modules drops the vision class, so this pin (and the
+        # autodetect path) both resolve.
+        transformer_layer_cls_to_wrap: ["Qwen3_5MoeDecoderLayer"]
+      # MESH mirror (GRID CELL 35B-B): EP=8 x FSDP=2 x CP=2. Inert (no RefWorker).
+      fsdp_size: 2
+      expert_model_parallel_size: 8
+      context_parallel_size: 2
+      cp_style: ring_sdpa
+      cp_rotate_method: allgather
+      moe_router_replay: true
+      moe_grouped_gemm: true
+      ep_comm_backend: torch
+
+  # Disaggregated placement: policy+ref share 4 nodes / 32 GPUs (FSDP), the 4
+  # generation nodes (8 TP=4 engines) are allocated separately.
+  # policy/ref_num_gpus_per_node are forced to 8 by --gpus_per_node 8; listed for
+  # documentation. policy_num_nodes / ref_num_nodes are honored from the YAML.
+  placement:
+    colocate_all: false
+    policy_num_nodes: 4
+    ref_num_nodes: 4
+    policy_num_gpus_per_node: 8
+    ref_num_gpus_per_node: 8
+    # Reserve the 4 policy nodes (STRICT_SPREAD) BEFORE the vLLM PG is created so
+    # policy claims its nodes first and the 8 TP=4 engines land on the disjoint 4
+    # gen nodes (prevents the policy-FSDP-lands-on-an-engine-GPU init OOM).
+    policy_strict_spread_pg: true
+    # One {GPU:1,CPU:1} bundle PER policy GPU -> each EP/FSDP actor pins to a
+    # distinct physical GPU (prevents GPU-0-stacking init OOM in the EP layout).
+    policy_per_gpu_bundles: true
+    policy_force_cvd_mask: true
+
+  fully_async:
+    max_staleness_steps: 16
+    num_parallel_generation_workers: 256
+
+# =============================================================================
+# Generator configuration (vLLM)
+# =============================================================================
+generator:
+  backend: vllm
+  timeout_multiplier: 1.0
+  model_dtype: bfloat16
+
+  # TP=4 — the Qwen3-Next/3.5 hybrid-MoE model-card recommendation. Divides 16
+  # attn heads (4/GPU) + 256 experts (64/GPU); 2 KV heads REPLICATED across TP
+  # (GQA, legal — and the reason the 131k KV is not sharded; see MEMORY (A)).
+  # RETUNED 2026-06-27: TP=4 was overkill for a 35B-A3B MoE (~3B active) -> TP=2 + EP=2.
+  # A TP=2 engine places intra-node on 2 of the 8 GPUs (NVLink decode); 4 engines/node.
+  inference_engine_tensor_parallel_size: 2
+  # 16 TP=2 engines = 32 inference GPU = 4 engine nodes (4 engines/node). Set EXPLICITLY
+  # (not null): the launcher derivation counts the 4 policy-only nodes too and would be WRONG.
+  num_inference_engines: 16
+
+  # EP=2 (= TP), ENABLED 2026-06-27: the 256 experts are expert-parallel across the engine's
+  # 2 GPUs (128 whole experts/GPU) rather than TP-sharded. 256 % 2 == 0. (Was UNVALIDATED on
+  # qwen3_5_moe in vLLM — watch generation correctness on relaunch.)
+  inference_engine_expert_parallel_size: 2
+
+  # DCP OFF (decode-context-parallel = 1): the hybrid arch's low 131k KV (~2.68
+  # GB/seq, ~20 concurrent at 0.85) does NOT need KV sharding. If DCP were ever
+  # wanted, dcp <= tp/num_kv_heads = 4/2 = 2, so dcp=2 is already TP-legal — but
+  # it is intentionally OFF here (see plan: layer DCP only if a later rung needs it).
+  inference_engine_decode_context_parallel_size: 1
+
+  # RAY EXECUTOR (mp_backend FALSE) — R3-MANDATORY. R3 routed-experts capture
+  # requires the ray executor path (the mp executor cannot emit per-token routing
+  # over /chat/completions for the FSDP2 replay hook). The ray backend splits
+  # TP=4 into 4x{GPU:1} bundles (STRICT_PACK on one node). Requires
+  # colocate_all=false (set above). async_scheduling is disabled below to satisfy
+  # vLLM's R3 guard.
+  inference_engine_mp_backend: false
+
+  n_samples_per_prompt: 8
+  eval_n_samples_per_prompt: 8
+
+  # 0.85 — the hybrid arch keeps KV pressure low (only 10/40 layers grow KV). At
+  # 131k this leaves ~53 GB KV pool / ~20 concurrent seqs (MEMORY (A)). Drop
+  # 0.85 -> 0.80 -> 0.75 on a generation KV-bind OOM (see MEMORY (C)).
+  gpu_memory_utilization: 0.85
+
+  # 16 at 131k — under the ~20-concurrency ceiling from MEMORY (A), with prefill
+  # headroom. Drop to 12 if the vLLM "Maximum concurrency" line comes in low.
+  # RETUNED 2026-06-26 (throughput-starvation fix): 16 -> 20. Modest bump to the
+  # documented ~20-concurrency KV ceiling at gpu_mem 0.85 (NOT higher — 24 risks an
+  # OOM at KV bind per MEMORY (A)); more decode slots help drain the rollout. Drop back
+  # to 16->12 if the vLLM "Maximum concurrency" line comes in low / KV bind OOMs.
+  max_num_seqs: 20
+  max_num_batched_tokens: 16384
+
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  enable_http_endpoint: true
+  enable_ray_prometheus_stats: false
+  vllm_stats_interval: 1
+  append_eos_token_after_stop_str_in_multi_turn: true
+  max_turns: 999999
+
+  sampling_params:
+    # 131k: 16384 max generation (matches the 30B 131k arm).
+    max_generate_length: 16384
+    temperature: 0.7
+    top_p: 0.95
+    top_k: 20
+
+  engine_init_kwargs:
+    # 131072 — WELL within native 262144 => NO YaRN rope_scaling / hf_overrides
+    # (do NOT add). The shipped rope is rope_type "default" with no scaling.
+    max_model_len: 131072
+    # Interleaved-thinking template; relative path resolved against /app (synced repo).
+    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
+    # Disable vLLM custom CUDA all-reduce (safe vs the NCCL weight-sync deadlock
+    # class; carried from the validated arms). Safe at TP=4.
+    disable_custom_all_reduce: true
+    # R3 ON: emit per-token expert routing over /chat/completions, consumed by
+    # the FSDP2 router-replay hook (moe_router_replay above). Capture is
+    # arch-agnostic in the vLLM fork — it hooks at the FusedMoE layer
+    # (routed_experts_capturer), and qwen3_5_moe routes its Qwen3NextSparseMoeBlock
+    # through FusedMoE (same path as the validated 80B-A3B/Qwen3-Next R3 arm), so
+    # enable_return_routed_experts is supported for Qwen3_5MoeForConditionalGeneration.
+    enable_return_routed_experts: true
+    # MUST be false under the RAY executor (trips vLLM's R3 guard otherwise).
+    async_scheduling: false
+    # DCP=1 => VLLM_ALLOW_ROUTED_EXPERTS_DCP is NOT needed (that guard-lift env is
+    # only for DCP>1). Intentionally absent from extra_env.
+
+# Data paths (set via CLI --train_data / --val_data)
+data:
+  train_data: []
+  val_data: []
+
+# K-actor rollout fan-out — ON (breaks the single-event-loop GIL ceiling).
+rollout:
+  fanout:
+    enabled: true
+    num_coordinators: 4
+    cpus_per_coordinator: 8
+
+# =============================================================================
+# Runtime env (forwarded into every task pod via the launcher's EnvironmentSpec
+# from this TOP-LEVEL extra_env: block — LOAD-BEARING; the Iris path has no
+# container: block, so without this the YAML env is SILENTLY DROPPED).
+# CoreWeave-Docker translation: NO APPTAINERENV_* / SIF-only vars; NO GH200 NCCL
+# P2P disables (would cripple the intra-node TP=4 NVLink all-reduce); NO
+# HF_HUB_OFFLINE (CoreWeave has egress).
+# =============================================================================
+extra_env:
+  # GatedDeltaNet linear-attention training path: force the proven pure-torch GDN
+  # (the fla wheel is broken). LOAD-BEARING for the 30 linear_attention layers
+  # (and the long-ctx chunked scan whose peak we watch at step 1 — MEMORY (B)).
+  SKYRL_GDN_MASK_FLA: "1"
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  # --- vLLM serve flags ---
+  VLLM_USE_FLASHINFER_SAMPLER: "0"
+  VLLM_ATTENTION_BACKEND: FLASH_ATTN
+  # gpu-rl RL conda env prefix. Hardcoded literal (NOT $CONDA_PREFIX/lib): k8s
+  # does NOT shell-expand $VAR in injected env.
+  LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib
+  # --- NCCL: H100+IB DEFAULTS (do NOT disable P2P). Observability + raised timeouts. ---
+  NCCL_DEBUG: WARN
+  SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "1800"
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "1800"
+  TORCH_NCCL_ENABLE_MONITORING: "1"
+  TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+  TORCH_FR_BUFFER_SIZE: "2000"
+  TORCH_NCCL_TRACE_CPP_STACK: "1"
+  TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /tmp/nccl_fr_rank
+  # --- R3 (router-replay) transport env — the R3 routed_experts side-message
+  #     plumbing (carried from the 30B 131k config). Sized for the worst-case
+  #     per-step routing payload at 131k. ---
+  # Widen the shm message-queue chunk above the R3 routed_experts worst case at 131k.
+  VLLM_MQ_MAX_CHUNK_BYTES_MB: "160"
+  # Timeout to dequeue the deferred R3 routed_experts side-message.
+  VLLM_ROUTED_EXPERTS_SIDE_TIMEOUT_SECONDS: "1200"
+  # Per-step model-execute RPC timeout (headroom for the long 131k first-prefill).
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "900"
+  # NOTE: VLLM_ALLOW_ROUTED_EXPERTS_DCP is INTENTIONALLY ABSENT — that guard-lift
+  # is only needed at DCP>1, and DCP=1 here. NO EPDIAG probe env — this is the
+  # minimal R3 config, not the EP-deadlock-debug vehicle (the 30B SeqNum=145 line).
+
+# =============================================================================
+# LAUNCH COMMAND  (GRID CELL 35B-B)  —  DRY-RUN VERIFIED 2026-06-28
+# Supervisor: drop --dry-run to launch. Respect Daytona <=6 RUNNING RL/cluster +
+# <=2 concurrent 8-node gangs (=16 nodes); check free-node count first
+# (.claude/ops/iris/coreweave_gpu_ops.md "Are nodes actually free?").
+# =============================================================================
+#   source /Users/benjaminfeuer/Documents/secrets.env
+#   export KUBECONFIG=~/.kube/coreweave-iris-gpu
+#   python -m rl.cloud.launch_rl_iris \
+#     --rl_config hpc/skyrl_yaml/iris/grid_35b_EP8_FSDP2_CP2.yaml \
+#     --model_path Qwen/Qwen3.6-35B-A3B \
+#     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
+#     --num-nodes 8 --gpus_per_node 8 --cpu 48 --max-retries 1 --memory 1700GB \
+#     --skyrl-ref fcf09ede \
+#     --rendezvous-dir s3://marin-na/iris/grid/35B-B/x \
+#     --job-name grid-35b-b --priority interactive --no-wait
+# (For the dry-run validation, append --dry-run instead of --no-wait.)
+# =============================================================================
