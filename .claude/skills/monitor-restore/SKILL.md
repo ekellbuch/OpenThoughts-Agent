@@ -105,11 +105,12 @@ LEONARDO CAMPAIGN DRIVER (the priority — drive it every sweep):
   the affected universe is `affected_evals.md` in the same dir. **Driver** (per the tracker's "🚦 CAMPAIGN DRIVER"
   section): each sweep, (1) HARVEST every leg gone terminal since the last pass — read new_score, compute
   `delta = new_score − old_deflated`, flip the row `🚀 → ✅/⚠️`, flag genuinely-negative deltas beyond ~1 stderr;
-  (2) REFILL the next still-`⏳ pending` **Section A** rows (Section A before B) until **32 RUNNING/PENDING legs on
-  Leonardo** (raised 16→32 on 2026-06-26 per user directive). **⚠️ DAYTONA-CAP GUARD (HARD):** 32 concurrent ≈
-  4× the original Daytona sandbox churn; the ORG2 (`DAYTONA_API_KEY`) snapshot cap is **60 — never raise it**.
-  Snapshots DON'T scale with leg count (legs reuse `harbor__*` snapshots); at 32 the binding limit is concurrent
-  **SANDBOXES** (~32 legs × ~32 trials). Clean stale sandboxes (`utils-cleanup-stale-sandboxes` /
+  (2) REFILL the next still-`⏳ pending` **Section A** rows (Section A before B) until the **in-flight target the
+  tracker records for this series** — read it from the tracker's "🚦 CAMPAIGN DRIVER" / latest-sweep "Target =" line.
+  The count is a **property of the experiment series, NOT this skill — do NOT hardcode a number here**; look it up
+  each sweep (it is raised/lowered by directive in the tracker). **⚠️ DAYTONA-CAP GUARD (HARD):** the ORG2
+  (`DAYTONA_API_KEY`) snapshot cap is **60 — never raise it**. Snapshots DON'T scale with leg count (legs reuse
+  `harbor__*` snapshots); the binding limit is concurrent **SANDBOXES** (~target legs × ~32 trials). Clean stale sandboxes (`utils-cleanup-stale-sandboxes` /
   `scripts/daytona/cleanup_stale_sandboxes.py --delete`) for headroom before/while refilling; if 32 won't fit,
   launch as many as fit and report the binding limit. Classify every live leg against the tracker + affected list FIRST — KEEP valid in-flight affected
   re-evals, CANCEL only confirmed duplicates of already-✅ rows or off-campaign (not-in-affected) legs; do NOT
