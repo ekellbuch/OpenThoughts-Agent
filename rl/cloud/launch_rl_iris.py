@@ -150,11 +150,66 @@ DEFAULT_GPUS_PER_NODE = 8           # gd-8xh100ib-i128 = 8x H100-80GB + IB
 #     1400GB admits the 8-node 131k EP8 gang cleanly AND does the full weight-load with no
 #     cgroup-OOM. Lower toward the real need on an admission stall; NEVER raise toward 1800.
 #     (1000-1200GB suffices for 2-node smokes.) See .claude/ops/iris/coreweave_gpu_ops.md.
-#   - DISK 512GB is adequate (rendezvous/checkpoints/traces go to R2/s3, not node-local disk).
+#   - DISK defaults to "auto" = 80% of the node's live allocatable ephemeral-storage (~27.2 TiB
+#     → ~21 TiB). WHY NOT the old 512GB: the long MoE training step's Ray object store spills to
+#     /tmp (a metered emptyDir that counts against the --disk ephemeral-storage limit), growing
+#     to >1.6 TB and EVICTING the pod (2026-06-28). Whole-node-exclusive gangs have NO co-tenants,
+#     so reserving disk is pure waste — claim ~80%. (R2 object-spilling, the durable fix, is also
+#     on; this headroom is belt-and-suspenders.) Pass --disk explicitly to override.
 DEFAULT_CPU_PER_NODE = 48.0
 DEFAULT_MEMORY_PER_NODE = "1400GB"
-DEFAULT_DISK_PER_NODE = "512GB"
+# --disk "auto" → DISK_FRACTION of the GPU node's live allocatable ephemeral-storage at launch
+# (FALLBACK_DISK_GIB iff the node query fails). See _resolve_default_disk().
+DEFAULT_DISK_PER_NODE = "auto"
+DISK_FRACTION = 0.80
+FALLBACK_DISK_GIB = 21800  # ~80% of the h100-8x ~27.2 TiB allocatable, used only if kubectl is unavailable
 DEFAULT_PRIORITY = "interactive"
+
+
+def _parse_quantity_to_gib(q: str) -> float:
+    """Parse a k8s resource quantity (plain bytes, or Ki/Mi/Gi/Ti binary / k/M/G/T decimal suffix) to GiB."""
+    q = q.strip()
+    for suf, mult in (("Ki", 2**10), ("Mi", 2**20), ("Gi", 2**30), ("Ti", 2**40), ("Pi", 2**50)):
+        if q.endswith(suf):
+            return float(q[: -len(suf)]) * mult / 2**30
+    for suf, mult in (("k", 1e3), ("M", 1e6), ("G", 1e9), ("T", 1e12), ("P", 1e15)):
+        if q.endswith(suf):
+            return float(q[: -len(suf)]) * mult / 2**30
+    return float(q) / 2**30  # plain bytes
+
+
+def _resolve_default_disk(fraction: float = DISK_FRACTION) -> str:
+    """``fraction`` of the GPU node's LIVE allocatable ephemeral-storage, as a ``"<N>Gi"`` string.
+
+    Whole-node-exclusive gangs have no co-tenants, so claim most of the node NVMe (the old fixed
+    512GB default evicted long MoE steps once Ray's object store spilled to the metered /tmp).
+    Queries kubectl for the MIN allocatable across 8-GPU nodes (never over-request a smaller node);
+    falls back to FALLBACK_DISK_GIB if kubectl is unavailable (requires KUBECONFIG)."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["kubectl", "get", "nodes", "-o",
+             r'jsonpath={range .items[*]}{.status.capacity.nvidia\.com/gpu}{" "}'
+             r'{.status.allocatable.ephemeral-storage}{"\n"}{end}'],
+            capture_output=True, text=True, timeout=20, check=True,
+        ).stdout
+        allocs = [
+            _parse_quantity_to_gib(p[1])
+            for p in (line.split() for line in out.splitlines())
+            if len(p) == 2 and p[0] == "8"
+        ]
+        if allocs:
+            gib = int(min(allocs) * fraction)
+            print(f"[rl-iris] --disk auto: {fraction:.0%} of node allocatable "
+                  f"(min {min(allocs):.0f}GiB across {len(allocs)} GPU nodes) = {gib}Gi", flush=True)
+            return f"{gib}Gi"
+        print("[rl-iris] --disk auto: no 8-GPU nodes returned by kubectl; "
+              f"using fallback {FALLBACK_DISK_GIB}Gi", flush=True)
+    except Exception as exc:  # noqa: BLE001 - best-effort; fall back rather than block a launch
+        print(f"[rl-iris] --disk auto: kubectl node query failed ({type(exc).__name__}: {exc}); "
+              f"using fallback {FALLBACK_DISK_GIB}Gi", flush=True)
+    return f"{FALLBACK_DISK_GIB}Gi"
 # The gpu-rl image's RL venv (deps-only: torch 2.11 + vLLM fork + skyrl editable).
 RL_PYTHON = "/opt/openthoughts/envs/rl/bin/python"
 SKYRL_HOME = "/opt/skyrl"
@@ -252,7 +307,10 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--disk", default=DEFAULT_DISK_PER_NODE,
-        help="Ephemeral disk per node.",
+        help=f"Ephemeral disk per node. Default 'auto' = {int(DISK_FRACTION * 100)}%% of the GPU "
+             "node's live allocatable ephemeral-storage (whole-node-exclusive gangs have no "
+             "co-tenants, so claim most of the node NVMe — keeps Ray object-spill / checkpoints "
+             "clear of the ephemeral-storage eviction). Pass an explicit value (e.g. 4000GB) to override.",
     )
     parser.add_argument(
         "--ray-port", "--ray_port", dest="ray_port", type=int, default=6379,
@@ -547,6 +605,12 @@ def main() -> int:
 
     # Per-task resources: a WHOLE node (8 H100 + IB), one task per node.
     gpu_spec = f"{args.gpu_variant}x{args.gpus_per_node}"
+
+    # Resolve the "auto" disk default to ~80% of the node's live allocatable ephemeral-storage.
+    # (Whole-node-exclusive gangs have no co-tenants → reserving disk is wasted; a too-low fixed
+    # default evicted long MoE steps once Ray spilled to the metered /tmp. See _resolve_default_disk.)
+    if str(args.disk).strip().lower() == "auto":
+        args.disk = _resolve_default_disk()
 
     user = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
     print(f"[rl-iris] Job:        /{user}/{args.job_name}", flush=True)
