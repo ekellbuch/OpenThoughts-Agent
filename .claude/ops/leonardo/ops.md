@@ -1,3 +1,10 @@
+## ⚠ SCHEDULED MAINTENANCE — `maint_3006_boost` reservation 2026-06-30 07:00 → 2026-07-01 07:00 UTC
+
+The **whole boost (GPU) partition is reserved/down for 24h**. Implications for any sweep in this window:
+- **Submits that would overlap the reservation are held `N/A`** — wall-times must fit before 06-30 07:00 UTC, else they queue until 07-01 07:00. (This forced w0's resume `48079459` to a 16h wall → it walls out ~step 304, needs a post-maintenance successor to finish →330.)
+- **Jobs still RUNNING at 06-30 07:00 UTC get drained** by the reservation — ensure resumable checkpoints; expect the slower eval legs / RL cells to die there and need a **post-maintenance (07-01 07:00+) resume sweep**.
+- Remove this block once the window has passed.
+
 ## CINECA Leonardo Access
 
 **SSH**: Uses ControlMaster multiplexing + step-ca certificate auth:
