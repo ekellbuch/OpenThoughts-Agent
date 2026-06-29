@@ -50,6 +50,25 @@ RUN_TAG_ARG="${4:-}"
 
 # --- Read env vars from listener (with defaults) ---
 N_CONCURRENT="${EVAL_N_CONCURRENT:-32}"
+# Vista-only concurrency ceiling (FIX B, 2026-06-29). The shared eval presets set
+# n_concurrent=32 (eval/presets/{swebench,tb2,v2}.yaml), forwarded here as
+# EVAL_N_CONCURRENT and passed to `harbor jobs start` via --n-concurrent (which
+# OVERRIDES any harbor-YAML n_concurrent_trials — see harbor cli/jobs.py:1095).
+# On Vista that drives too many simultaneous Daytona create_sandbox/start calls →
+# bursty env-build contention → EnvironmentStartTimeoutError (1800s) → trials
+# finalize as VerificationNotCompletedError with 0 reward (diagnosed in
+# agent_logs/2026-06-29_tacc_swebench_verifier_vnc.md). Clamp the START-path
+# concurrency to <= TACC_N_CONCURRENT_CEILING here — this file is Vista-EXCLUSIVE
+# (only eval/clusters/tacc.yaml references it; Leonardo/Jupiter use their own
+# eval_harbor.sbatch), so the shared presets / harbor YAMLs are UNTOUCHED and
+# Leonardo's concurrency is unaffected. (The RESUME path reads n_concurrent_trials
+# from the run's stored config.json, not --n-concurrent, so it is clamped
+# separately in the resume block below.)
+TACC_N_CONCURRENT_CEILING="${EVAL_TACC_N_CONCURRENT_CEILING:-8}"
+if [ "$N_CONCURRENT" -gt "$TACC_N_CONCURRENT_CEILING" ]; then
+    echo "Vista concurrency ceiling: capping N_CONCURRENT $N_CONCURRENT -> $TACC_N_CONCURRENT_CEILING"
+    N_CONCURRENT="$TACC_N_CONCURRENT_CEILING"
+fi
 GPU_MEMORY_UTIL="${EVAL_GPU_MEMORY_UTIL:-0.90}"
 DAYTONA_ERROR_THRESHOLD="${EVAL_DAYTONA_THRESHOLD:-999999}"
 CONFIG_YAML="${EVAL_CONFIG_YAML:-dcagent_eval_config_no_override.yaml}"
@@ -440,10 +459,17 @@ if [ -d "$RUN_DIR" ] && [ -f "$RUN_DIR/config.json" ]; then
     # host" (jobs 790834/835/836, 2026-06-28: 600+ conn-fails, 0 scores). Rewrite
     # api_base to THIS allocation's MASTER_ADDR so the resume dials the live node.
     NEW_API_BASE="http://${MASTER_ADDR}:8000/v1"
-    echo "Refreshing config.json api_base -> $NEW_API_BASE"
-    $PYTHON_BIN - "$RUN_DIR/config.json" "$NEW_API_BASE" <<'PY'
+    echo "Refreshing config.json api_base -> $NEW_API_BASE; clamping n_concurrent_trials -> $N_CONCURRENT"
+    # Also clamp n_concurrent_trials in the stored config.json (FIX B, resume path).
+    # `harbor jobs resume` does NOT accept --n-concurrent — it loads config.json
+    # verbatim into JobConfig (cli/jobs.py:1492) and runs at that stored
+    # n_concurrent_trials, which was baked at START time from the shared preset's
+    # 32. Rewrite it down to the Vista ceiling ($N_CONCURRENT) so the VNC-resume
+    # re-runs at the lower concurrency too (else the resume re-hits the same
+    # Daytona env-start contention and re-VNCs).
+    $PYTHON_BIN - "$RUN_DIR/config.json" "$NEW_API_BASE" "$N_CONCURRENT" <<'PY'
 import json, sys
-cfg_path, new_api_base = sys.argv[1], sys.argv[2]
+cfg_path, new_api_base, n_conc = sys.argv[1], sys.argv[2], int(sys.argv[3])
 with open(cfg_path) as f:
     cfg = json.load(f)
 changed = False
@@ -453,15 +479,31 @@ for agent in cfg.get("agents", []):
         print(f"  agent api_base {kw.get('api_base')!r} -> {new_api_base!r}")
         kw["api_base"] = new_api_base
         changed = True
+# n_concurrent_trials is a top-level JobConfig field in current harbor
+# (models/job/config.py); legacy configs nested it under `orchestrator`. Clamp
+# whichever form the stored config.json uses.
+cur = cfg.get("n_concurrent_trials")
+if isinstance(cur, int) and cur > n_conc:
+    print(f"  n_concurrent_trials {cur} -> {n_conc}")
+    cfg["n_concurrent_trials"] = n_conc
+    changed = True
+orch = cfg.get("orchestrator")
+if isinstance(orch, dict):
+    ocur = orch.get("n_concurrent_trials")
+    if isinstance(ocur, int) and ocur > n_conc:
+        print(f"  orchestrator.n_concurrent_trials {ocur} -> {n_conc}")
+        orch["n_concurrent_trials"] = n_conc
+        changed = True
 if changed:
     with open(cfg_path, "w") as f:
         json.dump(cfg, f, indent=2)
     print("  config.json updated")
 else:
-    print("  api_base already current; no change")
+    print("  api_base + n_concurrent_trials already current; no change")
 PY
     harbor jobs resume \
         -p "$RUN_DIR" \
+        --filter-error-type VerificationNotCompletedError \
         --filter-error-type EnvironmentStartTimeoutError \
         --filter-error-type DaytonaError \
         --filter-error-type DaytonaRateLimitError
