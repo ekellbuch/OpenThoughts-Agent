@@ -392,6 +392,207 @@ def _is_buildable(record: dict) -> bool:
     return True
 
 
+# --------------------------------------------------------------------------- #
+# FULL-SET regeneration from a Harbor-Hub export (data/tmax15k.generate --from-hub-export)
+#
+# The `_is_buildable()` gate above drops the ~5,136 records whose container_def
+# references external `%files` fixtures (e.g. /gpfs/scrubbed/.../image.png) — those
+# files are NOT present in the raw allenai/TMax-15K dataset, so generate.py's source
+# path tops out at ~9,465 buildable tasks. The Harbor-Hub export `tmax/TMax-15K-Harbor`
+# (12,926 tasks) DID ship those fixtures (under environment/_fixtures/), so it is the
+# only source for the FULL unfiltered set. That export is a STALE per-task-patcher
+# artifact (12,839 snapshots: each task bakes its post_install.sh + _fixtures into
+# environment/). This mode re-renders each hub task through the CURRENT
+# 1-shared-Dockerfile contract — base_install (shared, identical across all tasks) +
+# post_install + base64-restored fixtures move into the runtime setup.sh (inlined in
+# instruction.md, shipped in tests/ + solution/), leaving environment/ = one shared
+# Dockerfile => 1 snapshot, full 12,926 tasks, no solution/quality filter.
+# --------------------------------------------------------------------------- #
+
+import base64
+import shlex
+
+
+def _hub_fixtures_block(env_dir: Path) -> str:
+    """Restore environment/_fixtures/<copy-dest> files into the container at setup time.
+
+    The hub Dockerfile COPYs each fixture from _fixtures/<relpath> to a dest path. We
+    re-derive (relpath -> dest) from the Dockerfile's `COPY _fixtures/...` lines and
+    base64-embed each (small: max ~20KB, ~30MB total) so a single self-contained
+    setup.sh recreates them — no environment/ fixture => no per-task snapshot hash.
+    """
+    dockerfile = env_dir / "Dockerfile"
+    fixtures_root = env_dir / "_fixtures"
+    if not dockerfile.exists() or not fixtures_root.is_dir():
+        return ""
+    blocks: list[str] = []
+    for ln in dockerfile.read_text(encoding="utf-8", errors="replace").splitlines():
+        s = ln.strip()
+        if not s.startswith("COPY _fixtures/"):
+            continue
+        parts = shlex.split(s)
+        if len(parts) < 3:
+            continue
+        src_rel = parts[1][len("_fixtures/"):]  # path under _fixtures/
+        dest = parts[2]
+        src_path = fixtures_root / src_rel
+        if not src_path.is_file():
+            continue
+        b64 = base64.b64encode(src_path.read_bytes()).decode("ascii")
+        dest_q = shlex.quote(dest)
+        blocks.append(
+            f"mkdir -p \"$(dirname {dest_q})\"\n"
+            f"base64 -d > {dest_q} <<'TMAX_FIXTURE_EOF'\n{b64}\nTMAX_FIXTURE_EOF"
+        )
+    if not blocks:
+        return ""
+    return "\n# --- restore external fixtures (was COPY _fixtures/...) ---\n" + "\n".join(blocks) + "\n"
+
+
+def _build_hub_setup_script(task_dir: Path, base_install: str) -> str:
+    """Render an idempotent setup.sh from a hub task's base_install + post_install + fixtures."""
+    env_dir = task_dir / "environment"
+    post = (env_dir / "post_install.sh").read_text(encoding="utf-8", errors="replace") if (env_dir / "post_install.sh").exists() else ""
+    # Drop a redundant `export DEBIAN_FRONTEND` (set in the shared image env).
+    post = "\n".join(l for l in post.splitlines() if not re.match(r"\s*export\s+DEBIAN_FRONTEND", l))
+    fixtures = _hub_fixtures_block(env_dir)
+
+    header = dedent(
+        """\
+        #!/usr/bin/env bash
+        # Idempotent task-environment setup, factored out of the TMax Harbor-Hub export
+        # (base_install + post_install + _fixtures) so the Harbor environment/ dir (and
+        # thus the Daytona snapshot) stays shared across all tasks. Re-running is safe:
+        # a sentinel short-circuits the second invocation. Runs at trial time in EVERY
+        # phase (agent via instruction.md, oracle via /solution/setup.sh, verifier via
+        # /tests/setup.sh) -> all phases see the same materialized fixtures + ground truth.
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+
+        SENTINEL="/tmp/.tmax_setup_done"
+        if [ -f "$SENTINEL" ]; then
+            exit 0
+        fi
+
+        git config --global --add safe.directory '*' 2>/dev/null || true
+        """
+    )
+    footer = '\ntouch "$SENTINEL" 2>/dev/null || true\n'
+    # base_install is the SHARED base; it is already baked into SHARED_DOCKERFILE_FULL,
+    # so we do NOT re-run it at trial time (it is a long apt/pip/torch install). Only
+    # the per-task post_install + fixtures run here.
+    return (
+        header
+        + fixtures
+        + "\n# --- begin original post_install body ---\n"
+        + post
+        + "\n# --- end original post_install body ---\n"
+        + footer
+    )
+
+
+# Shared Dockerfile for the FULL set: bakes the hub's shared base_install (the union
+# apt/pip/torch base every hub task was built against) so the runtime setup.sh only has
+# to run each task's post_install + fixtures. One Dockerfile string for all tasks.
+def _shared_dockerfile_full(base_install: str) -> str:
+    bi = base_install.rstrip("\n")
+    return (
+        "FROM ubuntu:22.04\n\n"
+        "ENV DEBIAN_FRONTEND=noninteractive\n"
+        "ENV LC_ALL=C.UTF-8\n"
+        "ENV LANG=C.UTF-8\n"
+        "ENV GOPATH=/home/user/go\n"
+        "ENV PATH=/home/user/go/bin:/home/user/.cargo/bin:$PATH\n"
+        "WORKDIR /app\n\n"
+        "# Shared base install (identical across all TMax-15K-Harbor tasks).\n"
+        "COPY base_install.sh /tmp/base_install.sh\n"
+        "RUN bash /tmp/base_install.sh && rm /tmp/base_install.sh\n\n"
+        "WORKDIR /app\n"
+    )
+
+
+def convert_from_hub_export(
+    hub_dir: Path,
+    output_dir: Path,
+    limit: int = 0,
+) -> tuple[int, int]:
+    """Re-render a Harbor-Hub TMax-15K export into the shared-Dockerfile (1-snapshot) layout.
+
+    Includes EVERY hub task (the full ~12,926 set) — NO solution/quality filter, NO
+    `%files`/buildability drop (the fixtures ship with the export and are restored at
+    trial time). solution/solve.sh is the placeholder (the full set intentionally
+    includes tasks that lack a real oracle solution).
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    task_subdirs = sorted(
+        d for d in hub_dir.iterdir()
+        if d.is_dir() and (d / "instruction.md").exists()
+    )
+
+    # The shared base_install.sh is identical across all hub tasks; grab one copy.
+    base_install = ""
+    for d in task_subdirs:
+        bi = d / "environment" / "base_install.sh"
+        if bi.exists():
+            base_install = bi.read_text(encoding="utf-8", errors="replace")
+            break
+    shared_dockerfile = _shared_dockerfile_full(base_install)
+
+    made = 0
+    skipped = 0
+    idx = 0
+    for d in task_subdirs:
+        instruction_path = d / "instruction.md"
+        test_py = d / "tests" / "test_final_state.py"
+        if not test_py.exists():
+            skipped += 1
+            continue
+        description = instruction_path.read_text(encoding="utf-8", errors="replace")
+        setup_sh = _build_hub_setup_script(d, base_install)
+        instruction = build_instruction(description, setup_sh)
+        test_state = test_py.read_text(encoding="utf-8", errors="replace")
+
+        # Preserve the hub's metadata from its task.toml (best-effort) + the source id.
+        metadata = {
+            "source": "tmax/TMax-15K-Harbor",
+            "hub_task_dir": d.name,
+        }
+        toml = TASK_TOML.format(difficulty="medium", category="terminal",
+                                tags=json.dumps(["tmax15k", "synthetic", "terminal", "full"]))
+
+        task_dir = create_task_directory_unified(
+            output_dir=output_dir,
+            task_id=idx,
+            instruction_content=instruction,
+            dataset_prefix="tmax15k",
+            metadata=metadata,
+            solution_content=PLACEHOLDER_SOLVE,
+            test_sh_content=build_test_sh(),
+            test_py_content=None,
+            task_toml_content=toml,
+            dockerfile_content=shared_dockerfile,
+        )
+
+        # Ship the shared base_install.sh inside environment/ (referenced by the shared
+        # Dockerfile COPY). It is identical for every task, so it does NOT change the
+        # environment/ content hash across tasks => still 1 snapshot.
+        (task_dir / "environment" / "base_install.sh").write_text(base_install, encoding="utf-8")
+
+        (task_dir / "tests" / "test_state.py").write_text(test_state, encoding="utf-8")
+        for sub in ("tests", "solution"):
+            sp = task_dir / sub / "setup.sh"
+            sp.parent.mkdir(exist_ok=True)
+            sp.write_text(setup_sh, encoding="utf-8")
+            sp.chmod(0o755)
+
+        made += 1
+        idx += 1
+        if limit and made >= limit:
+            break
+
+    return made, skipped
+
+
 def convert(
     output_dir: Path,
     limit: int = 0,
@@ -478,10 +679,28 @@ def main() -> None:
     p.add_argument("--target-repo", default=None, help="HF repo to upload to (laion/...)")
     p.add_argument("--hf-token", default=None)
     p.add_argument("--no-upload", action="store_true")
+    p.add_argument(
+        "--from-hub-export",
+        type=Path,
+        default=None,
+        help=(
+            "Regenerate the FULL unfiltered set (~12,926 tasks) from a local "
+            "Harbor-Hub TMax-15K-Harbor export dir, re-rendered through the current "
+            "1-shared-Dockerfile contract. Bypasses the source-path _is_buildable "
+            "%files gate (fixtures ship with the export); NO solution/quality filter."
+        ),
+    )
     args = p.parse_args()
 
-    made, skipped = convert(args.output_dir, limit=args.limit, split=args.split)
-    print(f"Converted {made} tasks (skipped {skipped} unbuildable) -> {args.output_dir}")
+    if args.from_hub_export is not None:
+        made, skipped = convert_from_hub_export(
+            args.from_hub_export, args.output_dir, limit=args.limit
+        )
+        print(f"Regenerated {made} FULL-set tasks (skipped {skipped} no-test) "
+              f"from hub export {args.from_hub_export} -> {args.output_dir}")
+    else:
+        made, skipped = convert(args.output_dir, limit=args.limit, split=args.split)
+        print(f"Converted {made} tasks (skipped {skipped} unbuildable) -> {args.output_dir}")
 
     if args.target_repo and not args.no_upload:
         url = upload_tasks_to_hf(
