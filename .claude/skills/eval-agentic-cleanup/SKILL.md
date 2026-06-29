@@ -65,6 +65,20 @@ source of truth, the remediations below are the only side-effecting parts and yo
 > exactly the cross-user mutation that broke `zhuang1`'s eval jobs (2026-05-26). Skip a candidate whose slurm job is still RUNNING
 > (a live eval or an in-flight resume). When you can't tell which row is the partial → **STOP and surface, do not guess.**
 
+> **📐 The leaderboard's `Errors:` field = the EXACT incompleteness metric (source: `OT-Agent-Leaderboard/server/storage.ts:422-449`,
+> the `Errors: {invalidErrorCount}` badge).** "errors > 10%" is the right partial-eval test *because this field already
+> EXCLUDES the benign passthrough error types*. The formula:
+> `invalidErrorCount = Σ over stats.evals.*.exception_stats[errorType].length`, **EXCLUDING** the benign set
+> `{AgentTimeoutError, ContextLengthExceededError, SummarizationTimeout, SummarizationTimeoutError, BadRequestError,
+> NonZeroAgentExitCodeError, VerifierRuntimeError}` (those are passthrough/scored — NOT incompleteness). So
+> `VerificationNotCompletedError`, `DaytonaError`/`DaytonaValidationError`/`DaytonaRateLimitError`, and other no-reward
+> infra/verifier failures DO count. **error-fraction = `invalidErrorCount / total_attempted`; a row is an incomplete
+> partial (→ de-register + resume) iff error-fraction > 10%.** (The leaderboard badges the raw count at `>10`.)
+> ⚠️ **Do NOT re-derive this as a naive "no-reward / valid-reward<90%" count** — that wrongly folds in the benign
+> passthroughs (AgentTimeout etc., which ARE scored 0/1) and massively over-flags near-complete evals as partial. One
+> 2026-06-29 audit: 13 of my rows tripped the raw `>10` *count* but only **4** exceeded the `>10%` *fraction* (the other 9
+> were 92–96% valid → correctly KEPT; and a naive valid-reward<90% would have wrongly flagged ~197). Always use THIS formula.
+
 ### Check 4 — counting VALID trials (parse, never file-count) — STANDARD report element
 Trial dirs live at `eval_jobs/eval-<safe_model>_<safe_dataset>/<task>__<id>/result.json` (depth-1 under the
 run dir; the run-dir-root `result.json` is the aggregate — exclude it via the `*/` glob). Each per-trial
