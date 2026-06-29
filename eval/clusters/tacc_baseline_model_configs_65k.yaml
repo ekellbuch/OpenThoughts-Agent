@@ -1,3 +1,13 @@
+# ============================================================================
+# DEPRECATED (model-config decoupling, Stage 3 — 2026-06-29).
+# Migrated into the shared registry eval/configs/model_configs.yaml as flat
+# `<name>@gh200-65k` STANDALONE entries. The 65k launch selects it via
+# `--hardware-profile gh200-65k` (with --use-model-registry). Retained ONLY as a
+# legacy fallback: `--baseline-model-configs eval/clusters/tacc_baseline_model_configs_65k.yaml`
+# still loads it byte-identically (G5). Scheduled for DELETION in Stage 4. Do NOT
+# edit for new models — edit the registry instead.
+# ============================================================================
+#
 # TACC Vista per-model overrides — 65k context variant.
 #
 # Identical to tacc_baseline_model_configs.yaml but pins allenai/tmax-9b to

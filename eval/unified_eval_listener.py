@@ -562,6 +562,162 @@ def load_baseline_model_configs(path: Optional[str]) -> Dict[str, Dict]:
     return _BASELINE_MODEL_CONFIGS
 
 
+def load_model_registry(path: Optional[str], hardware_profile: Optional[str] = None) -> Dict[str, Dict]:
+    """Load the SHARED model-config registry (eval/configs/model_configs.yaml).
+
+    This is the decoupled replacement for ``load_baseline_model_configs`` (gated behind
+    ``--use-model-registry``; OFF by default through the Stage-4 cutover). It produces the
+    IDENTICAL in-memory structure the legacy loader does — it populates the same module
+    globals ``_BASELINE_MODEL_CONFIGS`` (exact/group dict) + ``_BASELINE_MODEL_PATTERNS``
+    (regex list) — so the four downstream resolvers
+    (``get_vllm_env_overrides`` / ``get_conda_env_override`` / ``get_baseline_agent_kwargs`` /
+    ``get_baseline_timeout_multiplier``) consume it UNCHANGED. That structural identity is
+    what guarantees byte-identical resolved serve env: there is exactly one EVAL_VLLM_*
+    translation + TP/DP derivation implementation, and both load paths feed it the same dict.
+
+    Two hardware-profile mechanisms, resolved at LOAD time (so the downstream resolvers never
+    see profile metadata), with precedence:
+
+        name@<profile> standalone (NO merge)  >  exact name + variants[<profile>]  >
+        exact name  >  group  >  pattern  ->  size-default
+
+    1. ``variants:`` (ADDITIVE) — for models whose ONLY per-cluster difference is a hardware
+       delta. A model entry carries ``variants: {<profile>: {<field>: <value>, ...}}``; when the
+       active profile matches, those fields SHALLOW-MERGE over the base entry (variant replaces
+       the whole value of each top-level key it names; no deep-merge; cannot UNSET a base key).
+       No matching variant -> base entry unchanged (G3 strict-superset).
+
+    2. ``name@<profile>`` (STANDALONE, no inheritance) — for models that genuinely diverge on
+       INTRINSIC fields per cluster (different scaffold / serve env), where the base+variant
+       additive merge cannot reproduce the recipe (a variant can add/replace but never REMOVE a
+       base key). A top-level ``models:`` key of the form ``"<name>@<profile>"`` is a fully
+       self-specified entry: when the active profile matches, it REPLACES the resolution of
+       ``<name>`` wholesale (no base/group/variant merge), and the suffixed key itself is not
+       exposed. Rationale (kept deliberately mechanical): the eval-launch stack will eventually
+       fold into ``hpc/`` as one source of truth — fully-resolved flat entries port over
+       mechanically, whereas merge cleverness (unset/replace) would have to be reverse-
+       engineered. Use ``variants:`` for HW-only deltas; use ``name@<profile>`` ONLY for the
+       scaffold/env-divergent models.
+
+    Patterns may carry an optional ``profiles: [<name>, ...]`` filter: a pattern with no
+    ``profiles`` key applies to ALL profiles; with ``profiles`` it applies only to the listed
+    ones (so a cluster's HW-specific pattern fallbacks live in the shared registry without
+    leaking onto other clusters). The ``profiles`` key is stripped before storing. ``variants:``
+    on a pattern is also supported.
+    """
+    global _BASELINE_MODEL_CONFIGS, _BASELINE_MODEL_PATTERNS
+    if _BASELINE_MODEL_CONFIGS is not None:
+        return _BASELINE_MODEL_CONFIGS
+
+    if not path or not os.path.isfile(path):
+        _BASELINE_MODEL_CONFIGS = {}
+        _BASELINE_MODEL_PATTERNS = []
+        return _BASELINE_MODEL_CONFIGS
+
+    # The active profile name used for variant/standalone/pattern matching. A cluster with no
+    # hardware_profile (Leonardo/Jupiter) matches "default".
+    active_profile = hardware_profile or "default"
+    _SUFFIX = "@"
+
+    def _apply_variant(entry: Dict) -> Dict:
+        """Pop the ``variants:`` block and shallow-merge the active profile's fields on top."""
+        variants = entry.pop("variants", None)
+        if isinstance(variants, dict) and active_profile in variants:
+            override = variants.get(active_profile) or {}
+            entry.update(override)  # shallow: variant replaces each named top-level key
+        return entry
+
+    try:
+        import yaml
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+
+        per_model = data.get("models", {}) or {}
+
+        # Split standalone "name@profile" keys out of the regular model entries.
+        base_models: Dict[str, Dict] = {}
+        standalone: Dict[str, Dict] = {}  # bare-name -> the active-profile standalone entry
+        for key, cfg in per_model.items():
+            if _SUFFIX in key:
+                bare, _, prof = key.rpartition(_SUFFIX)
+                if prof == active_profile and bare:
+                    standalone[bare] = cfg  # wins wholesale, no merge
+                # standalone entries for OTHER profiles are simply ignored on this cluster
+            else:
+                base_models[key] = cfg
+
+        # Expand groups first (group config is the base; per-model entries merge on top).
+        expanded: Dict[str, Dict] = {}
+        for group in data.get("groups", []) or []:
+            model_names = group.get("models", [])
+            shared_cfg = {k: v for k, v in group.items() if k != "models"}
+            for name in model_names:
+                expanded[name] = dict(shared_cfg)
+
+        for name, overrides in base_models.items():
+            if name in expanded:
+                expanded[name].update(overrides)
+            else:
+                expanded[name] = dict(overrides)
+
+        # Profile inheritance rule for BASE (bare) model entries:
+        #   - the "default" profile (Leonardo/Jupiter) sees ALL base entries (the shared base);
+        #   - a NON-default profile (e.g. gh200) inherits a base entry ONLY if that entry opts in
+        #     via a matching `variants:` block — i.e. the model is a HW-only delta of the base.
+        #     A base entry with no variant for the active profile is NOT exposed on that profile;
+        #     the model then resolves from its `name@<profile>` standalone (below) if present, else
+        #     the profile's pattern fallbacks / size-default.
+        # This reproduces the legacy per-cluster forks exactly: a cluster's model set = its
+        # opted-in (variant) base entries + its `@profile` standalones + its scoped patterns, with
+        # nothing from another cluster's recipe leaking in. (Decoupling refactor Stage 3.)
+        import copy as _copy
+
+        def _included_on_profile(entry: Dict) -> bool:
+            if active_profile == "default":
+                return True
+            variants = entry.get("variants")
+            return isinstance(variants, dict) and active_profile in variants
+
+        resolved: Dict[str, Dict] = {
+            name: _apply_variant(_copy.deepcopy(entry))
+            for name, entry in expanded.items()
+            if _included_on_profile(entry)
+        }
+
+        # name@profile standalone entries REPLACE the bare name wholesale (no base/variant merge).
+        # `variants:` stripped if present (a standalone is already fully resolved).
+        for bare, cfg in standalone.items():
+            entry = _copy.deepcopy(cfg)
+            entry.pop("variants", None)
+            resolved[bare] = entry
+
+        # Patterns: keep those that apply to the active profile (no `profiles` key = all),
+        # strip the `profiles` filter, then resolve any per-pattern variant.
+        patterns = data.get("patterns", []) or []
+        resolved_patterns: List[Dict] = []
+        for p in patterns:
+            profs = p.get("profiles")
+            if profs is not None and active_profile not in profs:
+                continue
+            pcopy = _copy.deepcopy(p)
+            pcopy.pop("profiles", None)
+            resolved_patterns.append(_apply_variant(pcopy))
+
+        _BASELINE_MODEL_CONFIGS = resolved
+        _BASELINE_MODEL_PATTERNS = resolved_patterns
+        n_groups = len(data.get("groups", []) or [])
+        log(f"Loaded model registry: {len(_BASELINE_MODEL_CONFIGS)} model config(s) "
+            f"({n_groups} group(s), {len(base_models)} override(s), {len(standalone)} "
+            f"standalone@{active_profile}) and {len(_BASELINE_MODEL_PATTERNS)} pattern(s) "
+            f"from {path} (hardware_profile={active_profile})")
+    except Exception as e:
+        log(f"WARNING: failed to load model registry from {path}: {e}")
+        _BASELINE_MODEL_CONFIGS = {}
+        _BASELINE_MODEL_PATTERNS = []
+
+    return _BASELINE_MODEL_CONFIGS
+
+
 def _match_pattern_config(hf_model: str) -> Optional[Dict]:
     """Try to match a model name against pattern-based configs.
 
@@ -1422,6 +1578,12 @@ class ListenerConfig:
     pinggy_token: Optional[str] = None
     # Per-model vLLM overrides (baseline model configs)
     baseline_model_configs: Optional[str] = None
+    # Shared model-config registry (decoupling refactor; OFF by default through Stage 4).
+    # When use_model_registry is True the listener loads `model_registry` via
+    # load_model_registry(..., hardware_profile) INSTEAD of the legacy baseline path.
+    use_model_registry: bool = False
+    model_registry: Optional[str] = None
+    hardware_profile: Optional[str] = None
     # Per-model API serving config (Together AI / OpenAI / Anthropic)
     api_model_config: Optional[str] = None
     # API sbatch script (used when get_api_config() matches a model)
@@ -3265,8 +3427,16 @@ class EvalListener:
             pinggy_token=self.config.pinggy_token,
         )
 
-        # Load baseline model configs for per-model vLLM overrides
-        baseline_configs = load_baseline_model_configs(self.config.baseline_model_configs)
+        # Load per-model vLLM overrides. Default: the legacy baseline-model-configs path
+        # (untouched, authoritative). Opt-in (--use-model-registry / cluster use_model_registry):
+        # the shared model-config registry, which produces the IDENTICAL dict shape so the
+        # downstream resolvers are unchanged (decoupling refactor; see load_model_registry).
+        if self.config.use_model_registry:
+            baseline_configs = load_model_registry(
+                self.config.model_registry, self.config.hardware_profile
+            )
+        else:
+            baseline_configs = load_baseline_model_configs(self.config.baseline_model_configs)
 
         # Load per-model API serving configs (no-op if file missing — get_api_config returns None)
         api_configs = load_api_model_configs(self.config.api_model_config)
@@ -3923,6 +4093,28 @@ Examples:
              "(e.g., eval/configs/baseline_model_configs_minimal.yaml)",
     )
 
+    # Shared model-config registry (decoupling refactor; OFF by default through Stage 4).
+    parser.add_argument(
+        "--use-model-registry",
+        action="store_true",
+        default=None,
+        help="Opt in to the shared model-config registry (eval/configs/model_configs.yaml) "
+             "instead of the legacy --baseline-model-configs path. Combine with "
+             "--model-registry / --hardware-profile (or set them in the cluster config). "
+             "OFF by default; the legacy path stays authoritative until the Stage-4 cutover.",
+    )
+    parser.add_argument(
+        "--model-registry",
+        help="Path to the shared model-config registry YAML "
+             "(default eval/configs/model_configs.yaml). Used only with --use-model-registry.",
+    )
+    parser.add_argument(
+        "--hardware-profile",
+        help="Hardware-profile name selecting the registry `variants:` block for this cluster "
+             "(e.g. gh200). Used only with --use-model-registry; falls back to the cluster "
+             "config's `hardware_profile` key.",
+    )
+
     # API model config (per-model serving config for Together / OpenAI / Anthropic)
     parser.add_argument(
         "--api-model-config",
@@ -4330,6 +4522,23 @@ def build_config(args: argparse.Namespace) -> ListenerConfig:
             "NOT apply; models needing a non-default serve env (e.g. qwen3_5_moe "
             "-> eval-qwen35) will fall back to the default env and likely crash.")
 
+    # Shared model-config registry (decoupling refactor). OFF unless the CLI flag is set or
+    # the cluster config carries `use_model_registry: true`. Path + hardware_profile resolve
+    # CLI > cluster-config > sensible default. When OFF, the legacy baseline path above is
+    # authoritative and the registry is never loaded (G1 flag-off no-op).
+    use_model_registry = bool(
+        args.use_model_registry if args.use_model_registry is not None
+        else _cc("use_model_registry", False)
+    )
+    model_registry_path = (
+        args.model_registry or _cc("model_registry") or "eval/configs/model_configs.yaml"
+    )
+    hardware_profile = args.hardware_profile or _cc("hardware_profile")
+    if use_model_registry:
+        log(f"Model-config registry ENABLED: {model_registry_path} "
+            f"(hardware_profile={hardware_profile or 'default'}) — "
+            f"superseding the legacy baseline-model-configs path for this launch.")
+
     # API model configs for per-model API serving (no-op if file missing)
     api_model_config_path = args.api_model_config
 
@@ -4426,6 +4635,9 @@ def build_config(args: argparse.Namespace) -> ListenerConfig:
         blacklisted_models=blacklisted_models,
         # New features
         baseline_model_configs=baseline_model_configs_path,
+        use_model_registry=use_model_registry,
+        model_registry=model_registry_path,
+        hardware_profile=hardware_profile,
         api_model_config=api_model_config_path,
         harbor_config=harbor_config,
         eval_config=eval_config,
