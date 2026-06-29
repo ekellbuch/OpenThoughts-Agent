@@ -954,18 +954,11 @@ def _build_api_agent_kwargs_string(agent_kwargs: Dict[str, Any]) -> str:
 # (e.g. EnvironmentStartTimeoutError) — without it the disk scanner computes
 # infra_errors=0 for VNC-heavy runs and selects 0 resume candidates, so
 # --resume-only no-ops even though the sbatch filter (FIX A) is armed.
-INFRA_ERROR_TYPES = {
-    "DaytonaError",
-    "DaytonaAuthenticationError",
-    "DaytonaAuthorizationError",
-    "DaytonaNotFoundError",
-    "EnvironmentStartTimeoutError",
-    "DaytonaRateLimitError",
-    "CancelledError",
-    "SandboxBuildFailedError",
-    "AgentEnvironmentTimeoutError",
-    "VerificationNotCompletedError",
-}
+#
+# Single source of truth: the set lives in database/unified_db/infra_errors.py
+# (also used by the DB write-point that persists n_infra_errors onto
+# sandbox_jobs.stats). Imported here, not duplicated.
+from database.unified_db.infra_errors import INFRA_ERROR_TYPES
 
 
 def _parse_job_dir(job_dir: Path) -> Optional[Dict]:
