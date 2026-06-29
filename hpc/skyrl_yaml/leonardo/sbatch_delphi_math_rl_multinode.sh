@@ -61,10 +61,15 @@ MARIN=$WORK/code/MarinSkyRL/skyrl-train
 CFG=${CFG:-$WORK/code/OpenThoughts-Agent/hpc/skyrl_yaml/leonardo}
 
 # Dataset -> DATA_DIR + verifier env (built by rl_dataset_prep.py).
-export DATASET=${DATASET:-rlvr_math}                          # rlvr_math | dapo_math | math500 | rlvr_ifeval
+# NOTE: dapo_math is the ~500-prompt SMOKE slice; dapo_math_17k is the FULL 17k (the real
+# training set, ~66 steps/epoch @ tbs=256). Pointing a full-budget RL run (epochs=5 -> ~330
+# steps) at the dapo_math slice collapses total_training_steps to epochs x (497//256=1) = 5,
+# so a resume at global_step>5 trips trainer.py:_handle_resume_at_max_steps and finalizes
+# WITHOUT training (the dapo17k_w0 resume-chain bug, 2026-06-28). Use dapo_math_17k for real runs.
+export DATASET=${DATASET:-rlvr_math}                          # rlvr_math | dapo_math | dapo_math_17k | math500 | rlvr_ifeval
 export DATA_DIR=${DATA_DIR:-$WORK/data/rl/$DATASET}
 case "$DATASET" in
-  rlvr_math|dapo_math|math500) export ENV_CLASS=aime ;;       # boxed/answer-match (Minerva)
+  rlvr_math|dapo_math|dapo_math_17k|math500) export ENV_CLASS=aime ;;  # boxed/answer-match (Minerva)
   rlvr_ifeval)
     export ENV_CLASS=ifeval
     echo "WARNING: DATASET=rlvr_ifeval needs the skyrl_gym/envs/ifeval verifier (RL_CONVENTION §2.2)." ;;
