@@ -248,3 +248,4 @@ Sibling cleanups: **`rl-agentic-job-cleanup`** (RL model), **`sft-job-cleanup`**
 ## Operating notes (folded from memory 2026-06-14)
 
 - **`notes/ot-agent/task_repos/rl_to_check.md` is a QUEUE file, not documentation** — bare HF repo URLs, one per line, consumed line-by-line by the smoke-test runner (processed entries move to `rl_checked.md`, same flat format). "Update rl_to_check.md with the fixes" = **append the newly-uploaded repo URLs**, one per line. Do NOT add markdown tables / sections / writeups (breaks the parser). Fix notes belong in the chat response or a dedicated `rl_fixes_<date>.md`. Same caution for all `task_repos/*.md` (flat URL/path lists feeding tooling).
+- **Stale >12h non-Finished (Started/Running/Pending) rows owned by us are cosmetic cruft → DELETE them (FK-cascade, own-rows-only); registration is create-if-missing so this never blocks a real score landing later.**
