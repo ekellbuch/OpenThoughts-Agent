@@ -1,0 +1,54 @@
+# Shared model-config registry — the SINGLE source of truth for model-INTRINSIC
+# vLLM serving config, keyed by HF model name and shared across ALL clusters.
+#
+# This is the decoupled replacement for the per-cluster baseline-model-config forks
+# (eval/configs/baseline_model_configs_minimal.yaml + eval/clusters/tacc_baseline_model_configs*.yaml).
+# It is loaded by eval/unified_eval_listener.py::load_model_registry ONLY when a launch
+# opts in via --use-model-registry (or a cluster-config `use_model_registry: true`); the
+# legacy --baseline-model-configs path remains the default until the Stage-4 cutover.
+#
+# STATUS: EMPTY / scaffold only (Stage 1). Stage 2 populates `models:`/`patterns:` from
+# baseline_model_configs_minimal.yaml verbatim; Stage 3 folds the TACC forks into `variants:`.
+#
+# ---------------------------------------------------------------------------
+# FORMAT
+#   models:    Per-model entries (exact HF name -> config). A model entry holds the
+#              MODEL-INTRINSIC serve keys (trust_remote_code, tool_call_parser,
+#              reasoning_parser, hf_overrides, limit_mm_per_prompt, agent_kwargs,
+#              max_model_len, extra_args, max_num_seqs, and the multi-GPU base
+#              tensor_parallel_size/data_parallel_size) PLUS an optional `variants:` block.
+#   groups:    Apply one config to many models. Per-model entries merge on top (override wins).
+#   patterns:  Regex fallback when no exact/group match. First match wins (order preserved).
+#
+# VARIANTS (hardware-specific serving)
+#   A model entry may carry a `variants:` block keyed by HARDWARE-PROFILE name. When a
+#   cluster declares `hardware_profile: <name>`, the matching variant's fields SHALLOW-MERGE
+#   over the base entry (variant replaces the whole value of each top-level key it names;
+#   it does NOT deep-merge nested lists/JSON). A profile with no matching variant resolves
+#   to the base entry unchanged. Example:
+#
+#     models:
+#       "Qwen/Qwen3-32B":
+#         trust_remote_code: true
+#         tensor_parallel_size: 2          # multi-GPU base (Leonardo/Jupiter)
+#         max_model_len: 32768
+#         extra_args: "--enable-prefix-caching"
+#         variants:
+#           gh200:                          # TACC Vista: 1x 96GB GH200/node
+#             tensor_parallel_size: 1       # only the genuinely-divergent HW field
+#
+#   A cluster selects its profile with `hardware_profile: gh200` in its cluster yaml; the
+#   launcher already derives the actual TP/DP from `hardware.gpus_per_node` (an explicit
+#   tensor_parallel_size still wins per-field), so the variant only names what truly differs.
+#
+# RESOLUTION PRECEDENCE (load_model_registry pre-merges variants at load time, so the
+#   downstream resolvers see the identical exact/group dict + patterns list shape as today):
+#       exact+variant[profile]  >  exact  >  group  >  pattern  ->  size-default
+#   The variant tier is a STRICT SUPERSET of today's order: with no matching variant the
+#   resolution is byte-identical to the legacy exact/group/pattern chain.
+
+models: {}
+
+# groups: []
+
+# patterns: []
