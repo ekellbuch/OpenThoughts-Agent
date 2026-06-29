@@ -64,7 +64,15 @@ N_CONCURRENT="${EVAL_N_CONCURRENT:-32}"
 # Leonardo's concurrency is unaffected. (The RESUME path reads n_concurrent_trials
 # from the run's stored config.json, not --n-concurrent, so it is clamped
 # separately in the resume block below.)
-TACC_N_CONCURRENT_CEILING="${EVAL_TACC_N_CONCURRENT_CEILING:-8}"
+#
+# RELAXED 8 -> 16 (2026-06-29): the original ceiling of 8 over-indexed on a single
+# transient Lustre/Daytona burst. 8 is very slow and Vista should handle far more
+# concurrent env-builds. Raising to 16 and TRACKING whether the VNC storm recurs:
+# watch the per-run VerificationNotCompletedError / EnvironmentStartTimeoutError
+# rate (count in result.json outcomes; >~10% of attempted trials = the storm is
+# back). If 16 stays clean, push higher; revert toward 8 ONLY if the storm
+# demonstrably recurs at 16. Override per-run via EVAL_TACC_N_CONCURRENT_CEILING.
+TACC_N_CONCURRENT_CEILING="${EVAL_TACC_N_CONCURRENT_CEILING:-16}"
 if [ "$N_CONCURRENT" -gt "$TACC_N_CONCURRENT_CEILING" ]; then
     echo "Vista concurrency ceiling: capping N_CONCURRENT $N_CONCURRENT -> $TACC_N_CONCURRENT_CEILING"
     N_CONCURRENT="$TACC_N_CONCURRENT_CEILING"
