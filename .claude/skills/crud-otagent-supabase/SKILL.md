@@ -412,6 +412,34 @@ if DELETE:
 - **"Reconcile a duplicate model row."** → find sibling rows by `ilike`, run the
   cross-user FK pre-check, then dedup only your own rows.
 
+## Recipe: ALL models NOT yet evaled (on ANY benchmark)
+For the *general* "which models have no eval at all" (vs `query_unevaled_models.py`, which is
+**benchmark-specific** and counts a `Started`/`Pending` job as "evaluated"). Here a model is **EVALED iff it
+has ≥1 `sandbox_jobs` row that is `Finished` AND has a non-null `accuracy`** (a real score — see the §"job_status"
+note); everything else (no jobs, only `Started`/`Pending`, or `Finished`-but-null) is UN-EVALED. **Sibling-aware:**
+a model NAME is evaled if ANY of its `models.id` rows is evaled (the same name can have multiple ids — §GOTCHA 2).
+**PAGINATE** — `models` (~1300) and `sandbox_jobs` (~9000) both exceed the 1000-row default.
+```python
+def page(table, cols):
+    out=[]; off=0
+    while True:
+        d=c.table(table).select(cols).range(off,off+999).execute().data
+        out+=d
+        if len(d)<1000: break
+        off+=1000
+    return out
+models=page("models","id,name"); jobs=page("sandbox_jobs","model_id,job_status,metrics")
+evaled_ids={j["model_id"] for j in jobs if j["job_status"]=="Finished" and get_metric(j["metrics"]) is not None}  # get_metric = the shape-robust helper (§GOTCHA 1)
+id2name={m["id"]:m["name"] for m in models}
+evaled_names={id2name[i] for i in evaled_ids if i in id2name}
+unevaled=sorted({m["name"] for m in models if m["name"] not in evaled_names})
+```
+**⚠️ TRIAGE the result before reporting it — it is mostly DATA-QUALITY NOISE, not real eval gaps (2026-06-29: 60 raw):**
+- **(A) Real trained checkpoints (the actionable set)** — `DCAgent*/…`, `laion/…`, bare run-names. THESE are the ones a human means by "un-evaled." Cross-check: is one **in-progress** (a `Started` row — e.g. a model being evaled right NOW shows here because it has no `Finished` yet)? is it a **CONCLUDED series** (a3-*)?  flag both.
+- **(B) API / served baselines** — names prefixed `openai/`, `together_ai/`, or bare `o4-mini`/`gpt-*`. Reference models, usually intentionally outside our eval pipeline.
+- **(C) FILESYSTEM-PATH junk registrations** — names that are a local path (`^/…/models--<org>--<name>/snapshots/<hash>`). These are bogus rows (the model was registered by its on-disk path instead of the HF repo name — the path-analog of the served-id trap, §eval-agentic-cleanup §2); the underlying model is usually ALREADY evaled under its proper HF name. NOT an eval gap → a cleanup candidate, not a re-eval candidate.
+**So report it bucketed A/B/C with the in-progress / concluded flags — never a raw 60-name dump** (the raw count wildly overstates the real eval gap; in the 2026-06-29 run only ~17 of 60 were genuinely-actionable trained checkpoints).
+
 ## Recipe: per-task timeouts + turn counts + outcome breakdown (model × benchmark)
 
 To answer "what timeout/turns did model X actually get on benchmark Y, and how did
