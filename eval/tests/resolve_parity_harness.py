@@ -65,12 +65,14 @@ _CLUSTER_SHAPES = [
     {"name": "leonardo", "cluster_yaml": "eval/clusters/leonardo.yaml",
      "baseline_file": "eval/configs/baseline_model_configs_minimal.yaml",
      "registry_profile": "default"},
+    # Stage 3: tacc + tacc-65k flipped to the registry under the Vista hardware profiles
+    # (gh200 / gh200-65k) — divergent models are flat name@<profile> standalone entries.
     {"name": "tacc", "cluster_yaml": "eval/clusters/tacc.yaml",
      "baseline_file": "eval/clusters/tacc_baseline_model_configs.yaml",
-     "registry_profile": None},
+     "registry_profile": "gh200"},
     {"name": "tacc-65k", "cluster_yaml": "eval/clusters/tacc.yaml",
      "baseline_file": "eval/clusters/tacc_baseline_model_configs_65k.yaml",
-     "registry_profile": None},
+     "registry_profile": "gh200-65k"},
     {"name": "jupiter", "cluster_yaml": "eval/clusters/jupiter.yaml",
      "baseline_file": "eval/configs/baseline_model_configs_minimal.yaml",
      "registry_profile": "default"},

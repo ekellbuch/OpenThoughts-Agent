@@ -54,12 +54,33 @@ models:
   "org/no-variant":
     tensor_parallel_size: 2
     conda_env: some-env
+  # base entry that ALSO has a gh200 STANDALONE override (Option 4): the base carries
+  # intrinsic fields the gh200 recipe deliberately DROPS (tool_call_parser), which a variant
+  # could not express. The standalone wins wholesale on gh200, no merge.
+  "org/has-standalone":
+    tensor_parallel_size: 2
+    tool_call_parser: hermes
+    reasoning_parser: qwen3
+    trust_remote_code: true
+    extra_args: "--enable-prefix-caching"
+  "org/has-standalone@gh200":
+    tensor_parallel_size: 1
+    trust_remote_code: true
+    extra_args: "--enable-prefix-caching"
+  # standalone for a DIFFERENT profile only — must be ignored when active profile != that.
+  "org/other-only@some-other-profile":
+    tensor_parallel_size: 8
 
 patterns:
   - match: "(?i)32[Bb]"
     trust_remote_code: true
     tensor_parallel_size: 4
     extra_args: "--enable-prefix-caching"
+  # profile-scoped pattern: only active on gh200 (forces TP=1 for any 70B-ish name there).
+  - match: "(?i)70[Bb]"
+    profiles: [gh200]
+    trust_remote_code: true
+    tensor_parallel_size: 1
   - match: ".*"
     trust_remote_code: true
     tensor_parallel_size: 1
@@ -142,9 +163,14 @@ def main() -> int:
           and cfg_g["org/has-variant"].get("agent_kwargs")
           == ['extra_body={"chat_template_kwargs":{"enable_thinking":true}}'],
           repr(cfg_g["org/has-variant"]))
-    check("variant active: a model WITHOUT that variant is unchanged (superset)",
-          cfg_g["org/no-variant"] == {"tensor_parallel_size": 2, "conda_env": "some-env"},
-          repr(cfg_g["org/no-variant"]))
+    # Profile-inheritance rule: a base entry with NO variant for the active (non-default)
+    # profile is NOT exposed on that profile (it falls to that profile's standalone / patterns /
+    # size-default). On the default profile it WOULD be present (asserted under profile=None above).
+    check("non-default profile: a base entry without a matching variant is NOT inherited",
+          "org/no-variant" not in cfg_g, repr(list(cfg_g.keys())))
+    check("default profile DOES expose that same base entry (sharing baseline)",
+          cfg["org/no-variant"] == {"tensor_parallel_size": 2, "conda_env": "some-env"},
+          repr(cfg.get("org/no-variant")))
 
     # --- 4-tier precedence via the real resolvers on the merged dict ---
     # set a cluster shape so get_vllm_env_overrides has gpus_per_node
@@ -172,6 +198,53 @@ def main() -> int:
     check("precedence: exact+variant wins (gh200 -> TP=1, max_model_len 65536)",
           env_var["EVAL_VLLM_TENSOR_PARALLEL_SIZE"] == "1"
           and env_var.get("EVAL_VLLM_MAX_MODEL_LEN") == "65536", repr(env_var))
+
+    # --- Option-4 STANDALONE name@profile (NO inheritance) ---
+    # profile=None: the bare base entry resolves; the @gh200 standalone is NOT active and the
+    # suffixed key is NOT exposed.
+    cfg_n2, _ = _load(None)
+    check("standalone inactive (profile=None): bare base entry resolves with its intrinsics",
+          cfg_n2["org/has-standalone"].get("tool_call_parser") == "hermes"
+          and cfg_n2["org/has-standalone"].get("reasoning_parser") == "qwen3"
+          and cfg_n2["org/has-standalone"]["tensor_parallel_size"] == 2,
+          repr(cfg_n2.get("org/has-standalone")))
+    check("standalone key never exposed as a bare lookup (no '@' keys in resolved dict)",
+          not any("@" in k for k in cfg_n2),
+          repr([k for k in cfg_n2 if "@" in k]))
+
+    # profile=gh200: the @gh200 standalone REPLACES the bare entry wholesale — the base
+    # intrinsics (tool_call_parser, reasoning_parser) are DROPPED (NOT merged in).
+    cfg_g2, _ = _load("gh200")
+    sa = cfg_g2["org/has-standalone"]
+    check("standalone active (gh200): replaces wholesale, TP=1",
+          sa["tensor_parallel_size"] == 1, repr(sa))
+    check("standalone active (gh200): base intrinsics DROPPED (no tool_call_parser/reasoning_parser)",
+          "tool_call_parser" not in sa and "reasoning_parser" not in sa, repr(sa))
+    env_sa = uel.get_vllm_env_overrides("org/has-standalone", cfg_g2)
+    check("standalone active (gh200): resolved env has NO parser keys (the un-mergeable removal)",
+          "EVAL_VLLM_TOOL_CALL_PARSER" not in env_sa
+          and "EVAL_VLLM_REASONING_PARSER" not in env_sa, repr(env_sa))
+    check("standalone for a non-active profile is ignored (org/other-only absent on gh200)",
+          "org/other-only" not in cfg_g2 and "org/other-only@some-other-profile" not in cfg_g2,
+          repr([k for k in cfg_g2 if "other" in k]))
+
+    # --- profile-scoped patterns ---
+    # the (?i)70[Bb] pattern is profiles:[gh200] only.
+    _, pats_n = _load(None)
+    _, pats_g = _load("gh200")
+    check("profile-scoped pattern absent off-profile (no 70B pattern under default)",
+          not any(p.get("match") == "(?i)70[Bb]" for p in pats_n), repr([p.get("match") for p in pats_n]))
+    check("profile-scoped pattern present on-profile (70B pattern under gh200)",
+          any(p.get("match") == "(?i)70[Bb]" for p in pats_g), repr([p.get("match") for p in pats_g]))
+    check("profiles filter key stripped from stored patterns",
+          all("profiles" not in p for p in pats_g))
+    # behavioral: an unlisted 70B name resolves TP=1 under gh200 (its pattern), but falls to the
+    # .* catch-all (also TP=1 here) under default — assert the 70B pattern actually fires on gh200.
+    uel._CLUSTER_CONFIG = {"hardware": {"gpus_per_node": 1}}
+    cfg_g3, _ = _load("gh200")
+    env_70 = uel.get_vllm_env_overrides("unlisted/Foo-70B", cfg_g3)
+    check("profile-scoped pattern fires (gh200, 70B name -> TP=1 from its pattern)",
+          env_70["EVAL_VLLM_TENSOR_PARALLEL_SIZE"] == "1", repr(env_70))
 
     print(f"\n== {len(_failures)} failure(s) ==" if _failures else "\n== ALL TESTS PASS ==")
     return 1 if _failures else 0

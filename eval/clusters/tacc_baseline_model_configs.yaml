@@ -1,3 +1,15 @@
+# ============================================================================
+# DEPRECATED (model-config decoupling, Stage 3 — 2026-06-29).
+# This forked file has been MIGRATED into the shared registry
+# eval/configs/model_configs.yaml as flat `<name>@gh200` STANDALONE entries +
+# the gh200-scoped pattern fallbacks. tacc.yaml now sets `use_model_registry:
+# true` + `hardware_profile: gh200`, so eval launches resolve from the registry.
+# This file is RETAINED ONLY as a legacy fallback: `--baseline-model-configs
+# eval/clusters/tacc_baseline_model_configs.yaml` still loads it byte-identically
+# via the legacy path (G5 backward-compat). It is scheduled for DELETION in the
+# Stage-4 cutover. Do NOT edit it for new models — edit the registry instead.
+# ============================================================================
+#
 # TACC Vista per-model vLLM serving overrides.
 #
 # Derived from eval/configs/baseline_model_configs_minimal.yaml, but every TP is

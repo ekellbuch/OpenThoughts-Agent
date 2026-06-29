@@ -575,14 +575,35 @@ def load_model_registry(path: Optional[str], hardware_profile: Optional[str] = N
     what guarantees byte-identical resolved serve env: there is exactly one EVAL_VLLM_*
     translation + TP/DP derivation implementation, and both load paths feed it the same dict.
 
-    The only new behavior is the ``variants:`` block: a model entry may carry
-    ``variants: {<profile>: {<field>: <value>, ...}}``. When ``hardware_profile`` is set and a
-    matching variant exists, the variant's fields SHALLOW-MERGE over the base entry (the
-    variant replaces the whole value of each top-level key it names; nested lists/JSON are not
-    deep-merged). A profile with no matching variant yields the base entry unchanged (G3
-    strict-superset). Precedence: exact+variant > exact > group > pattern (the pattern tier is
-    the same first-match-wins ``_BASELINE_MODEL_PATTERNS`` list; patterns may also carry
-    ``variants:``, resolved the same way).
+    Two hardware-profile mechanisms, resolved at LOAD time (so the downstream resolvers never
+    see profile metadata), with precedence:
+
+        name@<profile> standalone (NO merge)  >  exact name + variants[<profile>]  >
+        exact name  >  group  >  pattern  ->  size-default
+
+    1. ``variants:`` (ADDITIVE) — for models whose ONLY per-cluster difference is a hardware
+       delta. A model entry carries ``variants: {<profile>: {<field>: <value>, ...}}``; when the
+       active profile matches, those fields SHALLOW-MERGE over the base entry (variant replaces
+       the whole value of each top-level key it names; no deep-merge; cannot UNSET a base key).
+       No matching variant -> base entry unchanged (G3 strict-superset).
+
+    2. ``name@<profile>`` (STANDALONE, no inheritance) — for models that genuinely diverge on
+       INTRINSIC fields per cluster (different scaffold / serve env), where the base+variant
+       additive merge cannot reproduce the recipe (a variant can add/replace but never REMOVE a
+       base key). A top-level ``models:`` key of the form ``"<name>@<profile>"`` is a fully
+       self-specified entry: when the active profile matches, it REPLACES the resolution of
+       ``<name>`` wholesale (no base/group/variant merge), and the suffixed key itself is not
+       exposed. Rationale (kept deliberately mechanical): the eval-launch stack will eventually
+       fold into ``hpc/`` as one source of truth — fully-resolved flat entries port over
+       mechanically, whereas merge cleverness (unset/replace) would have to be reverse-
+       engineered. Use ``variants:`` for HW-only deltas; use ``name@<profile>`` ONLY for the
+       scaffold/env-divergent models.
+
+    Patterns may carry an optional ``profiles: [<name>, ...]`` filter: a pattern with no
+    ``profiles`` key applies to ALL profiles; with ``profiles`` it applies only to the listed
+    ones (so a cluster's HW-specific pattern fallbacks live in the shared registry without
+    leaking onto other clusters). The ``profiles`` key is stripped before storing. ``variants:``
+    on a pattern is also supported.
     """
     global _BASELINE_MODEL_CONFIGS, _BASELINE_MODEL_PATTERNS
     if _BASELINE_MODEL_CONFIGS is not None:
@@ -593,11 +614,16 @@ def load_model_registry(path: Optional[str], hardware_profile: Optional[str] = N
         _BASELINE_MODEL_PATTERNS = []
         return _BASELINE_MODEL_CONFIGS
 
+    # The active profile name used for variant/standalone/pattern matching. A cluster with no
+    # hardware_profile (Leonardo/Jupiter) matches "default".
+    active_profile = hardware_profile or "default"
+    _SUFFIX = "@"
+
     def _apply_variant(entry: Dict) -> Dict:
         """Pop the ``variants:`` block and shallow-merge the active profile's fields on top."""
         variants = entry.pop("variants", None)
-        if hardware_profile and isinstance(variants, dict) and hardware_profile in variants:
-            override = variants.get(hardware_profile) or {}
+        if isinstance(variants, dict) and active_profile in variants:
+            override = variants.get(active_profile) or {}
             entry.update(override)  # shallow: variant replaces each named top-level key
         return entry
 
@@ -608,6 +634,18 @@ def load_model_registry(path: Optional[str], hardware_profile: Optional[str] = N
 
         per_model = data.get("models", {}) or {}
 
+        # Split standalone "name@profile" keys out of the regular model entries.
+        base_models: Dict[str, Dict] = {}
+        standalone: Dict[str, Dict] = {}  # bare-name -> the active-profile standalone entry
+        for key, cfg in per_model.items():
+            if _SUFFIX in key:
+                bare, _, prof = key.rpartition(_SUFFIX)
+                if prof == active_profile and bare:
+                    standalone[bare] = cfg  # wins wholesale, no merge
+                # standalone entries for OTHER profiles are simply ignored on this cluster
+            else:
+                base_models[key] = cfg
+
         # Expand groups first (group config is the base; per-model entries merge on top).
         expanded: Dict[str, Dict] = {}
         for group in data.get("groups", []) or []:
@@ -616,30 +654,62 @@ def load_model_registry(path: Optional[str], hardware_profile: Optional[str] = N
             for name in model_names:
                 expanded[name] = dict(shared_cfg)
 
-        for name, overrides in per_model.items():
+        for name, overrides in base_models.items():
             if name in expanded:
                 expanded[name].update(overrides)
             else:
                 expanded[name] = dict(overrides)
 
-        # Resolve the active hardware-profile variant per entry (pre-merged at load time so
-        # the downstream resolvers never see a `variants:` key). Deep-copy each entry first so
-        # the .pop()/.update() never mutate the shared group/yaml objects.
+        # Profile inheritance rule for BASE (bare) model entries:
+        #   - the "default" profile (Leonardo/Jupiter) sees ALL base entries (the shared base);
+        #   - a NON-default profile (e.g. gh200) inherits a base entry ONLY if that entry opts in
+        #     via a matching `variants:` block — i.e. the model is a HW-only delta of the base.
+        #     A base entry with no variant for the active profile is NOT exposed on that profile;
+        #     the model then resolves from its `name@<profile>` standalone (below) if present, else
+        #     the profile's pattern fallbacks / size-default.
+        # This reproduces the legacy per-cluster forks exactly: a cluster's model set = its
+        # opted-in (variant) base entries + its `@profile` standalones + its scoped patterns, with
+        # nothing from another cluster's recipe leaking in. (Decoupling refactor Stage 3.)
         import copy as _copy
+
+        def _included_on_profile(entry: Dict) -> bool:
+            if active_profile == "default":
+                return True
+            variants = entry.get("variants")
+            return isinstance(variants, dict) and active_profile in variants
+
         resolved: Dict[str, Dict] = {
-            name: _apply_variant(_copy.deepcopy(entry)) for name, entry in expanded.items()
+            name: _apply_variant(_copy.deepcopy(entry))
+            for name, entry in expanded.items()
+            if _included_on_profile(entry)
         }
 
+        # name@profile standalone entries REPLACE the bare name wholesale (no base/variant merge).
+        # `variants:` stripped if present (a standalone is already fully resolved).
+        for bare, cfg in standalone.items():
+            entry = _copy.deepcopy(cfg)
+            entry.pop("variants", None)
+            resolved[bare] = entry
+
+        # Patterns: keep those that apply to the active profile (no `profiles` key = all),
+        # strip the `profiles` filter, then resolve any per-pattern variant.
         patterns = data.get("patterns", []) or []
-        resolved_patterns = [_apply_variant(_copy.deepcopy(p)) for p in patterns]
+        resolved_patterns: List[Dict] = []
+        for p in patterns:
+            profs = p.get("profiles")
+            if profs is not None and active_profile not in profs:
+                continue
+            pcopy = _copy.deepcopy(p)
+            pcopy.pop("profiles", None)
+            resolved_patterns.append(_apply_variant(pcopy))
 
         _BASELINE_MODEL_CONFIGS = resolved
         _BASELINE_MODEL_PATTERNS = resolved_patterns
         n_groups = len(data.get("groups", []) or [])
         log(f"Loaded model registry: {len(_BASELINE_MODEL_CONFIGS)} model config(s) "
-            f"({n_groups} group(s), {len(per_model)} override(s)) and "
-            f"{len(_BASELINE_MODEL_PATTERNS)} pattern(s) from {path} "
-            f"(hardware_profile={hardware_profile or 'default'})")
+            f"({n_groups} group(s), {len(base_models)} override(s), {len(standalone)} "
+            f"standalone@{active_profile}) and {len(_BASELINE_MODEL_PATTERNS)} pattern(s) "
+            f"from {path} (hardware_profile={active_profile})")
     except Exception as e:
         log(f"WARNING: failed to load model registry from {path}: {e}")
         _BASELINE_MODEL_CONFIGS = {}
