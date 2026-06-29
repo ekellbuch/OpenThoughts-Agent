@@ -10,9 +10,19 @@ This module is the canonical definition: both `eval/unified_eval_listener.py`
 persists the count onto `sandbox_jobs.stats`) import from here. Do NOT duplicate
 the set elsewhere.
 
-NOTE: `VerificationNotCompletedError` is the OUTER wrapper every VNC trial stores
-when its true cause is an infra failure (e.g. EnvironmentStartTimeoutError); it is
-intentionally classified as infra.
+NOTE: harbor's trial finalizer no longer flattens an upstream infra failure into
+`VerificationNotCompletedError` (VNC). Since the harbor `feuer/trial-not-scored-error`
+change, when a single-step verification-enabled trial finalizes unscored:
+  - an informative upstream error (e.g. `EnvironmentStartTimeoutError`) is PRESERVED
+    as-is and bucketed under its true type (already in this set);
+  - VNC now means strictly "the verifier was reached but produced no result";
+  - a silent early fall-through with no prior error gets the catch-all
+    `TrialNotScoredError` base.
+All three (`EnvironmentStartTimeoutError`, `VerificationNotCompletedError`,
+`TrialNotScoredError`) are infra and listed here. `exception_stats` keys off the
+leaf class-name STRING, so the base needs its own entry. Old runs (pre-change)
+that bucketed env-start timeouts as VNC keep the same total infra count; future
+runs re-attribute to the true type for a truer breakdown.
 
 This module is dependency-free (stdlib only) so it can be imported from anywhere.
 """
@@ -33,6 +43,7 @@ INFRA_ERROR_TYPES = {
     "SandboxBuildFailedError",
     "AgentEnvironmentTimeoutError",
     "VerificationNotCompletedError",
+    "TrialNotScoredError",
 }
 
 
