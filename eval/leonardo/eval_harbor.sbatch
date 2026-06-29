@@ -551,14 +551,49 @@ echo "Using dataset path: $DATASET_PATH"
 declare -A BENCHMARK_NAME_MAP=(
     ["DCAgent2_aider_polyglot"]="aider_polyglot"
     ["DCAgent_dev_set_v2"]="dev_set_v2"
+    ["DCAgent2_dev_set_v2"]="dev_set_v2"
     ["DCAgent_dev_set_71_tasks"]="dev_set_71_tasks"
     ["DCAgent2_terminal_bench_2"]="terminal_bench_2"
     ["DCAgent_swebench_verified_eval_set"]="swebench-verified-random-100-folders"
+    ["DCAgent2_swebench-verified-random-100-folders"]="swebench-verified-random-100-folders"
     ["DCAgent2_bfcl-parity"]="bfcl-parity"
 )
-BENCHMARK_NAME="${BENCHMARK_NAME_MAP[$SAFE_REPO]:-$SAFE_REPO}"
+BENCHMARK_NAME="${BENCHMARK_NAME_MAP[$SAFE_REPO]:-}"
+
+# Bug fix (recurring a1 mis-registration): the a1 legs are launched by a wrapper
+# (NOT the v6 listener) with $2/REPO_ID = a LOCAL hash-named snapshot dir, e.g.
+# /…/data/datasets/0c553bd6…  →  basename = a bare 40-hex version-hash. That hash
+# has no BENCHMARK_NAME_MAP entry, so it used to fall through to $SAFE_REPO (the
+# hash) and the uploader auto-created a BOGUS hash-named benchmark. When SAFE_REPO
+# looks like a bare version-hash and isn't a known benchmark, recover the dataset's
+# true identity from a "datasets--<org>--<name>" segment in the (symlink-resolved)
+# REPO_ID path — mirroring hpc/launch_utils.py:derive_benchmark_from_job_dir's
+# HF-cache method — then re-map that <org>_<name> through BENCHMARK_NAME_MAP.
+# The listener path is UNAFFECTED: its SAFE_REPO is a real org_name (map hit above),
+# so this block never fires. If no datasets-- segment is recoverable here (flat
+# --local-dir snapshot), BENCHMARK_NAME stays empty and the uploader re-derives it
+# from the harbor-written $RUN_DIR/config.json (see uploader block below).
+if [ -z "$BENCHMARK_NAME" ] && [[ "$SAFE_REPO" =~ ^[0-9a-f]{40}$ || "$SAFE_REPO" =~ ^[0-9a-f]{64}$ ]]; then
+    _bench_resolved_path="$REPO_ID"
+    if [ -e "$REPO_ID" ]; then
+        _bench_resolved_path=$(readlink -f "$REPO_ID" 2>/dev/null || echo "$REPO_ID")
+    fi
+    _bench_seg=$(echo "$_bench_resolved_path" | tr '/' '\n' | grep -m1 'datasets--' || true)
+    if [ -n "$_bench_seg" ]; then
+        _bench_org_name=$(echo "${_bench_seg#datasets--}" | sed 's/--/_/g')
+        BENCHMARK_NAME="${BENCHMARK_NAME_MAP[$_bench_org_name]:-$_bench_org_name}"
+        echo "Recovered benchmark from datasets-- path segment: $_bench_seg -> $BENCHMARK_NAME"
+    fi
+fi
+
+# Fall back to SAFE_REPO only for non-hash inputs (preserves legacy behavior for
+# any unmapped real repo name). A bare hash is left EMPTY here so the uploader's
+# config.json recovery can run instead of registering the hash as a benchmark.
+if [ -z "$BENCHMARK_NAME" ] && ! [[ "$SAFE_REPO" =~ ^[0-9a-f]{40}$ || "$SAFE_REPO" =~ ^[0-9a-f]{64}$ ]]; then
+    BENCHMARK_NAME="$SAFE_REPO"
+fi
 export BENCHMARK_NAME
-echo "Benchmark name: $BENCHMARK_NAME"
+echo "Benchmark name: ${BENCHMARK_NAME:-<unresolved; uploader will derive from config.json>}"
 
 # ==============================================================================
 # Update DB: Started (using database/unified_db)
@@ -883,6 +918,31 @@ print(f"[uploader] upload_eval_results(path={run_dir!r}, username={username!r}, 
       f"error_mode={error_mode!r}, hf_repo_id={hf_repo_id!r})")
 dataset_hf = os.environ.get("REPO_ID", "")
 benchmark_name = os.environ.get("BENCHMARK_NAME", "")
+
+import re as _re
+
+def _is_bare_hash(s):
+    return bool(_re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", s or ""))
+
+# Bug fix (recurring a1 mis-registration): if BENCHMARK_NAME is empty or a bare
+# version-hash (the a1-wrapper local-snapshot-dir case), recover the dataset's
+# true identity from the harbor-written config.json via the SAME source of truth
+# the manual benchmark_id repoint uses (hpc.launch_utils.derive_benchmark_from_job_dir
+# → datasets[0].name/version or the datasets--org--name HF-cache segment). This
+# stops the uploader from auto-creating a BOGUS hash-named benchmark. The listener
+# path is UNAFFECTED: benchmark_name there is already a real registered name (not a
+# hash), so this recovery never runs.
+if not benchmark_name or _is_bare_hash(benchmark_name):
+    try:
+        from hpc.launch_utils import derive_benchmark_from_job_dir
+        derived = derive_benchmark_from_job_dir(run_dir)
+        if derived and not _is_bare_hash(derived):
+            print(f"[uploader] recovered benchmark from config.json: {benchmark_name!r} -> {derived!r}")
+            benchmark_name = derived
+    except Exception as e:
+        print(f"[uploader] WARNING: benchmark recovery from config.json failed: {e}")
+
+# Last-resort fallback (only if recovery above could not resolve a real name).
 if not benchmark_name:
     benchmark_name = dataset_hf.split("/")[-1] if "/" in dataset_hf else dataset_hf
 
