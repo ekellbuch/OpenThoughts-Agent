@@ -127,12 +127,17 @@ DEFAULT_CLUSTER = "cw-us-east-02a"
 # (use the immutable :gpu-rl-<gitsha> tag's digest, never the floating :gpu-rl).
 DEFAULT_RL_DOCKER_IMAGE = (
     "ghcr.io/open-thoughts/openthoughts-agent"
-    # gpu-rl-00220aac — bumps baked harbor 342729d5 -> f7f51f13 (litellm Provider-List
-    # /_turn_on_debug footer suppression + the TrialNotScoredError de-flatten in history),
-    # and picks up MarinSkyRL tip 23709366 (the async-actor drain fix). vLLM-fork unchanged
-    # (76259c63 == prebuilt-wheelhouse MANIFEST) so rebuilt via the fast prebuilt-wheelhouse
-    # path (zero nvcc, ~22 min). Built 2026-06-29 (kaniko job gpurl-kaniko-00220aac).
-    "@sha256:65b07cec09b015117271dc6a2b19bb657eb1b025f969b3476cea2288501838b6"
+    # REVERTED 2026-06-29 to gpu-rl-81045a29 (last known-good). The rebuild gpu-rl-00220aac
+    # (@sha256:65b07cec…, harbor litellm fix) REGRESSED the 32-rank default_pg NCCL rendezvous
+    # — it died TWICE at build_models/weight-sync (`DistBackendError: store->get('0') wait
+    # timeout`) while this image clears it cleanly (rl-131k-30b-stepfix3, 0 rendezvous failures).
+    # Cause: the rl-stage `uv pip install` drifted a transitive dep (bundled NCCL/torch/ray) on
+    # rebuild — the wheels were pinned but the rl env was NOT. The borked 65b07cec is deleted from
+    # ghcr; a re-rebuild with the rl-stage deps PINNED to this image's freeze (+ harbor f7f51f13)
+    # will restore the litellm fix without the NCCL regression, then re-bump this digest.
+    # gpu-rl-81045a29 = boto3-in-rl-env (R2 object-spilling) over the f9b8beb8 base; vLLM-fork
+    # 76259c63, torch 2.11.0+cu128, flash-attn 2.8.3.
+    "@sha256:648199885a1e35cebef029ab2993d527d88d3a2c7f3b30c1313990c81452c99e"
 )
 DEFAULT_GPU_VARIANT = "H100"
 DEFAULT_GPUS_PER_NODE = 8           # gd-8xh100ib-i128 = 8x H100-80GB + IB
