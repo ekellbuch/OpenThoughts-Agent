@@ -70,6 +70,28 @@ models:
       - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching --max-num-seqs 512"
 
+  # Qwen3-30B-A3B-Thinking-2507 — model_type: qwen3_moe (Qwen3MoeForCausalLM).
+  # 30B total / 3B active, bf16 ~60 GB → fits the 96GB GH200 at TP=1 with KV
+  # headroom at 32k (same envelope as the 35B-A3B legs above, which are ~69 GB).
+  # This is a NATIVE THINKING model (always emits long <think> traces), NOT a VL
+  # arch — config.json has model_type qwen3_moe, Qwen3MoeForCausalLM, NO
+  # vision_config / image|video tokens — so NO limit_mm_per_prompt is needed
+  # (unlike the qwen3_5_moe VL-config 35B legs). The otagent fork-vLLM resolves
+  # qwen3_moe natively. Thinking ON via enable_thinking (model's own chat template
+  # handles <think>; no explicit --chat-template, matching the 35B-A3B legs). The
+  # thinking trace + answer need a LARGE output budget — the sbatch defaults
+  # (EVAL_VLLM_MAX_MODEL_LEN 32768 + EVAL_MAX_OUTPUT_TOKENS 16384) supply 16k
+  # output, which is what the 35B-A3B thinking legs ran with. NO tool_call_parser /
+  # reasoning_parser (Pattern D — terminus-2 parses plain JSON client-side).
+  "Qwen/Qwen3-30B-A3B-Thinking-2507":
+    tensor_parallel_size: 1
+    max_model_len: 32768
+    swap_space: 32
+    trust_remote_code: true
+    agent_kwargs:
+      - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
+    extra_args: "--enable-prefix-caching --max-num-seqs 512"
+
 # Pattern fallbacks — all force TP=1 (single GH200/node) + prefix-caching.
 patterns:
   - match: "(?i)32[Bb]"
