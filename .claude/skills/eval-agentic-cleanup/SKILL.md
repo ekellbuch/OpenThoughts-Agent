@@ -231,6 +231,38 @@ c.table("sandbox_trial_model_usage").update({"model_id": correct.data[0]["id"]})
 c.table("models").delete().eq("id", "<BOGUS_ID>").execute()  # only if no other-user row FKs it
 ```
 
+## 2b. ⚠️ ALSO verify + fix the BENCHMARK name (the version-hash mis-registration)
+The **benchmark** FK has the same failure mode as the model FK in §2. The eval harness's benchmark-name
+derivation can register the row under a **raw 40-hex dataset version-hash** (e.g. `0c553bd6d05d…`, `377118ff…`,
+`693231ec…`) instead of the proper benchmark name — it bites when the launch passed a **local hash-named
+snapshot dir** as the dataset (`eval/leonardo/eval_harbor.sbatch` `basename`'d it, and `BENCHMARK_NAME_MAP`
+had no entry → it fell through to the hash). **Fixed for NEW launches in `0c24c528`** (the sbatch now derives
+the name from the `datasets--<org>--<name>` segment / run-dir, falling back to empty rather than a hash) — but
+legs launched BEFORE that, the auto-harvest path, and any manual `manual_db_eval_push` off such a run dir can
+all STILL land under a hash. A hash-named benchmark silently MIS-FILES the score (the leaderboard groups by
+benchmark) and spawns orphan benchmark rows. This recurred ~weekly until the fix — always verify it.
+
+**Detect** (do this in §0 check-2/3 AND after any register): read the row's benchmark NAME — if it matches
+`^[0-9a-f]{32,64}$` it's mis-keyed.
+**Resolve the proper name** from the run-dir name (the leading segment IS the benchmark: `<benchmark>_<model>_<ts>`
+or `<benchmark>_a1_<model>_<ts>`) or the trace repo (`DCAgent2/<benchmark>_…`), then map to the registered id:
+`swebench-verified-random-100-folders`=`cc1aca76…` · `dev_set_v2`=`b94dfab2…` · `terminal_bench_2`=`34ab93c4…`.
+**Repoint FK-safe** (same own-rows-only rule as §2 — assert ownership, scope `id`+`username`):
+```python
+me = ...  # your username ∈ feuer1/bfeuer00/penfever/benjaminfeuer
+job = c.table("sandbox_jobs").select("id,username,benchmark_id").eq("id","<JOB_ID>").execute().data[0]
+assert job["username"] == me, "FK-SAFETY STOP — not your row; surface, do not mutate"
+proper = c.table("benchmarks").select("id").eq("name","terminal_bench_2").execute().data[0]["id"]   # the resolved name
+c.table("sandbox_jobs").update({"benchmark_id": proper}).eq("id","<JOB_ID>").eq("username",me).execute()
+```
+**Then clean the orphan hash benchmark** — ONLY if **0 `sandbox_jobs` reference it across ALL users** (the
+cross-user pre-check): delete its `sandbox_benchmark_tasks` CHILDREN first (the FK that otherwise blocks the
+benchmark delete — note that table has **no `id` column**, delete by `.eq("benchmark_id", <id>)`), then delete
+the benchmark. **LEAVE it** (do not delete) if ANY row still references it — a `Started`/in-flight sibling, a
+rerun, or another user's row. `manual_db_eval_push` uses `hpc/launch_utils.py:derive_benchmark_from_job_dir`,
+which resolves correctly from the run-dir/HF-cache path — so a clean manual register usually avoids the hash;
+this guard is the safety net for pre-fix legs, the auto-harvest path, and any row that slipped through.
+
 ## 3. Verify it landed
 Confirm `sandbox_jobs.<JOB_ID>.model_id` now points to the real `laion/<name>` row and the trial scores are
 attached. If `--skip-hf` wasn't used, confirm the trace dataset (`DCAgent2/<RUN_TAG>-traces`) is non-empty on HF.
