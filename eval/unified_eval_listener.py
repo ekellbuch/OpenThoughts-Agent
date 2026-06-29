@@ -949,23 +949,19 @@ def _build_api_agent_kwargs_string(agent_kwargs: Dict[str, Any]) -> str:
 
 # Infrastructure errors that harbor's resume filters will retry.
 # MUST stay in sync with the sbatch resume branch's --filter-error-type list
-# (eval/tacc/eval_harbor.sbatch). VerificationNotCompletedError is the OUTER
-# wrapper every VNC trial stores when its true cause is an infra failure
-# (e.g. EnvironmentStartTimeoutError) — without it the disk scanner computes
-# infra_errors=0 for VNC-heavy runs and selects 0 resume candidates, so
-# --resume-only no-ops even though the sbatch filter (FIX A) is armed.
-INFRA_ERROR_TYPES = {
-    "DaytonaError",
-    "DaytonaAuthenticationError",
-    "DaytonaAuthorizationError",
-    "DaytonaNotFoundError",
-    "EnvironmentStartTimeoutError",
-    "DaytonaRateLimitError",
-    "CancelledError",
-    "SandboxBuildFailedError",
-    "AgentEnvironmentTimeoutError",
-    "VerificationNotCompletedError",
-}
+# (eval/tacc/eval_harbor.sbatch). Since the harbor `feuer/trial-not-scored-error`
+# change, an unscored single-step trial is bucketed under its TRUE cause: an
+# upstream infra failure (e.g. EnvironmentStartTimeoutError) is preserved, VNC
+# means strictly "verifier reached, no result", and a silent early fall-through
+# gets the TrialNotScoredError base. All three are infra and counted here — so a
+# VNC-heavy run (and the env-start-timeout-heavy runs that USED to mis-bucket as
+# VNC) still yield non-zero infra_errors and select resume candidates, rather
+# than computing infra_errors=0 and no-op'ing --resume-only.
+#
+# Single source of truth: the set lives in database/unified_db/infra_errors.py
+# (also used by the DB write-point that persists n_infra_errors onto
+# sandbox_jobs.stats). Imported here, not duplicated.
+from database.unified_db.infra_errors import INFRA_ERROR_TYPES
 
 
 def _parse_job_dir(job_dir: Path) -> Optional[Dict]:
