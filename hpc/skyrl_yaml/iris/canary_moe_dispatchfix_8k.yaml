@@ -161,13 +161,15 @@ trainer:
   update_epochs_per_batch: 1
 
   # Minimized batches (train == mini required by the fully-async assert).
-  # SkyRL asserts policy_mini_batch_size_per_gpu = floor(mini_batch x n_samples / dp_size)
-  # >= 1, and dp_size is the FULL policy world (32 here), NOT the ep/cp-reduced width.
-  # So need mini_batch x n_samples(2) >= 32 -> mini_batch 16 -> 32/32 = 1 sample/rank.
-  # Smallest valid batch that still reaches step-1 fwd with a tiny rollout.
-  train_batch_size: 16
-  policy_mini_batch_size: 16
-  eval_batch_size: 16
+  # SkyRL (utils.py:289-392) asserts, with policy_dp_size = full policy world = 32
+  # (RUNTIME-confirmed, NOT the ep/cp-reduced width): (a) train_batch_size >= lcm_dp_size(32),
+  # (b) policy_mini_batch_size_per_gpu = mini x n_samples(2) // 32 >= 1 and divisible by
+  # micro_train(1), (c) train_batch_size % policy_mini_batch_size == 0. train==mini==32
+  # -> per-gpu-mini = 32x2/32 = 2. Clears ALL checks. Smallest valid batch that still
+  # reaches step-1 fwd with a tiny (32 prompt x 2 sample = 64 episode) rollout.
+  train_batch_size: 32
+  policy_mini_batch_size: 32
+  eval_batch_size: 32
 
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
