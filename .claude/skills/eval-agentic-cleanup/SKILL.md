@@ -186,6 +186,12 @@ python scripts/database/manual_db_eval_push.py --job-dir trace_jobs/<RUN_TAG> --
 #   --hf-repo DCAgent2/<RUN_TAG>-traces   # explicit HF repo
 #   --skip-hf                             # DB only (traces already uploaded)
 #   --forced-update                       # overwrite existing records
+#   --benchmark-name terminal_bench_2     # EXPLICIT benchmark — PREVENTS the §2b hash bug. PASS IT whenever the
+#                                         #   run-dir name is ambiguous: when benchmark AND model both contain
+#                                         #   underscores (e.g. terminal_bench_2_Qwen3_5_35B_A3B_…), derive_benchmark_
+#                                         #   from_job_dir can't find the split → returns the junk string → mints a
+#                                         #   HASH benchmark. Passing --benchmark-name is the clean fix; far better
+#                                         #   than registering wrong then repointing per §2b.
 ```
 
 ### HF trace dataset — use the MEMORY-EFFICIENT uploader (don't hand-extract episodes)
