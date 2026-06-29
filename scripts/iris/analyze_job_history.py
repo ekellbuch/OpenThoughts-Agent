@@ -1,13 +1,29 @@
 #!/usr/bin/env python3
-"""Pull the entire log history for an iris job and produce summary statistics.
+"""Pull the COMPLETE log history for an iris job and produce summary statistics.
 
-The naive ``iris job logs <job> --tail --max-lines N`` truncates by line count,
-not by time, and verbose Ray state-dumps + fd-monitor frames crowd out the
-throughput emissions. This script paginates the log via fixed time windows
-(``--since-ms`` + ``--no-tail``) and filters at the python level to only retain
-lines we actually need (cycle boundaries, vLLM throughput emissions). The
-filtered stream is cached to ``/tmp/iris_history_<job>.filtered.log`` so re-runs
-are fast.
+Log acquisition reads finelog directly rather than paginating ``iris job logs
+--since-ms`` time windows (which were pathologically slow on long jobs). For a
+logical job we:
+
+  1. Enumerate the authoritative attempt/generation set from the iris controller
+     SQLite (``task_attempts`` joined through ``tasks``/``jobs`` on
+     ``root_job_id``/``job_id``), with each attempt's ``[started, finished]``
+     window.
+  2. Fetch every matching ``log`` row by ``key`` prefix from BOTH the LIVE
+     finelog server (recent, locally-resident segments) AND the GCS parquet
+     archive (uploaded L>=1 segments), then union and dedup on the server-stamped
+     monotonic ``seq``. Neither source alone is complete.
+  3. Assert COVERAGE: every enumerated attempt window must contain log rows with
+     no internal gap larger than ``--max-coverage-gap-seconds``. If any window is
+     uncovered (e.g. live unavailable for the recent L0 tail AND GCS has not yet
+     archived it) we FAIL LOUDLY, listing the missing ``(log_key, window)``,
+     unless ``--allow-incomplete`` is passed.
+
+The completeness contract is non-negotiable: the script either returns every log
+row across every attempt/generation or fails identifying the gap. The merged,
+filtered stream is cached to ``/tmp/iris_history_<job>.filtered.log`` (coverage
+result alongside in ``.coverage.json``) so re-runs are fast; ``--refresh``
+re-fetches.
 
 Three sections of stats are computed:
   §1 preemption count + time-to-preempt distribution
@@ -16,6 +32,11 @@ Three sections of stats are computed:
 
 A markdown report is written to ``--output``; a JSON sidecar is written
 alongside.
+
+Run under the marin venv (``/Users/benjaminfeuer/Documents/marin/.venv/bin/
+python``) so ``finelog``/``rigging``/``duckdb`` import. The LIVE path needs an
+IAP session for the ``marin`` cluster (``marin-login login marin``); without it
+the recent-L0 window is reported as uncovered rather than silently dropped.
 """
 from __future__ import annotations
 
@@ -26,13 +47,25 @@ import statistics
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import os
 import shutil
+
+import duckdb
+import fsspec
+from finelog.client.log_client import LogClient
+from finelog.deploy.cli import _register_namespace_views
+from finelog.deploy.config import FinelogConfig, load_finelog_config, tunnel_target_for
+from finelog.errors import StatsError
+from rigging.auth import IapLoginRequired
+from rigging.connect import IapAuth, connect, disconnect
+from rigging.iap_login import provider_for
+from rigging.tunnel import open_tunnel
 
 GCS_ROOT = "gs://marin-models-us/ot-agent"
 
@@ -122,6 +155,46 @@ KEEP_RE = re.compile(
 # is belt-and-suspenders / not used at the moment.
 DROP_SUFFIX = ("running agent...", "[fd-monitor]")
 
+# ---------- finelog acquisition tuning ----------
+
+# Server-side substring filters that select exactly the lines KEEP_RE matches.
+# These are LITERAL substrings of each KEEP_RE alternative; pushing them down as
+# ``contains(data, ...)`` (trigram-indexed) shrinks the stats fetch from the full
+# multi-million-row stream to a few thousand rows, while ``parse_log_lines`` still
+# re-validates each line against the precise regexes.
+FINELOG_CONTAINS_PATTERNS = (
+    "[tpu-inference-patch] APPLIED",
+    "Polling for rendezvous",
+    "Raylet is terminated",
+    "EngineCore died",
+    "worker_lost_spec",
+    "Preempted by /",
+    "Avg generation throughput",
+)
+
+# The LIVE query deadline must cover a trigram scan over a multi-day job; the
+# 10s client default times out on the long datagen jobs.
+LIVE_TIMEOUT_MS = 180_000
+# seq keyset page size. The server has no row cap but a 64MB transport limit per
+# response; a 50k-row page of log lines stays well under it.
+SEQ_PAGE_ROWS = 50_000
+# Coverage is proven by a cheap per-minute GROUP BY over ALL rows (unfiltered):
+# a bucket is "covered" if either source emitted >=1 row in that minute.
+COVERAGE_BUCKET_MS = 60_000
+# Portable floor-division to a minute bucket. The finelog server is
+# Postgres-flavored (integer ``/``) while the GCS path is DuckDB (float ``/``);
+# ``CAST(floor(epoch_ms / 60000.0) AS BIGINT)`` yields the same integer bucket on
+# both, matching python's ``epoch_ms // COVERAGE_BUCKET_MS``.
+BUCKET_EXPR = f"CAST(floor(epoch_ms / {COVERAGE_BUCKET_MS}.0) AS BIGINT)"
+# GCS parquet prune padding (segment ``time_created`` is an upper bound on its
+# rows' ``epoch_ms``): widen the window generously so L0->L1 compaction lag never
+# prunes a segment that still holds in-window rows.
+GCS_CREATED_SINCE_PAD_MS = 3_600_000  # 1h below the window floor
+GCS_CREATED_UNTIL_PAD_MS = 6 * 3_600_000  # 6h above the window ceiling
+# Default max run of consecutive empty minutes tolerated inside an attempt window
+# before it is flagged uncovered.
+DEFAULT_MAX_COVERAGE_GAP_SECONDS = 600.0
+
 
 @dataclass
 class Cycle:
@@ -155,6 +228,48 @@ class TrialStatus:
 
 
 @dataclass
+class Attempt:
+    """One row of ``task_attempts`` — an attempt of a task in some generation.
+
+    ``log_key`` is the iris wire identity including the attempt suffix
+    (``<task_id>:<attempt_id>``), which is the value of the finelog ``key``
+    column. ``finished_at_ms`` is ``None`` while the attempt is still running, in
+    which case its coverage window runs to ``now``.
+    """
+
+    log_key: str
+    state: int
+    started_at_ms: int | None
+    finished_at_ms: int | None
+
+
+@dataclass
+class MissingWindow:
+    """A coverage gap: an attempt window with a too-long run of empty minutes."""
+
+    log_key: str
+    window_start_ms: int
+    window_end_ms: int
+    gap_start_ms: int
+    gap_end_ms: int
+    gap_seconds: float
+
+
+@dataclass
+class LogAcquisition:
+    """Result of the LIVE u GCS fetch + coverage assertion."""
+
+    lines: list[str]
+    logs_complete: bool
+    missing_windows: list[MissingWindow]
+    live_available: bool
+    live_unavailable_reason: str | None
+    live_rows: int
+    gcs_rows: int
+    merged_rows: int
+
+
+@dataclass
 class JobAnalysis:
     job_id: str
     job_name: str
@@ -183,6 +298,10 @@ class JobAnalysis:
 
     # §3
     serving_samples: list[ServingSample] = field(default_factory=list)
+
+    # Completeness contract (see module docstring §3).
+    logs_complete: bool = True
+    missing_windows: list[MissingWindow] = field(default_factory=list)
 
 
 # ---------- Iris CLI / subprocess helpers ----------
@@ -226,166 +345,451 @@ def get_job_summary_preemptions(job_id: str) -> int | None:
     return int(m.group(1))
 
 
-# ---------- Iris log paging ----------
+# ---------- finelog log acquisition (LIVE u GCS, dedup on seq) ----------
 
 
-def fetch_filtered_log(
-    job_id: str, since_ms: int, max_lines: int = 200_000
-) -> tuple[list[str], str | None, int, int]:
-    """Fetch a page of logs from iris, returning only lines matching KEEP_RE.
+def _int_or_none(value: str | None) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
 
-    Returns (kept_lines, last_line_seen, total_lines_read, used_max). ``used_max``
-    is the page-size that actually succeeded (== max_lines unless we had to
-    halve to dodge a server timeout). ``last_line_seen`` is the very last raw
-    line emitted by iris (regardless of filter); we use its ``[HH:MM:SS]``
-    prefix to advance the page cursor.
 
-    Halves ``max_lines`` and retries on RPC timeout / non-zero exit. Iris's log
-    server returns ``StatsError: Request timed out`` when the server-side
-    aggregation for a big page exceeds its deadline; a smaller page is
-    materially cheaper to assemble and will normally succeed.
+def enumerate_attempts(job_id: str) -> tuple[list[Attempt], int]:
+    """Enumerate every attempt of every generation of the logical job ``job_id``.
+
+    Works whether ``job_id`` is a plain job, an executor coordinator, or a child:
+    the WHERE clause unions ``root_job_id`` matches (all descendants/generations)
+    with ``job_id`` matches (the job itself). Returns the attempt list plus
+    ``window_lo_ms``, the earliest job/attempt timestamp seen (used to bound the
+    GCS parquet prune). GC'd generations that survive only in finelog are still
+    fetched by key prefix; they simply lack an enumerated coverage window.
     """
-    tries = 0
-    cur_max = max_lines
-    last_err: str = ""
-    while tries < 4:
-        tries += 1
-        cmd = [
-            IRIS_BIN,
-            "--cluster",
-            CLUSTER,
-            "job",
-            "logs",
-            job_id,
-            "--since-ms",
-            str(since_ms),
-            "--max-lines",
-            str(cur_max),
-            "--no-tail",
-        ]
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    esc = job_id.replace("'", "''")
+    sql = (
+        "SELECT ta.task_id || ':' || ta.attempt_id AS log_key, ta.state, "
+        "ta.started_at_ms, ta.finished_at_ms "
+        "FROM task_attempts ta "
+        "JOIN tasks t ON t.task_id = ta.task_id "
+        "JOIN jobs j ON j.job_id = t.job_id "
+        f"WHERE j.root_job_id = '{esc}' OR j.job_id = '{esc}' "
+        "ORDER BY ta.started_at_ms"
+    )
+    rows = run_iris_query(sql)
+    attempts = [
+        Attempt(
+            log_key=r["log_key"],
+            state=int(r["state"]) if r.get("state") else -1,
+            started_at_ms=_int_or_none(r.get("started_at_ms")),
+            finished_at_ms=_int_or_none(r.get("finished_at_ms")),
         )
-        kept: list[str] = []
-        last_line: str | None = None
-        total = 0
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            total += 1
-            if LINE_RE.match(line):
-                last_line = line.rstrip("\n")
-            if KEEP_RE.search(line):
-                kept.append(line.rstrip("\n"))
-        _, err = proc.communicate()
-        if proc.returncode == 0:
-            return kept, last_line, total, cur_max
-        last_err = err
-        if "timed out" in err.lower() or "deadline" in err.lower():
-            print(
-                f"  [retry] iris timed out at max_lines={cur_max}; halving",
-                file=sys.stderr,
-            )
-            cur_max = max(cur_max // 2, 20_000)
-            continue
-        # other error — propagate
-        break
-    raise RuntimeError(
-        f"iris job logs returned exit {proc.returncode} after {tries} tries; last err:\n{last_err[-500:]}"
+        for r in rows
+    ]
+    job_sql = (
+        "SELECT submitted_at_ms, started_at_ms FROM jobs "
+        f"WHERE root_job_id = '{esc}' OR job_id = '{esc}'"
+    )
+    job_rows = run_iris_query(job_sql)
+    candidates: list[int] = []
+    for jr in job_rows:
+        candidates += [_int_or_none(jr.get("submitted_at_ms")), _int_or_none(jr.get("started_at_ms"))]
+    for att in attempts:
+        candidates += [att.started_at_ms, att.finished_at_ms]
+    valid = [c for c in candidates if c]
+    window_lo = min(valid) if valid else 0
+    return attempts, window_lo
+
+
+def _sql_str(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _key_predicate(prefix: str) -> str:
+    """SQL predicate selecting every log row of ``prefix``'s job tree.
+
+    Matches the exact ``prefix`` plus everything under ``<prefix>/`` (all tasks,
+    attempts, and nested generations at any depth). ``%``/``_``/``\\`` in the
+    prefix are escaped so a literal underscore in a job name cannot widen the
+    match. Filtering is on ``key`` (wire identity), never ``source`` (stream).
+    """
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    like_pat = escaped + "/%"
+    return f"(key LIKE {_sql_str(like_pat)} ESCAPE '\\' OR key = {_sql_str(prefix)})"
+
+
+def _data_predicate() -> str:
+    return "(" + " OR ".join(f"contains(data, {_sql_str(p)})" for p in FINELOG_CONTAINS_PATTERNS) + ")"
+
+
+def _paginate(run_page: Callable[[int], list[dict]]) -> list[dict]:
+    """Keyset-paginate by ``seq``: call ``run_page(last_seq)`` until a short page.
+
+    ``run_page`` must return rows sorted ascending by ``seq``, at most
+    ``SEQ_PAGE_ROWS`` of them, each a dict with a ``seq`` key.
+    """
+    out: list[dict] = []
+    last_seq = -1
+    while True:
+        page = run_page(last_seq)
+        out.extend(page)
+        if len(page) < SEQ_PAGE_ROWS:
+            return out
+        last_seq = page[-1]["seq"]
+
+
+def _data_page_sql(key_pred: str, data_pred: str, last_seq: int) -> str:
+    return (
+        "SELECT seq, key, source, epoch_ms, level, data FROM log "
+        f"WHERE {key_pred} AND {data_pred} AND seq > {last_seq} "
+        f"ORDER BY seq LIMIT {SEQ_PAGE_ROWS}"
     )
 
 
-def paginate_full_log(
-    job_id: str,
-    submitted_at_ms: int,
-    end_ms: int,
-    cache_path: Path,
-    refresh: bool,
-    page_max_lines: int = 200_000,
-) -> list[str]:
-    """Paginate the entire job log, caching the filtered stream to disk.
+def _bucket_sql(key_pred: str) -> str:
+    # Unfiltered per-minute presence over EVERY row (the coverage proof).
+    return f"SELECT {BUCKET_EXPR} AS bkt, count(*) AS n FROM log WHERE {key_pred} GROUP BY 1 ORDER BY 1"
 
-    We start at ``submitted_at_ms`` and ask iris for up to ``page_max_lines``
-    lines from that point onward. We then advance the cursor to the wall-clock
-    timestamp of the last line in the page (minus a 1s safety overlap, to make
-    sure we don't miss anything that shares the second). We stop when:
-      (a) cursor reaches ``end_ms``, OR
-      (b) the cursor failed to advance from the previous page (we caught up to
-          head and the next ``--since-ms`` will just return the same trailing
-          lines).
 
-    The iris log timestamp has only HH:MM:SS, so we maintain a UTC day counter
-    based on monotonic comparison: when HH:MM:SS goes backwards by > 12 hours
-    relative to the previous page-end, increment the day.
+@contextmanager
+def _open_live_client(cfg: FinelogConfig, finelog_name: str) -> "Iterator[LogClient]":
+    """Yield a LogClient to the live finelog server, mirroring ``finelog query``.
+
+    Uses the controller IAP proxy when ``client_url`` is set (the marin cluster),
+    otherwise an SSH/k8s tunnel (e.g. cw-us-east-02a).
     """
-    if cache_path.exists() and not refresh:
-        print(f"[cache] reusing {cache_path}", file=sys.stderr)
-        return cache_path.read_text().splitlines()
-
-    print(f"[fetch] paginating logs from {submitted_at_ms} to {end_ms}", file=sys.stderr)
-    seen: set[str] = set()
-    out: list[str] = []
-    cursor_ms = submitted_at_ms
-    page_idx = 0
-    # Sticky page size: once a page had to halve to succeed, keep using that
-    # smaller size for subsequent pages. Saves wasted 30s timeouts.
-    sticky_max = page_max_lines
-    while cursor_ms < end_ms:
-        page_idx += 1
-        page_lines, last_line, total, used_max = fetch_filtered_log(
-            job_id, cursor_ms, max_lines=sticky_max
+    if cfg.client_url:
+        client = connect(
+            cfg.client_url,
+            lambda ep: LogClient.connect(ep.url, interceptors=ep.interceptors, timeout_ms=LIVE_TIMEOUT_MS),
+            auth=IapAuth(provider_for(finelog_name)),
+            connect_timeout=60.0,
         )
-        if used_max < sticky_max:
-            print(
-                f"  [sticky] reducing page_max_lines from {sticky_max} to {used_max}",
-                file=sys.stderr,
+        try:
+            yield client
+        finally:
+            client.close()
+            disconnect(client)
+    else:
+        target = tunnel_target_for(cfg)
+        with open_tunnel(target, timeout=60.0) as url:
+            client = LogClient.connect(url, timeout_ms=LIVE_TIMEOUT_MS)
+            try:
+                yield client
+            finally:
+                client.close()
+
+
+def fetch_live(
+    cfg: FinelogConfig, finelog_name: str, prefix: str
+) -> tuple[list[dict], set[int], bool, str | None]:
+    """Fetch filtered rows + per-minute coverage buckets from the LIVE server.
+
+    Returns ``(rows, covered_buckets, available, reason)``. On any auth/transport
+    failure the live source is reported UNAVAILABLE (empty rows/buckets) so the
+    coverage check fails loudly for any window GCS does not also cover, rather
+    than silently proceeding as if complete.
+    """
+    key_pred = _key_predicate(prefix)
+    data_pred = _data_predicate()
+    try:
+        with _open_live_client(cfg, finelog_name) as client:
+            rows = _paginate(
+                lambda last: client.query(
+                    _data_page_sql(key_pred, data_pred, last), max_rows=SEQ_PAGE_ROWS + 10_000
+                ).to_pylist()
             )
-            sticky_max = used_max
-        new = 0
-        for line in page_lines:
-            if line not in seen:
-                seen.add(line)
-                out.append(line)
-                new += 1
+            bucket_rows = client.query(_bucket_sql(key_pred), max_rows=2_000_000).to_pylist()
+            buckets = {int(r["bkt"]) for r in bucket_rows}
+        return rows, buckets, True, None
+    except (IapLoginRequired, StatsError, ConnectionError, OSError, TimeoutError) as exc:
+        reason = f"{type(exc).__name__}: {exc}"
         print(
-            f"  page {page_idx}: cursor={cursor_ms}, raw={total}, kept={len(page_lines)}, new={new}",
+            f"[live] UNAVAILABLE: {reason}\n"
+            "       (live finelog needs an IAP session: `marin-login login marin`)",
             file=sys.stderr,
         )
-        if last_line is None:
-            print(f"  page {page_idx}: empty page, stopping", file=sys.stderr)
-            break
-        m = LINE_RE.match(last_line)
-        if not m:
-            print(f"  page {page_idx}: unparseable last line, stopping", file=sys.stderr)
-            break
-        hh, mm, ss = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        # Reconstruct date by anchoring to cursor's own date and walking forward
-        # day-by-day while the proposed timestamp falls before cursor_ms+1s.
-        cursor_dt = datetime.fromtimestamp(cursor_ms / 1000, tz=timezone.utc)
-        candidate = datetime(
-            cursor_dt.year, cursor_dt.month, cursor_dt.day, hh, mm, ss,
-            tzinfo=timezone.utc,
+        return [], set(), False, reason
+
+
+# finelog L0->L1->L2 compaction deletes superseded segments. A segment listed by
+# the view builder can 404 by the time DuckDB reads it; re-listing picks up the
+# superseding (higher-level) segment, whose rows carry the same ``seq`` — so a
+# fresh attempt is consistent and completeness is preserved.
+GCS_COMPACTION_RACE_ATTEMPTS = 5
+GCS_COMPACTION_RACE_BACKOFF_SECONDS = 2.0
+
+
+def _is_missing_segment_error(exc: Exception) -> bool:
+    text = str(exc)
+    return "FileNotFoundError" in text or "404" in text or "NoSuchKey" in text
+
+
+def _fetch_gcs_once(
+    cfg: FinelogConfig, prefix: str, window_lo_ms: int, window_hi_ms: int
+) -> tuple[list[dict], set[int]]:
+    fs, _ = fsspec.url_to_fs(cfg.remote_log_dir)
+    conn = duckdb.connect()
+    try:
+        conn.register_filesystem(fs)
+        _register_namespace_views(
+            conn,
+            cfg.remote_log_dir,
+            ["log"],
+            fs=fs,
+            created_since_ms=window_lo_ms - GCS_CREATED_SINCE_PAD_MS,
+            created_until_ms=window_hi_ms + GCS_CREATED_UNTIL_PAD_MS,
         )
-        # advance by whole days until candidate >= cursor_dt (so wall-clock
-        # rollovers within a page work)
-        while candidate < cursor_dt:
-            candidate = candidate + timedelta(days=1)
-        new_cursor_dt = candidate - timedelta(seconds=1)
-        new_cursor_ms = int(new_cursor_dt.timestamp() * 1000)
-        if new_cursor_ms <= cursor_ms:
-            # No progress => we've caught up to head
+        # _register_namespace_views skips the view entirely when the prune drops
+        # every segment; referencing ``log`` then raises. Treat as nothing archived.
+        if not conn.execute("SELECT view_name FROM duckdb_views() WHERE view_name = 'log'").fetchall():
+            return [], set()
+
+        key_pred = _key_predicate(prefix)
+        data_pred = _data_predicate()
+
+        def run_page(last_seq: int) -> list[dict]:
+            cur = conn.execute(_data_page_sql(key_pred, data_pred, last_seq))
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+        rows = _paginate(run_page)
+        cur = conn.execute(_bucket_sql(key_pred))
+        buckets = {int(r[0]) for r in cur.fetchall()}
+        return rows, buckets
+    finally:
+        conn.close()
+
+
+def fetch_gcs(
+    cfg: FinelogConfig, prefix: str, window_lo_ms: int, window_hi_ms: int
+) -> tuple[list[dict], set[int]]:
+    """Fetch filtered rows + per-minute coverage buckets from the GCS archive.
+
+    Replicates ``finelog gcs-query`` in-process: a DuckDB ``log`` view over the
+    archived parquet, time-pruned by object ``time_created`` (padded for L0->L1
+    lag). Retries the compaction TOCTOU race (a listed segment 404s mid-read).
+    Returns ``([], set())`` if no archived segments fall in the window.
+    """
+    if not cfg.remote_log_dir:
+        return [], set()
+    last_exc: Exception | None = None
+    for attempt in range(GCS_COMPACTION_RACE_ATTEMPTS):
+        try:
+            return _fetch_gcs_once(cfg, prefix, window_lo_ms, window_hi_ms)
+        except duckdb.Error as exc:
+            if not _is_missing_segment_error(exc):
+                raise
+            last_exc = exc
             print(
-                f"  page {page_idx}: cursor didn't advance ({new_cursor_ms} <= {cursor_ms}); stopping",
+                f"[gcs] segment vanished mid-read (compaction race), "
+                f"retry {attempt + 1}/{GCS_COMPACTION_RACE_ATTEMPTS}",
                 file=sys.stderr,
             )
-            break
-        # Cap so we don't go past `now`
-        if new_cursor_ms > end_ms:
-            cursor_ms = end_ms
-        else:
-            cursor_ms = new_cursor_ms
-    print(f"[fetch] total kept lines: {len(out)}", file=sys.stderr)
-    cache_path.write_text("\n".join(out) + "\n")
+            time.sleep(GCS_COMPACTION_RACE_BACKOFF_SECONDS)
+    raise RuntimeError(
+        f"GCS archive read kept racing finelog compaction after "
+        f"{GCS_COMPACTION_RACE_ATTEMPTS} attempts: {last_exc}"
+    )
+
+
+def merge_dedup_rows(live_rows: list[dict], gcs_rows: list[dict]) -> list[dict]:
+    """Union the two row sets, dedup on the monotonic ``seq``, sort by time.
+
+    ``seq`` is identical in the live deque and its GCS-archived copy, so it is the
+    canonical dedup key. Final order is ``(epoch_ms, seq)``.
+    """
+    by_seq: dict[int, dict] = {}
+    for row in live_rows:
+        by_seq[row["seq"]] = row
+    for row in gcs_rows:
+        by_seq.setdefault(row["seq"], row)
+    return sorted(by_seq.values(), key=lambda r: (r["epoch_ms"], r["seq"]))
+
+
+def _strip_attempt_suffix(key: str) -> str:
+    """``/user/job/0:3`` -> ``/user/job/0`` (the task identity the parser expects).
+
+    The trailing ``:<attempt_id>`` is what iris appends per attempt; the legacy
+    ``iris job logs`` ``task=`` field carried the bare task id, so the downstream
+    parser keys cycle detection on it.
+    """
+    head, _, tail = key.rpartition(":")
+    if head and tail.isdigit():
+        return head
+    return key
+
+
+def rows_to_filtered_lines(rows: list[dict]) -> list[str]:
+    """Render merged finelog rows into the legacy ``[HH:MM:SS] task=<k> | <data>``.
+
+    This is the exact text shape ``parse_log_lines`` consumes: the outer
+    ``[HH:MM:SS]`` is ``epoch_ms`` in UTC, ``task=`` is the key with its attempt
+    suffix stripped, and the body is the raw ``data``. Multi-line ``data`` is
+    flattened so each emitted physical line still satisfies ``LINE_RE``.
+    """
+    out: list[str] = []
+    for row in rows:
+        ts = datetime.fromtimestamp(row["epoch_ms"] / 1000, tz=timezone.utc)
+        task = _strip_attempt_suffix(row["key"])
+        data = str(row["data"]).replace("\n", " ").replace("\r", " ")
+        out.append(f"[{ts.strftime('%H:%M:%S')}] task={task} | {data}")
     return out
+
+
+def check_coverage(
+    attempts: list[Attempt], covered_buckets: set[int], now_ms: int, max_gap_seconds: float
+) -> list[MissingWindow]:
+    """Assert each attempt window is covered with no empty run > ``max_gap_seconds``.
+
+    A minute bucket is covered if EITHER source emitted a row in it. For a running
+    attempt (``finished_at_ms`` is None) the window runs to ``now``, so a live
+    outage that strands the recent-L0 tail (which GCS has not archived) surfaces
+    as a trailing gap here.
+    """
+    missing: list[MissingWindow] = []
+    for att in attempts:
+        if att.started_at_ms is None:
+            continue
+        start = att.started_at_ms
+        end = att.finished_at_ms if att.finished_at_ms is not None else now_ms
+        if end <= start:
+            continue
+        lo_b = start // COVERAGE_BUCKET_MS
+        hi_b = end // COVERAGE_BUCKET_MS
+        worst_run = 0
+        worst_span: tuple[int, int] | None = None
+        run_start: int | None = None
+        for b in range(lo_b, hi_b + 1):
+            if b in covered_buckets:
+                run_start = None
+                continue
+            if run_start is None:
+                run_start = b
+            run_len = b - run_start + 1
+            if run_len > worst_run:
+                worst_run = run_len
+                worst_span = (run_start, b)
+        if worst_span is not None and worst_run * (COVERAGE_BUCKET_MS / 1000.0) > max_gap_seconds:
+            gap_start_ms = worst_span[0] * COVERAGE_BUCKET_MS
+            gap_end_ms = (worst_span[1] + 1) * COVERAGE_BUCKET_MS
+            missing.append(
+                MissingWindow(
+                    log_key=att.log_key,
+                    window_start_ms=start,
+                    window_end_ms=end,
+                    gap_start_ms=gap_start_ms,
+                    gap_end_ms=gap_end_ms,
+                    gap_seconds=(gap_end_ms - gap_start_ms) / 1000.0,
+                )
+            )
+    return missing
+
+
+def acquire_complete_log(
+    job_id: str,
+    cluster: str,
+    now_ms: int,
+    cache_path: Path,
+    coverage_cache_path: Path,
+    refresh: bool,
+    max_gap_seconds: float,
+) -> LogAcquisition:
+    """Fetch the COMPLETE filtered log + coverage verdict for ``job_id``.
+
+    Caches the merged filtered lines and the coverage verdict so re-runs are
+    instant; ``refresh`` re-fetches. The returned ``lines`` are in the legacy
+    ``[HH:MM:SS] task=<key> | <data>`` shape ``parse_log_lines`` consumes.
+    """
+    if cache_path.exists() and coverage_cache_path.exists() and not refresh:
+        print(f"[cache] reusing {cache_path}", file=sys.stderr)
+        cov = json.loads(coverage_cache_path.read_text())
+        return LogAcquisition(
+            lines=cache_path.read_text().splitlines(),
+            logs_complete=cov["logs_complete"],
+            missing_windows=[MissingWindow(**w) for w in cov["missing_windows"]],
+            live_available=cov["live_available"],
+            live_unavailable_reason=cov.get("live_unavailable_reason"),
+            live_rows=cov.get("live_rows", 0),
+            gcs_rows=cov.get("gcs_rows", 0),
+            merged_rows=cov.get("merged_rows", 0),
+        )
+
+    finelog_name = cluster  # finelog config name == iris cluster name
+    cfg = load_finelog_config(finelog_name)
+    prefix = job_id.rstrip("/")
+
+    attempts, window_lo = enumerate_attempts(job_id)
+    print(
+        f"[enumerate] {len(attempts)} attempt(s) across the job tree; "
+        f"window_lo={window_lo}",
+        file=sys.stderr,
+    )
+
+    print("[live] fetching filtered rows + coverage buckets ...", file=sys.stderr)
+    live_rows, live_buckets, live_available, live_reason = fetch_live(cfg, finelog_name, prefix)
+    print(
+        f"[live] available={live_available} filtered_rows={len(live_rows)} "
+        f"buckets={len(live_buckets)}",
+        file=sys.stderr,
+    )
+
+    print("[gcs] fetching filtered rows + coverage buckets ...", file=sys.stderr)
+    gcs_rows, gcs_buckets = fetch_gcs(cfg, prefix, window_lo, now_ms)
+    print(
+        f"[gcs] filtered_rows={len(gcs_rows)} buckets={len(gcs_buckets)}",
+        file=sys.stderr,
+    )
+
+    merged = merge_dedup_rows(live_rows, gcs_rows)
+    covered_buckets = live_buckets | gcs_buckets
+    print(
+        f"[merge] live={len(live_rows)} + gcs={len(gcs_rows)} -> "
+        f"deduped={len(merged)}; covered_minutes={len(covered_buckets)}",
+        file=sys.stderr,
+    )
+
+    missing = check_coverage(attempts, covered_buckets, now_ms, max_gap_seconds)
+    logs_complete = not missing
+    if missing:
+        print(
+            f"[coverage] INCOMPLETE: {len(missing)} attempt window(s) uncovered",
+            file=sys.stderr,
+        )
+        for w in missing:
+            g0 = datetime.fromtimestamp(w.gap_start_ms / 1000, tz=timezone.utc).isoformat()
+            g1 = datetime.fromtimestamp(w.gap_end_ms / 1000, tz=timezone.utc).isoformat()
+            print(
+                f"    {w.log_key}: {w.gap_seconds/60:.1f}min gap [{g0} .. {g1}]",
+                file=sys.stderr,
+            )
+    else:
+        print("[coverage] COMPLETE: every enumerated attempt window covered", file=sys.stderr)
+
+    lines = rows_to_filtered_lines(merged)
+    cache_path.write_text("\n".join(lines) + ("\n" if lines else ""))
+    coverage_cache_path.write_text(
+        json.dumps(
+            {
+                "logs_complete": logs_complete,
+                "missing_windows": [asdict(w) for w in missing],
+                "live_available": live_available,
+                "live_unavailable_reason": live_reason,
+                "live_rows": len(live_rows),
+                "gcs_rows": len(gcs_rows),
+                "merged_rows": len(merged),
+            },
+            indent=2,
+        )
+    )
+    return LogAcquisition(
+        lines=lines,
+        logs_complete=logs_complete,
+        missing_windows=missing,
+        live_available=live_available,
+        live_unavailable_reason=live_reason,
+        live_rows=len(live_rows),
+        gcs_rows=len(gcs_rows),
+        merged_rows=len(merged),
+    )
 
 
 # ---------- Log line parsing ----------
@@ -702,6 +1106,17 @@ def render_markdown(a: JobAnalysis, warmup_seconds: float) -> str:
     lines.append(f"- **current_time** (analysis): {a.current_time.isoformat()}")
     lines.append(f"- **total_runtime**: {fmt_duration(a.total_runtime_s)}")
     lines.append(f"- **state**: {a.state} (3=RUNNING)")
+    if a.logs_complete:
+        lines.append("- **logs_complete**: true (every attempt window covered)")
+    else:
+        lines.append(
+            f"- **logs_complete**: FALSE — {len(a.missing_windows)} uncovered "
+            "window(s); stats below may be partial:"
+        )
+        for w in a.missing_windows:
+            g0 = datetime.fromtimestamp(w.gap_start_ms / 1000, tz=timezone.utc).isoformat()
+            g1 = datetime.fromtimestamp(w.gap_end_ms / 1000, tz=timezone.utc).isoformat()
+            lines.append(f"    - `{w.log_key}`: {w.gap_seconds/60:.1f}min gap [{g0} .. {g1}]")
     lines.append("")
 
     # §1
@@ -920,6 +1335,10 @@ def analysis_to_json(a: JobAnalysis) -> dict:
         "serving_samples_count": len(a.serving_samples),
         # Don't dump the full sample stream; keep summary
         "serving_summary": _summarise_samples(a.serving_samples),
+        # Completeness contract: whether every enumerated attempt window was
+        # covered by the merged LIVE u GCS log, and the gaps if not.
+        "logs_complete": a.logs_complete,
+        "missing_windows": [asdict(w) for w in a.missing_windows],
     }
 
 
@@ -938,7 +1357,14 @@ def _summarise_samples(samples: list[ServingSample]) -> dict:
 # ---------- Main ----------
 
 
-def analyze(job_id: str, output: Path, refresh: bool, warmup_seconds: float) -> JobAnalysis:
+def analyze(
+    job_id: str,
+    output: Path,
+    refresh: bool,
+    warmup_seconds: float,
+    max_gap_seconds: float,
+    allow_incomplete: bool,
+) -> JobAnalysis:
     job_name = job_id.rsplit("/", 1)[-1]
     meta = get_job_metadata(job_id)
     submitted_at = datetime.fromtimestamp(meta["submitted_at_ms"] / 1000, tz=timezone.utc)
@@ -956,14 +1382,37 @@ def analyze(job_id: str, output: Path, refresh: bool, warmup_seconds: float) -> 
     print(f"[{job_name}] iris preemptions={iris_preempts}", file=sys.stderr)
 
     cache_path = Path(f"/tmp/iris_history_{job_name}.filtered.log")
+    coverage_cache_path = Path(f"/tmp/iris_history_{job_name}.coverage.json")
     end_ms = int(now.timestamp() * 1000)
-    filtered = paginate_full_log(
+    acq = acquire_complete_log(
         job_id,
-        meta["submitted_at_ms"],
-        end_ms,
+        cluster=CLUSTER,
+        now_ms=end_ms,
         cache_path=cache_path,
+        coverage_cache_path=coverage_cache_path,
         refresh=refresh,
+        max_gap_seconds=max_gap_seconds,
     )
+    if not acq.logs_complete and not allow_incomplete:
+        details = "\n".join(
+            f"    {w.log_key}: {w.gap_seconds/60:.1f}min uncovered "
+            f"[{datetime.fromtimestamp(w.gap_start_ms/1000, tz=timezone.utc).isoformat()} .. "
+            f"{datetime.fromtimestamp(w.gap_end_ms/1000, tz=timezone.utc).isoformat()}]"
+            for w in acq.missing_windows
+        )
+        live_note = (
+            ""
+            if acq.live_available
+            else "\n  LIVE finelog was unavailable "
+            f"({acq.live_unavailable_reason}); run `marin-login login {CLUSTER}` "
+            "to cover the recent-L0 window."
+        )
+        raise RuntimeError(
+            f"INCOMPLETE LOG for {job_id}: {len(acq.missing_windows)} attempt window(s) "
+            f"are uncovered (no rows for > {max_gap_seconds:.0f}s):\n{details}{live_note}\n"
+            "Refusing to write a 'successful' report. Pass --allow-incomplete to override."
+        )
+    filtered = acq.lines
     parsed, samples = parse_log_lines(filtered, submitted_at)
     print(
         f"[{job_name}] parsed lines={len(parsed)}, samples={len(samples)}",
@@ -1006,6 +1455,8 @@ def analyze(job_id: str, output: Path, refresh: bool, warmup_seconds: float) -> 
         serving_samples=samples,
         total_trial_dirs=len(trials),
         non_empty_trials=len(non_empty),
+        logs_complete=acq.logs_complete,
+        missing_windows=acq.missing_windows,
     )
     if harbor:
         stats = harbor.get("stats", {})
@@ -1056,6 +1507,23 @@ def main() -> int:
         default=0,
         help="(unused, accepted for compat) cap GCS trial inspection",
     )
+    ap.add_argument(
+        "--max-coverage-gap-seconds",
+        type=float,
+        default=DEFAULT_MAX_COVERAGE_GAP_SECONDS,
+        help=(
+            "Max run of consecutive empty minutes tolerated inside an attempt "
+            "window before it is flagged uncovered (completeness check)."
+        ),
+    )
+    ap.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help=(
+            "Opt out of the strict completeness contract: write the report even "
+            "if some attempt window is uncovered (default: fail loudly)."
+        ),
+    )
     args = ap.parse_args()
 
     # Wire cluster + binary into the module globals the helpers read.
@@ -1067,7 +1535,14 @@ def main() -> int:
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    a = analyze(args.job_id, output, args.refresh, args.warmup_seconds)
+    a = analyze(
+        args.job_id,
+        output,
+        args.refresh,
+        args.warmup_seconds,
+        max_gap_seconds=args.max_coverage_gap_seconds,
+        allow_incomplete=args.allow_incomplete,
+    )
 
     md = render_markdown(a, warmup_seconds=args.warmup_seconds)
     output.write_text(md)
