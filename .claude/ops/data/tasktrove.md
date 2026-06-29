@@ -83,6 +83,8 @@ The Harbor agentic coding/SWE task sets — the `exp_rpt_*` (repo-PR-test), `exp
 | laion__freelancer-projects-sandboxes-ta-rl-gpt-5-nano-v2 | 10,000 | |
 | laion__openswe-tasks-patched-v5-oracle-success | 17,504 | |
 | **laion__swegym-tasks-patched-validated-v5** | **2,438** | **v3.2 (2026-06-14): replaced `laion__swegym-tasks-patched-validated-v2` (989 tasks)** |
+| **laion__tmax15k-tasks-snap-reduced-v3** | **6,751** | **TMax-15K-Harbor VERIFIABLE SUBSET (2026-06-29). 1 snapshot (shared Dockerfile; was 12,839 stale per-task). ~100% oracle-gated real solve.sh; small-sample oracle 40/40=100%, full-dataset oracle ~99.7%. Use for verified RL/datagen.** |
+| **laion__tmax15k-tasks-full-v3** | **12,926** | **TMax-15K-Harbor FULL UNFILTERED set (2026-06-29). 1 snapshot (was 12,839 stale; regen via `data/tmax15k/generate.py --from-hub-export`). Verifiable fraction = 5,943/12,926 = 46.0% real solve.sh (rest placeholder, intentionally unfiltered). Small-sample oracle 15/40=37.5%; full-dataset oracle running. Includes unverifiable tasks by design — NO oracle floor.** |
 
 ## B. Curriculum mixes (15)
 
