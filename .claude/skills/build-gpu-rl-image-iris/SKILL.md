@@ -172,6 +172,22 @@ reintroduces one:
    `uv pip install "tyro"` (WITH its light pure-python deps) BEFORE
    `uv pip install --no-deps "torchtitan @ git+…@a1fdd7e"`.
 
+4. **PIN THE RL-STAGE DEPS, not just the wheels (the gpu-rl-00220aac NCCL regression, 2026-06-29).** The
+   vLLM-fork + flash-attn WHEELS are ABI-pinned (prebuilt-wheelhouse, locked to torch 2.11.0 / cu128 / cp312),
+   but the rl-env `uv pip install`s are NOT inherently version-locked — so a rebuild on a later date silently
+   RE-RESOLVES different transitive versions of NCCL-affecting deps (the torch-bundled `nvidia-nccl-cu12`,
+   `ray`, the `nvidia-*-cu12` CUDA libs). That drift REGRESSED the 32-rank `default_pg` NCCL rendezvous: the
+   rebuild gpu-rl-00220aac (@sha256:65b07cec) died TWICE at `build_models` / `init_weight_sync_state` with
+   `DistBackendError: store->get('0') wait timeout after 1200000ms`, while the prior image cleared it cleanly.
+   **FIX (already wired):** the rl stage sets `ENV UV_CONSTRAINT=/opt/openthoughts/docker/rl_env_constraints.txt`
+   so every rl-env `uv pip install` honors `docker/rl_env_constraints.txt` — the FROZEN known-good version set
+   (a `uv pip freeze` of the last-known-good image's `/opt/openthoughts/envs/rl`). The constraint is unset after
+   the rl steps so it doesn't leak into runtime. **The rule (see §9):** every rebuild MUST install the rl stage
+   under that constraint; regenerate the file from the CURRENT good image's freeze ONLY for an intentional dep
+   bump, never let the transitive set float. (The boto/s3 client cluster is deliberately UNpinned in the file —
+   the freeze captured an internally-inconsistent aiobotocore/botocore pair a single solve rejects; see the
+   file header. It's NCCL-irrelevant.)
+
 ## 6. Build-asserts ARE the validation (a successful build = a working EP>1 stack)
 
 The `rl` stage RUNs hard import asserts at build time. Because kaniko fails the build if any RUN exits non-zero,
@@ -219,8 +235,9 @@ crane manifest --platform linux/amd64 ghcr.io/open-thoughts/openthoughts-agent:g
 Then **bump `DEFAULT_RL_DOCKER_IMAGE` in `rl/cloud/launch_rl_iris.py`** to the new
 `ghcr.io/open-thoughts/openthoughts-agent@sha256:<digest>` and update the provenance comment. **Pin the DIGEST,
 never the floating `:gpu-rl` tag** (it stale-caches under `imagePullPolicy: IfNotPresent`). Last known-good
-digest (v7): `sha256:2055412f56ac7ee4f69e24762e5a7b25ba6958ae020b7a266e02fa0cde8553fc`. Commit the launcher
-bump locally.
+digest: `sha256:9581f8d27be6da18d690b779d1bda67aed505c1aa92b6dd7ccd142cfea1f90bf` (gpu-rl-b3f498ee,
+2026-06-29 — rl env PINNED to the 81045a29 freeze via `docker/rl_env_constraints.txt` + harbor f7f51f13; the
+NCCL-regression fix). Commit the launcher bump locally.
 
 ## 9. WHEN a rebuild is actually required (vs a runtime checkout)
 
@@ -230,6 +247,20 @@ Rebuild the image ONLY for a change to something the image **BAKES / COMPILES**:
 - **flash-attn version** (`FLASH_ATTN_VERSION`) — compiled.
 - **torch / CUDA** (`TORCH_VERSION` / `BASE_IMAGE` cu128) — the whole ABI/cache-key.
 - **a baked dep change** (torchtitan/tyro/harbor/ray pins, the rl-stage install set).
+
+> **⚠ EVERY rebuild MUST pin the rl-stage deps (the gpu-rl-00220aac NCCL regression).** The rl env is installed
+> under `ENV UV_CONSTRAINT=docker/rl_env_constraints.txt` (the frozen known-good `uv pip freeze`) so the
+> rebuild resolves the EXACT working transitive versions — NOT just the ABI-pinned wheels. WITHOUT this, a
+> rebuild on a later date drifts an NCCL-affecting transitive dep (torch-bundled `nvidia-nccl-cu12` / `ray` /
+> `nvidia-*-cu12`) → the 32-rank `default_pg` rendezvous times out at `build_models`/weight-sync
+> (`DistBackendError: store->get('0') wait timeout`; the deleted gpu-rl-00220aac @sha256:65b07cec, 2026-06-29).
+> **Most rebuilds keep `rl_env_constraints.txt` UNCHANGED** — even a harbor-commit-only or skyrl-commit-only
+> bump must not touch it (it's a `--no-deps` swap that won't fight the constraint). **Regenerate it ONLY when
+> you INTENTIONALLY want to bump the rl-env deps**: run a freeze-extract iris job on the new good image
+> (`VIRTUAL_ENV=/opt/openthoughts/envs/rl uv pip freeze --python /opt/openthoughts/envs/rl/bin/python`),
+> rewrite the file from that freeze (strip the git/file/editable lines + the boto cluster — see the file
+> header), rebuild, then VALIDATE the dep-match: a 1-line freeze on the NEW image must show
+> `nvidia-nccl-cu12` / `torch` / `ray` == the intended freeze. Never let the transitive set float.
 
 Do **NOT** rebuild for a **MarinSkyRL source** change — that's editable at `/opt/skyrl` and picked up live at
 launch via **`--skyrl-ref <commit>`** (a `git fetch && checkout`), no image rebuild. Likewise first-party

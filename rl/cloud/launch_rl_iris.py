@@ -127,17 +127,21 @@ DEFAULT_CLUSTER = "cw-us-east-02a"
 # (use the immutable :gpu-rl-<gitsha> tag's digest, never the floating :gpu-rl).
 DEFAULT_RL_DOCKER_IMAGE = (
     "ghcr.io/open-thoughts/openthoughts-agent"
-    # REVERTED 2026-06-29 to gpu-rl-81045a29 (last known-good). The rebuild gpu-rl-00220aac
-    # (@sha256:65b07cec…, harbor litellm fix) REGRESSED the 32-rank default_pg NCCL rendezvous
-    # — it died TWICE at build_models/weight-sync (`DistBackendError: store->get('0') wait
-    # timeout`) while this image clears it cleanly (rl-131k-30b-stepfix3, 0 rendezvous failures).
-    # Cause: the rl-stage `uv pip install` drifted a transitive dep (bundled NCCL/torch/ray) on
-    # rebuild — the wheels were pinned but the rl env was NOT. The borked 65b07cec is deleted from
-    # ghcr; a re-rebuild with the rl-stage deps PINNED to this image's freeze (+ harbor f7f51f13)
-    # will restore the litellm fix without the NCCL regression, then re-bump this digest.
-    # gpu-rl-81045a29 = boto3-in-rl-env (R2 object-spilling) over the f9b8beb8 base; vLLM-fork
-    # 76259c63, torch 2.11.0+cu128, flash-attn 2.8.3.
-    "@sha256:648199885a1e35cebef029ab2993d527d88d3a2c7f3b30c1313990c81452c99e"
+    # gpu-rl-b3f498ee (built 2026-06-29, kaniko job gpurl-kaniko-b3f498ee): the rl env is now
+    # PINNED to the gpu-rl-81045a29 (last-known-good) freeze + harbor f7f51f13 (the litellm-spam
+    # fix). This RESTORES the litellm fix WITHOUT the NCCL regression of the deleted gpu-rl-00220aac
+    # (@sha256:65b07cec…), which died TWICE at build_models/weight-sync (`DistBackendError:
+    # store->get('0') wait timeout`) because the rl-stage `uv pip install` had drifted a transitive
+    # NCCL-affecting dep (bundled nvidia-nccl-cu12 / ray / nvidia-*-cu12) on rebuild — the wheels
+    # were ABI-pinned but the rl env was NOT version-locked. FIX: docker/rl_env_constraints.txt
+    # (the 81045a29 `uv pip freeze`) wired in via UV_CONSTRAINT in Dockerfile.gpu-rl, so the rebuild
+    # resolves the EXACT working versions. DEP-MATCH VERIFIED on this image: nvidia-nccl-cu12==2.28.9,
+    # torch==2.11.0+cu128, ray==2.51.1, triton==3.6.0, transformers==5.12.1 — all == the 81045a29
+    # freeze (job gpurl-newdepcheck). Build asserts passed (flash_attn_2_cuda / vllm / skyrl_train /
+    # torchtitan ExpertParallel); baked harbor 0.8.0 @ f7f51f13. vLLM-fork 76259c63, flash-attn 2.8.3.
+    # (A full multi-node NCCL-rendezvous smoke is the supervisor's call; the dep-match is the
+    # necessary cheap proof the regression won't recur.) Built via the FAST prebuilt-wheelhouse path.
+    "@sha256:9581f8d27be6da18d690b779d1bda67aed505c1aa92b6dd7ccd142cfea1f90bf"
 )
 DEFAULT_GPU_VARIANT = "H100"
 DEFAULT_GPUS_PER_NODE = 8           # gd-8xh100ib-i128 = 8x H100-80GB + IB
