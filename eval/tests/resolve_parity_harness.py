@@ -46,13 +46,29 @@ import yaml  # noqa: E402
 import eval.unified_eval_listener as uel  # noqa: E402
 
 
-# Cluster shapes: (name, cluster_yaml, baseline_file). gpus_per_node is read from the yaml.
-# jupiter has NO `baseline_model_configs:` pointer -> it loads minimal.yaml via the CLI flag.
+# Cluster shapes. gpus_per_node is read from the cluster yaml.
+#   baseline_file    -> the LEGACY load_baseline_model_configs path (Stage 0 / pre-migration).
+#   registry_profile -> when set (incl. "" / "default"), this cluster resolves via the NEW
+#                       load_model_registry(eval/configs/model_configs.yaml, profile) path
+#                       (mirrors the post-migration listener); the golden is UNCHANGED, so
+#                       --check still asserts byte-identity vs the Stage-0 legacy snapshot.
+# jupiter has NO `baseline_model_configs:` pointer -> legacy loads minimal.yaml via the CLI flag.
+# A cluster migrated to the registry sets registry_profile and ignores baseline_file.
+_REGISTRY_PATH = "eval/configs/model_configs.yaml"
 _CLUSTER_SHAPES = [
-    ("leonardo", "eval/clusters/leonardo.yaml", "eval/configs/baseline_model_configs_minimal.yaml"),
-    ("tacc", "eval/clusters/tacc.yaml", "eval/clusters/tacc_baseline_model_configs.yaml"),
-    ("tacc-65k", "eval/clusters/tacc.yaml", "eval/clusters/tacc_baseline_model_configs_65k.yaml"),
-    ("jupiter", "eval/clusters/jupiter.yaml", "eval/configs/baseline_model_configs_minimal.yaml"),
+    # Stage 2: leonardo + jupiter flipped to the registry (no variant -> base entries).
+    {"name": "leonardo", "cluster_yaml": "eval/clusters/leonardo.yaml",
+     "baseline_file": "eval/configs/baseline_model_configs_minimal.yaml",
+     "registry_profile": "default"},
+    {"name": "tacc", "cluster_yaml": "eval/clusters/tacc.yaml",
+     "baseline_file": "eval/clusters/tacc_baseline_model_configs.yaml",
+     "registry_profile": None},
+    {"name": "tacc-65k", "cluster_yaml": "eval/clusters/tacc.yaml",
+     "baseline_file": "eval/clusters/tacc_baseline_model_configs_65k.yaml",
+     "registry_profile": None},
+    {"name": "jupiter", "cluster_yaml": "eval/clusters/jupiter.yaml",
+     "baseline_file": "eval/configs/baseline_model_configs_minimal.yaml",
+     "registry_profile": "default"},
 ]
 
 # Synthetic names crafted to exercise EVERY pattern regex in the baseline files, regardless
@@ -115,12 +131,21 @@ def build_snapshot() -> dict:
     snapshot: dict = {"_meta": {}, "clusters": {}}
     coverage: dict = {}
 
-    for cluster_name, cluster_yaml, baseline_file in _CLUSTER_SHAPES:
-        gpn = _gpus_per_node(cluster_yaml)
+    for shape in _CLUSTER_SHAPES:
+        cluster_name = shape["name"]
+        gpn = _gpus_per_node(shape["cluster_yaml"])
+        registry_profile = shape.get("registry_profile")
+        baseline_file = shape["baseline_file"]
         # Set the ONLY cluster-config field the resolver chain reads (L608).
         uel._CLUSTER_CONFIG = {"hardware": {"gpus_per_node": gpn}}
         _reset_baseline_memo()
-        configs = uel.load_baseline_model_configs(str(_REPO_ROOT / baseline_file))
+        if registry_profile is not None:
+            # NEW path: shared registry + this cluster's hardware profile.
+            profile = None if registry_profile == "default" else registry_profile
+            configs = uel.load_model_registry(str(_REPO_ROOT / _REGISTRY_PATH), profile)
+        else:
+            # LEGACY path (untouched, authoritative pre-migration).
+            configs = uel.load_baseline_model_configs(str(_REPO_ROOT / baseline_file))
 
         # Pair universe for this cluster: every exact/group entry + pattern probes + eval-list names.
         exact_names = sorted(configs.keys())
@@ -144,7 +169,8 @@ def build_snapshot() -> dict:
                     break  # first-match-wins, mirror the resolver
         coverage[cluster_name] = {
             "gpus_per_node": gpn,
-            "baseline_file": baseline_file,
+            "source": (f"registry[{registry_profile}]" if registry_profile is not None
+                       else f"legacy:{baseline_file}"),
             "n_exact_entries": len(exact_names),
             "n_patterns": len(pats),
             "n_pairs_resolved": len(all_names),
@@ -215,7 +241,7 @@ def main() -> int:
     for cl, c in cov.items():
         unhit = [m for m, n in c["pattern_hits"].items() if n == 0]
         print(
-            f"  {cl}: gpus_per_node={c['gpus_per_node']} file={c['baseline_file']} "
+            f"  {cl}: gpus_per_node={c['gpus_per_node']} source={c['source']} "
             f"exact={c['n_exact_entries']} patterns={c['n_patterns']} pairs={c['n_pairs_resolved']} "
             f"pattern_hits={c['pattern_hits']}" + (f"  [UNEXERCISED PATTERNS: {unhit}]" if unhit else ""),
             file=sys.stderr,
