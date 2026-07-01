@@ -1,0 +1,42 @@
+### Stage 6 NON-DELPHI parity — LLaMA-Factory baseline (Gate P clean number).
+#
+# Pairs with sft/axolotl_configs/parity_llama3.yaml: same model + dataset + effective
+# batch, run through the SAME launcher, to measure the axolotl-vs-LF loss band on a
+# non-delphi config (the clean number). aarch64 (TACC Vista): SDPA, no flash-attn-2.
+#
+# Launch (both sides, matched):
+#   python -m hpc.launch --job_type sft --sft_backend llamafactory \
+#     --train_config_path sft/lf_configs/parity_llama3.yaml \
+#     --dataset philschmid/guanaco-sharegpt-style \
+#     --num_nodes 1 --gpus_per_node 1 --global_batch_size 8 --conda_env otagent
+
+global_batch_size: 8
+model_name_or_path: NousResearch/Meta-Llama-3-8B-Instruct
+trust_remote_code: true
+attn: sdpa                       # aarch64: no flash-attn-2 wheel
+optim: adamw_torch
+
+stage: sft
+do_train: true
+finetuning_type: full
+
+template: llama3
+cutoff_len: 1024
+overwrite_cache: true
+
+logging_steps: 1
+save_strategy: "steps"
+save_steps: 30
+save_total_limit: 1
+plot_loss: true
+
+learning_rate: 2.0e-5
+num_train_epochs: 1.0
+max_steps: 30
+warmup_steps: 3
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+bf16: true
+pure_bf16: false
+gradient_checkpointing: true
+push_to_hub: false
