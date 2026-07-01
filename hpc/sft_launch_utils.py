@@ -850,6 +850,32 @@ class SFTJobRunner:
                 os.environ[key] = value
                 print(f"[cuda] {key}={value}")
 
+        # Axolotl-backend-only env (cluster-agnostic; gated on backend so the
+        # LF path is untouched). Cluster-specific values (compiler CUDA_HOME/
+        # GCC_HOME, NCCL_SOCKET_IFNAME, offline flags) come from the cluster
+        # dotenv/hpc config via the sbatch template — NOT hardcoded here.
+        # setdefault so a value already exported by the cluster env wins.
+        if self.config.sft_backend == "axolotl":
+            axolotl_env = {
+                "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+                "AXOLOTL_DO_NOT_TRACK": "1",
+            }
+            for key, value in axolotl_env.items():
+                if key not in os.environ:
+                    os.environ[key] = value
+                    print(f"[axolotl] {key}={value}")
+
+    def _train_entrypoint_args(self) -> list:
+        """Trailing entrypoint + config args for the distributed launcher.
+
+        Backend swap point: axolotl runs ``-m axolotl.cli.train <cfg>``; the
+        default llamafactory backend runs the unchanged
+        ``sft/llamafactory/src/train.py <cfg>`` line.
+        """
+        if self.config.sft_backend == "axolotl":
+            return ["-m", "axolotl.cli.train", self.config.train_config_path]
+        return ["sft/llamafactory/src/train.py", self.config.train_config_path]
+
     def _run_torchrun(self) -> int:
         """Launch training with torchrun."""
         # Get distributed training parameters from environment
@@ -866,8 +892,7 @@ class SFTJobRunner:
             f"--rdzv_id={slurm_job_id}",
             "--rdzv_backend=c10d",
             f"--rdzv_endpoint={master_addr}:{master_port}",
-            "sft/llamafactory/src/train.py",
-            self.config.train_config_path,
+            *self._train_entrypoint_args(),
         ]
 
         print(f"Running torchrun command: {' '.join(cmd)}")
@@ -909,8 +934,7 @@ class SFTJobRunner:
             f"--num_machines={num_nodes}",
             f"--num_processes={num_nodes * gpus_per_node}",
             "--tee=1",
-            "sft/llamafactory/src/train.py",
-            self.config.train_config_path,
+            *self._train_entrypoint_args(),
         ]
 
         print(f"Running accelerate command: {' '.join(cmd)}")
