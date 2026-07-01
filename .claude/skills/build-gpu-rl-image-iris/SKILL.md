@@ -117,16 +117,23 @@ source /Users/benjaminfeuer/Documents/secrets.env
 export KUBECONFIG=~/.kube/coreweave-iris-gpu                       # HARD prereq (see ops doc)
 IRIS=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris        # the cw-capable (otagent-env) iris binary
 GHCR_TOKEN=$(gh auth token)                                       # GitHub PAT, NOT the Docker Hub DOCKER_TOKEN
+GITSHA=$(git rev-parse --short HEAD)                              # REQUIRED — build_gpu_rl_kaniko.sh has `: "${GITSHA:?}"` (the immutable :gpu-rl-<gitsha> tag)
 B64=$(base64 -i build_gpu_rl_kaniko.sh | tr -d '\n')              # the kaniko build script, base64'd in
 
 $IRIS --cluster=cw-us-east-02a job run \
   --task-image docker.io/library/ubuntu:22.04 --no-sync --enable-extra-resources \
   --cpu 48 --memory 512GB --disk 400GB \
-  --job-name gpurl-kaniko-<gitsha> \
+  --job-name gpurl-kaniko-$GITSHA \
   --max-retries 0 --timeout 18000 \
-  -e DOCKER_USER_ID penfever -e DOCKER_TOKEN "$GHCR_TOKEN" -e BUILD_B64 "$B64" --no-wait \
+  -e DOCKER_USER_ID penfever -e DOCKER_TOKEN "$GHCR_TOKEN" -e BUILD_B64 "$B64" \
+  -e GITSHA "$GITSHA" -e WHEEL_SOURCE prebuilt-wheelhouse --no-wait \
   -- bash -lc 'echo "$BUILD_B64" | base64 -d > /tmp/build.sh && exec bash /tmp/build.sh'
 ```
+> **`-e GITSHA` is MANDATORY** (`build_gpu_rl_kaniko.sh` hard-requires it via `: "${GITSHA:?}"` for the immutable
+> tag; the job dies immediately without it). **`-e WHEEL_SOURCE prebuilt-wheelhouse`** selects the FAST no-nvcc
+> path (§0/§4) — the script default is the slow `wheel-builder`, so pass it explicitly for a SKYRL-only bump.
+> (Both were paid for on the 2026-07-01 `39faff7d` bake — job `gpurl-kaniko-1af0ae2d`, ~34 min, digest
+> `sha256:d77b34dd…`.)
 The build script (`build_gpu_rl_kaniko.sh`) does, in order: fetch crane → `crane export` the kaniko executor
 over `/` → write `$DOCKER_CONFIG/config.json` with the ghcr `penfever:$GHCR_TOKEN` auth → run
 `/kaniko/executor --context dir:///app --dockerfile docker/Dockerfile.gpu-rl --build-arg
