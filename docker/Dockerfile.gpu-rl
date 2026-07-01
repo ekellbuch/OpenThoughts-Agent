@@ -311,7 +311,13 @@ ENV SKYRL_BRANCH=penfever/working
 #     resolution retry, so a transient EOF no longer kills a multi-node gang.
 # (Still includes 2d9feef's trials_dir raw-str fix; pinning keeps the image
 # reproducible.)
-ENV SKYRL_COMMIT=78d83a589760d561ff3510dcad0e66f9c24305f1
+#   - ac4b3806 "fix(moe-rl): keep R3 routed-experts worker-resident + uint8" — kills
+#     the by-value forward-arg object-store spill that wedged the 131k MoE forward
+#     (uint8/int16 narrowing in preprocess + ray.put-dedup per dp-group in dispatch).
+#   - 39faff7d "make rollout_routed_experts dtype deterministic (num_experts-keyed)"
+#     — the production-safe hardening of ac4b3806 (rank-invariant dtype; forward-fix
+#     validated end-to-end gs-1 + regression-free at the forward on 131k, 2026-07-01).
+ENV SKYRL_COMMIT=39faff7d4deef25336617032f14f17a7d68aaa93
 
 RUN git clone --branch $SKYRL_BRANCH https://github.com/marin-community/MarinSkyRL.git $SKYRL_HOME && \
     git -C $SKYRL_HOME checkout $SKYRL_COMMIT
