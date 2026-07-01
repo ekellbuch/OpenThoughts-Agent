@@ -104,10 +104,12 @@ DEFAULT_CLUSTER = "cw-us-east-02a"
 # (step-4a of Dockerfile.gpu-rl) PASSED in-build → the EP>1 MoE unblock is proven.
 # The CoreWeave EP=8 RL jobs (30B-A3B 131k, 35B) no longer hit
 # `ModuleNotFoundError: torchtitan`. Also baked: vLLM-fork 76259c63 + flash-attn
-# 2.8.3 (flash_attn_2_cuda present) + MarinSkyRL 78d83a5 + harbor 342729d5.
-# In-build asserts ran green: flash_attn_2_cuda OK (from cached wheel), torch
-# 2.11.0+cu128 / vllm 0.1.dev16611+g76259c63a / skyrl_train import OK, torchtitan
-# ExpertParallel import OK, baked MarinSkyRL HEAD == 78d83a5.
+# 2.8.3 (flash_attn_2_cuda present) + MarinSkyRL 39faff7d + harbor 342729d5.
+# MarinSkyRL 39faff7d (bumped from 78d83a5) carries the VALIDATED MoE forward-spill
+# fix + deterministic-dtype hardening. In-build asserts ran green: flash_attn_2_cuda
+# OK (from cached wheel), torch 2.11.0+cu128 / vllm 0.1.dev16611+g76259c63a /
+# skyrl_train import OK, torchtitan ExpertParallel import OK, baked MarinSkyRL HEAD
+# == 39faff7d.
 #
 # BUILT IN-CLUSTER ON COREWEAVE (not the arm64 Mac): the image is amd64 + a
 # from-source x86 CUDA build QEMU/Docker-Desktop can't do locally, and iris has NO
@@ -127,21 +129,20 @@ DEFAULT_CLUSTER = "cw-us-east-02a"
 # (use the immutable :gpu-rl-<gitsha> tag's digest, never the floating :gpu-rl).
 DEFAULT_RL_DOCKER_IMAGE = (
     "ghcr.io/open-thoughts/openthoughts-agent"
-    # gpu-rl-b3f498ee (built 2026-06-29, kaniko job gpurl-kaniko-b3f498ee): the rl env is now
-    # PINNED to the gpu-rl-81045a29 (last-known-good) freeze + harbor f7f51f13 (the litellm-spam
-    # fix). This RESTORES the litellm fix WITHOUT the NCCL regression of the deleted gpu-rl-00220aac
-    # (@sha256:65b07cec…), which died TWICE at build_models/weight-sync (`DistBackendError:
-    # store->get('0') wait timeout`) because the rl-stage `uv pip install` had drifted a transitive
-    # NCCL-affecting dep (bundled nvidia-nccl-cu12 / ray / nvidia-*-cu12) on rebuild — the wheels
-    # were ABI-pinned but the rl env was NOT version-locked. FIX: docker/rl_env_constraints.txt
-    # (the 81045a29 `uv pip freeze`) wired in via UV_CONSTRAINT in Dockerfile.gpu-rl, so the rebuild
-    # resolves the EXACT working versions. DEP-MATCH VERIFIED on this image: nvidia-nccl-cu12==2.28.9,
-    # torch==2.11.0+cu128, ray==2.51.1, triton==3.6.0, transformers==5.12.1 — all == the 81045a29
-    # freeze (job gpurl-newdepcheck). Build asserts passed (flash_attn_2_cuda / vllm / skyrl_train /
-    # torchtitan ExpertParallel); baked harbor 0.8.0 @ f7f51f13. vLLM-fork 76259c63, flash-attn 2.8.3.
-    # (A full multi-node NCCL-rendezvous smoke is the supervisor's call; the dep-match is the
-    # necessary cheap proof the regression won't recur.) Built via the FAST prebuilt-wheelhouse path.
-    "@sha256:9581f8d27be6da18d690b779d1bda67aed505c1aa92b6dd7ccd142cfea1f90bf"
+    # gpu-rl-1af0ae2d (built 2026-06-30, kaniko job gpurl-kaniko-1af0ae2d): a SKYRL_COMMIT-ONLY bump
+    # of the prior gpu-rl-b3f498ee (@sha256:9581f8d2…) — baked MarinSkyRL 78d83a5 → 39faff7d, which
+    # carries the VALIDATED MoE forward-spill fix + deterministic-dtype hardening. Everything else is
+    # unchanged: vLLM-fork 76259c63 (compiled) + flash-attn 2.8.3 + torch 2.11.0+cu128 + harbor
+    # f7f51f13, and the rl env stays PINNED to the gpu-rl-81045a29 known-good freeze via
+    # docker/rl_env_constraints.txt (UV_CONSTRAINT) — so the NCCL regression of the deleted
+    # gpu-rl-00220aac (rl-stage transitive dep drift → build_models/weight-sync `DistBackendError:
+    # store->get('0') wait timeout`) cannot recur. Because the SKYRL-only bump does not touch the
+    # wheel cache-key, the prebuilt vLLM-fork + flash-attn wheels (from laion/gpu-rl-build-wheels)
+    # stayed ABI-correct → the FAST no-nvcc prebuilt-wheelhouse path (WHEEL_SOURCE=prebuilt-wheelhouse
+    # + --skip-unused-stages, ZERO nvcc, ~18 min not ~3h). Build asserts ran green: flash_attn_2_cuda
+    # OK (from cached wheel), torch 2.11.0+cu128 / vllm 0.1.dev16611+g76259c63a / skyrl_train import
+    # OK, torchtitan ExpertParallel import OK (EP>1 MoE unblock), baked MarinSkyRL HEAD == 39faff7d.
+    "@sha256:d77b34dd9497cc736d59f7a113c2c57c5375b4553f3e16980479a89b30c2ca9b"
 )
 DEFAULT_GPU_VARIANT = "H100"
 DEFAULT_GPUS_PER_NODE = 8           # gd-8xh100ib-i128 = 8x H100-80GB + IB
