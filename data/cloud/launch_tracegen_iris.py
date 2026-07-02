@@ -130,6 +130,16 @@ class TracegenIrisLauncher(IrisLauncher):
 
         infer_harbor_env_from_config(args, args.harbor_config, log_prefix="[tracegen-iris]")
 
+        # Resolve per-model serve config from model_config/ (single source of
+        # truth). agent_kwargs are merged + forwarded here; max_model_len /
+        # limit_mm_per_prompt / extra_args are applied downstream by
+        # run_tracegen.py on the iris worker (same model_config/). tp_size is
+        # IGNORED on iris (tp derives from the TPU chip count). When --model isn't
+        # passed (model inferred from the datagen config on the worker), resolution
+        # is deferred to the worker.
+        from hpc.model_config_apply import apply_to_launcher
+        apply_to_launcher(args, log_prefix="[tracegen-iris]", iris=True)
+
         if args.harbor_env == "docker":
             print(
                 "[tracegen-iris] WARNING: --harbor_env=docker on an iris worker requires "

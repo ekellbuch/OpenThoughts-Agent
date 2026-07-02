@@ -142,6 +142,13 @@ class EvalCloudLauncher(CloudLauncher):
                 "Must provide --agent or ensure harbor config has agents[0].name"
             )
 
+        # Resolve per-model serve config from model_config/ (single source of
+        # truth). agent_kwargs are merged + forwarded here; serve intrinsics +
+        # parallelism are applied downstream by run_eval.py on the VM (which reads
+        # the same model_config/). Explicit CLI flags always win.
+        from hpc.model_config_apply import apply_to_launcher
+        apply_to_launcher(args, log_prefix="[eval-cloud]")
+
     def build_task_command(self, args, remote_output_dir: str) -> List[str]:
         """Build the run_eval.py command."""
         cmd: List[str] = [

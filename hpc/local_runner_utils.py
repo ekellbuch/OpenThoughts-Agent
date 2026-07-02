@@ -724,6 +724,21 @@ class LocalHarborRunner:
         # Set up Docker runtime if using docker backend
         setup_docker_runtime_if_needed(self.get_env_type())
 
+        # Resolve per-model serve config from model_config/ (the single source of
+        # truth), filling in anything the CLI / datagen config didn't specify.
+        # Runs AFTER apply_datagen_defaults (so datagen/CLI values win) and BEFORE
+        # the tp=1 defaults below (so a model_config tp is honored). On an iris
+        # worker (OT_AGENT_IRIS_SERVE=1) tp/pp/dp are left alone — iris derives
+        # tensor-parallel from the TPU chip count.
+        from hpc.model_config_apply import apply_to_runner
+        _iris_serve = os.environ.get("OT_AGENT_IRIS_SERVE") == "1"
+        apply_to_runner(
+            args,
+            log_prefix=f"[{self.JOB_PREFIX}-local]",
+            apply_parallelism_fields=not _iris_serve,
+            needs_local_vllm=getattr(args, "_needs_local_vllm", True),
+        )
+
         # Set parallelism defaults (only relevant for local vLLM)
         if args.tensor_parallel_size is None:
             args.tensor_parallel_size = 1

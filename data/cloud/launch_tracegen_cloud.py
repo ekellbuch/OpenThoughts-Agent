@@ -93,6 +93,14 @@ class TracegenCloudLauncher(CloudLauncher):
         # Infer --harbor_env from harbor config if not provided
         infer_harbor_env_from_config(args, args.harbor_config, log_prefix="[tracegen-cloud]")
 
+        # Resolve per-model serve config from model_config/ (single source of
+        # truth). agent_kwargs are merged + forwarded here; serve intrinsics +
+        # parallelism are applied downstream by run_tracegen.py on the VM (same
+        # model_config/). When --model isn't passed (model inferred from the
+        # datagen config on the worker), resolution is deferred to the worker.
+        from hpc.model_config_apply import apply_to_launcher
+        apply_to_launcher(args, log_prefix="[tracegen-cloud]")
+
     def build_task_command(self, args, remote_output_dir: str) -> List[str]:
         """Build the run_tracegen.py command."""
         cmd: List[str] = [

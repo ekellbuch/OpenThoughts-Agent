@@ -274,6 +274,16 @@ class EvalIrisLauncher(IrisLauncher):
         if not args.agent:
             raise ValueError("Must provide --agent or ensure harbor config has agents[0].name")
 
+        # Resolve per-model serve config from model_config/ (single source of
+        # truth). Runs AFTER _apply_preset so a chosen preset wins over the
+        # model_config; explicit CLI flags win over both. agent_kwargs are merged
+        # + forwarded here; max_model_len / limit_mm_per_prompt / extra_args are
+        # applied downstream by run_eval.py on the iris worker (same model_config/).
+        # tp_size + harbor_config are IGNORED on iris (tp derives from the TPU
+        # chip count; --harbor_config is CLI-required).
+        from hpc.model_config_apply import apply_to_launcher
+        apply_to_launcher(args, log_prefix="[eval-iris]", iris=True)
+
         if args.harbor_env == "docker":
             print(
                 "[eval-iris] WARNING: --harbor_env=docker on an iris worker requires "
