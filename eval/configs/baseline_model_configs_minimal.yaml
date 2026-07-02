@@ -695,7 +695,12 @@ patterns:
   # eliminating the capture-time OOM (mirrors the SERA-32B paper-parity entries,
   # which already serve eager). Decode is slightly slower but the 32B 16x timeout
   # multiplier absorbs it; correctness > a few % serve throughput.
-  - match: "(?i)32[Bb]"
+  #
+  # 2026-07-01: broadened 32[Bb] -> 3[02][Bb] to also cover the Qwen3-Coder-30B-A3B
+  # MoE (~60GB bf16, qwen3_moe/48L). It has the identical failure mode: needs TP>=2,
+  # and TP=2 on the 4-GPU node node-fills to DP=2 -> the same DPLBAsyncMPClient
+  # engine-core-init crash. TP=4 (whole node, DP=1) avoids it, same as the 32B.
+  - match: "(?i)3[02][Bb]"
     trust_remote_code: true
     tensor_parallel_size: 4
     max_model_len: 32768
