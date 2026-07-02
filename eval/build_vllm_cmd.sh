@@ -50,6 +50,25 @@ build_vllm_cmd() {
     local limit_mm="${EVAL_VLLM_LIMIT_MM_PER_PROMPT:-}"
     local max_num_seqs="${EVAL_VLLM_MAX_NUM_SEQS:-}"
 
+    # --- transformers-5.x tokenizer compat coercion (serve-side) ---------------
+    # A model exported by transformers 5.x (TokenizersBackend) can ship a
+    # tokenizer_config.json whose `extra_special_tokens` is a LIST of token
+    # strings instead of the {name: token} dict transformers expects (it calls
+    # `.keys()`), crashing vLLM's tokenizer load at api_server startup BEFORE any
+    # TP/DP placement: `AttributeError: 'list' object has no attribute 'keys'`.
+    # prep_serve_tokenizer.py resolves the model's already-cached tokenizer and,
+    # ONLY if coercion is needed, emits a NON-DESTRUCTIVE patched tokenizer dir
+    # (every file symlinked, tokenizer_config.json normalized) whose path we pass
+    # vLLM as --tokenizer (--model still loads weights from the repo). When the
+    # config is already well-formed it prints nothing → no --tokenizer → the
+    # serve is byte-identical to before. An explicit EVAL_VLLM_TOKENIZER wins.
+    local tokenizer_override="${EVAL_VLLM_TOKENIZER:-}"
+    local prep_script="${DCFT:-}/eval/prep_serve_tokenizer.py"
+    if [ -z "$tokenizer_override" ] && [ -n "${DCFT:-}" ] && [ -f "$prep_script" ]; then
+        # stdout -> the patched dir (or empty); stderr -> the job log.
+        tokenizer_override=$("$python_bin" "$prep_script" "$model") || tokenizer_override=""
+    fi
+
     # Build command array
     VLLM_CMD=(
         "$python_bin" -m vllm.entrypoints.openai.api_server
@@ -60,6 +79,10 @@ build_vllm_cmd() {
         --gpu-memory-utilization "$gpu_mem_util"
         --disable-custom-all-reduce
     )
+
+    if [ -n "$tokenizer_override" ]; then
+        VLLM_CMD+=(--tokenizer "$tokenizer_override")
+    fi
 
     # --swap-space was REMOVED from `vllm serve` in recent vLLM (e.g. Jupiter's nightly
     # 0.1.devNNNNN rejects it: "unrecognized arguments: --swap-space" → instant vLLM death).
@@ -118,6 +141,9 @@ build_vllm_cmd() {
     echo "vLLM command config:"
     if [ "$served_name" != "$model" ]; then
         echo "  served-model-name='$served_name' (ALIAS; load path --model='$model')"
+    fi
+    if [ -n "$tokenizer_override" ]; then
+        echo "  tokenizer=$tokenizer_override (transformers-5.x compat coercion; --model unchanged)"
     fi
     echo "  TP=$tp, DP=${dp:-1}, swap=$swap_space, max_model_len=${max_model_len:-auto}"
     echo "  trust_remote_code=${trust_remote_code:-no}"
