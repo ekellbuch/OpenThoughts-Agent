@@ -152,6 +152,10 @@ def build_listener_argv(
         cmd += ["--pinggy-url", args.pinggy_url]
     if args.pinggy_token:
         cmd += ["--pinggy-token", args.pinggy_token]
+    if getattr(args, "ingress_mode", "pinggy") and args.ingress_mode != "pinggy":
+        cmd += ["--ingress-mode", args.ingress_mode]
+    if getattr(args, "ingress_host", None):
+        cmd += ["--ingress-host", args.ingress_host]
     if args.config_yaml:
         cmd += ["--config-yaml", args.config_yaml]
     if args.agent_parser is not None:
@@ -264,6 +268,11 @@ def main() -> int:
                          "for multi-model resumes, fire one invocation per (model, pair)."))
     p.add_argument("--pinggy-token", default=None,
                    help="Cat 3 only. Pinggy auth token, paired with --pinggy-url.")
+    p.add_argument("--ingress-mode", default="pinggy", choices=["pinggy", "controller"],
+                   help="Ingress mode forwarded to the eval listener: 'pinggy' (default) "
+                        "or 'controller' (auth-gated controller ingress).")
+    p.add_argument("--ingress-host", default=None,
+                   help="Public controller-ingress host (used only with --ingress-mode controller).")
     p.add_argument("--config-yaml", default=None,
                    help=("Cat 3 only. Harbor config YAML (e.g. dcagent_eval_config_swe_agent.yaml). "
                          "Listener passes this to the sbatch for scaffold/parser selection."))

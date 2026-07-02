@@ -1615,6 +1615,9 @@ class ListenerConfig:
     # Pinggy tunnel config (for installed agents that run in Daytona sandbox)
     pinggy_url: Optional[str] = None
     pinggy_token: Optional[str] = None
+    # Ingress mode: "pinggy" (default, legacy) or "controller" (auth-gated ingress)
+    ingress_mode: str = "pinggy"
+    ingress_host: Optional[str] = None
     # Per-model vLLM overrides (baseline model configs)
     baseline_model_configs: Optional[str] = None
     # Shared model-config registry (decoupling refactor; OFF by default through Stage 4).
@@ -2585,6 +2588,8 @@ class SbatchParams:
     agent_envs: Optional[str] = None  # Comma-separated KEY=VALUE pairs for --ae
     pinggy_url: Optional[str] = None  # Pinggy persistent URL (e.g., xxx.a.pinggy.link)
     pinggy_token: Optional[str] = None  # Pinggy auth token
+    ingress_mode: str = "pinggy"  # "pinggy" (legacy) or "controller" (auth-gated ingress)
+    ingress_host: Optional[str] = None  # Public controller-ingress host (controller mode)
 
     def get_effective_agent_name(self) -> str:
         """Resolve the runtime agent name, preferring the config_yaml's agents[0].name.
@@ -2641,6 +2646,13 @@ class SbatchParams:
             env["EVAL_PINGGY_URL"] = self.pinggy_url
         if self.pinggy_token:
             env["EVAL_PINGGY_TOKEN"] = self.pinggy_token
+        # Controller-ingress config. Additive: only emitted in controller mode, so
+        # the default (pinggy) env is byte-identical. The IRIS_INGRESS_API_KEY
+        # secret is sourced on the cluster (secrets.env), referenced by name only.
+        if self.ingress_mode == "controller":
+            env["EVAL_INGRESS_MODE"] = self.ingress_mode
+            if self.ingress_host:
+                env["EVAL_INGRESS_HOST"] = self.ingress_host
         # Forward EVAL_JOBS_DIR to sbatch (default to user-writable location)
         fallback_jobs_dir = _cc_path("eval_jobs_dir", _FALLBACK_EVAL_JOBS_DIR)
         env["EVAL_JOBS_DIR"] = os.environ.get("EVAL_JOBS_DIR", fallback_jobs_dir)
@@ -3464,6 +3476,8 @@ class EvalListener:
             agent_envs=self.config.agent_envs,
             pinggy_url=self.config.pinggy_url,
             pinggy_token=self.config.pinggy_token,
+            ingress_mode=self.config.ingress_mode,
+            ingress_host=self.config.ingress_host,
         )
 
         # Load per-model vLLM overrides. Default: the legacy baseline-model-configs path
@@ -3822,6 +3836,8 @@ class EvalListener:
             agent_envs=self.config.agent_envs,
             pinggy_url=self.config.pinggy_url,
             pinggy_token=self.config.pinggy_token,
+            ingress_mode=self.config.ingress_mode,
+            ingress_host=self.config.ingress_host,
         )
         log(f"Sbatch params: {sbatch_params}")
 
@@ -4321,6 +4337,21 @@ Examples:
         help="Pinggy auth token for SSH tunnel.",
     )
     parser.add_argument(
+        "--ingress-mode",
+        type=str,
+        default="pinggy",
+        choices=["pinggy", "controller"],
+        help="How Daytona sandboxes reach vLLM: 'pinggy' (default, legacy tunnel) "
+        "or 'controller' (auth-gated Iris controller ingress). Byte-identical to "
+        "today in pinggy mode.",
+    )
+    parser.add_argument(
+        "--ingress-host",
+        type=str,
+        default=None,
+        help="Public controller-ingress host (used only with --ingress-mode controller).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Preview mode, no actual submission (implies --once)",
@@ -4727,6 +4758,8 @@ def build_config(args: argparse.Namespace) -> ListenerConfig:
         agent_envs=resolved_agent_envs,
         pinggy_url=args.pinggy_url,
         pinggy_token=args.pinggy_token,
+        ingress_mode=getattr(args, "ingress_mode", "pinggy") or "pinggy",
+        ingress_host=getattr(args, "ingress_host", None),
     )
 
 

@@ -805,6 +805,11 @@ class RLJobConfig:
     pinggy_persistent_url: Optional[str] = None
     pinggy_token: Optional[str] = None
 
+    # Ingress mode: "pinggy" (default, legacy) or "controller" (auth-gated
+    # controller ingress). ingress_host is the public controller-ingress host.
+    ingress_mode: str = "pinggy"
+    ingress_host: Optional[str] = None
+
     # Agent/environment info (for needs_pinggy_tunnel decision)
     agent_name: str = "terminus-2"
     harbor_env: str = "daytona"
@@ -1149,6 +1154,8 @@ def construct_rl_sbatch_script(exp_args: dict, hpc) -> str:
         # Pinggy tunnel settings (for cloud backends with installed agents)
         pinggy_persistent_url=exp_args.get("pinggy_persistent_url"),
         pinggy_token=exp_args.get("pinggy_token"),
+        ingress_mode=exp_args.get("ingress_mode") or "pinggy",
+        ingress_host=exp_args.get("ingress_host"),
         agent_name=agent_name,
         harbor_env=harbor_env,
         container_sif=exp_args.get("rl_container_sif"),
@@ -1747,6 +1754,44 @@ class RLJobRunner:
                 os.environ["HARBOR_DISTRIBUTED_CONTAINERS"] = "1"
                 print(f"[RLJobRunner] Enabled distributed {self.config.harbor_env} "
                       f"across {ray_cluster.total_nodes} nodes", flush=True)
+
+            # Controller-ingress mode: replace the pinggy tunnel with a stable
+            # public URL fronting the controller proxy. Only reroutes cloud
+            # backends (needs_pinggy_tunnel); local backends keep direct vLLM.
+            # In the default "pinggy" mode this branch is skipped entirely, so
+            # the legacy path below is byte-identical.
+            if self.config.ingress_mode == "controller":
+                from hpc.pinggy_utils import needs_pinggy_tunnel
+                from hpc.ingress_utils import (
+                    controller_api_base_for_job,
+                    inject_ingress_agent_key,
+                )
+
+                if needs_pinggy_tunnel(self.config.agent_name, self.config.harbor_env):
+                    if not self.config.ingress_host:
+                        raise ValueError(
+                            "--ingress-mode controller requires --ingress-host "
+                            "(the public controller-ingress host)."
+                        )
+                    api_base = controller_api_base_for_job(
+                        self.config.ingress_host, self.config.job_name
+                    )
+                    os.environ["HARBOR_MODEL_ENDPOINT"] = api_base
+                    injected = inject_ingress_agent_key()
+                    print(
+                        f"[RLJobRunner] ingress_mode=controller: "
+                        f"HARBOR_MODEL_ENDPOINT={api_base} "
+                        f"(agent key injected={injected})",
+                        flush=True,
+                    )
+                    return self._run_skyrl()
+                else:
+                    print(
+                        "[RLJobRunner] ingress_mode=controller but local backend "
+                        "(no ingress needed), using local vLLM",
+                        flush=True,
+                    )
+                    return self._run_skyrl()
 
             # Check if Pinggy tunnel is needed for installed agents in cloud backends
             from hpc.pinggy_utils import (
