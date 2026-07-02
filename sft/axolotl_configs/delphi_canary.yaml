@@ -42,7 +42,7 @@ plugins:
 datasets:
   - path: laion/llama-nemotron-science-reasoning-on-le3000tok-100k-canonical-think
     type: chat_template
-    field_messages: conversations
+    field_messages: messages          # verified on TACC: this dataset's messages column is `messages` (list of {role, content}), not the sharegpt-default `conversations`
     message_field_role: role
     message_field_content: content
 
