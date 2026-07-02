@@ -193,12 +193,46 @@ from vLLM serving config):
 `num_parallel_generation_workers: 338` (**~2:1**, workers ≈ n/2), co-tuned ("450→338 −25%, paired with
 n_concurrent_trials 900→675").
 
-**⚠ MISDIAGNOSIS to avoid:** engine idleness (`Waiting=0`, low KV, `Running ≪ per-engine ceiling`) is **NOT** an intrinsic
-"agentic duty-cycle" ceiling — it is an **offered-concurrency SUPPLY** shortfall. A timid `n_concurrent_trials` (e.g.
-96–192) with an un-scaled worker pool *looks* starved/duty-cycle-bound but is simply under-offered. To saturate: raise
-`n_concurrent_trials` toward the tuned reference (hundreds) **with `num_parallel_generation_workers` scaled proportionally
-(~n/2)**, THEN measure Running/Waiting/KV. (This corrects the 2026-07-02 moe-grid Stage-0 "duty-cycle-bound" reading —
-that was measured at n=96/192 without scaling the worker pool; see `experiments/active/moe_sharding_grid_131k`.)
+**⚠ HOW TO READ ENGINE SATURATION — `nvidia-smi` SM-util% is a TRAP (2026-07-02 GPU-profile correction).** A
+point-in-time `nvidia-smi` SM-util reads **84–89% even when the engine is idle-waiting** — it only means "a kernel was
+resident during the sample interval." At low request-concurrency (1–4 reqs) the engine runs low-occupancy decode kernels
+that inflate util% while every throughput-truthful signal sits at the floor. **Do NOT trust SM-util% alone.** The
+trustworthy saturation tuple is: **`Waiting`-queue depth (vLLM scheduler) + GPU KV-cache usage + power draw + memory-BW
+util**, cross-checked against nvidia-smi. **Saturated ⇔ `Waiting > 0` AND KV usage well off the floor AND power near TDP
+(~700 W H100) AND mem-BW util high.** Under-fed ⇔ `Waiting = 0` always (engines instantly drain what trickles in) + KV
+≈ 0 + power ≈ ⅓ TDP + mem-BW 2–5%. `Σ Running` (concurrent-request count) is a **valid** proxy and was the correct read
+all along; the "poll GPU util instead" instinct is right in spirit but SM-util% is the wrong GPU counter — use KV/power/mem-BW.
+
+**⚠ THREE distinct low-`Running` regimes — do NOT conflate (2026-07-02 moe-grid, all four observed):**
+1. **Under-offered** — `n_concurrent_trials` too low for the worker pool → raise n (+ workers ~n/2). (n=96/192 baselines.)
+2. **Rollout-SUPPLY-bound (the real ceiling at moderate n)** — with n episodes but only a small fraction calling `generate()`
+   at any instant, the rest are parked in **Daytona tool-execution / env steps BETWEEN LLM turns**. This IS the agentic
+   duty cycle — but it is **mutable**: raise offered concurrency until `Waiting > 0` / KV climbs. (n=128 on the RL org:
+   1–4 reqs in flight, `Waiting=0`, KV 0.3%, power ⅓ TDP, mem-BW 2–5%, prefix-cache hit 94.7% so 131k prefill is CHEAP,
+   not the wall → engines demand-starved by rollout supply, NOT capacity.)
+3. **Daytona control-plane OVERLOAD (the upper ceiling)** — push `n_concurrent_trials` too high and the Daytona
+   sandbox-setup + verifier control plane saturates → `AgentSetupTimeoutError` (>360s) + `VerifierTimeoutError` flood,
+   timed-out sandboxes leak in STARTED, episode yield collapses to ~0, `global_step` never advances, and the engines go
+   **idler** than at lower n. (n=512 on the SHARED eval org: 124 timeouts in 2.5h, ~4 valid episodes, Σ Running ~5–8.)
+
+So there is a **demand-bind WINDOW**: too low = under-offered/supply-starved; too high = Daytona overload. Saturation
+(engines demand-bound) is reachable only if that window is wide enough — and its **upper bound is org-dependent**.
+
+**⚠ Daytona ORG routing (2026-07-02).** The agentic-RL grid must run on the **dedicated RL org (`DAYTONA_RL_API_KEY`,
+DataCompRL)**, NOT the shared `DAYTONA_API_KEY` (eval/datagen) org — the shared org's control plane self-saturates and
+also throttles the eval campaign. The iris RL launcher re-sources `secrets.env` after any shell `export` (`hpc/iris/env.py`
+`file overrides shell`), so a pre-launch `export DAYTONA_API_KEY=$DAYTONA_RL_API_KEY` is CLOBBERED — use the committed
+**`--daytona-api-key-env DAYTONA_RL_API_KEY`** flag (`rl/cloud/launch_rl_iris.py`, c6001bc1), which sets the pod's
+`DAYTONA_API_KEY` from the named var AFTER the re-source. VERIFY in-pod: `kubectl exec … printenv DAYTONA_API_KEY | sha1sum`
+== the RL key hash (NOT the shell before launch — that check silently passed while the pod carried the wrong key).
+
+**Corrected moe-grid Stage-0 narrative (2026-07-02, `experiments/active/moe_sharding_grid_131k`):** n=96/192 looked
+under-offered; scaling to n=512 (workers 256) did NOT saturate — it hit the Daytona overload ceiling (regime 3, shared
+org). Rerouted to the dedicated RL org at n=128 (regime 2): clean (0 setup timeouts) but engines rollout-supply-starved
+(the GPU-profile tuple above). **A grid THROUGHPUT reading is only valid once the engines are DEMAND-BOUND** (`Waiting>0`
+/ KV off floor) — measured throughput below that reflects the rollout-supply rate (geometry-invariant), not the
+EP×FSDP×CP serving capacity. Escalate n on the RL org (256 → …) to demand-bind; headline metric = aggregate gen tok/s
+across engines read only when `Waiting>0`. STAGE-0-REDO conclusion stays PENDING until a demand-bound rung lands.
 
 ## GDN + Context-Parallel (CP>1) HARD-CRASHES the 35B GatedDeltaNet MoE at forward
 
