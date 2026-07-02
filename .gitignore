@@ -483,3 +483,9 @@ eval/lists/a1_resume_*.txt
 eval/lists/tacc_refill_*.txt
 eval/lists/tacc_sanity_*.txt
 eval/lists/reeval_priority_*.txt
+# Per-cluster/per-sweep refill + resume priority-lists — regenerated every refill, ANY cluster
+# prefix (tacc_refill_*, leonardo_refill_*, reeval_refill_*, …). Forward-proof so a new cluster's
+# refill lists don't need a new pattern each time. (Curated lists in eval/lists/ have distinct
+# names — README.md, EXAMPLE.txt, models_131k.txt, id_evals_*/bfcl_*/dsv2_* — and stay tracked.)
+eval/lists/*_refill_*.txt
+eval/lists/resume_*.txt
