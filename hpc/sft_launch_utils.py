@@ -865,6 +865,29 @@ class SFTJobRunner:
                     os.environ[key] = value
                     print(f"[axolotl] {key}={value}")
 
+            # Short, job-scoped TMPDIR (AF_UNIX fix). HF `datasets` tokenization
+            # spawns a multiprocessing SyncManager whose control socket lives at
+            # ``$TMPDIR/pymp-*/listener-*`` (~35 char overhead). On clusters with a
+            # long default TMPDIR (nested $SCRATCH/$WORK), that path blows the
+            # 108-byte AF_UNIX ``sun_path`` limit -> "OSError: AF_UNIX path too
+            # long" at dataset load (dataset_num_proc=1 does NOT help; the manager
+            # is created regardless). Redirect TMPDIR/TMP/TEMP to a short local
+            # dir. Base is /tmp (POSIX-universal, local on compute nodes); a
+            # cluster dotenv can override via AXOLOTL_TMPDIR_BASE. We OVERRIDE
+            # (not setdefault) the inherited TMPDIR because the long value is the
+            # bug we are fixing.
+            tmp_base = os.environ.get("AXOLOTL_TMPDIR_BASE", "/tmp")
+            job_tag = os.environ.get("SLURM_JOB_ID", str(os.getpid()))
+            short_tmp = os.path.join(tmp_base, f"ax_{job_tag}")
+            try:
+                os.makedirs(short_tmp, exist_ok=True)
+                for key in ("TMPDIR", "TMP", "TEMP"):
+                    os.environ[key] = short_tmp
+                print(f"[axolotl] TMPDIR/TMP/TEMP={short_tmp} (AF_UNIX short-path fix)")
+            except OSError as e:
+                print(f"[axolotl] WARN: could not create short TMPDIR {short_tmp}: {e}; "
+                      f"leaving TMPDIR={os.environ.get('TMPDIR', '<unset>')}", file=sys.stderr)
+
     def _train_entrypoint_args(self) -> list:
         """Trailing entrypoint + config args for the distributed launcher.
 
