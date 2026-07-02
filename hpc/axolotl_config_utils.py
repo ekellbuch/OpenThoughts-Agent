@@ -169,6 +169,10 @@ def translate_lf_to_axolotl(base_config: dict, exp_args: dict, dataset_paths, mo
     gbs = base_config.get("global_batch_size")
     micro = base_config.get("micro_batch_size") or base_config.get("per_device_train_batch_size") or 1
     if gbs is not None:
+        # CLI passes --global_batch_size as a string; cast (mirrors the int()
+        # coercion already applied to micro/num_nodes/gpus_per_node below) so the
+        # modulo/floordiv below are integer math, not str-formatting (TypeError).
+        gbs = int(gbs)
         dp = max(int(num_nodes) * int(gpus_per_node), 1)
         denom = int(micro) * dp
         if denom <= 0 or gbs % denom != 0:
