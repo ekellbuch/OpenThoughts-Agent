@@ -57,6 +57,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shlex
 import sys
@@ -398,6 +399,17 @@ def create_parser() -> argparse.ArgumentParser:
              "Defaults to $OT_AGENT_SECRETS_ENV, else ~/Documents/secrets.env.",
     )
     parser.add_argument(
+        "--daytona-api-key-env", "--daytona_api_key_env", dest="daytona_api_key_env",
+        default=os.environ.get("DAYTONA_KEY_OVERRIDE"),
+        help="Name of an env var whose VALUE is forwarded to the pod as DAYTONA_API_KEY "
+             "(routes agentic RL onto a dedicated Daytona org, e.g. "
+             "--daytona-api-key-env DAYTONA_RL_API_KEY). Applied AFTER --secrets-env is "
+             "re-sourced (which does 'file overrides shell'), so the override actually STICKS "
+             "where a plain shell `export DAYTONA_API_KEY=...` is silently clobbered. "
+             "Referenced by NAME only; no key value on the command line. "
+             "Defaults to $DAYTONA_KEY_OVERRIDE.",
+    )
+    parser.add_argument(
         "--skyrl-ref", "--skyrl_ref", dest="skyrl_ref", default=None,
         help="If set, `git fetch && git checkout <ref>` the baked MarinSkyRL clone at "
              "/opt/skyrl BEFORE running, so the live editable install picks up a newer "
@@ -612,6 +624,27 @@ def main() -> int:
     # hooks see it) AND collect them for injection into the task. Reuse the
     # IrisLauncher static helper (same semantics as launch_eval_iris.py).
     IrisLauncher.load_secrets_env_into_os_environ(args.secrets_env)
+
+    # Daytona org re-route (robust). load_secrets_env_into_os_environ() above does
+    # "file overrides shell" (hpc/iris/env.py) — so a pre-launch `export
+    # DAYTONA_API_KEY="$DAYTONA_RL_API_KEY"` is CLOBBERED by secrets.env's main-org
+    # value, which is then what the passthrough (below) forwards to the pod. To route
+    # onto the dedicated RL Daytona org we must remap DAYTONA_API_KEY *after* the
+    # re-source, referencing the source var by NAME only (no key value in code/CLI).
+    override_src = getattr(args, "daytona_api_key_env", None)
+    if override_src:
+        override_val = os.environ.get(override_src)
+        if not override_val:
+            raise SystemExit(
+                f"[rl-iris] --daytona-api-key-env={override_src} but that env var is "
+                f"empty/unset. `source {args.secrets_env}` first; it must define {override_src}."
+            )
+        os.environ["DAYTONA_API_KEY"] = override_val
+        _fp = hashlib.sha1(override_val.encode()).hexdigest()[:12]
+        print(
+            f"[rl-iris] Daytona re-route: DAYTONA_API_KEY <- ${override_src} (sha1={_fp})",
+            flush=True,
+        )
 
     command = build_task_command(args)
 
