@@ -90,6 +90,22 @@ job_id prefix:
   zombie: `iris --cluster=marin job stop <job>`, then rescue per 4a. The fd-monitor-ONLY clause is the safety
   gate (a healthy cold-compiling/preempt-recompiling job emits XLA/vLLM logs, so it won't match — see memory
   `datagen_watchdog_kills_healthy_jobs`). Unsure wedge vs slow long-task cycle → do NOT kill; report and ask.
+  Before killing, ALSO rule out the §4c resume-scan (a healthy vLLM engine ⇒ NOT a zombie).
+- **4c. RESUME-SCAN check (report, NEVER kill) — the benign twin of §4b:** a datagen job can match §4b's signals
+  (state 3, harbor progress frozen, task log fd-monitor-only) yet be perfectly healthy — it's mid harbor
+  GCS-`jobs_dir` resume after a preempt. On PRE-fix `:tpu` images this scan is O(already-completed trials), so it
+  grows with progress and has been observed up to ~6.25h (if-v2), emitting only `[fd-monitor]` while the vLLM
+  engine is already up. DISCRIMINATOR: a recent engine-ready marker with NO serving yet ⇒ resume-scan, not zombie.
+  Detect + report per active datagen job:
+  1. engine-ready ts: `iris --cluster=marin job logs <job> --max-lines 20000 | grep -aE "Application startup complete|Starting vLLM API server" | tail -1`
+  2. progress advancing? compare the harbor `<done>/<total> Mean:` line across the tick (or `harbor_updated_at` from
+     the §2 sidecar). Frozen + recent-tail is fd-monitor-only (`iris ... job logs --max-lines 300 | grep -aoE 'fd-monitor|Mean:|serving|vllm' | sort | uniq -c`) ⇒ in a resume scan.
+  Report it explicitly: `RESUME-SCAN ~<Nh> (engine up @<T>, harbor idle, <done>/<total> trials)` — this is EXPECTED
+  on pre-fix builds and self-resolves; do NOT kill and do NOT count it as a stall. The durable fix is the harbor
+  O(existing) resume speedup (harbor `7010e48c`, in the `:tpu` image rebuilt 2026-07-02) — jobs on the current
+  image resume in minutes; surface "relaunch on the current image to eliminate the resume tax" for a job that keeps
+  paying it. ESCALATE (report as an OUTLIER worth a look, still NO auto-kill) only if the resume exceeds ~8h with a
+  still-healthy engine (beyond the observed max); if there is NO healthy engine, it is the §4b zombie path.
 - **Rescue mechanics (both):** `gsutil rsync` `gs://marin-models-{us,eu}/ot-agent/<job>/<job>/` → `/tmp/<job>_traces`,
   then `make_and_upload_trace_dataset.py --job_dir /tmp/<job>_traces --repo_id penfever/<slug>-qwen3.5-122b-32k-traces
   --episodes last --filter none --skip_register` (source `secrets.env` first). Report row count + update the tracker.
