@@ -60,6 +60,14 @@ python data/cloud/launch_tracegen_iris.py \
 ```
 
 Flag notes:
+- **Per-model serve config now resolves from `model_config/`** (commit `e792bfbb`, 2026-07-02): the
+  launcher looks up the served model (from `--datagen_config`'s `engine.model` / `--model`) in
+  `model_config/<org>/<slug>.yaml` via the shared resolver and **merges/forwards its `agent_kwargs`** +
+  applies serve intrinsics (`max_model_len` / `limit_mm` / `extra_args`) on the worker — so datagen no
+  longer diverges from the source of truth. `tp_size` + `harbor_config` are **ignored** on TPU (tp from
+  chip count; harbor_config CLI-required). **Precedence: explicit CLI / `--datagen_config` values always
+  win** over `model_config/`; a model with no entry launches byte-unchanged (logged). Edit the source
+  file `model_config/<org>/<slug>.yaml`, never the generated `eval/configs/model_configs.yaml`.
 - **`--gcs-output-dir gs://marin-models-us/ot-agent` opts OUT of the region
   pin** (the launcher would otherwise auto-pin to the region with the most v5p-8
   capacity). Use it to avoid the stuck-PENDING trap when a single region's v5p-8

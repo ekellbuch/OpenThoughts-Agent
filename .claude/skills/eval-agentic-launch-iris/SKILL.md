@@ -25,8 +25,13 @@ Covers launch → monitor → manual cleanup. For **datagen/tracegen** jobs use 
 > fields Iris forces via a different channel (`harbor_config` [CLI-required], `agent_name` [from harbor
 > config], `tp_size` [from TPU chip count], `slurm_partition`/`slurm_account` [SLURM-only]) now log as
 > *ignored* instead of silently dropping. The `[eval-iris] preset <name>: applied {…}; ignored {…}` line
-> shows the split. (The per-model **`model_config/` source-of-truth** change is likewise SLURM-listener
-> only — Iris does not read the SLURM model registry; see the **Thinking on Iris** note below.)
+> shows the split. **As of commit `e792bfbb` (2026-07-02) the Iris launcher DOES resolve per-model serve
+> config from `model_config/`** (via the shared `model_config/resolver.py` + `hpc/model_config_apply.py`):
+> it **merges/forwards the model's `agent_kwargs`** (so thinking is now auto-applied per-model — see the
+> updated **Thinking on Iris** note below) and applies serve intrinsics (`max_model_len` / `limit_mm` /
+> `extra_args`) on the worker; **`tp_size` + `harbor_config` are still ignored** (tp derives from TPU chip
+> count; `--harbor_config` is CLI-required). Precedence: explicit CLI/`--preset` values win over
+> `model_config/`. Edit the source at `model_config/<org>/<slug>.yaml` (not the generated registry).
 
 ## Required info (ask if missing)
 
@@ -89,11 +94,14 @@ What the Iris launcher does with each preset field:
   - each entry of the preset's generic `agent_kwargs` list → its own harbor
     `--agent-kwarg key=value`. A `--agent_kwarg` you pass with the same key
     overrides the preset's.
-  - **Thinking on Iris:** the Iris launcher does NOT read the SLURM baseline model
-    config, so thinking is NOT auto-applied per-model here. It comes from the
-    served model's chat-template default (Qwen3 = thinking ON) — so the usual
-    Qwen3/Qwen3-MoE de-risk models think with no flag. For a model whose template
-    defaults thinking OFF (e.g. Qwen3.5/3.6), pass it explicitly:
+  - **Thinking on Iris:** as of commit `e792bfbb` the Iris launcher **resolves the model's
+    `agent_kwargs` from `model_config/`**, so **thinking IS now auto-applied per-model** for any model
+    that carries `agent_kwargs: [extra_body={…enable_thinking:true}]` in its `model_config/<org>/<slug>.yaml`
+    (precedence: explicit `--agent_kwarg` / `--preset` > `model_config/`). For a model with **no
+    `model_config/` entry**, behavior is unchanged — thinking falls back to the served model's
+    chat-template default (Qwen3 = thinking ON; so the usual Qwen3/Qwen3-MoE de-risk models still think
+    with no flag). For a default-OFF template model that isn't in `model_config/` (e.g. Qwen3.5/3.6),
+    pass it explicitly:
     `--agent_kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'`
     (the live nested chat-template-kwarg form vLLM applies; a bare
     `enable_thinking=true` is DEAD — terminus-2 has no such param). There is no
