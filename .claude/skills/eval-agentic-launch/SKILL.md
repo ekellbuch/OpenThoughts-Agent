@@ -17,6 +17,19 @@ Launch agentic evals via the **unified eval listener** (`eval/unified_eval_liste
 across clusters). This skill is the **cluster-agnostic process**; for the cluster you're on, read its
 ops notes first.
 
+> **🚪 SINGLE FRONT DOOR (2026-07-02): `python -m hpc.launch --job_type eval_listener …`.**
+> The listener is now launched **through `hpc.launch`**, which runs the listener's `main()`
+> **in-process** after doing the launcher preamble for you — `detect_hpc` + `set_environment`
+> (the equivalent of `source hpc/dotenv/<cluster>.env` → `DCFT` / `EXPERIMENTS_DIR` / `PYTHONPATH`) +
+> `setup_hosted_vllm_api_key` + Supabase keys, **plus `chdir` to the repo root**. So the old manual
+> preamble (`cd <repo>` + `source hpc/dotenv/<cluster>.env` + `export PYTHONPATH=$PWD`) and the WORKDIR/DCFT
+> guard dance are **no longer operator responsibilities** — the front door handles them. `hpc.launch`
+> forwards the listener's own ~50 flags **verbatim** (it strips only `--job_type eval_listener`), so every
+> flag below is unchanged. **The single-shot `--job_type eval` path was removed** (strictly subsumed);
+> `--job_type eval` still works as a **deprecated alias** that reroutes to the listener with a one-line
+> nudge. Running the raw `python eval/unified_eval_listener.py …` script still works (unchanged public
+> API) and is a fine fallback, but prefer the front door — it's the single entry point the sweeps use.
+
 > **Cluster particulars → `.claude/ops/<cluster>/ops.md`** (and `ops/all/` for shared, e.g. `hf_tmux.md`).
 > What lives there, NOT here: the `--sbatch-script` path, `--gpu-memory-util` ceiling (A100-64GB needs a
 > lower one than H/GH-class), `--n-concurrent` value, SSH-tunnel/step-ca cert refresh, conda env + code
@@ -108,37 +121,42 @@ default** (the user keeps 1–7 for sibling experiments; confirm before borrowin
 
 ## 3. Launch (in tmux — the listener is long-running)
 
-> **🚧 SUBMIT FROM THE REPO DIR WITH `DCFT` SET — the sbatch WORKDIR guard hard-fails otherwise.**
-> Run the cluster preamble (`cd <repo>` + `source hpc/dotenv/<cluster>.env`, which exports `DCFT`) before
-> launching the listener. The generated `universal_eval.sbatch` resolves `WORKDIR` from `DCFT_PRIVATE →
-> DCFT → $PWD`; if the listener submits eval jobs from `$HOME` or a scratch subdir with `DCFT` unset, the
-> guard trips (missing `hpc/shell_utils/triton_cache.sh` marker) and each eval job **`exit 1`s
-> immediately** with a `FATAL: WORKDIR=... is not the OpenThoughts-Agent repo root` message. If you see
-> that FATAL in an eval `.out`, the listener was started from the wrong place — re-run the preamble and
-> relaunch.
+> **🚧 WORKDIR/DCFT guard — HANDLED BY THE FRONT DOOR (only a concern on the raw-script fallback).**
+> The generated `universal_eval.sbatch` resolves `WORKDIR` from `DCFT_PRIVATE → DCFT → $PWD`; if the
+> listener submits eval jobs with `DCFT` unset / from the wrong cwd, the guard trips (missing
+> `hpc/shell_utils/triton_cache.sh` marker) and each eval job **`exit 1`s immediately** with
+> `FATAL: WORKDIR=... is not the OpenThoughts-Agent repo root`. **`python -m hpc.launch --job_type
+> eval_listener` prevents this** — its preamble runs `set_environment` (exports `DCFT`) and `chdir`s to
+> the repo root before the listener parses args. You only need to run the manual preamble
+> (`cd <repo>` + `source hpc/dotenv/<cluster>.env`) if you use the raw `python
+> eval/unified_eval_listener.py` fallback. If you ever see that FATAL, you launched via the raw script
+> from the wrong place — switch to the front door (or re-run the preamble) and relaunch.
 
-General shape — use the **canonical unified listener `eval/unified_eval_listener.py` with a
+General shape — use the **front door `python -m hpc.launch --job_type eval_listener` with a
 `--cluster-config`** (the retired pre-v6 per-cluster listener subsystem has been removed; it lacked the
 `conda_env` / `limit_mm_per_prompt` / `--config-yaml` / `--agent-kwarg` / `--agent-parser`
 wiring and would mis-serve per-model-conda_env models — e.g. the qwen3_5 tmax models would fall back
-to `otagent`/vLLM-0.16 and crash). The cluster config (`eval/clusters/<cluster>.yaml`) supplies
-sbatch_script / hardware / conda_envs / paths, so you no longer pass `--sbatch-script` /
-`--n-concurrent` / `--gpu-memory-util`:
+to `otagent`/vLLM-0.16 and crash). The cluster config supplies sbatch_script / hardware / conda_envs /
+paths, so you no longer pass `--sbatch-script` / `--n-concurrent` / `--gpu-memory-util`.
+**`--cluster-config` now takes a bare cluster NAME** (e.g. `leonardo`, `tacc`), resolved from the
+`hpc.hpc` cluster object's `eval_cluster_view` — the single source of truth (Stage 4 merged the old
+`eval/clusters/*.yaml` files into the HPC objects). A `.yaml`-suffixed path (`eval/clusters/<c>.yaml`)
+still works as a back-compat fallback, but prefer the name.
 ```bash
-# inside a tmux session (the listener runs minutes/model — pre-download; nohup/disown are unreliable)
-# PYTHONPATH MUST include the repo root — the listener imports first-party top-level packages
-# (`database`, `eval`, `hpc`). A bare `python eval/unified_eval_listener.py` from a one-liner that
-# didn't set it dies with `ModuleNotFoundError: No module named 'database'`. Run from the repo root
-# (cd $WORKDIR) AND export it:
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"   # $PWD = the OpenThoughts-Agent repo root
-python eval/unified_eval_listener.py \
-  --cluster-config eval/clusters/<cluster>.yaml \
+# inside a tmux session (the listener runs minutes/model — pre-download; nohup/disown are unreliable).
+# The front door does the preamble for you: detect_hpc + set_environment (DCFT/EXPERIMENTS_DIR/PYTHONPATH)
+# + hosted-vllm/Supabase keys + chdir to repo root. No manual `source hpc/dotenv/<cluster>.env` /
+# `export PYTHONPATH=$PWD` needed (that was the old raw-script requirement).
+python -m hpc.launch --job_type eval_listener \
+  --cluster-config <cluster-name> \
   --preset <preset> \
   --require-priority-list --priority-file eval/lists/<file>.txt \
   --config-yaml dcagent_eval_config_no_override.yaml \
   [--agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'] [--agent-parser json] [--max-output-tokens 16384] \
   [--pre-download] [--force-reeval] [--pinggy_persistent_url <URL> --pinggy_token <TOKEN>] \
   --once --verbose 2>&1 | tee eval/<cluster>/logs/<preset>_listener_$(date +%Y%m%d_%H%M%S).log
+# Raw-script fallback (unchanged public API; you own the preamble): from the repo root, with
+# `export PYTHONPATH="$PWD:${PYTHONPATH:-}"`, run `python eval/unified_eval_listener.py …` with the same flags.
 ```
 Per-model serve settings (`conda_env` — e.g. `eval-qwen35` for qwen3_5 — `tensor_parallel_size`,
 `data_parallel_size`, `max_model_len`, `limit_mm_per_prompt`, and the optional `max_output_tokens`
@@ -154,6 +172,18 @@ presets do NOT carry thinking, so a preset can never force thinking on a non-thi
 model. There is **no `--enable-thinking` flag**. To override a model's resolved
 kwargs, pass `--agent-kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'`
 (precedence: CLI `--agent-kwarg` > per-model registry > preset).
+
+> **📝 EDIT PER-MODEL SERVE CONFIG IN `model_config/`, NOT the generated `eval/configs/model_configs.yaml`.**
+> As of 2026-07-02 the registry has a **file-per-model source of truth**: `model_config/<org>/<slug>.yaml`
+> (layered schema — intrinsic fields + optional `variants: {<hardware_profile>: {…}}` / `name@<profile>`
+> hardware deltas). **`eval/configs/model_configs.yaml` is now AUTO-GENERATED** and carries a
+> `# do NOT hand-edit` banner. To add or change a model's `conda_env` / `tensor_parallel_size` /
+> `data_parallel_size` / `max_model_len` / `limit_mm_per_prompt` / `timeout_multiplier` / `agent_kwargs`:
+> edit (or add) its `model_config/<org>/<slug>.yaml`, then regenerate —
+> `python scripts/generate_eval_registry.py` (CI drift gate: `scripts/generate_eval_registry.py --check`).
+> A hand-edit to the generated file will be clobbered on the next regen and trip the drift check. Wherever
+> this skill says "add a per-model entry in `eval/configs/model_configs.yaml`", read it as "add the
+> per-model `model_config/<org>/<slug>.yaml` file and regenerate."
 
 > **✅ Per-model serve overrides come from the registry BY DEFAULT — `--baseline-model-configs` is now a DEPRECATED optional override.**
 > As of the Stage-4 cutover the shared registry (`eval/configs/model_configs.yaml`) is the default

@@ -119,8 +119,9 @@ LEONARDO CAMPAIGN DRIVER (the priority — drive it every sweep):
   `--force-reeval` an already-✅ row (the duplicate trap). Launch via the canonical `eval-agentic-launch` listener
   (after THAT cluster's ops preamble — leonardo OR tacc per the tracker, NOT assumed Leonardo — in tmux, ONE
   listener per preset, ~40s stagger):
-    export PYTHONPATH="$PWD:${PYTHONPATH:-}"   # repo root — the listener imports first-party top-level packages
-    python eval/unified_eval_listener.py --cluster-config eval/clusters/<cluster>.yaml --preset <tb2|swebench|v2|...> \
+    # Front door (2026-07-02): hpc.launch runs the listener in-process + does the dotenv/PYTHONPATH/chdir
+    # preamble for you. `--cluster-config` takes a bare cluster NAME (resolved from HPC.eval_cluster_view).
+    python -m hpc.launch --job_type eval_listener --cluster-config <cluster-name> --preset <tb2|swebench|v2|...> \
       [--baseline-model-configs eval/configs/baseline_model_configs_minimal.yaml] \
       --require-priority-list --priority-file <list>.txt \
       --config-yaml dcagent_eval_config_no_override.yaml --force-reeval --once --verbose
@@ -154,7 +155,7 @@ COREWEAVE RL (agentic SkyRL/MoE via `rl-agentic-launch-iris`):
   this 3h cron is the baseline — don't let one substitute for the other.
 
 TACC EVAL HARVEST (when present — newly-integrated, currently validated by a canary):
-- TACC agentic eval runs through the v6 listener with `--cluster-config eval/clusters/tacc.yaml` (its
+- TACC agentic eval runs through the front door `python -m hpc.launch --job_type eval_listener --cluster-config tacc` (bare name resolves from `HPC.eval_cluster_view`; its
   `sbatch_script` = `eval/tacc/eval_harbor.sbatch`, `eval_jobs_dir` = `/scratch/10635/penfever/eval_jobs`; whole-node
   alloc, no `--gres`/`--mem`; compute nodes have egress so NO proxy/cert). Once a leg is RUNNING, harvest finished
   TACC evals the same way as Leonardo (`eval-agentic-cleanup` if auto-register failed). Treat the path as

@@ -60,7 +60,7 @@ standard-GRPO cells + the **SummarizationTimeoutError-deflated re-eval campaign 
 tracker `~/Documents/experiments/active/flawed_summ_evals/reeval_tracker.md` (NOT any old `notes/ot-agent/…` path);
 driver = HARVEST every terminal leg since the last pass (read new_score, compute delta vs old_deflated, flip the row,
 flag negatives beyond ~1σ) + REFILL the next Section-A ⏳-pending rows back to **the in-flight target the tracker records for this series** — read it from the tracker's "🚦 CAMPAIGN DRIVER" / latest-sweep "Target =" line; the count is a **property of the experiment series, NOT this skill — do NOT hardcode a number here**, look it up each sweep (it changes by directive). **Subject to the HARD Daytona ORG2 snapshot cap of 60 — clean stale sandboxes via `utils-cleanup-stale-sandboxes` for headroom, NEVER raise the cap; at high concurrency the binding watch is concurrent SANDBOXES, not snapshots.** Canonical `eval-agentic-launch` listener:
-`PYTHONPATH=$PWD eval/unified_eval_listener.py --cluster-config eval/clusters/leonardo.yaml … --baseline-model-configs … --require-priority-list --priority-file … --config-yaml dcagent_eval_config_no_override.yaml --force-reeval --once` (thinking is per-model authoritative — sourced from the baseline model config `eval/configs/baseline_model_configs_minimal.yaml` per model; presets carry none, there is **no `--enable-thinking` flag**; override a model with `--agent-kwarg 'extra_body={…}'`, precedence CLI > per-model > preset); both `--baseline-model-configs` + `--require-priority-list` load-bearing;
+`python -m hpc.launch --job_type eval_listener --cluster-config leonardo … --require-priority-list --priority-file … --config-yaml dcagent_eval_config_no_override.yaml --force-reeval --once` (the 2026-07-02 front door: `hpc.launch` runs the listener in-process + does the dotenv/PYTHONPATH/chdir preamble; `--cluster-config` takes a bare cluster NAME resolved from `HPC.eval_cluster_view`; raw `python eval/unified_eval_listener.py …` still works as a fallback. Per-model serve config now lives in `model_config/<org>/<slug>.yaml` → generated `eval/configs/model_configs.yaml`, registry default-on, so `--baseline-model-configs` is a **deprecated** override; thinking is per-model authoritative from the registry, presets carry none, there is **no `--enable-thinking` flag**; override a model with `--agent-kwarg 'extra_body={…}'`, precedence CLI > per-model > preset); `--require-priority-list` load-bearing;
 ONE listener per preset, ~40s stagger, never `&`-per-leg; do NOT `--force-reeval` an already-✅ row (duplicate trap). HF upload = the sbatch-tunnel path (login node SIGKILLs at ~100s);
 needs the fresh `~/.ssh/leonardo_daytona` step-ca cert (expires ~12h). ckpts/exports → `$WORK`, never `$SCRATCH_FAST`.
 
@@ -86,8 +86,9 @@ needs the fresh `~/.ssh/leonardo_daytona` step-ca cert (expires ~12h). ckpts/exp
 **TACC(Vista) gather/triage particulars:** `ssh TACCVista` (ControlMaster live, hardened single-string ssh).
 `salloc` is BLOCKED → sbatch; uv/builds go in a CPU `-p gg` sbatch, never the shared login node. Compute nodes have
 FULL internet → **NO proxy/SOCKS/step-ca cert** (contrast Leonardo). GPUs are NOT a SLURM gres (whole-node alloc);
-RealMemory misreported. Agentic eval runs through the v6 listener with `--cluster-config eval/clusters/tacc.yaml`
-(`sbatch_script`=`eval/tacc/eval_harbor.sbatch`, `eval_jobs_dir`=`/scratch/10635/penfever/eval_jobs`) — **newly
+RealMemory misreported. Agentic eval runs through the front door `python -m hpc.launch --job_type eval_listener --cluster-config tacc`
+(bare name resolves from `HPC.eval_cluster_view`; `sbatch_script`=`eval/tacc/eval_harbor.sbatch`,
+`eval_jobs_dir`=`/scratch/10635/penfever/eval_jobs`) — **newly
 integrated, currently validated by a canary**, so sanity-check the canary's traces uploaded + registered before
 relying on it. Harvest finished TACC evals the same way as Leonardo (`eval-agentic-cleanup` if auto-register failed).
 

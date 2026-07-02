@@ -15,6 +15,19 @@ End-to-end operation of an eval job through `eval/cloud/launch_eval_iris.py`
 Covers launch → monitor → manual cleanup. For **datagen/tracegen** jobs use the
 **datagen-launch-iris** skill instead.
 
+> **🚪 The SLURM eval front door (`python -m hpc.launch --job_type eval_listener`) does NOT apply here.**
+> The 2026-07-02 eval-listener unification is a **SLURM-cluster** change (leonardo/tacc/jupiter); the
+> Iris/cloud/local launchers **bypass `hpc.launch` entirely** and were never coupled to the removed
+> single-shot path. Keep launching Iris evals via `eval/cloud/launch_eval_iris.py` as below. What DID
+> change for Iris (commit `81df3e47`, "align preset handling with the listener defaults"): the launcher's
+> `_apply_preset` now (a) **applies `n_attempts` from the preset** (CLI-overridable via `--n_attempts`;
+> it previously defaulted to 3 regardless of preset), and (b) **expanded `_PRESET_IGNORED_FIELDS`** so
+> fields Iris forces via a different channel (`harbor_config` [CLI-required], `agent_name` [from harbor
+> config], `tp_size` [from TPU chip count], `slurm_partition`/`slurm_account` [SLURM-only]) now log as
+> *ignored* instead of silently dropping. The `[eval-iris] preset <name>: applied {…}; ignored {…}` line
+> shows the split. (The per-model **`model_config/` source-of-truth** change is likewise SLURM-listener
+> only — Iris does not read the SLURM model registry; see the **Thinking on Iris** note below.)
+
 ## Required info (ask if missing)
 
 1. `model` — model id for `--model` (HF id or a GCS/served path). Alternatively

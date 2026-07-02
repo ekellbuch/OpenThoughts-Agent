@@ -30,7 +30,7 @@ home; scoping evidence lives in dated `agent_logs/`.
 - **Scoping evidence / breadcrumbs → dated `/Users/benjaminfeuer/Documents/agent_logs/YYYY-MM-DD_<topic>.md`** (the repro that proved the bug, the upstream-check that ruled out "already fixed", measurements). The plan *cites* these logs.
 
 ## Parent plan doc — required sections
-1. **Header:** date · **status** (`scoped — propose-only; no code yet` at creation) · target repo + **local path** + branch (the feature branch you'll cut, e.g. `feuer/<slug>`) · links to the evidence `agent_logs/`.
+1. **Header:** date · **status** (`scoped — propose-only; no code yet` at creation) · target repo + **canonical local path** + **isolated working-copy path** (the rsync-clone you'll branch in — see "Isolated working copy" below) + branch (the feature branch you'll cut in the clone, e.g. `feuer/<slug>`) · links to the evidence `agent_logs/`.
 2. **Goal:** the precise, testable end state (e.g. "`dcp=N` rollout bit-identical to `dcp=1`: greedy token-ids identical + logprobs allclose atol 1e-2").
 3. **Why / the mechanism:** the root cause or design rationale — enough that a fresh reader understands the change without re-deriving it.
 4. **Stage map** (dependency-ordered table): `Stage | title | what | feature(s) | layer | cost (CPU / 1-GPU / N-GPU) | gate`. Order so each stage is independently testable and a later stage builds on an *already-gated* earlier one. Mark the **critical path**.
@@ -46,8 +46,28 @@ home; scoping evidence lives in dated `agent_logs/`.
 - **Validation gate (GO/NO-GO):** the concrete pass condition + cost. This is what `code-execute-staged-plan` checks before advancing.
 - **Composes with / depends on:** the upstream stages it assumes are already green.
 
+## Isolated working copy — rsync-clone BEFORE you branch (do NOT branch the canonical clone)
+**Never cut the feature branch on the canonical clone** (`~/Documents/{OpenThoughts-Agent,harbor,MarinSkyRL,vllm}`).
+Branching/checking-out there swaps the canonical copy off `penfever/working` and is the exact source of the
+branch-drift we keep hitting (a launcher or config silently reads the wrong tree). Instead, **rsync-clone the
+repo to an isolated working directory first, and cut the branch THERE:**
+```bash
+# 1. rsync-clone the canonical repo (INCLUDING .git; skip heavy build/venv dirs) to an isolated copy
+SLUG=<change-slug>; REPO=OpenThoughts-Agent          # or harbor / MarinSkyRL / vllm
+SRC=/Users/benjaminfeuer/Documents/$REPO
+DST=/Users/benjaminfeuer/Documents/staged-work/$SLUG/$REPO
+mkdir -p "$(dirname "$DST")"
+rsync -a --exclude='.venv' --exclude='__pycache__' --exclude='*.egg-info' --exclude='wandb/' "$SRC/" "$DST/"
+# 2. confirm the canonical clone is clean + on penfever/working, then branch IN THE CLONE
+cd "$DST" && git fetch origin && git checkout penfever/working && git pull --ff-only && git checkout -b feuer/$SLUG
+```
+- The canonical clone **stays on `penfever/working`, untouched** — no branch swap, no drift, no risk to in-flight launches that read it.
+- Record the `staged-work/<slug>/<repo>` path as the **isolated working-copy path** in the plan Header; `code-execute-staged-plan` runs the stages there, then commits→pushes the branch → other clones `git pull` (never patch a cluster).
+- Note the rsync-clone is **not** the editable-installed copy the `otagent` env imports; that's fine — design + edits + push happen in the clone, and real cluster testing happens after push+pull. Local syntax checks use `mcp__ide__getDiagnostics` on the clone's files.
+- One clone per repo the change touches (a cross-repo change rsync-clones each). Clean up `staged-work/<slug>/` after the branch is merged.
+
 ## Discipline
-- **Local clone is ground truth** — the plan targets the local repo on a feature branch off `penfever/working` (vLLM: the fork on its branch); execution will commit→push→sync, never patch the cluster (see `supervisor-init`).
+- **Local clone is ground truth** — the plan targets the repo on a feature branch off `penfever/working` (vLLM: the fork on its branch), **cut in an rsync-clone (above), NOT on the canonical clone**; execution will commit→push→sync, never patch the cluster (see `supervisor-init`).
 - **Default-off & reversible:** design new features so flag-off is byte-identical; that's the gating invariant that makes staged landing safe.
 - **Cheapest-repro-first:** stage 0 is usually a unit/CPU harness that reproduces the target signal without a full multi-GPU run, so the fix loop is fast.
 - At creation the plan is **propose-only** — no code, no edits, no rebuild. Hand off to `code-execute-staged-plan` to run it.
