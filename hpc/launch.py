@@ -603,6 +603,13 @@ def main():
     from database.unified_db.utils import load_supabase_keys
     from hpc.resume_manager import ResumeBail
     load_supabase_keys()
+    # Stage-1 thin wrapper: eval_listener forwards sys.argv verbatim to the listener
+    # after the preamble. Fast-pathed BEFORE parse_args() so the listener's ~50 own
+    # flags parse natively (zero forwarding loss, zero argparse coupling). See
+    # hpc/eval_listener_launch_utils.py + notes/ot-agent/eval_listener_unification_plan.md.
+    from hpc.eval_listener_launch_utils import _is_eval_listener_request, launch_eval_listener_from_argv
+    if _is_eval_listener_request():
+        return launch_eval_listener_from_argv()
     # this is where defaults are stored for experiments_dir and deepspeed
     cli_args = parse_args()
 
