@@ -38,6 +38,10 @@ warmup_steps: 3
 max_grad_norm: 1.0
 lr_scheduler_type: cosine
 bf16: true
-pure_bf16: false
+# pure_bf16 matches the axolotl side (bf16: auto -> bf16 optimizer states, no fp32
+# master). With pure_bf16:false LF kept fp32 master + fp32 Adam (~9 GiB heavier ->
+# 8B OOMs on the 95 GiB GH200 even defragmented); pure_bf16:true both fits AND makes
+# the Stage-6 loss-match precision-matched (apples-to-apples) instead of fp32-vs-bf16.
+pure_bf16: true
 gradient_checkpointing: true
 push_to_hub: false
