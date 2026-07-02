@@ -100,8 +100,14 @@ If active datagen (`qwen3.5-122b-32k-%`, state 1/2/3) < 2, auto-launch the next 
 `/Users/benjaminfeuer/Documents/experiments/active/datagen/qwen3.5-122b-tt/tracker.md` via the datagen launch
 template (S1, `ctx32k_verified.yaml`, `--tpu v5p-8 --preemptible`, `--gcs-output-dir gs://marin-models-us/ot-agent`
 unpinned, repo `penfever/<slug>-qwen3.5-122b-32k-traces`) — see **datagen-launch-iris**. Flip its tracker row to
-RUNNING. On Daytona `SnapshotCapExceeded`, delete only MISSING `harbor__` snapshots (memory `daytona_snapshot_cap`)
-then retry. Eval jobs do NOT count toward the 2 and are never auto-launched.
+RUNNING. Eval jobs do NOT count toward the 2 and are never auto-launched.
+
+**Snapshot-cap hygiene (every tick):** audit the cli-org (`DAYTONA_API_KEY`) snapshot count. If a datagen refill
+is blocked by `SnapshotCapExceeded` OR the org is ≥ ~58/60, **reclaim idle `harbor__` snapshots** (idle > 120 min)
+via `daytona_snapshot_manager.py --api-key-env DAYTONA_API_KEY --stale-days 0.0833 --delete-stale --yes`, then retry
+the launch. This deletes ONLY idle `harbor__` env snapshots (rebuilt on demand) — the `--name-prefix harbor__`
+default guards the shared base images (`daytonaio/sandbox:*`, `daytona-*`, `windows-*`), which must never be deleted.
+This supersedes the old MISSING-only rule (which stalls at 0 MISSING). Full procedure: **datagen-reclaim-stale-snapshots**.
 
 ## 6. No-kill guardrail
 Never kill/restart/bounce a RUNNING job or the cluster without express permission — the ONLY exception is the §4b
