@@ -22,7 +22,6 @@ directly or via this wrapper.
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from typing import List, Optional
 
@@ -80,9 +79,30 @@ def _strip_job_type(argv: List[str]) -> List[str]:
 
 
 def launch_eval_listener_from_argv() -> int:
-    """Run the preamble, then exec the listener with forwarded argv. Returns its exit code."""
+    """Run the preamble, then run the listener IN-PROCESS with forwarded argv.
+
+    Stage 5: instead of shelling out to ``eval/unified_eval_listener.py`` via
+    ``subprocess``, the listener's own ``main()`` is invoked in this process.
+    This is the deep-integration end-state: ``hpc.launch --job_type eval_listener``
+    runs the listener in-process, sharing the launcher's preamble (detect_hpc /
+    set_environment / setup_hosted_vllm_api_key / load_supabase_keys) + Python
+    interpreter. The listener's public API (parse_args / build_config /
+    EvalListener / PRESETS / load_cluster_config) and the standalone
+    ``python eval/unified_eval_listener.py`` script are UNTOUCHED — every
+    ``from eval.unified_eval_listener import X`` still resolves.
+
+    We do NOT physically relocate the 4.7k-line listener into a ``hpc/eval_listener/``
+    package: the in-process call achieves the unification goal (single entry point,
+    shared preamble + interpreter, unified exit-code propagation) without the
+    large-diff regression risk of a file move. ``sys.argv`` is set so the listener's
+    ``parse_args()`` (which reads ``sys.argv``) sees the forwarded flags verbatim.
+
+    Returns the listener's exit code (0 normally; argparse may SystemExit on --help
+    or a parse error, which propagates as the process exit).
+    """
     from hpc.hpc import detect_hpc, set_environment
     from hpc.launch_utils import setup_hosted_vllm_api_key
+    import eval.unified_eval_listener as uel
 
     # --- preamble (the ergonomic win: operators no longer source the dotenv by hand) ---
     hpc = detect_hpc()
@@ -103,7 +123,6 @@ def launch_eval_listener_from_argv() -> int:
         )
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    listener_script = os.path.join(repo_root, "eval", "unified_eval_listener.py")
 
     # The listener resolves relative paths (eval/clusters/*.yaml, eval/lists/*) against
     # cwd, and its sbatch WORKDIR guard requires cwd == repo root. The skill's §3 🚧
@@ -116,15 +135,22 @@ def launch_eval_listener_from_argv() -> int:
     env = os.environ.copy()
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = repo_root + (os.pathsep + existing if existing else "")
+    os.environ["PYTHONPATH"] = env["PYTHONPATH"]
 
-    cmd = [sys.executable, listener_script] + listener_argv
+    # Set sys.argv so the listener's parse_args() (which reads sys.argv) sees the
+    # forwarded flags verbatim — argv[0] is the logical program name.
     preview = " ".join(listener_argv[:4])
     print(
-        f"[hpc.launch:eval_listener] cluster={hpc.name} | forwarding {len(listener_argv)} arg(s) "
-        f"to eval/unified_eval_listener.py: {preview}{'…' if len(listener_argv) > 4 else ''}",
+        f"[hpc.launch:eval_listener] cluster={hpc.name} | running listener in-process "
+        f"with {len(listener_argv)} arg(s): {preview}{'…' if len(listener_argv) > 4 else ''}",
         file=sys.stderr,
     )
+    sys.argv = ["unified_eval_listener.py"] + listener_argv
 
-    # subprocess.call (not os.execvp) so `tee`/pipe setups the parent shell established
-    # keep working and the exit code propagates cleanly.
-    return subprocess.call(cmd, env=env)
+    # Run the listener's main() in THIS process. argparse may raise SystemExit
+    # (--help, parse error) which propagates as the process exit code — desired.
+    try:
+        uel.main()
+        return 0
+    except SystemExit as e:
+        return int(e.code) if isinstance(e.code, int) else (1 if e.code else 0)
