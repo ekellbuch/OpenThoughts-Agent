@@ -642,8 +642,22 @@ def main() -> int:
         return 0
 
     # Defer heavy iris imports so --dry-run / --help stay snappy.
+    #
+    # NOTE: post iris PR #6652 (pydantic config parsing) + #6730 (multi-backend
+    # controller) the old submit API moved. The config is now a pydantic
+    # ``IrisClusterConfig`` loaded via the MODULE-LEVEL ``load_config(path)``
+    # (the ``IrisConfig`` class + its ``.load()`` / ``.provider_bundle()`` /
+    # ``.proto`` are gone). The provider bundle is now built by the module-level
+    # ``iris.cluster.composer.provider_bundle(config)``, and ``LocalCluster``
+    # moved to ``iris.cluster.local_cluster``. The job-build helpers
+    # (build_resources / build_job_constraints / resolve_multinode_defaults /
+    # EnvironmentSpec / Entrypoint / job_pb2) and the ``IrisClient.remote(...)`` /
+    # ``client.submit(...)`` surface are UNCHANGED — see how the marin CLI itself
+    # now submits in iris/cli/job.py + iris/cli/connect.py, which this mirrors.
     from iris.client import IrisClient
-    from iris.cluster.config import IrisConfig
+    from iris.cluster.config import load_config
+    from iris.cluster.composer import provider_bundle
+    from iris.cluster.local_cluster import LocalCluster
     from iris.cluster.types import EnvironmentSpec, Entrypoint
     from iris.cli.job import build_resources, build_job_constraints, resolve_multinode_defaults
     from iris.rpc import job_pb2
@@ -731,19 +745,24 @@ def main() -> int:
         if v:
             env_vars[k] = v
 
-    iris_config = IrisConfig.load(args.cluster_config)
-    bundle = iris_config.provider_bundle()
-    controller_proto = iris_config.proto.controller
-    if controller_proto.WhichOneof("controller") == "local":
-        from iris.cluster.providers.local.cluster import LocalCluster
-        controller_address = LocalCluster(iris_config.proto).start()
+    # Load the cluster config (pydantic IrisClusterConfig) and build the provider
+    # bundle, then discover + tunnel to the controller. This mirrors the marin
+    # CLI's own path (iris/cli/connect.py::require_controller_url): for a local
+    # controller start an in-process LocalCluster; otherwise use the config's
+    # controller_address() (defaults.worker.controller_address) if set, else fall
+    # back to the backend's discover_controller(). cw-us-east-02a's controller
+    # kind is "coreweave" (non-local, no IAP auth) → the discover path.
+    iris_config = load_config(args.cluster_config)
+    bundle = provider_bundle(iris_config)
+    if iris_config.controller.controller_kind() == "local":
+        controller_address = LocalCluster(iris_config).start()
     else:
         controller_address = (
             iris_config.controller_address()
-            or bundle.controller.discover_controller(controller_proto)
+            or bundle.controller.discover_controller(iris_config.controller)
         )
 
-    with bundle.controller.tunnel(controller_address) as controller_url:
+    with bundle.controller.tunnel(address=controller_address) as controller_url:
         client = IrisClient.remote(controller_url, workspace=PROJECT_ROOT)
         entrypoint = Entrypoint.from_command(*command)
         job = client.submit(
