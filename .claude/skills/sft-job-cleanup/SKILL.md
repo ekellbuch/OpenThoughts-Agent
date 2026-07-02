@@ -28,7 +28,7 @@ ls $CHECKPOINTS_DIR/<job_name>/ | grep -E 'safetensors|global_step'
 - **`--private` is a no-value flag** — omit it (default public per `feedback_hf_public_default`); `--private false` is a CLI parse error.
 - **Jupiter**: login node has direct internet → `hf upload` from the login node (in tmux) works.
 - **Leonardo**: the login node SIGKILLs long processes at ~100s → use the **sbatch compute-node + SSH-tunnel** upload
-  (see `sft-launch-leonardo` §11 / CLAUDE.md "Leonardo HF Upload — Use sbatch, NOT the Login Node").
+  (see `.claude/ops/leonardo/ops.md` "Leonardo HF Upload — Use sbatch, NOT the Login Node" / `sft-launch`).
 - **Don't upload partials** (`feedback_no_partial_checkpoint_uploads`): if training didn't reach 100%, relaunch and let
   chain restarts auto-resume from the latest checkpoint. Salvage-upload a partial ONLY when explicitly OK'd
   (then name it `laion/<job_name>-<step>-<size>`).
@@ -126,7 +126,7 @@ rm -rf $CHECKPOINTS_DIR/<job_name>  <consolidate_workdir>/<job_name>
 ```
 
 > Launch-side details (preamble, configs, sbatch patching, the no-internet pre-download) live in the
-> **`sft-launch-jupiter`** / **`sft-launch-leonardo`** skills; this skill is the post-run publish + cleanup.
+> **`sft-launch`** skill (per-cluster particulars in `ops/<cluster>/ops.md §SFT`); this skill is the post-run publish + cleanup.
 
 ---
 

@@ -59,7 +59,7 @@ chain), `--dependency afterany:<jid>`, `--experiments_dir`, `--dry_run`.
 - **`pretokenize`** (`pretokenize_launch_utils.py:schedule_pretokenize`) runs a single-node tokenize-only pass building the Arrow cache; the SFT training job then chains `afterok:<pretok_jid>`. Trigger standalone (`--job_type pretokenize`) or inline (`--pretokenize true`).
 - **Key flags:** `--train_config_path` (base YAML), `--model_name_or_path`, `--dataset` / `--dataset_dir`, `--hub_model_id` (HF upload target; auto-derives if unset), `--num_train_epochs`, `--global_batch_size` (launcher computes grad-accum from nodes×gpus), `--cutoff_len`, `--deepspeed`, `--num_nodes`, `--push_to_hub`.
 - **Harbor-dataset tags (load-bearing):** Harbor/DCAgent datasets use `role`/`content` with `user`/`assistant`; LLaMA-Factory defaults to `from`/`value` with `human`/`gpt`. Always pass `--role_tag role --user_tag user --assistant_tag assistant --content_tag content` or the thinking preprocessor finds 0 assistant messages → garbage.
-- Launch/cleanup specifics per cluster: skills `sft-launch-jupiter` / `sft-launch-leonardo` / `sft-job-cleanup`; runtime/env choice (8B vs 32B-ZeRO3 vs Qwen3.5): `.claude/ops/jupiter/ENVIRONMENT_MAP.md`.
+- Launch/cleanup specifics per cluster: skills `sft-launch` (cluster-agnostic core → `.claude/ops/<cluster>/ops.md §SFT`) / `sft-job-cleanup`; runtime/env choice (8B vs 32B-ZeRO3 vs Qwen3.5): `.claude/ops/jupiter/ENVIRONMENT_MAP.md`.
 
 ---
 

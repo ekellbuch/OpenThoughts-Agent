@@ -257,3 +257,99 @@ the torch-2.8 recipe is retained as the documented fallback. Run convention:
   so rely on **NCCL trace + per-rank `opCount` alignment** + last-log-line-per-rank + `/proc/<pid>/{stack,environ}`
   (readable without ptrace) to localize a hang. faulthandler/`SIGUSR1`-stack-dump is in-process (no ptrace)
   and still works if instrumented at launch.
+---
+
+# SFT (Leonardo particulars for the `sft-launch` skill)
+
+Cluster-agnostic flow + backend/Delphi decisions: **`.claude/skills/sft-launch`**. This section is the
+Leonardo-specific procedural layer. A100-**64GB**, 4/node, **no internet on compute nodes**, **login-node process
+killer**, **24h max wall** — these three drive almost every quirk. Read the dsfs (multi-node) + canary-blocker
+subsections before launching anything large; they are the two ways a run silently wastes a 24h slot. Conda envs:
+**`otagent`** (dense Qwen3 / Llama-3-tokenizer, default) vs **`sft-qwen35`** (Qwen3.5 hybrid arch ONLY).
+Write paths: obey the **WRITE-PATH MANDATE** above (§ near top) — checkpoints/exports → `$WORK`/`$CHECKPOINTS_DIR`,
+NEVER `$SF`/`$SCRATCH_FAST` (over-quota → `Errno 122` mid-run). Authoritative launch template:
+`experiments/active/delphi/rl-scaling-laws-6279/SFT_LEONARDO_INSTRUCTIONS.md`.
+
+## Preamble (login node, tmux)
+```bash
+ssh Leonardo   # step-ca cert; complete 2FA once, socket persists ~8h
+source /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/etc/profile.d/conda.sh && \
+conda activate otagent && \   # or sft-qwen35 for Qwen3.5 hybrid
+cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent && GIT_TERMINAL_PROMPT=0 git pull && \
+git submodule update --init --remote sft/llamafactory && \
+git submodule update --init sft/axolotl && \   # pinned; no --remote; only for --sft_backend axolotl
+source hpc/dotenv/leonardo.env && source ~/secrets.env
+```
+Cluster facts: account `AIFAC_5C0_290`, partition `boost_usr_prod`, wall `23:59:00`. **Compilers come from conda**
+(GCC 15.2 / CUDA 13.2) — do NOT `module load gcc cuda`. Paths: code `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent`,
+`$HF_HUB_CACHE`/`$HF_HOME` `…/bfeuer00/data/hub`, experiments/`$CHECKPOINTS_DIR` `…/bfeuer00/experiments`.
+
+## Launch template
+```bash
+DISABLE_VERSION_CHECK=1 python -m hpc.launch --job_type sft \
+  --train_config_path sft/lf_configs/<family>/<cfg>.yaml \
+  --time_limit 23:59:00 --num_nodes 4 --gpus_per_node 4 \
+  --model_path <hf_base_model> \
+  --dataset_dir <registry, e.g. sft/delphi> --dataset <instr>[,<warmup>] \
+  [--mix_strategy interleave_under --interleave_probs 0.9,0.1] \
+  --hub_model_id <hub_model_id> --internet_node --max_restarts 2
+```
+Vary only `--model_path`/`--hub_model_id`/`--dataset` for a controlled set — configs bake template/cutoff/epochs/LR.
+**`--dry_run` the first cell** (confirm model, template, epochs, LR, role tags, `push_to_hub`). Multi-node SFT uses
+**`accelerate` (not torchrun)** — `training_launcher="accelerate"` in `hpc.py` (torchrun's c10d rendezvous fails on
+Leonardo inter-node TCP). `--num_nodes 4 --gpus_per_node 4` = 16 A100-64GB, ZeRO-3 handles ≤~9.7B full-FT.
+
+## No-internet-on-compute handling (compute can't reach HF Hub)
+1. **Pre-download model + datasets on the login node first** (detached tmux, retry): `export HF_HUB_ENABLE_HF_TRANSFER=1;
+   hf download <base_model> --repo-type model; hf download <dataset_repo> --repo-type dataset` (monitor by
+   `$HF_HUB_CACHE` size growth).
+2. **`--internet_node`** — skips the launcher's own pre-download (`_materialize_dataset_and_model` does a
+   `snapshot_download` on a *registry name* → 404 → looks like a stall). Everything is already cached by step 1.
+3. **Offline dataset LOADING:** repoint each dataset in the registry `dataset_info.json` from `hf_hub_url` to a local
+   `file_name` parquet dir (LF `load_from=file`), and strip the ~6 global schema-tag keys the launcher injects (they
+   `KeyError` on heterogeneous mixes — let LF use the per-dataset registry tags).
+4. **`push_to_hub: false`** in the config (repo-create at train start hits the unreachable hub → `OfflineModeIsEnabled`
+   crash). Model saves to local disk; upload post-run via the sbatch-tunnel (see the **HF Upload** section above).
+
+## ⚠️ Multi-node dataset prep — the `data_shared_file_system` cache race (the REAL "24h timeout")
+A tiny model (e.g. 447M) multi-node SFT that idles to the 24h wall with `TIMEOUT`, never checkpointing, LOOKS like
+"24h tokenizing" but ISN'T (tokenizing the 555k/428k mixes takes ~65s with `preprocessing_num_workers: 16`). Real
+cause: with the default `data_shared_file_system: false`, LF's `main_process_first(local=…)` barrier is **per-node**,
+so each node's local-rank-0 runs `datasets.map` simultaneously against the same shared GPFS cache → race →
+`FileNotFoundError` on a parquet shard → collective hangs → NCCL watchdog SIGABRTs at 600s → the step never releases
+→ idle to the wall. Intermittent (timing-dependent). **Fix: `data_shared_file_system: true`** (global barrier;
+same tokens/loss — infra only) via a per-run config copy (e.g. `sft/lf_configs/delphi/4k_sft_dsfs.yaml`). Safe
+mid-grid. `--pretokenize`/`--pretokenize_bprod` is an OPTIONAL optimization, NOT this fix — reach for it only after
+confirming tokenization is actually the bottleneck (it usually isn't). Diagnose order: dsfs → schema-key `KeyError` → pretokenize.
+
+## MANDATORY sbatch post-patch (the launcher does NOT do this for Leonardo SFT)
+After `hpc.launch` generates the sbatch, BEFORE `sbatch`-ing, patch it. The newer launcher template no longer emits
+literal `WORKDIR="$PWD"`/`export DCFT="$WORKDIR"` lines (it resolves WORKDIR at runtime from `$DCFT`/`$DCFT_PRIVATE`
+via a dotenv loop; on the compute node neither is set → falls through to `$HOME` → `triton_cache.sh` "No such file"
+→ `set -e` exit 1 in ~22s). So **inject literal `export DCFT=<code path>` and `export DCFT_PRIVATE=<code path>`
+immediately before the `conda activate` line** in the generated sbatch (also add the conda activation — `otagent`,
+NOT `sft-qwen35`, for dense Qwen3). Then `grep` the spooled script (`scontrol write batch_script <jobid> -`) to
+confirm both exports + `conda activate otagent`, no `$DCFT//leonardo_work` doubling. **A fast (~20s) ExitCode-1 is
+almost always a missing/incorrect post-patch.** Slurm snapshots the script at submit — re-submit after editing.
+
+## 24h wall + `--max_restarts` resume
+`--max_restarts N` submits an N-deep `afterany` chain (auto-resume from latest ckpt; `save_total_limit: 1` keeps it).
+**MUTUALLY EXCLUSIVE with `--overwrite_output_dir`** (hard-errors: overwrite wipes the ckpt dir each restart). For a
+clean re-run, `rm -rf` the output dir first. Resume only helps if the job *checkpoints* — a job that TIMEOUTs in
+tokenization (dsfs) never saves → re-tokenizes forever. Fix dsfs first.
+
+## Canary-discovered blockers — apply to EVERY cell
+(From `SFT_LEONARDO_INSTRUCTIONS.md §9.) 1. HF pre-download stalls → pre-stage in detached tmux w/ retry. 2. `upath`
+missing in `otagent` → `pip install universal_pathlib`. 3. Launcher can't resolve REGISTERED names for pre-download →
+`--internet_node`. 4. Offline dataset loading → local `file_name` parquet + strip global schema tags. 5.
+`push_to_hub: true` crashes at repo-create offline → `false`, upload post-run. 6. **Template × tokenizer mismatch**
+(top silent ruin) — Llama-3-family (Delphi) → `delphi`/llama3 template, NEVER `qwen3`; `--dry_run` + eyeball the first
+rendered example of an instruction turn AND a `<think>` warmup example.
+
+## Cleanup (recognition → skill §6; UPLOAD mechanics → the HF Upload section above)
+Recognition: `ls $CHECKPOINTS_DIR/<job>/ | grep -E 'safetensors|global_step'` — root `model-*.safetensors` → 8B path
+(also Qwen3.5-9B); `global_stepN/`+`zero_to_fp32.py` → 32B path (consolidate first via `--job_type consolidate` →
+upload from `final_repo/`). **Upload via the sbatch-tunnel (never a >100s login-node process); `hf upload`, never
+`upload-large-folder`** — full mechanics + cert refresh in **Leonardo HF Upload** above. DB register via
+`manual_db_push.py` (skip for HF-only series like Delphi #6279, `enable_db_registration: false`). `rm -rf` exp +
+(32B) workdir only after upload+register succeed.

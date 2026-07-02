@@ -38,7 +38,7 @@ use **`sft-job-cleanup`**.
    - Qwen3.5: copy `preprocessor_config.json` from the base model into the checkpoint before upload.
 4b. **Tokenizer sanity check (pre-upload, MANDATORY):** verify `tokenizer_config.json`'s `extra_special_tokens` is a **dict**, not a list (`python -c "import json;d=json.load(open('<ckpt>/tokenizer_config.json'));assert isinstance(d.get('extra_special_tokens',{}),dict)"`). If it's a list → set to `{}` and re-save before upload. (Root cause: transformers **5.x** SFT-save folds `additional_special_tokens` into `extra_special_tokens` as a list; the **4.57.6** RL/SkyRL loader `.keys()`-crashes on it in `get_tokenizer`. Eval env (evalchemy, 5.x) is unaffected, but coerce anyway for RL reuse. Bit swesmith cold-start 2026-06-14.)
 5. **Upload to HF** (public default):
-   - **Leonardo** (where the Delphi grid runs): the login node SIGKILLs long processes at ~100s → use the **sbatch compute-node + SSH-tunnel** upload (see `sft-launch-leonardo` §11 — the `start_proxy_tunnel.sh` SOCKS pattern; or, while the step-ca cert is expired, the detached login-node nohup fallback per `ops/leonardo/ops.md`). `hf upload`, NOT `upload-large-folder`.
+   - **Leonardo** (where the Delphi grid runs): the login node SIGKILLs long processes at ~100s → use the **sbatch compute-node + SSH-tunnel** upload (see `.claude/ops/leonardo/ops.md` "Leonardo HF Upload" — the `start_proxy_tunnel.sh` SOCKS pattern; or, while the step-ca cert is expired, the detached login-node nohup fallback per `ops/leonardo/ops.md`). `hf upload`, NOT `upload-large-folder`.
    - **Jupiter:** login node has direct internet → `hf upload` in tmux.
    - `source secrets.env` for `HF_TOKEN` (env var only — never inline).
 6. **STOP — do NOT run `manual_db_push.py`.** This is the defining difference from `sft-job-cleanup`. No DB row, no `--base-model` anchor (which would auto-create a base-model row).
@@ -59,5 +59,5 @@ Each leg also catches up backlog: any COMPLETED-SFT-not-uploaded, uploaded-not-e
 - **Per-cell TP must divide `num_attention_heads`:** 9e18 heads=9→TP=1, 2e19 heads=11→TP=1, 3e19 heads=12→TP=2 (the sbatch's hardcoded TP=2 is WRONG for 9e18/2e19 — pass the optional TP_OVERRIDE 4th positional arg).
 
 > Full Delphi series data (the why, the map path, the score sheet) lives in memory
-> `project_delphi_sft_hf_only_no_db`; Leonardo upload mechanics in `sft-launch-leonardo` §11; this skill is
+> `project_delphi_sft_hf_only_no_db`; Leonardo upload mechanics in `.claude/ops/leonardo/ops.md` "Leonardo HF Upload"; this skill is
 > the reusable HF-only-cleanup procedure.

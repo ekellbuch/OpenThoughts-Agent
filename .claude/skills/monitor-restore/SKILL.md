@@ -33,7 +33,7 @@ lost on a session restart, so this skill is the durable source of truth: the can
 ## Supporting skills/docs the sweep leans on (read these; the prompt references them)
 - **`monitor-cron-sweep`** — the sweep *procedure* (gather → bucket → render → flag), now with per-cluster Leonardo / CoreWeave / TACC gather+triage sections; **`monitor-job-tables`** + `/Users/benjaminfeuer/Documents/notes/ot-agent/job_monitor_table.md` — the exact per-type table formats + metric/red-flag definitions (the unified RL table now spans Leonardo + CoreWeave).
 - **Cleanup:** `rl-agentic-job-cleanup` (agentic), `rl-standard-job-cleanup` (standard GRPO), `sft-job-cleanup`, `datagen-job-cleanup`, `eval-agentic-cleanup` (+ `eval-standard-cleanup`).
-- **Launch:** `rl-agentic-launch-iris` (CoreWeave RL), `rl-standard-launch-leonardo`, `sft-launch-leonardo`, `datagen-launch`, `eval-agentic-launch`, `eval-standard-launch`. (`*-jupiter` skills apply when Jupiter returns.)
+- **Launch:** `rl-agentic-launch-iris` (CoreWeave RL), `rl-standard-launch-leonardo`, `sft-launch` (Leonardo via `ops/leonardo/ops.md §SFT`), `datagen-launch`, `eval-agentic-launch`, `eval-standard-launch`. (`rl-*-jupiter` skills apply when Jupiter returns.)
 - **Cluster particulars** (access, paths, caps, preamble, binding gotchas): `.claude/ops/leonardo/ops.md`, `.claude/ops/iris/coreweave_gpu_ops.md` (+ `coreweave_h100_cloud_hardware.md`), `.claude/ops/tacc/ops.md`, `.claude/ops/local/ops.md`. **Dependency facts:** `.claude/projects/{marinskyrl,harbor,vllm,llama-factory,daytona}/`.
 - The repo `CLAUDE.md` is the user's cited reference for table format + launch + cleanup; **the canonical prompt below overrides any memory/skill if they conflict** (per the user).
 

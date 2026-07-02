@@ -109,3 +109,67 @@ Hard-won during the #232 long-ctx RL TP-rank-desync wedge (2026-06-18). What wor
 - **NCCL flight recorder (FR) — useful but has THREE gotchas:** (1) var is `TORCH_FR_BUFFER_SIZE` now (deprecated `TORCH_NCCL_TRACE_BUFFER_SIZE` auto-maps); enable `TORCH_NCCL_DUMP_ON_TIMEOUT=1` + a writable `TORCH_NCCL_DEBUG_INFO_TEMP_FILE=<dir>/rank` (torch appends rank). (2) vLLM's `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=900` **preempts NCCL's default 1800s watchdog** → NCCL never reaches its dump path. To get an FR dump, drop `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC` BELOW 900 (e.g. 600). (3) **FR only dumps a rank that is IN a collective** — in a TP desync where the lagging rank *never issues* the collective the others block on, that rank has nothing in-flight → no dump on the rank you most need. FR catches the *blocked* ranks (0/1), not the *diverged* one (rank2). For the diverged rank, use faulthandler.
 - **NCCL `COLL` trace lines as a stack substitute:** with `NCCL_DEBUG=INFO` / FR-on, each rank logs `AllReduce/AllGather: opCount … count … comm …`. Aligning the per-rank op streams by `opCount` pinpoints WHICH collective desyncs (the lagging rank stops emitting at op N while peers advance to op N+1). This cracked the #232 desync localization when py-spy + FR both failed. (Caveat: these verbose lines contain the substring "opCount dead" — a hex/marker, NOT an error — which falsely trips naive `grep dead`/EngineDead monitors; match real tokens only: `EngineDeadError`, `execute_model timed out`, `Watchdog`.)
 - **Two independent watchdogs:** vLLM's `execute_model` RPC timeout (`VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`, multiproc/Ray executor) vs NCCL's collective heartbeat (`TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC`). A multi-node hang trips whichever is shorter; tune their relative values to control which fires first + whether you get a dump. A 900s `execute_model` timeout = a genuinely *wedged* step (normal steps are ms–seconds), not slow compute.
+
+---
+
+# SFT (Jupiter particulars for the `sft-launch` skill)
+
+Cluster-agnostic flow + backend/Delphi decisions: **`.claude/skills/sft-launch`**. This section is the
+Jupiter-specific procedural layer. GH200, 4 GPUs/node, aarch64. Conda env **`otagent`** (dense Qwen3 /
+Llama-3-tokenizer), **`sft-qwen35`** (Qwen3.5 hybrid arch, transformers ≥5.3), **`sft-axolotl`** (`--sft_backend axolotl`).
+
+## Preamble (run FIRST, every session — pulls latest code + submodules)
+```bash
+source ~/.bashrc; source ~/secrets.env; cd /e/scratch/jureap59/feuer1/harbor; git stash; git pull; \
+cd /e/scratch/jureap59/feuer1/OpenThoughts-Agent/SkyRL; git stash; git pull; conda activate otagent; \
+cd /e/scratch/jureap59/feuer1/OpenThoughts-Agent; git pull; \
+git submodule update --init --remote sft/llamafactory; git submodule update --init sft/axolotl; source hpc/dotenv/jupiter.env;
+```
+- `git submodule update … sft/llamafactory` is essential (SFT won't run on a stale submodule). `sft/axolotl` is
+  **pinned** — update WITHOUT `--remote` to honor the pin; only needed for `--sft_backend axolotl`.
+- **🚧 SUBMIT FROM THE REPO DIR WITH `DCFT` SET.** The generated `universal_sft.sbatch` resolves `WORKDIR` from
+  `DCFT_PRIVATE → DCFT → $PWD`; submitting from `$HOME`/scratch with `DCFT` unset trips the WORKDIR guard (missing
+  `hpc/shell_utils/triton_cache.sh` marker) → immediate `exit 1` (`FATAL: WORKDIR=… is not the OpenThoughts-Agent
+  repo root`). The preamble (`cd …/OpenThoughts-Agent` + `source hpc/dotenv/jupiter.env`) sets `DCFT`. Re-run it if you see that FATAL.
+
+## Wall / QOS / account
+- **`--time_limit` max `11:59:00`** — booster QOS caps wall at 12h. For longer, chain-restart with `--max_restarts N`
+  (auto-resumes from latest checkpoint).
+- **Account: leave default `reformo`** — do NOT pass `--account jureap59` (its booster QOS is **suspended** →
+  `Reason=InvalidQOS`, never schedules). `hpc.py` hardwires `reformo` for Jupiter SFT; SFT shares that allocation
+  with RL/datagen, so to schedule faster **free a reformo slot** (don't switch accounts).
+
+## Checkpoints → `/e/data1/datasets/playground/ot/checkpoints`
+Prefer **`--output_dir /e/data1/datasets/playground/ot/checkpoints/<job_name>`**. `hpc/dotenv/jupiter.env` defaults
+`CHECKPOINTS_DIR=$DCFT_DATA/checkpoints` (= `…/ot-baf/checkpoints`), and an `export CHECKPOINTS_DIR=…` gets
+**clobbered by `source hpc/dotenv/jupiter.env`** in the preamble — so the explicit flag is the reliable way to land
+in canonical `ot/checkpoints`. Dry-run and confirm the rendered `output_dir`.
+
+## 8B vs 32B (recognition + cleanup shape → skill §6)
+- **8B** (also Qwen3.5-9B): `--hub_model_id laion/<name>` sets the repo; `push_to_hub` defaults **False** on Jupiter
+  (compute has no direct internet), so upload is a **login-node `hf upload`** cleanup step + `manual_db_push.py` to
+  register (the `--upload_to_database` flag is eval-only). Full: CLAUDE.md "8B SFT Job Cleanup Checklist".
+- **32B** (`…_32b*.yaml`): ZeRO-3 writes sharded `global_stepN/`, NO root safetensors → **launch WITHOUT
+  `--hub_model_id`**, then: (1) `--job_type consolidate --consolidate_input $CKPT/<job> --consolidate_output_repo
+  laion/<name> --consolidate_workdir <wd>/<name> --time_limit 02:00:00 --num_nodes 1`; (2) **manually `hf upload`
+  from `final_repo/`** (the consolidate auto-push has hit `BrokenPipeError` on big uploads). Full: CLAUDE.md "32B SFT
+  Job Cleanup Checklist". Recognition: `ls $CKPT/<job>/` shows `global_stepN/`+`zero_to_fp32.py`, no root safetensors.
+
+## Qwen3.5 hybrid — `sft-qwen35` env
+Qwen3.5 (9B/27B) GatedDeltaNet+Attention arch isn't in transformers 4.x → run the preamble but `conda activate
+sft-qwen35`. After training, copy `preprocessor_config.json` from the base into the ckpt (LF doesn't emit it; vLLM
+needs it). 9B → root safetensors (SKIP consolidate); 27B → 32B consolidate flow. On Jupiter the launcher handles the
+env activation.
+
+## Operating notes
+- **Axolotl SFT (Sera/CoderForge baselines): default `--nodes=4` (16 GH200) + `zero3_bf16.json`** even for small
+  1-epoch jobs (cuts per-step ~4× vs ~50min/1-node; dodges the 1-node/zero1 step-5 OOM at 8B/32k). NOT `zero1.json`.
+  Scale to 2 nodes only if the 4-node queue is congested. (This is the standalone-sbatch Sera/CoderForge path, distinct
+  from the `--sft_backend axolotl` launcher path — see `.claude/projects/axolotl/axolotl.md`.)
+- **HPO sweeps: always pass `--job_name <short>`** so SLURM name + exp dir + checkpoint dir match (else the derived
+  long dataset-string name breaks resume-from-checkpoint).
+- **Scaling-ablation workflow:** one SSH session → preamble → queue all sizes back-to-back (record every JID) →
+  ScheduleWakeup 600s + 1800s for early health (PENDING-past-30min, arrow-cache race, ENOSPC, NCCL, OOM — only caught
+  by tailing `.out`) → switch to a 2h CronCreate once RUNNING-advancing/PENDING-with-ETA → fire the per-size
+  post-training flow as EACH lands (32B consolidate `--time_limit 06:00:00` NOT 24h → `manual_db_push`; 8B skip
+  consolidate). Verify the Supabase row, then `rm -rf` exp + consolidate dirs.
