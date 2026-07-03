@@ -81,7 +81,7 @@ fi
 # pruned => ZERO nvcc on the prebuilt-wheelhouse path.
 exec /kaniko/executor \
   --context dir:///app \
-  --dockerfile docker/Dockerfile.gpu-rl \
+  --dockerfile "${DOCKERFILE:-docker/Dockerfile.gpu-rl}" \
   --build-arg WHEEL_SOURCE="$WHEEL_SOURCE" \
   --skip-unused-stages \
   --single-snapshot \
