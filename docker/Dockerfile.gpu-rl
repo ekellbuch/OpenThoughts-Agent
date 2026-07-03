@@ -464,7 +464,14 @@ RUN . $RL_ENV_DIR/bin/activate && \
 #   carries the TrialNotScoredError de-flatten (stop flattening upstream errors
 #   into VNC) and the earlier reward-zeroing rmtree fix (342729d5).
 # --no-deps so this only swaps the harbor source, not its resolved deps.
-ENV HARBOR_COMMIT=f7f51f131577e0d6672ef815a555b507e83778a0
+#   ef42e75e = "perf(daytona): replace 1s exec poll with 1ms+jitter (rollout-
+#   throughput fix)" — drops the Daytona per-exec poll from a 1s sleep to
+#   0.001s + jitter (asyncio.sleep(0.001 + random.uniform(0, 0.001)) in
+#   _poll_response), so each exec costs ~runtime+RTT instead of ceil(runtime)+1s.
+#   This is what feeds the RL engines faster (poll-starvation fix). Supersedes
+#   f7f51f13 (litellm-spam merge); its history still carries the TrialNotScoredError
+#   de-flatten + the reward-zeroing rmtree fix (342729d5).
+ENV HARBOR_COMMIT=ef42e75e400cec0a743bc051658d42b2da0af7d9
 RUN . $RL_ENV_DIR/bin/activate && \
     uv pip install --no-deps --force-reinstall \
         "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
