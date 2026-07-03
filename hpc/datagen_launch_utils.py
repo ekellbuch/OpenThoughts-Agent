@@ -1302,15 +1302,6 @@ class TracegenJobRunner:
                 extra_env_vars=extra_env_vars if extra_env_vars else None,
             )
             with vllm_server:
-                # record_literal is not wired for the controller-ingress path in this
-                # pass (the co-located proxy would need to register as the iris
-                # endpoint); use pinggy or local ingress with --record_literal.
-                if self.config.record_literal and self.config.ingress_mode == "controller":
-                    raise NotImplementedError(
-                        "record_literal + ingress_mode=controller is not supported; "
-                        "use pinggy or local ingress with --record_literal."
-                    )
-
                 # Controller-ingress mode: replace the pinggy tunnel with a stable
                 # public URL fronting the controller proxy. Only reroutes cloud
                 # backends; local backends keep the direct vLLM endpoint. In the
@@ -1320,7 +1311,9 @@ class TracegenJobRunner:
                     from hpc.pinggy_utils import needs_pinggy_tunnel
                     from hpc.ingress_utils import (
                         controller_api_base_for_job,
+                        controller_registration_plan,
                         inject_ingress_agent_key,
+                        register_controller_endpoint,
                         INGRESS_KEY_PLACEHOLDER,
                     )
 
@@ -1330,6 +1323,48 @@ class TracegenJobRunner:
                                 "--ingress-mode controller requires --ingress-host "
                                 "(the public controller-ingress host)."
                             )
+                        if self.config.record_literal:
+                            # COMBINED path (record_literal x controller): co-locate
+                            # the RecordProxy in front of vLLM and register the
+                            # PROXY's address as the iris endpoint, so the served
+                            # path is controller -> RecordProxy -> vLLM and literal
+                            # tokens are captured. The proxy binds 0.0.0.0 so the
+                            # (remote) controller can reach it at IRIS_ADVERTISE_HOST;
+                            # it needs no bearer (EndpointProxy strips Authorization
+                            # upstream). api_base + endpoint name match the plain path.
+                            from hpc.literal_proxy_utils import (
+                                maybe_serve_literal_proxy,
+                                DEFAULT_LITERAL_PROXY_PORT,
+                            )
+
+                            endpoint_name, register_address, api_base = (
+                                controller_registration_plan(
+                                    self.config.ingress_host,
+                                    self.config.job_name,
+                                    record_literal=True,
+                                    proxy_port=DEFAULT_LITERAL_PROXY_PORT,
+                                )
+                            )
+                            with maybe_serve_literal_proxy(
+                                True,
+                                vllm_server.endpoint,
+                                experiments_dir=self.config.experiments_dir,
+                                job_name=self.config.job_name,
+                                host="0.0.0.0",
+                            ):
+                                endpoint_id = register_controller_endpoint(
+                                    endpoint_name, register_address
+                                )
+                                injected = inject_ingress_agent_key()
+                                print(
+                                    f"[TracegenJobRunner] ingress_mode=controller "
+                                    f"+record_literal: registered {endpoint_name} -> "
+                                    f"{register_address} (id={endpoint_id}); Harbor "
+                                    f"endpoint={api_base} (agent key injected={injected})"
+                                )
+                                return self._run_harbor(
+                                    endpoint=api_base, api_key=INGRESS_KEY_PLACEHOLDER
+                                )
                         api_base = controller_api_base_for_job(
                             self.config.ingress_host, self.config.job_name
                         )

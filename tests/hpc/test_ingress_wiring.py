@@ -16,20 +16,31 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import httpx
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from starlette.testclient import TestClient
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from hpc.harbor_utils import build_endpoint_meta, merge_agent_kwargs  # noqa: E402
 from hpc.ingress_utils import (  # noqa: E402
+    ADVERTISE_HOST_ENV,
+    DEFAULT_VLLM_PORT,
     INGRESS_KEY_ENV,
     INGRESS_KEY_PLACEHOLDER,
     build_controller_api_base,
     build_controller_endpoint_meta,
     controller_api_base_for_job,
     controller_endpoint_name,
+    controller_registration_plan,
+    controller_upstream_address,
     inject_ingress_agent_key,
+    register_controller_endpoint,
 )
+from hpc.literal_proxy_utils import DEFAULT_LITERAL_PROXY_PORT  # noqa: E402
 
 
 def test_controller_endpoint_name_sanitizes():
@@ -111,3 +122,159 @@ def test_eval_listener_to_env_controller_additive():
     ctrl_env = SbatchParams(ingress_mode="controller", ingress_host="ingress.example").to_env()
     assert ctrl_env["EVAL_INGRESS_MODE"] == "controller"
     assert ctrl_env["EVAL_INGRESS_HOST"] == "ingress.example"
+
+
+# --------------------------------------------------------------------------- #
+# Endpoint registration helpers (shared by the controller + literal-combo path)
+# --------------------------------------------------------------------------- #
+class _FakeRegistrar:
+    """Records register(name, address, metadata) calls; returns a fixed id."""
+
+    def __init__(self):
+        self.calls = []
+
+    def register(self, name, address, metadata=None):
+        self.calls.append({"name": name, "address": address, "metadata": metadata})
+        return "endpoint-id-xyz"
+
+
+def test_controller_upstream_address_uses_advertise_host():
+    # in-cluster: IRIS_ADVERTISE_HOST wins, on the requested port
+    env = {ADVERTISE_HOST_ENV: "10.16.4.7"}
+    assert controller_upstream_address(8010, env=env) == "http://10.16.4.7:8010"
+    # off-cluster (unset) -> loopback fallback
+    assert controller_upstream_address(8000, env={}) == "http://127.0.0.1:8000"
+
+
+def test_register_controller_endpoint_uses_injected_registrar():
+    reg = _FakeRegistrar()
+    eid = register_controller_endpoint(
+        "otagent.myjob", "http://10.0.0.1:8010", registrar=reg, metadata={"k": "v"}
+    )
+    assert eid == "endpoint-id-xyz"
+    assert reg.calls == [
+        {"name": "otagent.myjob", "address": "http://10.0.0.1:8010", "metadata": {"k": "v"}}
+    ]
+
+
+def test_register_controller_endpoint_no_registrar_returns_none(monkeypatch):
+    # off-cluster / iris unavailable: best-effort no-op, never raises.
+    monkeypatch.setattr(
+        "hpc.ingress_utils._default_endpoint_registrar", lambda: None
+    )
+    assert register_controller_endpoint("otagent.j", "http://h:8000") is None
+
+
+def test_controller_registration_plan_plain_registers_vllm_port():
+    """Plain controller: register raw vLLM:8000; api_base is the /proxy/<name>/v1 URL."""
+    name, address, api_base = controller_registration_plan(
+        "ingress.example",
+        "myjob",
+        record_literal=False,
+        proxy_port=DEFAULT_LITERAL_PROXY_PORT,
+        env={ADVERTISE_HOST_ENV: "10.0.0.5"},
+    )
+    assert name == "otagent.myjob"
+    assert address == f"http://10.0.0.5:{DEFAULT_VLLM_PORT}"
+    assert address.endswith(":8000")
+    assert api_base == "https://ingress.example/proxy/otagent.myjob/v1"
+
+
+def test_controller_registration_plan_literal_registers_proxy_port():
+    """COMBINED path: the REGISTERED address is the RecordProxy's port, NOT vLLM's.
+
+    api_base + endpoint name are IDENTICAL to the plain path (only the address
+    differs), so the controller URL the agent targets is unchanged.
+    """
+    name, address, api_base = controller_registration_plan(
+        "ingress.example",
+        "myjob",
+        record_literal=True,
+        proxy_port=DEFAULT_LITERAL_PROXY_PORT,
+        env={ADVERTISE_HOST_ENV: "10.0.0.5"},
+    )
+    assert name == "otagent.myjob"
+    # the proxy's address is registered, never raw vLLM:8000
+    assert address == f"http://10.0.0.5:{DEFAULT_LITERAL_PROXY_PORT}"
+    assert address.endswith(":8010")
+    assert ":8000" not in address
+    # api_base unchanged vs the plain path
+    assert api_base == "https://ingress.example/proxy/otagent.myjob/v1"
+
+
+def test_combined_path_registers_proxy_and_sets_api_base_and_key():
+    """End-to-end (in-process) proof of the record_literal x controller wiring.
+
+    Mirrors exactly what the launcher does when BOTH flags are set: compute the
+    registration plan, register via the (fake) registrar, build the agent kwargs.
+    Asserts: registered address is the PROXY's (not vLLM's), api_base is the
+    /proxy/<name>/v1 URL, api_key == the IRIS_INGRESS_API_KEY placeholder.
+    """
+    reg = _FakeRegistrar()
+    name, address, api_base = controller_registration_plan(
+        "ingress.example",
+        "myjob",
+        record_literal=True,
+        proxy_port=DEFAULT_LITERAL_PROXY_PORT,
+        env={ADVERTISE_HOST_ENV: "10.0.0.5"},
+    )
+    register_controller_endpoint(name, address, registrar=reg)
+
+    # the endpoint registered points at the RecordProxy, not raw vLLM
+    assert reg.calls[0]["address"].endswith(f":{DEFAULT_LITERAL_PROXY_PORT}")
+    assert not reg.calls[0]["address"].endswith(":8000")
+
+    # the agent sees the controller /proxy/<name>/v1 URL + the ingress key placeholder
+    meta = build_controller_endpoint_meta("ingress.example", name)
+    merged, _ = merge_agent_kwargs(
+        {"agents": [{"name": "qwen-code", "kwargs": {"model_name": "m"}}]},
+        agent_name="qwen-code",
+        endpoint_meta=meta,
+    )
+    assert merged["api_base"] == "https://ingress.example/proxy/otagent.myjob/v1"
+    assert merged["api_base"] == api_base
+    assert merged["api_key"] == INGRESS_KEY_PLACEHOLDER
+    assert INGRESS_KEY_PLACEHOLDER == "${" + INGRESS_KEY_ENV + "}"
+
+
+def test_record_proxy_accepts_unauthenticated_calls():
+    """The registered upstream (RecordProxy) must accept NO-bearer in-cluster calls.
+
+    EndpointProxy strips Authorization before forwarding upstream, so the
+    RecordProxy — like raw vLLM today — must serve requests with no bearer.
+    Exercised in-process via httpx.ASGITransport (no socket/GPU/controller).
+    """
+    from harbor.literal.proxy import RecordProxy
+
+    stub = FastAPI()
+
+    @stub.post("/v1/chat/completions")
+    async def _chat(request: Request):  # noqa: ANN001
+        return JSONResponse({"id": "r1", "model": "m", "choices": [{}]})
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        proxy = RecordProxy("http://vllm.local", Path(td) / "literal.jsonl", timeout=10.0)
+        stub_client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=stub), base_url="http://vllm.local"
+        )
+
+        async def _fake_get_client():
+            return stub_client
+
+        proxy._get_client = _fake_get_client  # type: ignore[assignment]
+        with TestClient(proxy.app()) as client:
+            # NO Authorization header — must still forward + 200.
+            r = client.post("/v1/chat/completions", json={"model": "m", "messages": []})
+        assert r.status_code == 200
+        assert "authorization" not in {k.lower() for k in r.request.headers}
+
+
+def test_notimplementederror_guard_removed_from_launchers():
+    """The record_literal x controller NotImplementedError guard is gone from both launchers."""
+    guard = "record_literal + ingress_mode=controller is not supported"
+    for fname in ("rl_launch_utils.py", "datagen_launch_utils.py"):
+        src = (_REPO_ROOT / "hpc" / fname).read_text()
+        assert guard not in src, f"stale NotImplementedError guard still in hpc/{fname}"
+        assert "NotImplementedError(\n" not in src or guard not in src
