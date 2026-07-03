@@ -140,8 +140,14 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # attempt (diagnosed restart-from-0 across all 8 r4 pods → ImagePullBackOff; the incremental-base
     # rebuild ALSO failed because the build pod had to pull the same 16.6 GB base). 48 small layers each
     # pull+retry independently. Build asserts green (baked harbor 0.8.0 @ 0729a3e9). Digest below.
-    "@sha256:59cef2f509f9505a09bdf0358924cf11ad04418c0bef87c49960f28ba6babc63"  # noqa: E501  (gpu-rl-efd77b98)
-    # (prev: gpu-rl-69634c0b @sha256:d9c7e604… — same contents, un-pullable 16.6 GB single-snapshot layer)
+    # gpu-rl-e79c224b (built 2026-07-03, kaniko job gpurl-kaniko-e79c224b): HARBOR_COMMIT-only bump of
+    # gpu-rl-efd77b98 → harbor a4957ef1 "reuse one persistent exec session per sandbox" (descends from
+    # 0729a3e9, so keeps the 1ms poll + tmux-bake AND adds _ensure_exec_session — cuts the per-turn
+    # Daytona-exec overhead that starved the engines at n=256). Same PULLABLE re-layered build recipe
+    # (SINGLE_SNAPSHOT=0 + torch nvidia-CUDA split, max layer 3.46 GB, 48 layers). Everything else
+    # unchanged (MarinSkyRL 39faff7d baked, vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128).
+    "@sha256:d6a6da981afcac5c8afe2ee7d87b18551591e0e78fcd3f675d9e91caede7d3a0"  # noqa: E501  (gpu-rl-e79c224b)
+    # (prev: gpu-rl-efd77b98 @sha256:59cef2f5… harbor 0729a3e9; gpu-rl-69634c0b @sha256:d9c7e604… un-pullable)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
