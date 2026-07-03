@@ -471,6 +471,27 @@ class LaunchArgs:
             "help": "Debugger URL exposed via Pinggy (used for health checks)",
         },
     )
+    ingress_mode: str = field(
+        default="pinggy",
+        metadata={
+            "help": (
+                "How cloud sandboxes reach the on-cluster vLLM: 'pinggy' (default, legacy paid "
+                "SSH reverse tunnel) or 'controller' (auth-gated Iris controller ingress). "
+                "Inert until the wiring swap (Stage 4) reads it; 'pinggy' is byte-identical to today."
+            ),
+            "choices": ["pinggy", "controller"],
+        },
+    )
+    ingress_host: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Public controller-ingress host (e.g., ingress.iris.example) used only when "
+                "--ingress-mode controller; the sandbox api_base becomes "
+                "https://<ingress_host>/proxy/<endpoint_name>/v1. Unused in pinggy mode."
+            ),
+        },
+    )
     use_mca: bool = field(
         default=False,
         metadata={

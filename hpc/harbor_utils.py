@@ -263,7 +263,7 @@ def get_harbor_env_from_config(
 # ---------------------------------------------------------------------------
 
 
-def build_endpoint_meta(endpoint_url: str) -> Dict[str, str]:
+def build_endpoint_meta(endpoint_url: str, api_key: Optional[str] = None) -> Dict[str, str]:
     """Build endpoint metadata dict from a vLLM endpoint URL.
 
     Handles both formats:
@@ -272,9 +272,12 @@ def build_endpoint_meta(endpoint_url: str) -> Dict[str, str]:
 
     Args:
         endpoint_url: vLLM endpoint URL (with or without /v1 suffix)
+        api_key: optional bearer key to carry into agent kwargs (controller-ingress
+            mode). When None (the default / pinggy path), the returned dict is
+            byte-identical to the legacy behavior.
 
     Returns:
-        Dict with 'api_base' and 'metrics_endpoint' keys
+        Dict with 'api_base' and 'metrics_endpoint' keys (+ 'api_key' if provided)
     """
     url = endpoint_url.rstrip("/")
 
@@ -288,10 +291,13 @@ def build_endpoint_meta(endpoint_url: str) -> Dict[str, str]:
 
     metrics_endpoint = f"{base_url}/metrics"
 
-    return {
+    meta = {
         "api_base": api_base,
         "metrics_endpoint": metrics_endpoint,
     }
+    if api_key:
+        meta["api_key"] = api_key
+    return meta
 
 
 def derive_vllm_supports_tool_calling(vllm_cfg: Any) -> Optional[bool]:
@@ -553,6 +559,10 @@ def merge_agent_kwargs(
             agent_kwargs["metrics_endpoint"] = endpoint_meta["metrics_endpoint"]
         if endpoint_meta.get("api_base"):
             agent_kwargs["api_base"] = endpoint_meta["api_base"]
+        # api_key only present in controller-ingress mode; dormant (byte-identical)
+        # for the pinggy/local path where endpoint_meta carries no api_key.
+        if endpoint_meta.get("api_key"):
+            agent_kwargs["api_key"] = endpoint_meta["api_key"]
 
     # 3. Apply extra kwargs from datagen config
     if extra_kwargs:

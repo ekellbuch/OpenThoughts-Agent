@@ -555,6 +555,8 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
                 hf_episodes=exp_args.get("upload_hf_episodes") or "last",
                 pinggy_persistent_url=exp_args.get("pinggy_persistent_url"),
                 pinggy_token=exp_args.get("pinggy_token"),
+                ingress_mode=exp_args.get("ingress_mode") or "pinggy",
+                ingress_host=exp_args.get("ingress_host"),
                 # Chunking fields (None when not chunking)
                 chunk_size=chunk_size if is_chunked else None,
                 chunk_index=chunk_idx,
@@ -941,6 +943,11 @@ class TracegenJobConfig:
     pinggy_persistent_url: Optional[str] = None
     pinggy_token: Optional[str] = None
 
+    # Ingress mode: "pinggy" (default, legacy) or "controller" (auth-gated
+    # controller ingress). ingress_host is the public controller-ingress host.
+    ingress_mode: str = "pinggy"
+    ingress_host: Optional[str] = None
+
     # Ray object store size in GB (default: 40)
     ray_object_store_gb: float = 40.0
 
@@ -1290,6 +1297,43 @@ class TracegenJobRunner:
                 extra_env_vars=extra_env_vars if extra_env_vars else None,
             )
             with vllm_server:
+                # Controller-ingress mode: replace the pinggy tunnel with a stable
+                # public URL fronting the controller proxy. Only reroutes cloud
+                # backends; local backends keep the direct vLLM endpoint. In the
+                # default "pinggy" mode this branch is skipped, so the legacy path
+                # below is byte-identical.
+                if self.config.ingress_mode == "controller":
+                    from hpc.pinggy_utils import needs_pinggy_tunnel
+                    from hpc.ingress_utils import (
+                        controller_api_base_for_job,
+                        inject_ingress_agent_key,
+                        INGRESS_KEY_PLACEHOLDER,
+                    )
+
+                    if needs_pinggy_tunnel(self.config.agent, self.config.trace_env):
+                        if not self.config.ingress_host:
+                            raise ValueError(
+                                "--ingress-mode controller requires --ingress-host "
+                                "(the public controller-ingress host)."
+                            )
+                        api_base = controller_api_base_for_job(
+                            self.config.ingress_host, self.config.job_name
+                        )
+                        injected = inject_ingress_agent_key()
+                        print(
+                            f"[TracegenJobRunner] ingress_mode=controller: "
+                            f"Harbor endpoint={api_base} (agent key injected={injected})"
+                        )
+                        return self._run_harbor(
+                            endpoint=api_base, api_key=INGRESS_KEY_PLACEHOLDER
+                        )
+                    else:
+                        print(
+                            "[TracegenJobRunner] ingress_mode=controller but local "
+                            f"backend, using local vLLM endpoint: {vllm_server.endpoint}"
+                        )
+                        return self._run_harbor(endpoint=vllm_server.endpoint)
+
                 # Check if we need Pinggy tunnel for cloud backends with installed agents
                 from hpc.pinggy_utils import (
                     needs_pinggy_tunnel,
@@ -1332,12 +1376,16 @@ class TracegenJobRunner:
                     print(f"[TracegenJobRunner] Using local vLLM endpoint for Harbor: {vllm_server.endpoint}")
                     return self._run_harbor(endpoint=vllm_server.endpoint)
 
-    def _run_harbor(self, endpoint: Optional[str]) -> int:
-        """Execute the Harbor CLI for trace generation."""
+    def _run_harbor(self, endpoint: Optional[str], api_key: Optional[str] = None) -> int:
+        """Execute the Harbor CLI for trace generation.
+
+        api_key is set only in controller-ingress mode (a ``${IRIS_INGRESS_API_KEY}``
+        placeholder carried into agent kwargs); None on the legacy/pinggy path.
+        """
         from hpc.harbor_utils import build_harbor_command, load_harbor_config, build_endpoint_meta
 
         # Build endpoint metadata for vLLM
-        endpoint_meta = build_endpoint_meta(endpoint) if endpoint else None
+        endpoint_meta = build_endpoint_meta(endpoint, api_key=api_key) if endpoint else None
 
         # Load harbor config data for agent kwargs extraction
         harbor_config_data = load_harbor_config(self.config.harbor_config)
