@@ -1304,6 +1304,48 @@ vista = HPC(
     num_nodes_slow=4,
     num_nodes_default=16,
     num_nodes_fast=32,
+    # Stage 4: eval-listener cluster config (single source of truth — was eval/clusters/tacc.yaml).
+    # NOTE: this HPC object is named "vista" (the machine) but operators pass the bare
+    # name "tacc"; the view's cluster_name is "tacc" (mirroring tacc.yaml) and the
+    # listener's _resolve_cluster_view_by_name() matches EITHER c.name ("vista") OR the
+    # view's cluster_name ("tacc"), so `--cluster-config tacc` AND `--cluster-config vista`
+    # both resolve. User-scoped paths mirror that yaml (penfever's). Vista-specific vs
+    # leonardo: hardware_profile gh200, 1 GPU/node, NO mem_per_node_mb (RealMemory is
+    # misreported as 1 MB → request whole nodes), and hardware.gpu_gres false (GPUs are
+    # not a SLURM gres here). Compute nodes have full egress so proxy is disabled.
+    eval_cluster_view={
+        "cluster_name": "tacc",
+        "baseline_model_configs": "eval/clusters/tacc_baseline_model_configs.yaml",
+        "use_model_registry": True,
+        "model_registry": "eval/configs/model_configs.yaml",
+        "hardware_profile": "gh200",
+        "slurm_partition": "gh",
+        "slurm_account": "CCR24067",
+        "slurm_time": "23:59:00",
+        "conda_envs": {
+            "otagent": "/scratch/10635/penfever/miniconda3/envs/otagent",
+        },
+        "paths": {
+            "project_root": "/scratch/10635/penfever/OpenThoughts-Agent",
+            "hf_cache": "/scratch/10635/penfever/hub",
+            "eval_jobs_dir": "/scratch/10635/penfever/eval_jobs",
+            "eval_logs_dir": "eval/tacc/logs",
+            "listener_logs_dir": "experiments/listener_logs",
+            "sbatch_script": "eval/tacc/eval_harbor.sbatch",
+            "dp_sbatch_script": "eval/tacc/eval_harbor.sbatch",
+            "harbor_src": "/scratch/10635/penfever/harbor/src",
+            "datasets_dirs": ["/scratch/10635/penfever/hub"],
+            "secrets_file": "/scratch/10635/penfever/keys.env",
+        },
+        "proxy": {"enabled": False},
+        "hardware": {
+            "gpus_per_node": 1,
+            "cpus_per_node": 72,
+            "arch": "aarch64",
+            "cuda_home": "/scratch/10635/penfever/miniconda3/envs/otagent",
+            "gpu_gres": False,
+        },
+    },
 )
 
 lonestar = HPC(

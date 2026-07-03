@@ -1370,13 +1370,23 @@ def _resolve_cluster_view_by_name(name: str) -> Optional[Dict[str, Any]]:
     `eval_cluster_view` populated, return `cluster.to_eval_cluster_view()`.
     Returns None if hpc.hpc isn't importable, the name is unknown, or the cluster
     has no eval view (so the caller falls back to the YAML-path resolution).
+
+    The name is matched against EITHER the HPC object's `.name` (the machine name,
+    e.g. "vista") OR the eval view's own `cluster_name` (the operator-facing eval
+    alias, e.g. "tacc"). This lets `--cluster-config tacc` resolve the vista object
+    even though the HPC object is keyed on the machine name — no separate alias
+    field needed, since the view already declares its cluster_name (from tacc.yaml).
     """
     try:
         from hpc.hpc import clusters as _hpc_clusters
     except Exception:
         return None
+    lname = name.lower()
     for c in _hpc_clusters:
-        if c.name.lower() == name.lower() and c.eval_cluster_view:
+        if not c.eval_cluster_view:
+            continue
+        view_name = (c.eval_cluster_view.get("cluster_name") or "").lower()
+        if lname == c.name.lower() or lname == view_name:
             return c.to_eval_cluster_view()
     return None
 
