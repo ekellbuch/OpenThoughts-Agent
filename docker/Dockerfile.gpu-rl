@@ -517,7 +517,13 @@ RUN . $RL_ENV_DIR/bin/activate && \
 #   TrialNotScoredError de-flatten + the reward-zeroing rmtree fix (342729d5).
 #   NOTE: the tmux-bake only takes effect on a FRESH snapshot mint — the stale
 #   per-env snapshot must be deleted so harbor re-builds it with the baked layer.
-ENV HARBOR_COMMIT=0729a3e93c3679283ea560d70d03b3e4af05700c
+#   a4957ef1 = "perf(daytona): reuse one persistent exec session per sandbox (not
+#   per exec)" (branch feuer/daytona-persistent-session) — DESCENDS from 0729a3e9,
+#   so it carries BOTH prior fixes (1ms poll + tmux-bake) AND adds the persistent
+#   per-sandbox exec session (`_ensure_exec_session`): one long-lived tmux/exec
+#   session reused across every exec instead of spawning+tearing-down one PER exec,
+#   cutting the per-turn Daytona-exec overhead that starved the engines at n=256.
+ENV HARBOR_COMMIT=a4957ef11300909ea5f18370eb66a5041e088a85
 RUN . $RL_ENV_DIR/bin/activate && \
     uv pip install --no-deps --force-reinstall \
         "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
