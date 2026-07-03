@@ -341,7 +341,15 @@ def _install_inline_subagent_merger() -> None:
 
     def patched_extract_conversations_from_trajectory(
         trajectory_file: Path, run_metadata: Dict[str, Any], embed_tools_in_conversation: bool = True,
+        include_literal_tokens: bool = False,
     ) -> List[Dict[str, Any]]:
+        # `include_literal_tokens` accepted for signature-compat with harbor's
+        # extract_conversations_from_trajectory (export_traces always forwards it since the
+        # trace-literal merge). This inline-subagent-merger reimplements extraction and does NOT
+        # emit literal token columns — that plumbing belongs to the opencode literal-traces runtime
+        # (not yet wired). For non-literal uploads (terminus-2 datagen) it is a no-op; accepting it
+        # here unblocks all trace uploads, which currently crash with `unexpected keyword argument`.
+        _ = include_literal_tokens
         try:
             trajectory_data = json.loads(trajectory_file.read_text())
         except (json.JSONDecodeError, OSError) as exc:
