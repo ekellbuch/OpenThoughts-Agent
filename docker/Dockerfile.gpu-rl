@@ -517,13 +517,16 @@ RUN . $RL_ENV_DIR/bin/activate && \
 #   TrialNotScoredError de-flatten + the reward-zeroing rmtree fix (342729d5).
 #   NOTE: the tmux-bake only takes effect on a FRESH snapshot mint — the stale
 #   per-env snapshot must be deleted so harbor re-builds it with the baked layer.
-#   a4957ef1 = "perf(daytona): reuse one persistent exec session per sandbox (not
-#   per exec)" (branch feuer/daytona-persistent-session) — DESCENDS from 0729a3e9,
-#   so it carries BOTH prior fixes (1ms poll + tmux-bake) AND adds the persistent
-#   per-sandbox exec session (`_ensure_exec_session`): one long-lived tmux/exec
-#   session reused across every exec instead of spawning+tearing-down one PER exec,
-#   cutting the per-turn Daytona-exec overhead that starved the engines at n=256.
-ENV HARBOR_COMMIT=a4957ef11300909ea5f18370eb66a5041e088a85
+#   9416d5f3 = "perf(terminus-2): default-OFF episode logging (kill the sync
+#   per-LLM-call debug.json write)" (penfever/working HEAD) — DESCENDS from
+#   a4957ef1, so it carries ALL prior fixes (1ms poll + tmux-bake +
+#   _ensure_exec_session persistent session) AND adds the REAL throughput lever
+#   py-spy found: the 3 big SYNCHRONOUS per-turn S3 writes (episode-N/debug.json +
+#   prompt + response) that blocked the shared asyncio loop are now gated behind a
+#   default-OFF `enable_episode_logging` switch (terminus_2.py:191 `= False`). A 4th
+#   per-turn write (trajectory.json, training-critical) REMAINS — r8 measures
+#   whether removing 3 of 4 unblocks training at n=256.
+ENV HARBOR_COMMIT=9416d5f341bf416c3d63c7641b0d797ae8997c0c
 RUN . $RL_ENV_DIR/bin/activate && \
     uv pip install --no-deps --force-reinstall \
         "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
