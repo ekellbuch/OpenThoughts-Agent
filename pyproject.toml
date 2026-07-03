@@ -112,6 +112,15 @@ datagen-tpu = [
     # if it pins an older transformers — dev_tpu.py will surface that.
     "ray[default]>=2.50.0",
     "transformers>=5.3.0",
+    # marin-iris client: needed for controller-endpoint registration at serve
+    # time (run_tracegen.py imports iris.cluster.client.endpoint_client). Pinned
+    # to the same marin commit our launcher uses to submit jobs, so the client
+    # is protocol-compatible with the running controller. marin-rigging is a
+    # required dependency of marin-iris and lives in the same monorepo; both are
+    # git subdirectory installs (not published to PyPI). marin-finelog(+server)
+    # and connect-python come in transitively from PyPI.
+    "marin-iris @ git+https://github.com/marin-community/marin.git@2595163da#subdirectory=lib/iris",
+    "marin-rigging @ git+https://github.com/marin-community/marin.git@2595163da#subdirectory=lib/rigging",
 ]
 cloud = [
     "skypilot>=0.6.1",
