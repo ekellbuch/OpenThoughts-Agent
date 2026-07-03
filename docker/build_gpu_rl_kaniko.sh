@@ -25,6 +25,16 @@ set -euxo pipefail
 #     only when no prebuilt wheels can be force-staged.
 WHEEL_SOURCE="${WHEEL_SOURCE:-wheel-builder}"
 
+# SINGLE_SNAPSHOT=1 (default) => kaniko collapses the whole build into ONE final
+# layer (--single-snapshot; smallest image, but that ONE layer can be ~16 GB and
+# CANNOT be pulled over the CoreWeave->ghcr egress — containerd restarts the
+# single-blob GET from 0 and it dies at 8-11 GB every time). Set SINGLE_SNAPSHOT=0
+# to produce PER-INSTRUCTION layers (each small enough to pull+retry independently)
+# — the fix for the un-pullable 16 GB layer. --compressed-caching=false (below)
+# writes layers to disk so multi-layer snapshotting does NOT blow up memory.
+SINGLE_SNAPSHOT="${SINGLE_SNAPSHOT:-1}"
+if [ "$SINGLE_SNAPSHOT" = "1" ]; then SNAPSHOT_FLAG="--single-snapshot"; else SNAPSHOT_FLAG=""; fi
+
 CACHE_REPO=ghcr.io/open-thoughts/openthoughts-agent/cache
 DEST_FLOATING=ghcr.io/open-thoughts/openthoughts-agent:gpu-rl
 DEST_PINNED=ghcr.io/open-thoughts/openthoughts-agent:gpu-rl-${GITSHA}
@@ -84,7 +94,7 @@ exec /kaniko/executor \
   --dockerfile "${DOCKERFILE:-docker/Dockerfile.gpu-rl}" \
   --build-arg WHEEL_SOURCE="$WHEEL_SOURCE" \
   --skip-unused-stages \
-  --single-snapshot \
+  $SNAPSHOT_FLAG \
   --compressed-caching=false \
   --cache=true \
   --cache-repo="${CACHE_REPO}" \
