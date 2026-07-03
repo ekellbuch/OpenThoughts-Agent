@@ -130,20 +130,22 @@ DEFAULT_CLUSTER = "cw-us-east-02a"
 # (use the immutable :gpu-rl-<gitsha> tag's digest, never the floating :gpu-rl).
 DEFAULT_RL_DOCKER_IMAGE = (
     "ghcr.io/open-thoughts/openthoughts-agent"
-    # gpu-rl-1af0ae2d (built 2026-06-30, kaniko job gpurl-kaniko-1af0ae2d): a SKYRL_COMMIT-ONLY bump
-    # of the prior gpu-rl-b3f498ee (@sha256:9581f8d2…) — baked MarinSkyRL 78d83a5 → 39faff7d, which
-    # carries the VALIDATED MoE forward-spill fix + deterministic-dtype hardening. Everything else is
-    # unchanged: vLLM-fork 76259c63 (compiled) + flash-attn 2.8.3 + torch 2.11.0+cu128 + harbor
-    # f7f51f13, and the rl env stays PINNED to the gpu-rl-81045a29 known-good freeze via
-    # docker/rl_env_constraints.txt (UV_CONSTRAINT) — so the NCCL regression of the deleted
-    # gpu-rl-00220aac (rl-stage transitive dep drift → build_models/weight-sync `DistBackendError:
-    # store->get('0') wait timeout`) cannot recur. Because the SKYRL-only bump does not touch the
-    # wheel cache-key, the prebuilt vLLM-fork + flash-attn wheels (from laion/gpu-rl-build-wheels)
-    # stayed ABI-correct → the FAST no-nvcc prebuilt-wheelhouse path (WHEEL_SOURCE=prebuilt-wheelhouse
-    # + --skip-unused-stages, ZERO nvcc, ~18 min not ~3h). Build asserts ran green: flash_attn_2_cuda
-    # OK (from cached wheel), torch 2.11.0+cu128 / vllm 0.1.dev16611+g76259c63a / skyrl_train import
-    # OK, torchtitan ExpertParallel import OK (EP>1 MoE unblock), baked MarinSkyRL HEAD == 39faff7d.
-    "@sha256:d77b34dd9497cc736d59f7a113c2c57c5375b4553f3e16980479a89b30c2ca9b"
+    # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
+    # of the prior gpu-rl-1af0ae2d (@sha256:d77b34dd…) — baked harbor f7f51f13 → 0729a3e9, which sits
+    # on top of ef42e75e and carries BOTH Daytona throughput fixes: (1) ef42e75e "replace 1s exec poll
+    # with 1ms+jitter" (per-exec runtime+RTT vs ceil(runtime)+1s → feeds the RL engines faster), and
+    # (2) 0729a3e9 "bake tmux+asciinema into every snapshot at BUILD time" (terminus-2 per-episode
+    # tmux install short-circuits → kills the ~401s agent_setup / 63% AgentSetupTimeout; takes effect
+    # only on a FRESH snapshot mint). Everything else is unchanged: MarinSkyRL 39faff7d (baked),
+    # vLLM-fork 76259c63 (compiled) + flash-attn 2.8.3 + torch 2.11.0+cu128, and the rl env stays
+    # PINNED to the gpu-rl-81045a29 known-good freeze via docker/rl_env_constraints.txt (UV_CONSTRAINT)
+    # — so the NCCL regression of the deleted gpu-rl-00220aac cannot recur. Harbor is a --no-deps
+    # source-only swap, so the wheel cache-key is untouched → the prebuilt vLLM-fork + flash-attn
+    # wheels (laion/gpu-rl-build-wheels) stayed ABI-correct → FAST no-nvcc prebuilt-wheelhouse path.
+    # Build asserts ran green: flash_attn_2_cuda OK, torch 2.11.0+cu128 / vllm 0.1.dev16611+g76259c63a
+    # / skyrl_train import OK, torchtitan ExpertParallel import OK (EP>1 MoE unblock),
+    # baked harbor 0.8.0 @ commit 0729a3e9, baked MarinSkyRL HEAD == 39faff7d.
+    "@sha256:d9c7e6046e8392f3bb50567fa46e8ef3d39e49bd7fdc34409bf40f380a8596a2"
 )
 DEFAULT_GPU_VARIANT = "H100"
 DEFAULT_GPUS_PER_NODE = 8           # gd-8xh100ib-i128 = 8x H100-80GB + IB
