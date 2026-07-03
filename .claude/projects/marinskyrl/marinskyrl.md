@@ -231,8 +231,23 @@ under-offered; scaling to n=512 (workers 256) did NOT saturate — it hit the Da
 org). Rerouted to the dedicated RL org at n=128 (regime 2): clean (0 setup timeouts) but engines rollout-supply-starved
 (the GPU-profile tuple above). **A grid THROUGHPUT reading is only valid once the engines are DEMAND-BOUND** (`Waiting>0`
 / KV off floor) — measured throughput below that reflects the rollout-supply rate (geometry-invariant), not the
-EP×FSDP×CP serving capacity. Escalate n on the RL org (256 → …) to demand-bind; headline metric = aggregate gen tok/s
-across engines read only when `Waiting>0`. STAGE-0-REDO conclusion stays PENDING until a demand-bound rung lands.
+EP×FSDP×CP serving capacity.
+
+**✅ RESOLVED (n=256, 2026-07-02) — the ceiling is the AGENTIC DUTY CYCLE, not offered concurrency; raising `n` does NOT
+saturate.** Doubled n=128→256 on the RL org: **STILL STARVED, and this time cleanly** — Waiting=0 (0/300 samples), KV
+0.0–0.4%, power 17–22% TDP, mem-BW 0%, Σ Running ~6.4, aggregate ~444 tok/s (**FLAT** vs n=128's ~346 — does NOT scale
+with n). Critically the earlier confounds are RULED OUT: **realized concurrency = 332 sandboxes ≥ 256 offered (FULL
+supply, RL org NOT under-provisioning)**, **0 AgentSetupTimeouts** (not the Daytona-overload regime), CUDA-graphs ON
+(not the eager confound). So of ~256 in-flight episodes only **~6 (~2%) are in `generate()` at any instant** — the rest
+are parked in Daytona tool-exec/verify between LLM turns. **⇒ The 4× (TP8/DCP2) engine block is grossly over-provisioned
+for a ~6-request steady load; more offered concurrency cannot fix it (the ceiling is upstream of the vLLM slot count).**
+- **`n=384` is CONTRAINDICATED** (128→256 gave zero/negative throughput return → 1.5× more is predicted futile + only
+  adds Daytona-org load). The demand-bind "window" idea above is superseded for this workload: there is no `n` that
+  saturates 4 TP8 engines within the sustainable-supply range.
+- **The lever is REDUCE `num_inference_engines`** (fewer, fuller engines) so the ~6-req steady load demand-binds a
+  smaller block — THEN the throughput reading becomes valid and the EP×FSDP×CP comparison can run. Secondary duty-cycle
+  levers: faster Daytona tool-exec / shorter verify. STAGE-0-REDO stays PENDING until a demand-bound rung (via fewer
+  engines) lands.
 
 ## GDN + Context-Parallel (CP>1) HARD-CRASHES the 35B GatedDeltaNet MoE at forward
 
