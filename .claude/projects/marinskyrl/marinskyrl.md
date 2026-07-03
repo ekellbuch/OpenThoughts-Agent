@@ -233,31 +233,29 @@ org). Rerouted to the dedicated RL org at n=128 (regime 2): clean (0 setup timeo
 / KV off floor) — measured throughput below that reflects the rollout-supply rate (geometry-invariant), not the
 EP×FSDP×CP serving capacity.
 
-**✅ RESOLVED (n=256 + Harbor stage-timing attribution, 2026-07-02) — the engines are starved by DAYTONA `exec`
-ROUND-TRIP LATENCY inside the agent loop, NOT an intrinsic duty cycle and NOT the engine count.** Doubling n=128→256
-stayed STARVED cleanly (Waiting=0, KV 0.0–0.4%, power 17–22% TDP, mem-BW 0%, Σ Running ~6.4, tok/s FLAT ~444 vs ~346) at
-FULL supply (realized 332 ≥ 256 sandboxes, 0 AgentSetupTimeouts on the RL org, CUDA-graphs ON) → **raising n cannot
-help.** Harbor per-stage timings (`TrialResult` `TimingInfo` per phase + per-turn `trajectory.json` + per-call
-`api_request_times_msec`) then ATTRIBUTED the non-generating ~98%:
-- **Per turn (mean 101.4 s): generate 21.2 s (21%) + agent-REQUESTED command time 0.7 s (<1% — intrinsic tool-exec) +
-  RESIDUAL 79.5 s (78%) = Daytona `exec` round-trip latency** (the poll-based `environment.exec`: 1 s-granularity
-  `_poll_response` + ≥3 HTTP round-trips/exec × ~15–24 exec calls/turn).
-- **Across 131 completed trials, 63% died in `AgentSetupTimeoutError`** — never reached a single LLM call (Daytona
-  sandbox-create + agent-install so slow it times out). Generate ≈ 7% of episode wall overall.
-- ⇒ (a) intrinsic tool-exec RULED OUT (0.7 s/turn); (c) RolloutCoordinator/dispatch RULED OUT (generate latency healthy
-  ~21 s, Waiting=0, the residual is inside the agent's own Daytona path *after* generate returns); **(b) Daytona
-  API/network latency CONFIRMED dominant.**
+**✅ RESOLVED (n=256 + Harbor stage-timing + DIRECT Daytona latency probe, 2026-07-02) — the engines are starved by
+HARBOR'S CLIENT-SIDE 1-SECOND POLL LOOP, NOT Daytona, NOT an intrinsic duty cycle, NOT the engine count.** Doubling
+n=128→256 stayed STARVED cleanly (Waiting=0, KV 0.0–0.4%, power 17–22% TDP, mem-BW 0%, Σ Running ~6.4, tok/s FLAT ~444
+vs ~346) at FULL supply (realized 332 ≥ 256 sandboxes, CUDA-graphs ON) → **raising n cannot help.** Per-turn (mean
+101.4 s): generate 21.2 s (21%) + agent-requested command 0.7 s (<1% intrinsic) + **RESIDUAL 79.5 s (78%)**.
+- **Direct measurement (probe from inside a live r2 CoreWeave pod vs the Mac, both on the RL org / `app.daytona.io`):
+  Daytona is FAST — a full `exec` is 0.15 s median from CoreWeave (FASTER than the Mac's 0.78 s), each HTTP call
+  ~0.03 s, sandbox create ~0.05 s, bare API RTT ~0.15 s.** So (a) CoreWeave↔Daytona network and (c) Daytona
+  control-plane are BOTH REFUTED (network ≈ 2–4 s/turn total).
+- **The residual is harbor's `_poll_response` `asyncio.sleep(1)` loop:** per-`exec` ≈ **`ceil(command_runtime)` +
+  ~0.14 s network** — every non-instant command is floored at ≥1 s and each extra second of runtime adds another whole
+  `sleep(1)`. With ~15–24 execs/turn on ~3–4 s commands → 52–84 s/turn ≈ the observed 79.5 s. **The "Daytona exec
+  round-trip latency" label was a MISATTRIBUTION — it is client-side poll rounding, not Daytona.**
+- Separately, the ~63% `AgentSetupTimeoutError` is NOT round-trip latency (default-snapshot create is ~0.05 s) — it's
+  the **custom per-task snapshot pull + agent install** (heavy pip/uv + repo checkout); needs its own measurement.
 
-**⇒ LEVER = FIX THE DAYTONA EXEC PATH — do NOT reduce `num_inference_engines`** (reducing engines only makes the idle
-number look better while total throughput stays Daytona-latency-bound; the engines are STARVED, not oversupplied). In
-priority: (1) cut Daytona `exec` round-trips/turn — batch send-keys+capture into one `exec`, drop the sub-1 s poll,
-or a persistent/streaming exec channel (harbor `environment.py:_poll_response` / `tmux_session.py`); (2) faster sandbox
-setup (pre-warmed/snapshot-cached sandboxes + faster agent install — recovers the 63% dying in setup); (3) *then* raise
-`n_concurrent_trials` with matched Daytona capacity. **Both `n=384` and reduce-engines are CONTRAINDICATED.** A valid
-grid THROUGHPUT reading (STAGE-0-REDO) requires the rollout pipeline to feed the engines first — this is a
-harbor/Daytona optimization, not a grid-config tweak. (Caveat: the 79.5 s residual is attributed by subtraction
-[turn-wall − generate − requested-sleep] + the poll-exec code path; a per-`exec` `TimingInfo` would confirm the RT
-count directly if instrumented.)
+**⇒ FIX (harbor-side, `harbor/src/harbor/environments/environment.py:_poll_response`):** (1) **drop the 1 s poll to an
+adaptive/exponential backoff (~0.05→0.5 s)** — removes ~0.5–0.8 s of pure rounding per non-instant exec → order
+**8–19 s/turn** recovered from a ~one-line change, zero Daytona/network work; (2) **batch a turn's ~5–8 `exec` calls**
+into fewer `execute_session_command` invocations (cuts per-call overhead + the number of 1 s floors); (3) separately
+attack the setup-timeout (custom-snapshot pull + install). **Do NOT reduce `num_inference_engines` and do NOT raise n
+(both contraindicated)** — the throughput is harbor-poll-bound; a valid grid THROUGHPUT reading (STAGE-0-REDO) requires
+the harbor poll fix first, THEN relaunch. This fix helps ALL agentic harbor rollouts (RL + eval), not just the grid.
 
 ## GDN + Context-Parallel (CP>1) HARD-CRASHES the 35B GatedDeltaNet MoE at forward
 
