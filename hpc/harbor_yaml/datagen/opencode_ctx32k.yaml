@@ -1,0 +1,85 @@
+# Harbor datagen (trace-generation) config — opencode agent, 32k context, Daytona (cloud).
+#
+# opencode is Harbor's literal-token-capable installed agent (SUPPORTS_LITERAL_TRACES=True):
+# run behind harbor's RecordProxy it records per-turn prompt/completion token IDs + logprobs
+# into a literal.jsonl the agent merges back into its trajectory. To capture those, launch with
+# `--record_literal` (co-locates the RecordProxy in front of vLLM and routes the agent endpoint
+# through it) and export with `make_and_upload_trace_dataset.py --include_literal_tokens`.
+#
+# Model routing: opencode requires model_name in `provider/model` form. The `openai` provider
+# makes opencode read OPENAI_BASE_URL / OPENAI_API_KEY (which the launcher populates from the
+# served-vLLM / ingress endpoint), so leave `openai/override-at-runtime` here — the launcher
+# fills the real served-model id + endpoint at runtime.
+#
+# Usage:
+#   python -m hpc.launch \
+#       --job_type datagen \
+#       --vllm_serve_config hpc/datagen_yaml/<model>_vllm_serve_32k.yaml \
+#       --harbor_yaml hpc/harbor_yaml/datagen/opencode_ctx32k.yaml \
+#       --record_literal \
+#       ...
+
+job_name: default-trace-job
+jobs_dir: trace_jobs
+n_attempts: 1
+timeout_multiplier: 1.0
+debug: false
+orchestrator:
+  type: local
+  n_concurrent_trials: 48
+  quiet: false
+  plain_output: true
+  adaptive_concurrency:
+    enabled: false
+    algorithm: gradient2
+    min_limit: null
+    max_limit: null
+    metrics_endpoint: null
+    metrics_timeout_sec: 10.0
+    poll_interval_sec: 120.0
+    window_size: 5
+    queue_p95_drop_threshold: null
+    algorithm_kwargs: {}
+  retry:
+    max_retries: 10
+    include_exceptions:
+    - DaytonaRateLimitError
+    exclude_exceptions:
+    - AgentTimeoutError
+    - VerifierTimeoutError
+    - RewardFileNotFoundError
+    - RewardFileEmptyError
+    - VerifierOutputParseError
+    - SandboxBuildFailedError
+    - VerifierRuntimeError
+    wait_multiplier: 2.0
+    min_wait_sec: 1.0
+    max_wait_sec: 90.0
+  kwargs: {}
+environment:
+  type: daytona
+  force_build: false
+  delete: true
+  override_cpus: 1
+  override_memory_mb: 2048
+  override_storage_mb: 2048
+  kwargs:
+    auto_snapshot: true
+verifier:
+  override_timeout_sec: null
+  max_timeout_sec: null
+  disable: true
+metrics: []
+agents:
+- name: opencode
+  import_path: null
+  model_name: openai/override-at-runtime
+  override_timeout_sec: 1800
+  max_timeout_sec: null
+  override_setup_timeout_sec: 600
+  kwargs:
+    # Per-job opencode.json overrides (deep-merged into the auto-generated config).
+    opencode_config: {}
+datasets:
+- path: /replace/with/tasks/path
+tasks: []
