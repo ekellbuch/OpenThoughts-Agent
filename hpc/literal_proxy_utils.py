@@ -15,7 +15,12 @@ path is byte-identical to today (parity gate G0).
 
 Contract (from ``harbor/src/harbor/literal/proxy.py``, read 2026-07-03):
   * ``RecordProxy(upstream_base_url, log_path, timeout=600.0)`` — forwards to
-    ``upstream_base_url`` (a vLLM ``.../v1`` base) and records to ``log_path``.
+    ``upstream_base_url`` by RE-APPENDING the FULL incoming request path
+    (``url = upstream_base_url + request.url.path``). So ``upstream_base_url``
+    MUST be the vLLM ORIGIN (``http://host:port``), NOT the agent-facing
+    ``.../v1`` base: passing the ``/v1`` base doubles the segment
+    (``/v1/v1/chat/completions``) and vLLM 404s the request. We strip the
+    launcher's ``.../v1`` endpoint to its origin before handing it to RecordProxy.
   * ``RecordProxy.app()`` returns a FastAPI app serving ``/v1/chat/completions``
     and ``/v1/completions`` (the surface harbor's installed agents call). We serve
     that app with uvicorn on a co-located port; the agent's api_base points at it.
@@ -31,6 +36,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 # The co-located proxy binds this port by default. vLLM/datagen use 8000, so 8010
 # avoids a collision while staying on the loopback interface (the proxy only ever
@@ -60,6 +66,22 @@ def literal_proxy_endpoint(
     return f"http://{host}:{port}/v1"
 
 
+def upstream_origin(endpoint: str) -> str:
+    """Origin (``scheme://host:port``) of a vLLM OpenAI-compatible base URL.
+
+    Harbor's ``RecordProxy`` forwards by re-appending the FULL incoming request
+    path (``/v1/chat/completions``) onto its ``upstream_base_url``. So the base it
+    receives MUST be the origin only — handing it the agent-facing ``.../v1`` base
+    doubles the segment (``/v1/v1/chat/completions``) and vLLM 404s the request
+    (``{"detail":"Not Found"}``). This strips any path/query so exactly one ``/v1``
+    reaches vLLM.
+    """
+    parts = urlsplit(endpoint)
+    if not parts.scheme or not parts.netloc:
+        raise ValueError(f"upstream endpoint must be an absolute http(s) URL: {endpoint!r}")
+    return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+
+
 @contextmanager
 def serve_record_proxy(
     upstream_endpoint: str,
@@ -85,7 +107,11 @@ def serve_record_proxy(
     from harbor.literal.proxy import RecordProxy
 
     Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-    proxy = RecordProxy(upstream_endpoint, log_path, timeout=timeout)
+    # RecordProxy re-appends the full request path (/v1/chat/completions), so it
+    # must receive the vLLM ORIGIN, not the agent-facing .../v1 base (else /v1
+    # doubles -> vLLM 404). See upstream_origin.
+    origin = upstream_origin(upstream_endpoint)
+    proxy = RecordProxy(origin, log_path, timeout=timeout)
     app = proxy.app()
 
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
@@ -109,7 +135,7 @@ def serve_record_proxy(
 
     print(
         f"[literal-proxy] RecordProxy serving {literal_proxy_endpoint(host, port)} "
-        f"-> {upstream_endpoint} (log: {log_path})",
+        f"-> {origin} (log: {log_path})",
         flush=True,
     )
     try:

@@ -52,6 +52,18 @@ def test_default_port_avoids_vllm():
     assert lp.DEFAULT_LITERAL_PROXY_PORT != 8000
 
 
+def test_upstream_origin_strips_v1_base():
+    # Harbor's RecordProxy re-appends the full request path (/v1/chat/completions),
+    # so the base it receives must be origin-only; a .../v1 base would double the
+    # segment (/v1/v1/...) and vLLM 404s. upstream_origin strips path/query.
+    assert lp.upstream_origin("http://127.0.0.1:8000/v1") == "http://127.0.0.1:8000"
+    assert lp.upstream_origin("http://127.0.0.1:8000/v1/") == "http://127.0.0.1:8000"
+    assert lp.upstream_origin("http://10.0.0.5:8000") == "http://10.0.0.5:8000"
+    # non-absolute URLs must fail loud, not silently forward a bad base.
+    with pytest.raises(ValueError):
+        lp.upstream_origin("127.0.0.1:8000/v1")
+
+
 def test_literal_log_path_sanitizes_and_places_under_logs(tmp_path):
     p = lp.literal_log_path(tmp_path, "rl-qwen3_8b/run.1")
     assert p.parent == tmp_path / "logs"
@@ -173,6 +185,40 @@ def test_record_proxy_app_injects_and_records(tmp_path, monkeypatch):
     assert entry["literal"]["prompt_token_ids"] == [10, 11, 12]
     assert entry["literal"]["completion_token_ids"] == [13, 14]
     assert entry["literal"]["logprobs"] == [-0.1, -0.2]
+
+
+def test_record_proxy_from_v1_base_does_not_double_v1(tmp_path, monkeypatch):
+    """Regression: the launcher's .../v1 base must NOT forward to /v1/v1/... (404).
+
+    Production hands ``serve_record_proxy`` the agent-facing vLLM ``.../v1`` base;
+    harbor's RecordProxy re-appends the full request path, so we strip to origin
+    first (``upstream_origin``). Without that strip the forwarded URL is
+    ``/v1/v1/chat/completions`` and the stub (like real vLLM) 404s — the exact
+    live-ingress failure this fixes.
+    """
+    from harbor.literal.proxy import RecordProxy
+
+    # Build RecordProxy the way serve_record_proxy does: strip the /v1 base to origin.
+    proxy = RecordProxy(
+        lp.upstream_origin("http://vllm.local/v1"), tmp_path / "l.jsonl", timeout=10.0
+    )
+    stub_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_make_stub_vllm()),
+        base_url="http://vllm.local",
+    )
+
+    async def _fake_get_client():
+        return stub_client
+
+    monkeypatch.setattr(proxy, "_get_client", _fake_get_client)
+
+    with TestClient(proxy.app()) as client:
+        r = client.post("/v1/chat/completions", json={"model": "m", "messages": []})
+
+    # 200 proves the forwarded path is /v1/chat/completions (single /v1). If the
+    # base had kept its /v1, this would forward to /v1/v1/... and 404.
+    assert r.status_code == 200
+    assert r.json()["id"] == "resp-1"
 
 
 if __name__ == "__main__":
