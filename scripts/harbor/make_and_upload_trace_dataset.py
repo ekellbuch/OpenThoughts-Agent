@@ -864,6 +864,14 @@ def _parse_args() -> argparse.Namespace:
         "when the job was generated with hpc.launch --record_literal.",
     )
     p.add_argument(
+        "--literal_log",
+        default=None,
+        help="URI of the RecordProxy literal.jsonl (gs:// or local) to correlate into "
+        "opencode trajectory step metrics before export. Only used with "
+        "--include_literal_tokens. If omitted, auto-discovered under "
+        "<job_dir>/logs/*_literal.jsonl (searching a few parents).",
+    )
+    p.add_argument(
         "--single_commit",
         action="store_true",
         help="Stage all shards locally, then push them in ONE upload_folder commit instead of "
@@ -882,6 +890,41 @@ def main() -> None:
         raise SystemExit(f"job_dir does not exist or is not a directory: {job_dir}")
 
     success_filter = None if args.filter == "none" else args.filter
+
+    # Step 0 — literal-token correlation (opencode + --record_literal). The
+    # RecordProxy captured token IDs / logprobs into a job-global literal.jsonl on
+    # the worker (not visible to the in-sandbox agent), so populate them into the
+    # per-trial trajectory step metrics here, BEFORE export. Verify-or-skip: only
+    # steps whose token COUNTS match a correlated record are enriched, so a wrong
+    # join omits rather than corrupts. No-op for non-literal jobs.
+    if args.include_literal_tokens:
+        from scripts.harbor.literal_correlator import (
+            discover_literal_log,
+            enrich_trajectories_with_literals,
+        )
+
+        traces_utils = _import_traces_utils()
+        literal_log = args.literal_log or discover_literal_log(str(job_dir))
+        if not literal_log:
+            print(
+                "[trace-export] --include_literal_tokens set but no literal.jsonl found "
+                "(pass --literal_log <gs://…/logs/<slug>_literal.jsonl>); exporting "
+                "text-only (token columns will be absent)."
+            )
+        else:
+            print(f"[trace-export] Correlating literal tokens from {literal_log} ...")
+            stats = enrich_trajectories_with_literals(
+                str(job_dir),
+                literal_log,
+                iter_trial_dirs=lambda root: traces_utils.iter_trial_dirs(root, recursive=True),
+                verbose=bool(args.verbose),
+            )
+            yield_pct = (100.0 * stats.trials_enriched / stats.trials) if stats.trials else 0.0
+            print(
+                f"[trace-export] Literal yield: {stats.trials_enriched}/{stats.trials} trials "
+                f"({yield_pct:.1f}%), {stats.steps_enriched} steps enriched; "
+                f"{stats.chains} chains ({stats.ambiguous_chains} ambiguous)."
+            )
 
     # Step 1 — the single, always-streaming, memory-safe upload mechanism.
     print(f"[trace-export] Streaming export from: {job_dir}")
