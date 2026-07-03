@@ -233,21 +233,23 @@ org). Rerouted to the dedicated RL org at n=128 (regime 2): clean (0 setup timeo
 / KV off floor) — measured throughput below that reflects the rollout-supply rate (geometry-invariant), not the
 EP×FSDP×CP serving capacity.
 
-**✅ RESOLVED (n=256, 2026-07-02) — the ceiling is the AGENTIC DUTY CYCLE, not offered concurrency; raising `n` does NOT
-saturate.** Doubled n=128→256 on the RL org: **STILL STARVED, and this time cleanly** — Waiting=0 (0/300 samples), KV
-0.0–0.4%, power 17–22% TDP, mem-BW 0%, Σ Running ~6.4, aggregate ~444 tok/s (**FLAT** vs n=128's ~346 — does NOT scale
-with n). Critically the earlier confounds are RULED OUT: **realized concurrency = 332 sandboxes ≥ 256 offered (FULL
-supply, RL org NOT under-provisioning)**, **0 AgentSetupTimeouts** (not the Daytona-overload regime), CUDA-graphs ON
-(not the eager confound). So of ~256 in-flight episodes only **~6 (~2%) are in `generate()` at any instant** — the rest
-are parked in Daytona tool-exec/verify between LLM turns. **⇒ The 4× (TP8/DCP2) engine block is grossly over-provisioned
-for a ~6-request steady load; more offered concurrency cannot fix it (the ceiling is upstream of the vLLM slot count).**
-- **`n=384` is CONTRAINDICATED** (128→256 gave zero/negative throughput return → 1.5× more is predicted futile + only
-  adds Daytona-org load). The demand-bind "window" idea above is superseded for this workload: there is no `n` that
-  saturates 4 TP8 engines within the sustainable-supply range.
-- **The lever is REDUCE `num_inference_engines`** (fewer, fuller engines) so the ~6-req steady load demand-binds a
-  smaller block — THEN the throughput reading becomes valid and the EP×FSDP×CP comparison can run. Secondary duty-cycle
-  levers: faster Daytona tool-exec / shorter verify. STAGE-0-REDO stays PENDING until a demand-bound rung (via fewer
-  engines) lands.
+**✅ PARTIALLY RESOLVED (n=256, 2026-07-02) — raising `n` does NOT saturate the engines; the feed ceiling is upstream of
+the vLLM slot count (the MECHANISM is not yet attributed).** Doubled n=128→256 on the RL org: **STILL STARVED, and this
+time cleanly** — Waiting=0 (0/300 samples), KV 0.0–0.4%, power 17–22% TDP, mem-BW 0%, Σ Running ~6.4, aggregate ~444
+tok/s (**FLAT** vs n=128's ~346 — does NOT scale with n). Earlier confounds RULED OUT: **realized concurrency = 332
+sandboxes ≥ 256 offered (FULL supply, RL org NOT under-provisioning)**, **0 AgentSetupTimeouts** (not Daytona-overload),
+CUDA-graphs ON (not the eager confound). So of ~256 in-flight episodes only **~6 (~2%) are in `generate()` at any
+instant**. **ESTABLISHED: the 4× (TP8/DCP2) block is under-fed at FULL supply and throughput is FLAT as n doubles →
+raising n cannot help.** **⚠ NOT yet measured: the ATTRIBUTION of the non-generating ~98%** — could be (a) genuine agent
+tool-exec/verify wall-time (intrinsic duty cycle), (b) Daytona-API/network round-trip latency per agent step, or (c)
+RolloutCoordinator/harbor dispatch overhead serializing `generate()` calls. (b)/(c) are FIXABLE and would feed the
+engines *without* dropping them, so **attribute via Harbor's per-stage timings BEFORE choosing the lever — do NOT assume
+"Daytona work."**
+- **`n=384` is CONTRAINDICATED regardless** (128→256 gave zero/negative return → 1.5× more is predicted futile). No `n`
+  saturates 4 TP8 engines within the sustainable-supply range; the demand-bind "window" idea above is superseded here.
+- **The lever depends on the attribution:** genuine agent-work → REDUCE `num_inference_engines` (fewer/fuller engines
+  demand-bind the ~6-req load → valid throughput reading). Fixable latency/dispatch overhead → fix THAT (async/batched
+  dispatch, faster Daytona) to raise the generating fraction. STAGE-0-REDO stays PENDING until a demand-bound rung lands.
 
 ## GDN + Context-Parallel (CP>1) HARD-CRASHES the 35B GatedDeltaNet MoE at forward
 
