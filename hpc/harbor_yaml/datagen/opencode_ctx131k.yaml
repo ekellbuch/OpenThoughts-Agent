@@ -68,7 +68,10 @@ environment:
 verifier:
   override_timeout_sec: null
   max_timeout_sec: null
-  disable: true
+  # Verifier ON for the campaign — we want the teacher's reward signal on the
+  # trainable traces. (Smoke bringup used disable:true to isolate the agent/
+  # ingress/literal path from verifier behavior; flipped before keep-3 fan-out.)
+  disable: false
 metrics: []
 agents:
 - name: opencode
