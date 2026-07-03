@@ -70,7 +70,7 @@ def test_build_controller_api_base_scheme_handling():
 def test_controller_api_base_for_job():
     assert (
         controller_api_base_for_job("ingress.example", "myjob")
-        == "https://ingress.example/proxy/otagent.myjob/v1"
+        == "https://ingress.example/proxy/otagent-myjob/v1"
     )
 
 
@@ -204,10 +204,10 @@ def test_controller_registration_plan_plain_registers_vllm_port():
         proxy_port=DEFAULT_LITERAL_PROXY_PORT,
         env={ADVERTISE_HOST_ENV: "10.0.0.5"},
     )
-    assert name == "otagent.myjob"
+    assert name == "otagent-myjob"
     assert address == f"http://10.0.0.5:{DEFAULT_VLLM_PORT}"
     assert address.endswith(":8000")
-    assert api_base == "https://ingress.example/proxy/otagent.myjob/v1"
+    assert api_base == "https://ingress.example/proxy/otagent-myjob/v1"
 
 
 def test_controller_registration_plan_literal_registers_proxy_port():
@@ -223,13 +223,13 @@ def test_controller_registration_plan_literal_registers_proxy_port():
         proxy_port=DEFAULT_LITERAL_PROXY_PORT,
         env={ADVERTISE_HOST_ENV: "10.0.0.5"},
     )
-    assert name == "otagent.myjob"
+    assert name == "otagent-myjob"
     # the proxy's address is registered, never raw vLLM:8000
     assert address == f"http://10.0.0.5:{DEFAULT_LITERAL_PROXY_PORT}"
     assert address.endswith(":8010")
     assert ":8000" not in address
     # api_base unchanged vs the plain path
-    assert api_base == "https://ingress.example/proxy/otagent.myjob/v1"
+    assert api_base == "https://ingress.example/proxy/otagent-myjob/v1"
 
 
 def test_combined_path_registers_proxy_and_sets_api_base_and_key():
@@ -261,7 +261,7 @@ def test_combined_path_registers_proxy_and_sets_api_base_and_key():
         agent_name="qwen-code",
         endpoint_meta=meta,
     )
-    assert merged["api_base"] == "https://ingress.example/proxy/otagent.myjob/v1"
+    assert merged["api_base"] == "https://ingress.example/proxy/otagent-myjob/v1"
     assert merged["api_base"] == api_base
     assert merged["api_key"] == INGRESS_KEY_PLACEHOLDER
     assert INGRESS_KEY_PLACEHOLDER == "${" + INGRESS_KEY_ENV + "}"
