@@ -239,6 +239,21 @@ in the cluster.
   after the image build can be picked up live via `--skyrl-ref <commit>` (editable
   checkout); only the compiled vLLM fork requires an image rebuild (then **bump the
   digest**, using the immutable `:gpu-rl-<gitsha>` tag's digest).
+- **⚠ BUILD THE IMAGE MULTI-LAYER (`SINGLE_SNAPSHOT=0`) — a single >8 GB layer is
+  UN-PULLABLE cold over the CoreWeave→ghcr egress.** Validated 2026-07-02
+  (`agent_logs/2026-07-02_gpu-rl-rebuild-harbor-0729a3e9-r4.md`): a kaniko
+  `--single-snapshot` build collapses everything kaniko adds into ONE ~16.6 GB layer.
+  Prior images "worked" only because that giant layer was already node-cached; the first
+  **fresh** pull of a 16.6 GB single-stream layer **never completes** — containerd
+  restarts each attempt from byte 0 (`short read: expected … got <N>`) and dies at
+  8–11 GB every time, so all pods sit `ImagePullBackOff` indefinitely (NOT a transient —
+  don't wait it out; a relaunch re-pulls the same blob). The incremental-`FROM`-base trick
+  does NOT help — the build pod hits the same 16.6 GB base pull. **Fix = re-layer:** build
+  `SINGLE_SNAPSHOT=0` (per-instruction layers) and split the big torch/nvidia-CUDA installs
+  into a few pinned pre-install RUNs so **no single layer exceeds ~8 GB** (the validated
+  r5 image `gpu-rl-efd77b98` = 48 layers, max 3.46 GB → pulled clean, Running in ~5 min).
+  Quality-gate any new image with a throwaway 1-pod pull test BEFORE swapping a live job
+  onto it.
 
 ---
 

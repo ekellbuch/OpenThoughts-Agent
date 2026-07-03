@@ -257,6 +257,16 @@ attack the setup-timeout (custom-snapshot pull + install). **Do NOT reduce `num_
 (both contraindicated)** — the throughput is harbor-poll-bound; a valid grid THROUGHPUT reading (STAGE-0-REDO) requires
 the harbor poll fix first, THEN relaunch. This fix helps ALL agentic harbor rollouts (RL + eval), not just the grid.
 
+**✅ RESOLVED + VALIDATED end-to-end (2026-07-02, iris `grid-30b-a-n256-rlorg-r5`).** Both fixes shipped: (1) poll
+loop → `sleep(0.001 + random.uniform(0,0.001))` (harbor `ef42e75e`); (2) the setup-timeout was the missing tmux/asciinema
+— baked into the snapshot via `_AGENT_TOOLING_LAYER`/`bake_agent_tooling()` in `snapshots.py` (harbor `0729a3e9`), so
+episodes no longer apt-install/compile per-episode. **Measured payoff: `agent_setup` ~401 s → mean 0.41 s (~1000×);
+`AgentSetupTimeout` 63% → 0%** (episodes survive setup). Re-minting the snapshot REQUIRED manually deleting the stale
+`harbor__<hash>__snapshot` first (env-dir hash is unchanged by a library-code change). On CoreWeave harbor is baked
+NON-editably into the gpu-rl image → both fixes needed a kaniko rebuild + digest bump (SLURM harbor is editable → live
+on `git pull`). ⚠ That rebuild surfaced a separate CW gotcha (now in `.claude/ops/iris/coreweave_gpu_ops.md`): build the
+gpu-rl image MULTI-LAYER (`SINGLE_SNAPSHOT=0`, max layer <8 GB) — a single >8 GB layer can't cold-pull over CW→ghcr.
+
 ## GDN + Context-Parallel (CP>1) HARD-CRASHES the 35B GatedDeltaNet MoE at forward
 
 The **Qwen3.6-35B-A3B** MoE has 30 GatedDeltaNet (GDN) linear-attn layers with **no CP-aware kernel** → running it
