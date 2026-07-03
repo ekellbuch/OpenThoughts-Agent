@@ -863,6 +863,14 @@ def _parse_args() -> argparse.Namespace:
         "token columns, is skipped). Default off = current text-only behavior. Pass this "
         "when the job was generated with hpc.launch --record_literal.",
     )
+    p.add_argument(
+        "--single_commit",
+        action="store_true",
+        help="Stage all shards locally, then push them in ONE upload_folder commit instead of "
+        "one commit per shard. Use for large datasets (>128 shards) to avoid HF's per-repo "
+        "commit rate limit (128/hour). Trade-off: all shards accumulate on local disk before "
+        "the single upload (peak disk ~ full dataset), vs one shard at a time for the default path.",
+    )
     return p.parse_args()
 
 
@@ -877,6 +885,15 @@ def main() -> None:
 
     # Step 1 — the single, always-streaming, memory-safe upload mechanism.
     print(f"[trace-export] Streaming export from: {job_dir}")
+    # --single_commit: stage every shard on local disk (reuse the per-shard subprocess's
+    # TRACE_EXPORT_FAKE_UPLOAD_DIR seam so it writes-to-disk instead of committing to the
+    # Hub), then push the whole folder in ONE upload_folder commit below. Sidesteps HF's
+    # per-repo 128-commits/hour limit that the per-shard path trips on >128-shard datasets.
+    single_commit_dir = None
+    if args.single_commit:
+        single_commit_dir = tempfile.mkdtemp(prefix="trace_single_commit_")
+        os.environ["TRACE_EXPORT_FAKE_UPLOAD_DIR"] = single_commit_dir
+        print(f"[trace-export] --single_commit: staging shards under {single_commit_dir} (no per-shard commits).")
     total = stream_export_and_upload(
         job_dir=job_dir,
         repo_id=args.repo_id,
@@ -888,6 +905,20 @@ def main() -> None:
         verbose=bool(args.verbose),
         include_literal_tokens=bool(args.include_literal_tokens),
     )
+    if single_commit_dir is not None:
+        from huggingface_hub import HfApi  # type: ignore
+
+        os.environ.pop("TRACE_EXPORT_FAKE_UPLOAD_DIR", None)
+        print(f"[trace-export] --single_commit: pushing {total} rows in ONE upload_folder commit...")
+        HfApi().upload_folder(
+            folder_path=single_commit_dir,
+            path_in_repo="data",
+            repo_id=args.repo_id,
+            repo_type="dataset",
+            allow_patterns=["*.parquet"],
+            commit_message=f"Upload {total} rows ({total // max(1, int(args.chunk_size))}+ shards) in one commit",
+        )
+        shutil.rmtree(single_commit_dir, ignore_errors=True)
 
     print(
         f"[trace-export] Upload complete ({total} rows): "
