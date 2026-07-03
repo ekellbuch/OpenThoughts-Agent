@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, Optional, Protocol, Tuple
+from dataclasses import dataclass
+from typing import Callable, Dict, Optional, Protocol, Tuple
 
 # The sandbox-facing static bearer token secret (name-only; see secrets.env).
 INGRESS_KEY_ENV = "IRIS_INGRESS_API_KEY"
@@ -109,26 +110,80 @@ def build_controller_endpoint_meta(ingress_host: str, endpoint_name: str) -> Dic
 # helpers below fill it and are shared so the plain and the record_literal combo
 # register the SAME name (only the address differs), keeping the api_base fixed.
 #
-# NOTE ON NAMESPACING: we register through the LOW-LEVEL cluster client
-# (``ctx.client._cluster_client.register_endpoint``) rather than
-# ``ctx.registry.register`` — the latter (``NamespacedEndpointRegistry``)
-# auto-prefixes the name with the job namespace (``<user>/<root>/<name>``),
-# which would break the fixed single-segment ``/proxy/otagent.<slug>/v1`` route
-# the ingress path already builds (and that the S3 live smoke verified with the
-# un-prefixed name). The ``.register(name, address, metadata)`` call shape still
-# matches the primitive the design references; we just skip the prefixing.
+# NOTE ON NAMESPACING: we register through the leased :class:`EndpointClient`
+# (``iris.cluster.client.endpoint_client``) directly rather than through
+# ``ctx.registry`` — the latter (``NamespacedEndpointRegistry``) auto-prefixes the
+# name with the job namespace (``<user>/<root>/<name>``), which would break the
+# fixed single-segment ``/proxy/otagent.<slug>/v1`` route the ingress path already
+# builds (and that the live smoke verified with the un-prefixed name).
+# ``EndpointClient.register(name, address, task_attempt, metadata)`` does NOT
+# prefix, so the wire name stays the single ``otagent.<slug>`` segment.
+#
+# NOTE ON LEASING: iris endpoints are LEASED. ``EndpointClient`` owns the RPC stub
+# AND a background ``EndpointLeaseRenewer`` daemon — the lease is what keeps the
+# controller serving the endpoint, and a one-shot register with no renewal expires
+# within minutes (which 404'd the whole run). So we build a dedicated
+# ``EndpointClient`` (its renewer daemon running), register through it, and KEEP IT
+# ALIVE for the entire harbor run via the returned :class:`ControllerEndpointRegistration`
+# handle, then ``close()`` it (stops renewing + unregisters) on run exit.
 
 
 class EndpointRegistrar(Protocol):
     """The ``register(name, address, metadata) -> endpoint_id`` shape we drive.
 
-    Both the in-cluster cluster-client adapter and unit-test fakes satisfy it,
-    so the registration wiring is testable in-process without a live controller.
+    The in-cluster leased-``EndpointClient`` adapter and unit-test fakes both
+    satisfy it, so the registration wiring is testable in-process without a live
+    controller. An implementation MAY also expose ``close()`` to stop lease
+    renewal and unregister; the registration handle calls it on teardown.
     """
 
     def register(
         self, name: str, address: str, metadata: Optional[Dict[str, str]] = None
     ) -> str: ...
+
+
+@dataclass
+class ControllerEndpointRegistration:
+    """A live controller endpoint registration whose lease is being renewed.
+
+    Holds the real ``endpoint_id`` and a ``close`` callable that stops the
+    background lease renewer and unregisters the endpoint. The caller MUST keep
+    this handle alive for the whole harbor run (so the daemon keeps renewing) and
+    call :meth:`close` on exit; a dropped handle lets the lease lapse and the
+    ``/proxy/<name>/v1`` route starts 404-ing mid-run.
+    """
+
+    endpoint_id: str
+    _close: Callable[[], None]
+
+    def close(self) -> None:
+        """Stop lease renewal and unregister the endpoint (best-effort, idempotent)."""
+        self._close()
+
+
+class _LeasedEndpointRegistrar:
+    """Registers through a dedicated leased iris :class:`EndpointClient`.
+
+    Owns the ``EndpointClient`` (and thus its background ``EndpointLeaseRenewer``
+    daemon), so ``register`` returns the real endpoint_id and keeps the lease
+    renewed until ``close``. Registers WITHOUT namespace-prefixing (see module
+    note) so the wire name is the single ``otagent.<slug>`` segment the
+    ``/proxy/<name>/v1`` api_base uses.
+    """
+
+    def __init__(self, client: "EndpointClient", task_attempt: "TaskAttempt") -> None:
+        self._client = client
+        self._task_attempt = task_attempt
+
+    def register(
+        self, name: str, address: str, metadata: Optional[Dict[str, str]] = None
+    ) -> str:
+        return self._client.register(name, address, self._task_attempt, metadata or {})
+
+    def close(self) -> None:
+        # Stops the renewer daemon and best-effort unregisters everything still
+        # registered, then disconnects the stub.
+        self._client.close()
 
 
 def controller_upstream_address(port: int, *, env: Optional[dict] = None) -> str:
@@ -144,48 +199,38 @@ def controller_upstream_address(port: int, *, env: Optional[dict] = None) -> str
     return f"http://{host}:{port}"
 
 
-class _ClusterClientRegistrar:
-    """Adapts the iris cluster client to :class:`EndpointRegistrar`.
+def _default_endpoint_registrar() -> _LeasedEndpointRegistrar:
+    """Build the in-cluster leased-``EndpointClient`` registrar.
 
-    Registers WITHOUT namespace-prefixing (see module note) so the wire name is
-    the single ``otagent.<slug>`` segment the ``/proxy/<name>/v1`` api_base uses.
+    Constructs a dedicated ``EndpointClient`` from the task's
+    ``IRIS_CONTROLLER_ADDRESS`` (network-level trust in-cluster, no credentials)
+    and the task identity from :func:`iris.cluster.client.job_info.get_job_info`.
+    The ``EndpointClient`` starts a background lease renewer on ``register`` so
+    the controller keeps serving the endpoint for the whole run.
+
+    Raises loudly (never returns ``None``) when iris is unavailable or we are not
+    inside a task — a silent no-op here is exactly what produced the 404-ing run.
     """
+    # iris is only importable inside the cluster runtime image; on the
+    # controller-ingress path (worker / SLURM node) it is always present.
+    from iris.cluster.client.endpoint_client import EndpointClient
+    from iris.cluster.client.job_info import get_job_info
+    from iris.rpc.compression import IRIS_RPC_COMPRESSIONS
+    from iris.rpc.controller_connect import EndpointServiceClientSync
 
-    def __init__(self, cluster: Any, task_attempt: Any) -> None:
-        self._cluster = cluster
-        self._task_attempt = task_attempt
-
-    def register(
-        self, name: str, address: str, metadata: Optional[Dict[str, str]] = None
-    ) -> str:
-        return self._cluster.register_endpoint(
-            name=name,
-            address=address,
-            task_attempt=self._task_attempt,
-            metadata=metadata or {},
+    info = get_job_info()
+    if info is None or not info.controller_address:
+        raise RuntimeError(
+            "controller endpoint registration requires an in-cluster iris task "
+            "(IRIS_TASK_ID + IRIS_CONTROLLER_ADDRESS); none found. Registration "
+            "cannot proceed — the /proxy/<name>/v1 route would 404."
         )
-
-
-def _default_endpoint_registrar() -> Optional[EndpointRegistrar]:
-    """Best-effort in-cluster registrar from :func:`iris.client.iris_ctx`.
-
-    Returns ``None`` (never raises) when iris is unavailable or we are not running
-    inside a task (no controller address / task attempt) — e.g. off-cluster or in
-    tests — so callers degrade gracefully.
-    """
-    try:  # iris is only importable inside the cluster runtime image.
-        from iris.client import iris_ctx  # type: ignore
-    except Exception:
-        return None
-    try:
-        ctx = iris_ctx()
-        cluster = getattr(getattr(ctx, "client", None), "_cluster_client", None)
-        task_attempt = getattr(ctx, "task_attempt", None)
-        if cluster is None or task_attempt is None:
-            return None
-        return _ClusterClientRegistrar(cluster, task_attempt)
-    except Exception:
-        return None
+    stub = EndpointServiceClientSync(
+        info.controller_address,
+        accept_compression=IRIS_RPC_COMPRESSIONS,
+        send_compression=None,
+    )
+    return _LeasedEndpointRegistrar(EndpointClient(stub), info.task_attempt)
 
 
 def register_controller_endpoint(
@@ -194,20 +239,33 @@ def register_controller_endpoint(
     *,
     registrar: Optional[EndpointRegistrar] = None,
     metadata: Optional[Dict[str, str]] = None,
-) -> Optional[str]:
+) -> ControllerEndpointRegistration:
     """Register ``address`` under ``endpoint_name`` with the iris controller.
 
-    Uses the ``register(name, address, metadata)`` primitive so
-    ``/proxy/<endpoint_name>/v1`` resolves to ``address``. ``registrar`` is
-    injectable for unit tests; in production it is resolved in-cluster from
-    :func:`iris.client.iris_ctx`. Returns the endpoint_id, or ``None`` when no
-    registrar is available (off-cluster / iris missing) — the caller logs and
-    proceeds (the sidecar/api_base wiring is already set).
+    Registers through a leased ``EndpointClient`` (its background lease renewer
+    keeps the controller serving the endpoint) so ``/proxy/<endpoint_name>/v1``
+    resolves to ``address`` for the whole run. ``registrar`` is injectable for
+    unit tests; in production it is the in-cluster :func:`_default_endpoint_registrar`.
+
+    Returns a :class:`ControllerEndpointRegistration` handle with the REAL
+    ``endpoint_id`` and a ``close()`` that stops renewal + unregisters. The caller
+    MUST keep the handle alive for the whole run and ``close()`` it on exit.
+
+    Raises if no registrar is available or the register call yields no id — a
+    broken registration must fail loud, not silently 404 the run.
     """
     reg = registrar if registrar is not None else _default_endpoint_registrar()
-    if reg is None:
-        return None
-    return reg.register(endpoint_name, address, metadata or {})
+    endpoint_id = reg.register(endpoint_name, address, metadata or {})
+    if not endpoint_id:
+        raise RuntimeError(
+            f"controller endpoint registration for {endpoint_name} -> {address} "
+            "returned no endpoint_id; refusing to proceed (would 404 the run)."
+        )
+    close = getattr(reg, "close", None)
+    return ControllerEndpointRegistration(
+        endpoint_id=endpoint_id,
+        _close=close if callable(close) else (lambda: None),
+    )
 
 
 def controller_registration_plan(

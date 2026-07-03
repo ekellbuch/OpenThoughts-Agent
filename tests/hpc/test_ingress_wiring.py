@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.testclient import TestClient
@@ -128,14 +129,22 @@ def test_eval_listener_to_env_controller_additive():
 # Endpoint registration helpers (shared by the controller + literal-combo path)
 # --------------------------------------------------------------------------- #
 class _FakeRegistrar:
-    """Records register(name, address, metadata) calls; returns a fixed id."""
+    """Records register(name, address, metadata) calls; returns a fixed id.
+
+    Also records close() so tests can assert the registration handle stops lease
+    renewal on teardown (mirroring the real leased ``EndpointClient``).
+    """
 
     def __init__(self):
         self.calls = []
+        self.closed = False
 
     def register(self, name, address, metadata=None):
         self.calls.append({"name": name, "address": address, "metadata": metadata})
         return "endpoint-id-xyz"
+
+    def close(self):
+        self.closed = True
 
 
 def test_controller_upstream_address_uses_advertise_host():
@@ -148,21 +157,39 @@ def test_controller_upstream_address_uses_advertise_host():
 
 def test_register_controller_endpoint_uses_injected_registrar():
     reg = _FakeRegistrar()
-    eid = register_controller_endpoint(
+    registration = register_controller_endpoint(
         "otagent.myjob", "http://10.0.0.1:8010", registrar=reg, metadata={"k": "v"}
     )
-    assert eid == "endpoint-id-xyz"
+    # returns a handle carrying the REAL endpoint_id (never None)
+    assert registration.endpoint_id == "endpoint-id-xyz"
     assert reg.calls == [
         {"name": "otagent.myjob", "address": "http://10.0.0.1:8010", "metadata": {"k": "v"}}
     ]
+    # closing the handle stops lease renewal / unregisters via the registrar
+    assert reg.closed is False
+    registration.close()
+    assert reg.closed is True
 
 
-def test_register_controller_endpoint_no_registrar_returns_none(monkeypatch):
-    # off-cluster / iris unavailable: best-effort no-op, never raises.
-    monkeypatch.setattr(
-        "hpc.ingress_utils._default_endpoint_registrar", lambda: None
-    )
-    assert register_controller_endpoint("otagent.j", "http://h:8000") is None
+def test_register_controller_endpoint_fails_loud_without_registrar(monkeypatch):
+    # A broken registration (no in-cluster registrar) must raise, not silently
+    # no-op — a silent no-op is exactly what 404'd the whole run.
+    def _boom():
+        raise RuntimeError("no in-cluster iris task")
+
+    monkeypatch.setattr("hpc.ingress_utils._default_endpoint_registrar", _boom)
+    with pytest.raises(RuntimeError):
+        register_controller_endpoint("otagent.j", "http://h:8000")
+
+
+def test_register_controller_endpoint_fails_loud_on_empty_id():
+    # A registrar that returns no id must raise (would 404 the /proxy route).
+    class _EmptyRegistrar:
+        def register(self, name, address, metadata=None):
+            return ""
+
+    with pytest.raises(RuntimeError):
+        register_controller_endpoint("otagent.j", "http://h:8000", registrar=_EmptyRegistrar())
 
 
 def test_controller_registration_plan_plain_registers_vllm_port():

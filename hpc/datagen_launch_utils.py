@@ -1352,19 +1352,25 @@ class TracegenJobRunner:
                                 job_name=self.config.job_name,
                                 host="0.0.0.0",
                             ):
-                                endpoint_id = register_controller_endpoint(
+                                # The leased EndpointClient must stay alive for the
+                                # whole harbor run; _run_harbor runs synchronously
+                                # here, so close (stop renewal + unregister) after it.
+                                registration = register_controller_endpoint(
                                     endpoint_name, register_address
                                 )
                                 injected = inject_ingress_agent_key()
                                 print(
                                     f"[TracegenJobRunner] ingress_mode=controller "
                                     f"+record_literal: registered {endpoint_name} -> "
-                                    f"{register_address} (id={endpoint_id}); Harbor "
+                                    f"{register_address} (id={registration.endpoint_id}); Harbor "
                                     f"endpoint={api_base} (agent key injected={injected})"
                                 )
-                                return self._run_harbor(
-                                    endpoint=api_base, api_key=INGRESS_KEY_PLACEHOLDER
-                                )
+                                try:
+                                    return self._run_harbor(
+                                        endpoint=api_base, api_key=INGRESS_KEY_PLACEHOLDER
+                                    )
+                                finally:
+                                    registration.close()
                         api_base = controller_api_base_for_job(
                             self.config.ingress_host, self.config.job_name
                         )

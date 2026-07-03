@@ -1810,7 +1810,10 @@ class RLJobRunner:
                             job_name=self.config.job_name,
                             host="0.0.0.0",
                         ):
-                            endpoint_id = register_controller_endpoint(
+                            # The leased EndpointClient must stay alive for the
+                            # whole skyrl run; _run_skyrl runs synchronously here,
+                            # so close (stop renewal + unregister) after it.
+                            registration = register_controller_endpoint(
                                 endpoint_name, register_address
                             )
                             os.environ["HARBOR_MODEL_ENDPOINT"] = api_base
@@ -1818,11 +1821,14 @@ class RLJobRunner:
                             print(
                                 f"[RLJobRunner] ingress_mode=controller +record_literal: "
                                 f"registered {endpoint_name} -> {register_address} "
-                                f"(id={endpoint_id}); HARBOR_MODEL_ENDPOINT={api_base} "
+                                f"(id={registration.endpoint_id}); HARBOR_MODEL_ENDPOINT={api_base} "
                                 f"(agent key injected={injected})",
                                 flush=True,
                             )
-                            return self._run_skyrl()
+                            try:
+                                return self._run_skyrl()
+                            finally:
+                                registration.close()
                     api_base = controller_api_base_for_job(
                         self.config.ingress_host, self.config.job_name
                     )

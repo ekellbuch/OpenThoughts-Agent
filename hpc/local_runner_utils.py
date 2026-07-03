@@ -927,16 +927,23 @@ class LocalHarborRunner:
             job_name=job_name,
             host="0.0.0.0",
         ):
-            endpoint_id = register_controller_endpoint(endpoint_name, register_address)
+            # The leased EndpointClient inside `registration` MUST stay alive for
+            # the whole harbor run (its background renewer keeps the controller
+            # serving the endpoint); harbor runs inside this `yield`, so hold the
+            # handle and close (stop renewal + unregister) on context exit.
+            registration = register_controller_endpoint(endpoint_name, register_address)
             injected = inject_ingress_agent_key()
             print(
                 f"[{self.JOB_PREFIX}-local] ingress_mode=controller "
                 f"record_literal={record_literal}: registered {endpoint_name} -> "
-                f"{register_address} (id={endpoint_id}); harbor endpoint={api_base} "
+                f"{register_address} (id={registration.endpoint_id}); harbor endpoint={api_base} "
                 f"(agent key injected={injected})",
                 flush=True,
             )
-            yield build_controller_endpoint_meta(ingress_host, endpoint_name)
+            try:
+                yield build_controller_endpoint_meta(ingress_host, endpoint_name)
+            finally:
+                registration.close()
 
     def run(self) -> None:
         """Main entry point - start services and run Harbor."""
