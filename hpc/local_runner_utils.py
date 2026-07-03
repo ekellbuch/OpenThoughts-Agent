@@ -13,9 +13,10 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from hpc.vllm_utils import _build_vllm_cli_args, run_endpoint_health_check
 from hpc.launch_utils import generate_served_model_id, hosted_vllm_alias, maybe_int, PROJECT_ROOT
@@ -861,6 +862,82 @@ class LocalHarborRunner:
         if needs_local_vllm and not iris_serve:
             subprocess.run(["ray", "stop", "--force"], check=False)
 
+    @contextmanager
+    def _serving_endpoint_meta(
+        self, experiments_dir: Path, job_name: str
+    ) -> Iterator[Optional[Dict[str, Any]]]:
+        """Yield the endpoint_meta harbor should use for this run.
+
+        When ``--record_literal`` / ``--ingress_mode controller`` are set, co-locate
+        harbor's RecordProxy in front of the advertised vLLM and/or register a
+        controller-ingress endpoint with the iris controller, mirroring the SLURM
+        ``TracegenJobRunner`` combined path. Inert otherwise: yields
+        ``self._endpoint_meta`` UNCHANGED and starts no server, so the eval path and
+        the default (pinggy) datagen path are byte-identical.
+        """
+        record_literal = getattr(self.args, "record_literal", False)
+        ingress_mode = getattr(self.args, "ingress_mode", "pinggy")
+        if not record_literal and ingress_mode != "controller":
+            yield self._endpoint_meta
+            return
+
+        # Reachability on the iris path comes ONLY from the controller registration
+        # (there is no pinggy tunnel wired here), so literal capture needs controller.
+        if record_literal and ingress_mode != "controller":
+            raise ValueError(
+                "--record_literal on the iris/local path requires --ingress_mode controller "
+                "(no pinggy tunnel here to expose the loopback RecordProxy)."
+            )
+
+        from hpc.literal_proxy_utils import (
+            maybe_serve_literal_proxy,
+            DEFAULT_LITERAL_PROXY_PORT,
+        )
+        from hpc.ingress_utils import (
+            controller_registration_plan,
+            register_controller_endpoint,
+            inject_ingress_agent_key,
+            build_controller_endpoint_meta,
+        )
+
+        ingress_host = getattr(self.args, "ingress_host", None)
+        if not ingress_host:
+            raise ValueError(
+                "--ingress_mode controller requires --ingress_host (the public "
+                "controller-ingress host)."
+            )
+        upstream = (self._endpoint_meta or {}).get("api_base")
+        if not upstream:
+            raise ValueError(
+                "controller ingress requires a local vLLM endpoint (api_base); none resolved."
+            )
+
+        endpoint_name, register_address, api_base = controller_registration_plan(
+            ingress_host,
+            job_name,
+            record_literal=record_literal,
+            proxy_port=DEFAULT_LITERAL_PROXY_PORT,
+        )
+        # The RecordProxy binds 0.0.0.0 so the (remote) controller can reach it at
+        # IRIS_ADVERTISE_HOST; the disabled path yields `upstream` unchanged.
+        with maybe_serve_literal_proxy(
+            record_literal,
+            upstream,
+            experiments_dir=experiments_dir,
+            job_name=job_name,
+            host="0.0.0.0",
+        ):
+            endpoint_id = register_controller_endpoint(endpoint_name, register_address)
+            injected = inject_ingress_agent_key()
+            print(
+                f"[{self.JOB_PREFIX}-local] ingress_mode=controller "
+                f"record_literal={record_literal}: registered {endpoint_name} -> "
+                f"{register_address} (id={endpoint_id}); harbor endpoint={api_base} "
+                f"(agent key injected={injected})",
+                flush=True,
+            )
+            yield build_controller_endpoint_meta(ingress_host, endpoint_name)
+
     def run(self) -> None:
         """Main entry point - start services and run Harbor."""
         args = self.args
@@ -1023,34 +1100,40 @@ class LocalHarborRunner:
             # Get dataset info
             dataset_slug, dataset_path = self.get_dataset_for_harbor()
 
-            # Build Harbor command
-            harbor_cmd = build_harbor_command(
-                harbor_binary=args.harbor_binary,
-                harbor_config_path=args.harbor_config,
-                harbor_config_data=getattr(args, "_harbor_config_data", {}),
-                job_name=job_name,
-                agent_name=args.agent,
-                model_name=harbor_model,
-                env_type=self.get_env_type(),
-                n_concurrent=args.n_concurrent,
-                n_attempts=args.n_attempts,
-                endpoint_meta=self._endpoint_meta,
-                agent_kwarg_overrides=list(args.agent_kwarg or []),
-                harbor_extra_args=list(args.harbor_extra_arg or []),
-                dataset_slug=dataset_slug,
-                dataset_path=dataset_path,
-                extra_agent_kwargs=getattr(args, "_extra_agent_kwargs", None),
-                export_hf_repo=getattr(args, "upload_hf_repo", None),
-            )
-            print("Harbor command:", " ".join(harbor_cmd))
+            # Resolve the serving endpoint. When --record_literal / --ingress_mode
+            # controller are set this co-locates harbor's RecordProxy in front of the
+            # advertised vLLM and/or registers a controller-ingress endpoint; harbor
+            # runs INSIDE the context so the proxy/registration outlive the whole job.
+            # Inert (serving_meta is self._endpoint_meta) on the default/eval path.
+            with self._serving_endpoint_meta(experiments_dir, job_name) as serving_meta:
+                # Build Harbor command
+                harbor_cmd = build_harbor_command(
+                    harbor_binary=args.harbor_binary,
+                    harbor_config_path=args.harbor_config,
+                    harbor_config_data=getattr(args, "_harbor_config_data", {}),
+                    job_name=job_name,
+                    agent_name=args.agent,
+                    model_name=harbor_model,
+                    env_type=self.get_env_type(),
+                    n_concurrent=args.n_concurrent,
+                    n_attempts=args.n_attempts,
+                    endpoint_meta=serving_meta,
+                    agent_kwarg_overrides=list(args.agent_kwarg or []),
+                    harbor_extra_args=list(args.harbor_extra_arg or []),
+                    dataset_slug=dataset_slug,
+                    dataset_path=dataset_path,
+                    extra_agent_kwargs=getattr(args, "_extra_agent_kwargs", None),
+                    export_hf_repo=getattr(args, "upload_hf_repo", None),
+                )
+                print("Harbor command:", " ".join(harbor_cmd))
 
-            if not args.dry_run:
-                # Import here to avoid circular imports
-                from hpc.cli_utils import run_harbor_cli
-                run_harbor_cli(harbor_cmd, harbor_log)
-                self.post_harbor_hook()
-            else:
-                print(f"[dry-run] Would run Harbor {self.JOB_PREFIX} job.")
+                if not args.dry_run:
+                    # Import here to avoid circular imports
+                    from hpc.cli_utils import run_harbor_cli
+                    run_harbor_cli(harbor_cmd, harbor_log)
+                    self.post_harbor_hook()
+                else:
+                    print(f"[dry-run] Would run Harbor {self.JOB_PREFIX} job.")
 
         finally:
             self.cleanup()

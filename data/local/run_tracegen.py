@@ -21,7 +21,12 @@ from typing import Optional, Tuple
 
 from hpc.launch_utils import PROJECT_ROOT
 from hpc.local_runner_utils import LocalHarborRunner
-from hpc.arg_groups import add_harbor_env_arg, add_hf_upload_args, add_tasks_input_arg
+from hpc.arg_groups import (
+    add_harbor_env_arg,
+    add_hf_upload_args,
+    add_ingress_literal_args,
+    add_tasks_input_arg,
+)
 
 
 class TracegenRunner(LocalHarborRunner):
@@ -67,6 +72,9 @@ class TracegenRunner(LocalHarborRunner):
 
         # HuggingFace upload options (shared from arg_groups)
         add_hf_upload_args(parser)
+
+        # Literal-token capture + controller-ingress (opencode / SUPPORTS_LITERAL_TRACES).
+        add_ingress_literal_args(parser)
 
         return parser
 

@@ -27,6 +27,7 @@ from hpc.cloud_launch_utils import repo_relative, parse_gpu_count, infer_harbor_
 from hpc.arg_groups import (
     add_harbor_args,
     add_harbor_env_arg,
+    add_ingress_literal_args,
     add_model_compute_args,
     add_hf_upload_args,
     add_tasks_input_arg,
@@ -107,6 +108,9 @@ class TracegenIrisLauncher(IrisLauncher):
         # NOTE: --job_name comes from add_harbor_args above.
 
         add_hf_upload_args(parser)
+
+        # Literal-token capture + controller-ingress passthrough to the worker.
+        add_ingress_literal_args(parser)
 
     def normalize_paths(self, args: argparse.Namespace) -> None:
         # On TPU, --gpus drives vLLM tensor_parallel_size — derive from TPU chip count.
@@ -235,6 +239,14 @@ class TracegenIrisLauncher(IrisLauncher):
 
         if args.harbor_env:
             cmd.extend(["--harbor_env", args.harbor_env])
+
+        # Literal-capture + controller-ingress passthrough (run_tracegen.py worker args).
+        if getattr(args, "record_literal", False):
+            cmd.append("--record_literal")
+        if getattr(args, "ingress_mode", "pinggy") and args.ingress_mode != "pinggy":
+            cmd.extend(["--ingress_mode", args.ingress_mode])
+        if getattr(args, "ingress_host", None):
+            cmd.extend(["--ingress_host", args.ingress_host])
 
         # When --resume-from is active, the iris-level job_name is fresh
         # (timestamped for iris uniqueness) but the harbor identity must be
