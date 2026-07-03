@@ -73,6 +73,74 @@ def test_literal_log_path_sanitizes_and_places_under_logs(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# 1b. Durability: remote (gs://) experiments_dir -> local staging + upload URI
+# --------------------------------------------------------------------------- #
+def test_literal_log_remote_uri_for_gcs_experiments_dir():
+    # A gs:// experiments_dir yields a DURABLE gs:// upload URI under logs/, NOT a
+    # collapsed local ``Path('gs://…')`` (the bug that lost every literal log on iris).
+    uri = lp.literal_log_remote_uri("gs://marin-models-us/ot-agent/tgen-x", "rl-q8b/run.1")
+    assert uri == "gs://marin-models-us/ot-agent/tgen-x/logs/rl-q8b-run.1_literal.jsonl"
+    # crucially the scheme survives (no gs:/ collapse)
+    assert uri.startswith("gs://")
+
+
+def test_literal_log_remote_uri_none_for_local_experiments_dir(tmp_path):
+    # A plain local experiments_dir needs no upload — the proxy writes it directly.
+    assert lp.literal_log_remote_uri(tmp_path, "myjob") is None
+    assert lp.literal_log_remote_uri("/tmp/experiments", "myjob") is None
+
+
+def test_maybe_serve_remote_stages_locally_and_passes_upload_uri(monkeypatch):
+    # On a gs:// experiments_dir the proxy must APPEND to a real local path (object
+    # stores have no append) and hand serve_record_proxy the durable upload URI.
+    calls: dict = {}
+
+    @contextlib.contextmanager
+    def _fake_serve(up, log_path, *, host=lp.DEFAULT_LITERAL_PROXY_HOST,
+                    port=lp.DEFAULT_LITERAL_PROXY_PORT, remote_uri=None, **kw):
+        calls["log_path"] = Path(log_path)
+        calls["remote_uri"] = remote_uri
+        yield lp.literal_proxy_endpoint(host, port)
+
+    monkeypatch.setattr(lp, "serve_record_proxy", _fake_serve)
+
+    with lp.maybe_serve_literal_proxy(
+        True,
+        "http://10.0.0.1:8000/v1",
+        experiments_dir="gs://marin-models-us/ot-agent/tgen-x",
+        job_name="myjob",
+    ):
+        pass
+
+    # local staging path: absolute + local (NOT a gs:/ collapse)
+    assert calls["log_path"].is_absolute()
+    assert "gs:" not in str(calls["log_path"])
+    assert calls["log_path"].name == "myjob_literal.jsonl"
+    # durable upload target: the gs:// URI under logs/
+    assert calls["remote_uri"] == "gs://marin-models-us/ot-agent/tgen-x/logs/myjob_literal.jsonl"
+
+
+def test_upload_literal_log_copies_whole_file(tmp_path):
+    # _upload_literal_log rewrites the entire object (object stores have no append).
+    # Use a local dir as the "remote" (UPath handles local + gs:// identically).
+    local = tmp_path / "stage" / "literal.jsonl"
+    local.parent.mkdir(parents=True)
+    local.write_text('{"literal": {"completion_token_ids": [1, 2]}}\n')
+    remote = tmp_path / "durable" / "myjob_literal.jsonl"  # parent does not exist yet
+
+    lp._upload_literal_log(local, str(remote))
+
+    assert remote.read_text() == '{"literal": {"completion_token_ids": [1, 2]}}\n'
+
+
+def test_upload_literal_log_noop_when_local_missing(tmp_path):
+    # Proxy saw no traffic yet -> nothing to upload, must not raise.
+    remote = tmp_path / "durable" / "x.jsonl"
+    lp._upload_literal_log(tmp_path / "nope.jsonl", str(remote))
+    assert not remote.exists()
+
+
+# --------------------------------------------------------------------------- #
 # 2. FLAG-OFF PARITY — null context manager, byte-identical endpoint
 # --------------------------------------------------------------------------- #
 def test_maybe_serve_disabled_yields_upstream_unchanged(monkeypatch, tmp_path):

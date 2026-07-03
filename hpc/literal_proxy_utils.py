@@ -32,11 +32,14 @@ disabled path are fully unit-testable without a server (see tests/hpc/test_liter
 from __future__ import annotations
 
 import re
+import tempfile
 import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 from urllib.parse import urlsplit, urlunsplit
+
+from upath import UPath
 
 # The co-located proxy binds this port by default. vLLM/datagen use 8000, so 8010
 # avoids a collision while staying on the loopback interface (the proxy only ever
@@ -50,13 +53,54 @@ DEFAULT_LITERAL_PROXY_HOST = "127.0.0.1"
 LITERAL_LOG_FILENAME = "literal.jsonl"
 
 
-def literal_log_path(experiments_dir: str | Path, job_name: str) -> Path:
-    """Deterministic path for the co-located RecordProxy's ``literal.jsonl`` log.
+def _slug(job_name: str) -> str:
+    """Filesystem-safe slug for a job name (``.`` preserved for readability)."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", (job_name or "job")).strip("-.") or "job"
 
-    Lives under ``<experiments_dir>/logs/`` beside the other per-job logs.
+
+def literal_log_path(experiments_dir: str | Path, job_name: str) -> Path:
+    """Deterministic LOCAL path for the co-located RecordProxy's ``literal.jsonl`` log.
+
+    Lives under ``<experiments_dir>/logs/`` beside the other per-job logs. This is
+    the path the proxy APPENDS to (harbor's ``RecordProxy`` uses a plain
+    ``open(..., "a")``, which only works on a local filesystem). When
+    ``experiments_dir`` is itself a remote URI (``gs://…``), do NOT collapse it to a
+    junk local path (``Path("gs://…")`` → CWD-relative ``gs:/…``): the launch path
+    stages the log locally under the system temp dir instead and uploads to the
+    durable remote location via :func:`literal_log_remote_uri`. See
+    :func:`maybe_serve_literal_proxy`.
     """
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", (job_name or "job")).strip("-.") or "job"
-    return Path(experiments_dir) / "logs" / f"{slug}_{LITERAL_LOG_FILENAME}"
+    return Path(experiments_dir) / "logs" / f"{_slug(job_name)}_{LITERAL_LOG_FILENAME}"
+
+
+# schemes we treat as durable object stores (upload target) rather than a local FS.
+_REMOTE_PROTOCOLS = frozenset({"gs", "gcs", "s3", "az", "abfs", "abfss", "http", "https"})
+
+
+def literal_log_remote_uri(experiments_dir: str | Path, job_name: str) -> Optional[str]:
+    """Durable remote URI for the literal log, or ``None`` for local ``experiments_dir``.
+
+    On iris ``experiments_dir`` is a ``gs://…`` remote_output_dir. The proxy cannot
+    append to object storage (no append semantics), so it writes locally and the
+    launch path uploads the whole file here on a periodic + on-exit flush. Returns
+    ``<experiments_dir>/logs/<slug>_literal.jsonl`` as a ``gs://…`` string when
+    ``experiments_dir`` is remote; ``None`` when it is an ordinary local path (local
+    runs and unit tests need no upload).
+    """
+    protocol = UPath(experiments_dir).protocol
+    if protocol not in _REMOTE_PROTOCOLS:
+        return None
+    return str(UPath(experiments_dir) / "logs" / f"{_slug(job_name)}_{LITERAL_LOG_FILENAME}")
+
+
+def _local_staging_path(job_name: str) -> Path:
+    """A stable, absolute LOCAL staging path for the proxy to append to.
+
+    Used when ``experiments_dir`` is remote (``gs://…``): the proxy appends here and
+    the launch path uploads the file to :func:`literal_log_remote_uri`. Absolute (not
+    CWD-relative) so it is robust regardless of the worker's working directory.
+    """
+    return Path(tempfile.gettempdir()) / "ot-agent-literal" / f"{_slug(job_name)}_{LITERAL_LOG_FILENAME}"
 
 
 def literal_proxy_endpoint(
@@ -82,6 +126,23 @@ def upstream_origin(endpoint: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
 
 
+def _upload_literal_log(local_path: str | Path, remote_uri: str) -> None:
+    """Copy the whole local literal log to ``remote_uri`` (full-object overwrite).
+
+    Object stores have no append, so each flush rewrites the entire object. The log
+    is a JSONL of token IDs — small enough to rewrite periodically for a smoke and
+    for a preempt-durable snapshot. A missing local file (proxy saw no traffic yet)
+    is a no-op.
+    """
+    try:
+        data = Path(local_path).read_bytes()
+    except FileNotFoundError:
+        return
+    remote = UPath(remote_uri)
+    remote.parent.mkdir(parents=True, exist_ok=True)
+    remote.write_bytes(data)
+
+
 @contextmanager
 def serve_record_proxy(
     upstream_endpoint: str,
@@ -91,6 +152,8 @@ def serve_record_proxy(
     port: int = DEFAULT_LITERAL_PROXY_PORT,
     timeout: float = 600.0,
     startup_timeout: float = 30.0,
+    remote_uri: Optional[str] = None,
+    flush_interval: float = 30.0,
 ) -> Iterator[str]:
     """Serve harbor's RecordProxy in front of ``upstream_endpoint`` on ``host:port``.
 
@@ -98,6 +161,12 @@ def serve_record_proxy(
     uvicorn server runs on a daemon thread and is shut down on context exit. The
     upstream need not be live at start time — RecordProxy forwards lazily per
     request, so it is safe to start the proxy BEFORE the vLLM engines are up.
+
+    When ``remote_uri`` is set, a daemon thread uploads the (local) ``log_path`` to
+    that durable object-store URI every ``flush_interval`` seconds and once more on
+    exit, so the literal log survives worker teardown / preemption. This is the
+    durability fix for iris, where ``experiments_dir`` is a ``gs://…`` URI that a
+    plain local ``open(..., "a")`` can never reach.
 
     This binds a real socket and is used ONLY on the flag-ON launch path; unit
     tests exercise the app in-process via ``RecordProxy.app()`` + ASGITransport
@@ -133,9 +202,26 @@ def serve_record_proxy(
             f"RecordProxy failed to start on {host}:{port} within {startup_timeout}s"
         )
 
+    # Periodic uploader: snapshot the growing local log to durable storage so a
+    # preemption between flushes loses at most ``flush_interval`` of records.
+    stop_flushing = threading.Event()
+    uploader: Optional[threading.Thread] = None
+    if remote_uri:
+        def _flush_loop() -> None:
+            while not stop_flushing.wait(flush_interval):
+                try:
+                    _upload_literal_log(log_path, remote_uri)
+                except Exception as exc:  # durability is best-effort; never crash the run
+                    print(f"[literal-proxy] periodic literal-log upload failed: {exc}", flush=True)
+
+        uploader = threading.Thread(target=_flush_loop, name="literal-uploader", daemon=True)
+        uploader.start()
+
     print(
         f"[literal-proxy] RecordProxy serving {literal_proxy_endpoint(host, port)} "
-        f"-> {origin} (log: {log_path})",
+        f"-> {origin} (log: {log_path}"
+        + (f" -> {remote_uri}" if remote_uri else "")
+        + ")",
         flush=True,
     )
     try:
@@ -143,6 +229,18 @@ def serve_record_proxy(
     finally:
         server.should_exit = True
         thread.join(timeout=10.0)
+        stop_flushing.set()
+        if uploader is not None:
+            uploader.join(timeout=5.0)
+        if remote_uri:
+            try:
+                _upload_literal_log(log_path, remote_uri)
+                print(
+                    f"[literal-proxy] uploaded final literal log -> {remote_uri}",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(f"[literal-proxy] final literal-log upload failed: {exc}", flush=True)
 
 
 @contextmanager
@@ -165,8 +263,16 @@ def maybe_serve_literal_proxy(
     if not enabled:
         yield upstream_endpoint
         return
-    log_path = literal_log_path(experiments_dir, job_name)
+    # Remote experiments_dir (iris ``gs://…``): the proxy cannot append to object
+    # storage, so stage the log on the LOCAL worker FS and upload it to the durable
+    # remote URI (periodic + on-exit). Local experiments_dir (local runs / tests):
+    # write directly under ``<exp>/logs/`` with no upload — byte-identical to before.
+    remote_uri = literal_log_remote_uri(experiments_dir, job_name)
+    if remote_uri is not None:
+        log_path: str | Path = _local_staging_path(job_name)
+    else:
+        log_path = literal_log_path(experiments_dir, job_name)
     with serve_record_proxy(
-        upstream_endpoint, log_path, host=host, port=port
+        upstream_endpoint, log_path, host=host, port=port, remote_uri=remote_uri
     ) as proxy_endpoint:
         yield proxy_endpoint
