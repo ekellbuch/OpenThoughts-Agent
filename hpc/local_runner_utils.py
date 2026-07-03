@@ -58,6 +58,53 @@ from scripts.harbor.job_config_utils import load_job_config
 # Re-export docker runtime utilities for backward compatibility
 from hpc.docker_runtime import setup_docker_runtime_if_needed
 
+# Harbor's OpenCode agent (AgentName.OPENCODE.value). Unlike the litellm-backed
+# agents (terminus-2 etc.) which want a ``hosted_vllm/<id>`` model alias, opencode
+# derives its provider from the ``provider/model`` split and ONLY wires a baseURL
+# when the provider is ``openai`` — see harbor OpenCode._build_register_config_command.
+# So opencode needs ``openai/<served_id>`` plus OPENAI_BASE_URL exported (below).
+OPENCODE_AGENT_NAME = "opencode"
+
+
+def opencode_model_routing(
+    agent_name: Optional[str],
+    served_model_id: Optional[str],
+    serving_meta: Optional[Dict[str, Any]],
+) -> Optional[Tuple[str, str]]:
+    """Return ``(harbor_model, openai_base_url)`` for opencode, else ``None``.
+
+    Harbor's OpenCode agent splits ``model_name`` into ``provider/model`` and
+    wires the served vLLM as its baseURL ONLY when the provider is ``openai``: it
+    reads ``OPENAI_BASE_URL`` from the env and injects it into ``opencode.json``
+    for the ``openai`` provider (``_build_register_config_command``). The default
+    ``hosted_vllm/<id>`` alias — required by the litellm-backed agents like
+    terminus-2 — leaves opencode's provider as ``hosted_vllm`` with no baseURL, so
+    it builds ``undefined/chat/completions`` and dies (``UnknownError``).
+
+    For opencode we therefore hand harbor ``openai/<served_id>`` (same served id,
+    only the provider prefix differs, so vLLM still serves the same model) and
+    export ``OPENAI_BASE_URL`` = the resolved ``api_base`` (the ingress
+    ``/proxy/otagent-<slug>/v1`` URL in controller mode, or the local vLLM
+    ``api_base`` otherwise). ``OPENAI_API_KEY`` is already set on the controller
+    path by ``inject_ingress_agent_key``.
+
+    Returns ``None`` for any non-opencode agent (or when there is no served id,
+    e.g. an API engine) so the caller keeps the hosted_vllm alias untouched.
+
+    Raises:
+        ValueError: opencode is selected but no ``api_base`` resolved — the
+            ``openai`` provider has nowhere to point and would 404/undefined.
+    """
+    if agent_name != OPENCODE_AGENT_NAME or not served_model_id:
+        return None
+    api_base = (serving_meta or {}).get("api_base")
+    if not api_base:
+        raise ValueError(
+            "opencode requires a resolved api_base to export OPENAI_BASE_URL "
+            "(its `openai` provider reads the base URL from the env); none resolved."
+        )
+    return f"openai/{served_model_id}", api_base
+
 
 @dataclass
 class ManagedProcess:
@@ -1113,6 +1160,22 @@ class LocalHarborRunner:
             # runs INSIDE the context so the proxy/registration outlive the whole job.
             # Inert (serving_meta is self._endpoint_meta) on the default/eval path.
             with self._serving_endpoint_meta(experiments_dir, job_name) as serving_meta:
+                # opencode needs `openai/<served_id>` + OPENAI_BASE_URL (see
+                # opencode_model_routing); the litellm agents keep hosted_vllm/<id>.
+                opencode_route = opencode_model_routing(
+                    agent_name=args.agent,
+                    served_model_id=getattr(args, "_served_model_id", None),
+                    serving_meta=serving_meta,
+                )
+                if opencode_route is not None:
+                    harbor_model, opencode_base_url = opencode_route
+                    os.environ["OPENAI_BASE_URL"] = opencode_base_url
+                    print(
+                        f"[{self.JOB_PREFIX}-local] opencode routing: model={harbor_model} "
+                        f"OPENAI_BASE_URL={opencode_base_url}",
+                        flush=True,
+                    )
+
                 # Build Harbor command
                 harbor_cmd = build_harbor_command(
                     harbor_binary=args.harbor_binary,
@@ -1180,6 +1243,9 @@ __all__ = [
     # Model ID utilities (re-exported from launch_utils)
     "generate_served_model_id",
     "hosted_vllm_alias",
+    # opencode model routing
+    "OPENCODE_AGENT_NAME",
+    "opencode_model_routing",
     # Base runner class
     "LocalHarborRunner",
     # Re-exports

@@ -301,6 +301,45 @@ def test_record_proxy_accepts_unauthenticated_calls():
         assert "authorization" not in {k.lower() for k in r.request.headers}
 
 
+# --------------------------------------------------------------------------- #
+# opencode model routing (openai provider + OPENAI_BASE_URL)
+# --------------------------------------------------------------------------- #
+def test_opencode_model_routing_uses_openai_provider_and_api_base():
+    # opencode must get openai/<served_id> (NOT hosted_vllm/<id>) so harbor wires
+    # OPENAI_BASE_URL, and the base url is the resolved (ingress) api_base.
+    from hpc.local_runner_utils import opencode_model_routing
+
+    meta = {"api_base": "https://ingress.example/proxy/otagent-myjob/v1"}
+    route = opencode_model_routing(
+        agent_name="opencode", served_model_id="1783107198924068", serving_meta=meta
+    )
+    assert route == (
+        "openai/1783107198924068",
+        "https://ingress.example/proxy/otagent-myjob/v1",
+    )
+
+
+def test_opencode_model_routing_inert_for_other_agents():
+    # terminus-2 (litellm) must keep the hosted_vllm alias -> routing returns None.
+    from hpc.local_runner_utils import opencode_model_routing
+
+    meta = {"api_base": "http://host:8000/v1"}
+    assert opencode_model_routing("terminus-2", "abc123", meta) is None
+    # no served id (API engine) -> also inert
+    assert opencode_model_routing("opencode", None, meta) is None
+
+
+def test_opencode_model_routing_requires_api_base():
+    # opencode with no resolved api_base must fail loud (its openai provider would
+    # otherwise have nowhere to point -> undefined/chat/completions).
+    from hpc.local_runner_utils import opencode_model_routing
+
+    with pytest.raises(ValueError):
+        opencode_model_routing("opencode", "abc123", None)
+    with pytest.raises(ValueError):
+        opencode_model_routing("opencode", "abc123", {"api_base": ""})
+
+
 def test_notimplementederror_guard_removed_from_launchers():
     """The record_literal x controller NotImplementedError guard is gone from both launchers."""
     guard = "record_literal + ingress_mode=controller is not supported"
