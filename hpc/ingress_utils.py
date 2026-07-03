@@ -52,12 +52,16 @@ INGRESS_KEY_PLACEHOLDER = "${" + INGRESS_KEY_ENV + "}"
 def controller_endpoint_name(job_name: Optional[str]) -> str:
     """Deterministic iris endpoint name for a job's vLLM (Stage 2 registers this name).
 
-    ``otagent.<sanitized-job-name>`` — unique per job, single path segment (the
-    controller proxy route is ``/proxy/<name>/<sub_path>``, so ``name`` must not
-    contain ``/``).
+    ``otagent-<sanitized-job-name>`` — unique per job, single path segment. The name
+    MUST be DOT-FREE: the controller EndpointProxy decodes ``.`` -> ``/`` in the
+    ``/proxy/<name>/`` route (``endpoint_proxy.py``: ``slashed = encoded_name.replace('.','/')``,
+    then resolves ``/<slashed>``). So a literal dot in the registered name is looked up
+    as a ``/`` path segment and can never match — that is the 404 the first live smoke
+    hit despite a successful register. We map dots (and anything outside ``[A-Za-z0-9_-]``)
+    to ``-`` so the registered name and the dot-decoded lookup are identical.
     """
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", (job_name or "job")).strip("-.").lower()
-    return f"otagent.{slug or 'job'}"
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", (job_name or "job")).strip("-_").lower()
+    return f"otagent-{slug or 'job'}"
 
 
 def build_controller_api_base(ingress_host: str, endpoint_name: str) -> str:

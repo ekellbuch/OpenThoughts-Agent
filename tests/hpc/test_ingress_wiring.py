@@ -45,11 +45,14 @@ from hpc.literal_proxy_utils import DEFAULT_LITERAL_PROXY_PORT  # noqa: E402
 
 
 def test_controller_endpoint_name_sanitizes():
-    assert controller_endpoint_name("rl-qwen3_8b/run.1") == "otagent.rl-qwen3_8b-run.1"
-    assert controller_endpoint_name(None) == "otagent.job"
-    assert controller_endpoint_name("") == "otagent.job"
-    # single path segment (no slashes) — required by the /proxy/<name>/ route
-    assert "/" not in controller_endpoint_name("a/b/c")
+    # DOT-FREE: the EndpointProxy decodes '.' -> '/' in /proxy/<name>/, so the name
+    # must contain no literal dots (else the register-name != dot-decoded-lookup 404).
+    assert controller_endpoint_name("rl-qwen3_8b/run.1") == "otagent-rl-qwen3_8b-run-1"
+    assert controller_endpoint_name(None) == "otagent-job"
+    assert controller_endpoint_name("") == "otagent-job"
+    # single path segment (no slashes) AND no dots — both required by the /proxy/<name>/ route
+    name = controller_endpoint_name("a/b.c/d")
+    assert "/" not in name and "." not in name
 
 
 def test_build_controller_api_base_scheme_handling():
