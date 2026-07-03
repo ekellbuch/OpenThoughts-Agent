@@ -233,23 +233,31 @@ org). Rerouted to the dedicated RL org at n=128 (regime 2): clean (0 setup timeo
 / KV off floor) — measured throughput below that reflects the rollout-supply rate (geometry-invariant), not the
 EP×FSDP×CP serving capacity.
 
-**✅ PARTIALLY RESOLVED (n=256, 2026-07-02) — raising `n` does NOT saturate the engines; the feed ceiling is upstream of
-the vLLM slot count (the MECHANISM is not yet attributed).** Doubled n=128→256 on the RL org: **STILL STARVED, and this
-time cleanly** — Waiting=0 (0/300 samples), KV 0.0–0.4%, power 17–22% TDP, mem-BW 0%, Σ Running ~6.4, aggregate ~444
-tok/s (**FLAT** vs n=128's ~346 — does NOT scale with n). Earlier confounds RULED OUT: **realized concurrency = 332
-sandboxes ≥ 256 offered (FULL supply, RL org NOT under-provisioning)**, **0 AgentSetupTimeouts** (not Daytona-overload),
-CUDA-graphs ON (not the eager confound). So of ~256 in-flight episodes only **~6 (~2%) are in `generate()` at any
-instant**. **ESTABLISHED: the 4× (TP8/DCP2) block is under-fed at FULL supply and throughput is FLAT as n doubles →
-raising n cannot help.** **⚠ NOT yet measured: the ATTRIBUTION of the non-generating ~98%** — could be (a) genuine agent
-tool-exec/verify wall-time (intrinsic duty cycle), (b) Daytona-API/network round-trip latency per agent step, or (c)
-RolloutCoordinator/harbor dispatch overhead serializing `generate()` calls. (b)/(c) are FIXABLE and would feed the
-engines *without* dropping them, so **attribute via Harbor's per-stage timings BEFORE choosing the lever — do NOT assume
-"Daytona work."**
-- **`n=384` is CONTRAINDICATED regardless** (128→256 gave zero/negative return → 1.5× more is predicted futile). No `n`
-  saturates 4 TP8 engines within the sustainable-supply range; the demand-bind "window" idea above is superseded here.
-- **The lever depends on the attribution:** genuine agent-work → REDUCE `num_inference_engines` (fewer/fuller engines
-  demand-bind the ~6-req load → valid throughput reading). Fixable latency/dispatch overhead → fix THAT (async/batched
-  dispatch, faster Daytona) to raise the generating fraction. STAGE-0-REDO stays PENDING until a demand-bound rung lands.
+**✅ RESOLVED (n=256 + Harbor stage-timing attribution, 2026-07-02) — the engines are starved by DAYTONA `exec`
+ROUND-TRIP LATENCY inside the agent loop, NOT an intrinsic duty cycle and NOT the engine count.** Doubling n=128→256
+stayed STARVED cleanly (Waiting=0, KV 0.0–0.4%, power 17–22% TDP, mem-BW 0%, Σ Running ~6.4, tok/s FLAT ~444 vs ~346) at
+FULL supply (realized 332 ≥ 256 sandboxes, 0 AgentSetupTimeouts on the RL org, CUDA-graphs ON) → **raising n cannot
+help.** Harbor per-stage timings (`TrialResult` `TimingInfo` per phase + per-turn `trajectory.json` + per-call
+`api_request_times_msec`) then ATTRIBUTED the non-generating ~98%:
+- **Per turn (mean 101.4 s): generate 21.2 s (21%) + agent-REQUESTED command time 0.7 s (<1% — intrinsic tool-exec) +
+  RESIDUAL 79.5 s (78%) = Daytona `exec` round-trip latency** (the poll-based `environment.exec`: 1 s-granularity
+  `_poll_response` + ≥3 HTTP round-trips/exec × ~15–24 exec calls/turn).
+- **Across 131 completed trials, 63% died in `AgentSetupTimeoutError`** — never reached a single LLM call (Daytona
+  sandbox-create + agent-install so slow it times out). Generate ≈ 7% of episode wall overall.
+- ⇒ (a) intrinsic tool-exec RULED OUT (0.7 s/turn); (c) RolloutCoordinator/dispatch RULED OUT (generate latency healthy
+  ~21 s, Waiting=0, the residual is inside the agent's own Daytona path *after* generate returns); **(b) Daytona
+  API/network latency CONFIRMED dominant.**
+
+**⇒ LEVER = FIX THE DAYTONA EXEC PATH — do NOT reduce `num_inference_engines`** (reducing engines only makes the idle
+number look better while total throughput stays Daytona-latency-bound; the engines are STARVED, not oversupplied). In
+priority: (1) cut Daytona `exec` round-trips/turn — batch send-keys+capture into one `exec`, drop the sub-1 s poll,
+or a persistent/streaming exec channel (harbor `environment.py:_poll_response` / `tmux_session.py`); (2) faster sandbox
+setup (pre-warmed/snapshot-cached sandboxes + faster agent install — recovers the 63% dying in setup); (3) *then* raise
+`n_concurrent_trials` with matched Daytona capacity. **Both `n=384` and reduce-engines are CONTRAINDICATED.** A valid
+grid THROUGHPUT reading (STAGE-0-REDO) requires the rollout pipeline to feed the engines first — this is a
+harbor/Daytona optimization, not a grid-config tweak. (Caveat: the 79.5 s residual is attributed by subtraction
+[turn-wall − generate − requested-sleep] + the poll-exec code path; a per-`exec` `TimingInfo` would confirm the RT
+count directly if instrumented.)
 
 ## GDN + Context-Parallel (CP>1) HARD-CRASHES the 35B GatedDeltaNet MoE at forward
 
