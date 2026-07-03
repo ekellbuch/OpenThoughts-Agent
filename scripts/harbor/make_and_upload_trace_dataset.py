@@ -393,11 +393,20 @@ def _install_inline_subagent_merger() -> None:
     traces_utils.extract_conversations_from_trajectory = patched_extract_conversations_from_trajectory
 
 
-def _install_harbor_patches() -> None:
-    """Install all Harbor monkeypatches used by the streaming exporter."""
+def _install_harbor_patches(include_literal_tokens: bool = False) -> None:
+    """Install the Harbor monkeypatches used by the streaming exporter.
+
+    The inline-subagent-merger patch reimplements ``extract_conversations_from_trajectory``
+    and does NOT emit the literal token columns. So when ``include_literal_tokens``
+    is requested we SKIP that patch and let Harbor's native (literal-aware)
+    extraction run, which lifts ``step.metrics.{prompt_token_ids,completion_token_ids,
+    logprobs}`` into parallel columns. Default (no literal) installs all patches, so
+    the terminus-2 / non-literal upload path is byte-identical.
+    """
     _install_safe_episode_guard()
     _install_dataset_sanitizer()
-    _install_inline_subagent_merger()
+    if not include_literal_tokens:
+        _install_inline_subagent_merger()
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +462,7 @@ def _collect_trial_rows(
     include_instruction: bool,
     include_verifier_output: bool,
     verbose: bool,
+    include_literal_tokens: bool = False,
 ) -> List[Dict[str, Any]]:
     """Collect conversation rows for a single trial. Returns [] on skip/error."""
     from harbor.models.agent.name import AgentName  # type: ignore
@@ -493,6 +503,7 @@ def _collect_trial_rows(
             include_instruction=include_instruction,
             include_verifier_output=include_verifier_output,
             embed_tools_in_conversation=True,
+            include_literal_tokens=include_literal_tokens,
         )
     except (UnicodeDecodeError, ValueError, OSError) as e:
         if verbose:
@@ -602,6 +613,7 @@ def _process_one_shard_in_subprocess(
     include_verifier_output: bool,
     tmp_root: str,
     verbose: bool,
+    include_literal_tokens: bool = False,
 ) -> int:
     """Worker body: collect this batch's rows, write + upload ONE shard, return row count.
 
@@ -618,7 +630,7 @@ def _process_one_shard_in_subprocess(
     from huggingface_hub import HfApi  # type: ignore
 
     traces_utils = _import_traces_utils()
-    _install_harbor_patches()
+    _install_harbor_patches(include_literal_tokens=include_literal_tokens)
 
     chunk: List[Dict[str, Any]] = []
     for td in trial_dirs:
@@ -630,6 +642,7 @@ def _process_one_shard_in_subprocess(
             include_instruction=include_instruction,
             include_verifier_output=include_verifier_output,
             verbose=verbose,
+            include_literal_tokens=include_literal_tokens,
         )
         if rows:
             chunk.extend(rows)
@@ -682,6 +695,7 @@ def stream_export_and_upload(
     include_verifier_output: bool = True,
     chunk_size: int = 200,
     verbose: bool = False,
+    include_literal_tokens: bool = False,
 ) -> int:
     """Single streaming path: enumerate trials, write parquet shards, upload via HfApi.
 
@@ -725,6 +739,7 @@ def stream_export_and_upload(
                 include_verifier_output=include_verifier_output,
                 tmp_root=str(tmp_root),
                 verbose=verbose,
+                include_literal_tokens=include_literal_tokens,
             )
         )
         if written:
@@ -838,6 +853,16 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Verbose per-trial logging",
     )
+    p.add_argument(
+        "--include_literal_tokens",
+        action="store_true",
+        help="Emit per-turn prompt_token_ids / completion_token_ids / logprobs columns "
+        "from step.metrics (for agents with SUPPORTS_LITERAL_TRACES, e.g. opencode run "
+        "behind the RecordProxy via --record_literal). When set, Harbor's native "
+        "literal-aware extraction is used (the inline-subagent-merger patch, which drops "
+        "token columns, is skipped). Default off = current text-only behavior. Pass this "
+        "when the job was generated with hpc.launch --record_literal.",
+    )
     return p.parse_args()
 
 
@@ -861,6 +886,7 @@ def main() -> None:
         private=bool(args.private),
         chunk_size=max(1, int(args.chunk_size)),
         verbose=bool(args.verbose),
+        include_literal_tokens=bool(args.include_literal_tokens),
     )
 
     print(
