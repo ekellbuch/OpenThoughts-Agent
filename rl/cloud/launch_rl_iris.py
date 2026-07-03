@@ -130,6 +130,20 @@ DEFAULT_CLUSTER = "cw-us-east-02a"
 # (use the immutable :gpu-rl-<gitsha> tag's digest, never the floating :gpu-rl).
 DEFAULT_RL_DOCKER_IMAGE = (
     "ghcr.io/open-thoughts/openthoughts-agent"
+    # gpu-rl-efd77b98 (built 2026-07-03, kaniko job gpurl-kaniko-efd77b98): the PULLABLE re-layering of
+    # gpu-rl-69634c0b (@sha256:d9c7e604…, harbor 0729a3e9 = poll fix + tmux-bake). Same baked contents
+    # (harbor 0729a3e9, MarinSkyRL 39faff7d, vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128,
+    # rl env pinned via rl_env_constraints.txt) but built with SINGLE_SNAPSHOT=0 (per-instruction layers)
+    # + torch's nvidia-CUDA deps split into 3 pre-install RUNs, so the MAX layer is 3.46 GB (was one
+    # 16.6 GB --single-snapshot layer). WHY: the 16.6 GB single layer CANNOT be pulled over the
+    # CoreWeave→ghcr egress — containerd restarts the single-blob GET from 0 and it dies at 8-11 GB every
+    # attempt (diagnosed restart-from-0 across all 8 r4 pods → ImagePullBackOff; the incremental-base
+    # rebuild ALSO failed because the build pod had to pull the same 16.6 GB base). 48 small layers each
+    # pull+retry independently. Build asserts green (baked harbor 0.8.0 @ 0729a3e9). Digest below.
+    "@sha256:59cef2f509f9505a09bdf0358924cf11ad04418c0bef87c49960f28ba6babc63"  # noqa: E501  (gpu-rl-efd77b98)
+    # (prev: gpu-rl-69634c0b @sha256:d9c7e604… — same contents, un-pullable 16.6 GB single-snapshot layer)
+)
+_SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
     # of the prior gpu-rl-1af0ae2d (@sha256:d77b34dd…) — baked harbor f7f51f13 → 0729a3e9, which sits
     # on top of ef42e75e and carries BOTH Daytona throughput fixes: (1) ef42e75e "replace 1s exec poll
