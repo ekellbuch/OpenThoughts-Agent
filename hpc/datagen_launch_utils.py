@@ -557,6 +557,7 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
                 pinggy_token=exp_args.get("pinggy_token"),
                 ingress_mode=exp_args.get("ingress_mode") or "pinggy",
                 ingress_host=exp_args.get("ingress_host"),
+                record_literal=bool(exp_args.get("record_literal")),
                 # Chunking fields (None when not chunking)
                 chunk_size=chunk_size if is_chunked else None,
                 chunk_index=chunk_idx,
@@ -948,6 +949,10 @@ class TracegenJobConfig:
     ingress_mode: str = "pinggy"
     ingress_host: Optional[str] = None
 
+    # Literal-token capture: co-locate harbor's RecordProxy in front of the vLLM
+    # server and route the agent endpoint through it. Default off = no proxy.
+    record_literal: bool = False
+
     # Ray object store size in GB (default: 40)
     ray_object_store_gb: float = 40.0
 
@@ -1297,6 +1302,15 @@ class TracegenJobRunner:
                 extra_env_vars=extra_env_vars if extra_env_vars else None,
             )
             with vllm_server:
+                # record_literal is not wired for the controller-ingress path in this
+                # pass (the co-located proxy would need to register as the iris
+                # endpoint); use pinggy or local ingress with --record_literal.
+                if self.config.record_literal and self.config.ingress_mode == "controller":
+                    raise NotImplementedError(
+                        "record_literal + ingress_mode=controller is not supported; "
+                        "use pinggy or local ingress with --record_literal."
+                    )
+
                 # Controller-ingress mode: replace the pinggy tunnel with a stable
                 # public URL fronting the controller proxy. Only reroutes cloud
                 # backends; local backends keep the direct vLLM endpoint. In the
@@ -1334,47 +1348,60 @@ class TracegenJobRunner:
                         )
                         return self._run_harbor(endpoint=vllm_server.endpoint)
 
-                # Check if we need Pinggy tunnel for cloud backends with installed agents
-                from hpc.pinggy_utils import (
-                    needs_pinggy_tunnel,
-                    PinggyTunnel,
-                    PinggyConfig,
-                    parse_endpoint_host_port,
-                )
+                # Co-locate harbor's RecordProxy in front of vLLM when
+                # --record_literal is set, and route the agent endpoint through it
+                # so literal token IDs / logprobs are captured. Default off = a null
+                # context manager yielding vllm_server.endpoint UNCHANGED and starting
+                # no server, so the pinggy/local handoff below is byte-identical.
+                from hpc.literal_proxy_utils import maybe_serve_literal_proxy
 
-                # Evaluate Pinggy conditions with diagnostic logging
-                has_url = bool(self.config.pinggy_persistent_url)
-                has_token = bool(self.config.pinggy_token)
-                needs_tunnel = needs_pinggy_tunnel(self.config.agent, self.config.trace_env)
-                use_pinggy = has_url and has_token and needs_tunnel
-
-                print(f"[TracegenJobRunner] Pinggy check: url={has_url}, token={has_token}, "
-                      f"needs_tunnel={needs_tunnel} (agent={self.config.agent}, env={self.config.trace_env})")
-                print(f"[TracegenJobRunner] use_pinggy={use_pinggy}, vllm_endpoint={vllm_server.endpoint}")
-
-                if use_pinggy:
-                    # Parse the vLLM endpoint to get the actual host:port
-                    # (vLLM may bind to a specific IP, not localhost)
-                    local_host, local_port = parse_endpoint_host_port(vllm_server.endpoint)
-                    print(f"[TracegenJobRunner] Starting Pinggy tunnel: {local_host}:{local_port} -> {self.config.pinggy_persistent_url}")
-                    pinggy_cfg = PinggyConfig(
-                        persistent_url=self.config.pinggy_persistent_url,
-                        token=self.config.pinggy_token,
-                        local_port=local_port,
-                        local_host=local_host,
+                with maybe_serve_literal_proxy(
+                    self.config.record_literal,
+                    vllm_server.endpoint,
+                    experiments_dir=self.config.experiments_dir,
+                    job_name=self.config.job_name,
+                ) as effective_endpoint:
+                    # Check if we need Pinggy tunnel for cloud backends with installed agents
+                    from hpc.pinggy_utils import (
+                        needs_pinggy_tunnel,
+                        PinggyTunnel,
+                        PinggyConfig,
+                        parse_endpoint_host_port,
                     )
-                    pinggy_log = log_dir / f"{self.config.job_name}_pinggy.log"
-                    pinggy_tunnel = PinggyTunnel(pinggy_cfg, log_path=pinggy_log)
 
-                    with pinggy_tunnel:
-                        # Use Pinggy's public endpoint instead of local vLLM endpoint
-                        public_endpoint = pinggy_tunnel.public_endpoint
-                        print(f"[TracegenJobRunner] Using Pinggy endpoint for Harbor: {public_endpoint}")
-                        return self._run_harbor(endpoint=public_endpoint)
-                else:
-                    # Use local vLLM endpoint directly
-                    print(f"[TracegenJobRunner] Using local vLLM endpoint for Harbor: {vllm_server.endpoint}")
-                    return self._run_harbor(endpoint=vllm_server.endpoint)
+                    # Evaluate Pinggy conditions with diagnostic logging
+                    has_url = bool(self.config.pinggy_persistent_url)
+                    has_token = bool(self.config.pinggy_token)
+                    needs_tunnel = needs_pinggy_tunnel(self.config.agent, self.config.trace_env)
+                    use_pinggy = has_url and has_token and needs_tunnel
+
+                    print(f"[TracegenJobRunner] Pinggy check: url={has_url}, token={has_token}, "
+                          f"needs_tunnel={needs_tunnel} (agent={self.config.agent}, env={self.config.trace_env})")
+                    print(f"[TracegenJobRunner] use_pinggy={use_pinggy}, vllm_endpoint={effective_endpoint}")
+
+                    if use_pinggy:
+                        # Parse the (effective) endpoint to get the actual host:port
+                        # (vLLM may bind to a specific IP, not localhost)
+                        local_host, local_port = parse_endpoint_host_port(effective_endpoint)
+                        print(f"[TracegenJobRunner] Starting Pinggy tunnel: {local_host}:{local_port} -> {self.config.pinggy_persistent_url}")
+                        pinggy_cfg = PinggyConfig(
+                            persistent_url=self.config.pinggy_persistent_url,
+                            token=self.config.pinggy_token,
+                            local_port=local_port,
+                            local_host=local_host,
+                        )
+                        pinggy_log = log_dir / f"{self.config.job_name}_pinggy.log"
+                        pinggy_tunnel = PinggyTunnel(pinggy_cfg, log_path=pinggy_log)
+
+                        with pinggy_tunnel:
+                            # Use Pinggy's public endpoint instead of local vLLM endpoint
+                            public_endpoint = pinggy_tunnel.public_endpoint
+                            print(f"[TracegenJobRunner] Using Pinggy endpoint for Harbor: {public_endpoint}")
+                            return self._run_harbor(endpoint=public_endpoint)
+                    else:
+                        # Use the effective (local vLLM, or co-located proxy) endpoint directly
+                        print(f"[TracegenJobRunner] Using local vLLM endpoint for Harbor: {effective_endpoint}")
+                        return self._run_harbor(endpoint=effective_endpoint)
 
     def _run_harbor(self, endpoint: Optional[str], api_key: Optional[str] = None) -> int:
         """Execute the Harbor CLI for trace generation.

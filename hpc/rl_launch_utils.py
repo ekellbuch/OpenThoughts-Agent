@@ -810,6 +810,10 @@ class RLJobConfig:
     ingress_mode: str = "pinggy"
     ingress_host: Optional[str] = None
 
+    # Literal-token capture: co-locate harbor's RecordProxy in front of the vLLM
+    # engines and route the agent endpoint through it. Default off = no proxy.
+    record_literal: bool = False
+
     # Agent/environment info (for needs_pinggy_tunnel decision)
     agent_name: str = "terminus-2"
     harbor_env: str = "daytona"
@@ -1156,6 +1160,7 @@ def construct_rl_sbatch_script(exp_args: dict, hpc) -> str:
         pinggy_token=exp_args.get("pinggy_token"),
         ingress_mode=exp_args.get("ingress_mode") or "pinggy",
         ingress_host=exp_args.get("ingress_host"),
+        record_literal=bool(exp_args.get("record_literal")),
         agent_name=agent_name,
         harbor_env=harbor_env,
         container_sif=exp_args.get("rl_container_sif"),
@@ -1755,6 +1760,15 @@ class RLJobRunner:
                 print(f"[RLJobRunner] Enabled distributed {self.config.harbor_env} "
                       f"across {ray_cluster.total_nodes} nodes", flush=True)
 
+            # record_literal is not wired for the controller-ingress path in this
+            # pass (the co-located proxy would need to register as the iris
+            # endpoint); use pinggy or local ingress with --record_literal.
+            if self.config.record_literal and self.config.ingress_mode == "controller":
+                raise NotImplementedError(
+                    "record_literal + ingress_mode=controller is not supported; "
+                    "use pinggy or local ingress with --record_literal."
+                )
+
             # Controller-ingress mode: replace the pinggy tunnel with a stable
             # public URL fronting the controller proxy. Only reroutes cloud
             # backends (needs_pinggy_tunnel); local backends keep direct vLLM.
@@ -1809,34 +1823,60 @@ class RLJobRunner:
                   f"needs_tunnel={needs_tunnel} (agent={self.config.agent_name}, "
                   f"env={self.config.harbor_env})", flush=True)
 
-            if use_pinggy:
-                # SkyRL's vLLM HTTP endpoint typically runs on port 8000
-                # The tunnel must be started BEFORE SkyRL so the port is available
-                vllm_port = 8000
+            # Co-locate harbor's RecordProxy in front of SkyRL's vLLM (localhost:8000)
+            # when --record_literal is set, so agent completions are captured to a
+            # literal.jsonl log. Default off = a null context manager that starts no
+            # server and leaves the tunnel port + HARBOR_MODEL_ENDPOINT exactly as
+            # today (byte-identical). When on, the tunnel fronts the proxy port and
+            # the local path routes Harbor through the proxy.
+            from hpc.literal_proxy_utils import (
+                maybe_serve_literal_proxy,
+                DEFAULT_LITERAL_PROXY_PORT,
+            )
 
-                pinggy_cfg = PinggyConfig(
-                    persistent_url=self.config.pinggy_persistent_url,
-                    token=self.config.pinggy_token,
-                    local_port=vllm_port,
-                    local_host="localhost",
-                )
+            _RL_VLLM_LOCAL = "http://localhost:8000/v1"
+            with maybe_serve_literal_proxy(
+                self.config.record_literal,
+                _RL_VLLM_LOCAL,
+                experiments_dir=self.config.experiments_dir,
+                job_name=self.config.job_name,
+            ) as literal_endpoint:
+                if use_pinggy:
+                    # SkyRL's vLLM HTTP endpoint typically runs on port 8000; when
+                    # capturing literal tokens the tunnel must front the proxy port.
+                    # The tunnel must be started BEFORE SkyRL so the port is available.
+                    vllm_port = (
+                        DEFAULT_LITERAL_PROXY_PORT if self.config.record_literal else 8000
+                    )
 
-                log_dir = Path(self.config.experiments_dir) / "logs"
-                log_dir.mkdir(parents=True, exist_ok=True)
-                pinggy_log = log_dir / f"{self.config.job_name}_pinggy.log"
+                    pinggy_cfg = PinggyConfig(
+                        persistent_url=self.config.pinggy_persistent_url,
+                        token=self.config.pinggy_token,
+                        local_port=vllm_port,
+                        local_host="localhost",
+                    )
 
-                print(f"[RLJobRunner] Starting Pinggy tunnel: localhost:{vllm_port} -> "
-                      f"{self.config.pinggy_persistent_url}", flush=True)
+                    log_dir = Path(self.config.experiments_dir) / "logs"
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    pinggy_log = log_dir / f"{self.config.job_name}_pinggy.log"
 
-                with PinggyTunnel(pinggy_cfg, log_path=pinggy_log) as tunnel:
-                    # Set environment variable for SkyRL/Harbor to use public endpoint
-                    # Terminal bench reads this to configure the hosted_vllm backend
-                    os.environ["HARBOR_MODEL_ENDPOINT"] = tunnel.public_endpoint
-                    print(f"[RLJobRunner] HARBOR_MODEL_ENDPOINT={tunnel.public_endpoint}", flush=True)
+                    print(f"[RLJobRunner] Starting Pinggy tunnel: localhost:{vllm_port} -> "
+                          f"{self.config.pinggy_persistent_url}", flush=True)
+
+                    with PinggyTunnel(pinggy_cfg, log_path=pinggy_log) as tunnel:
+                        # Set environment variable for SkyRL/Harbor to use public endpoint
+                        # Terminal bench reads this to configure the hosted_vllm backend
+                        os.environ["HARBOR_MODEL_ENDPOINT"] = tunnel.public_endpoint
+                        print(f"[RLJobRunner] HARBOR_MODEL_ENDPOINT={tunnel.public_endpoint}", flush=True)
+                        return self._run_skyrl()
+                else:
+                    if self.config.record_literal:
+                        # Route Harbor through the co-located proxy instead of vLLM directly.
+                        os.environ["HARBOR_MODEL_ENDPOINT"] = literal_endpoint
+                        print(f"[RLJobRunner] record_literal: HARBOR_MODEL_ENDPOINT={literal_endpoint}", flush=True)
+                        return self._run_skyrl()
+                    print(f"[RLJobRunner] No Pinggy tunnel needed, using local vLLM", flush=True)
                     return self._run_skyrl()
-            else:
-                print(f"[RLJobRunner] No Pinggy tunnel needed, using local vLLM", flush=True)
-                return self._run_skyrl()
 
     def _run_skyrl(self) -> int:
         """Execute SkyRL training.

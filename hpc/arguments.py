@@ -492,6 +492,20 @@ class LaunchArgs:
             ),
         },
     )
+    record_literal: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Co-locate harbor's RecordProxy in front of the on-cluster vLLM and route the "
+                "agent's inference endpoint THROUGH it, capturing literal token IDs / logprobs "
+                "to a literal.jsonl log (for agents with SUPPORTS_LITERAL_TRACES, e.g. opencode). "
+                "Default off = the proxy is never started and the endpoint wiring is "
+                "byte-identical to today. Pair with make_and_upload_trace_dataset "
+                "--include_literal_tokens at export time."
+            ),
+            "store_true": True,
+        },
+    )
     use_mca: bool = field(
         default=False,
         metadata={
