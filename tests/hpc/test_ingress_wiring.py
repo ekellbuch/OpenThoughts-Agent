@@ -304,9 +304,11 @@ def test_record_proxy_accepts_unauthenticated_calls():
 # --------------------------------------------------------------------------- #
 # opencode model routing (openai provider + OPENAI_BASE_URL)
 # --------------------------------------------------------------------------- #
-def test_opencode_model_routing_uses_openai_provider_and_api_base():
-    # opencode must get openai/<served_id> (NOT hosted_vllm/<id>) so harbor wires
-    # OPENAI_BASE_URL, and the base url is the resolved (ingress) api_base.
+def test_opencode_model_routing_uses_vllm_provider_and_api_base():
+    # opencode must get vllm/<served_id> (NOT openai/<id> or hosted_vllm/<id>) so
+    # harbor registers the "@ai-sdk/openai-compatible" provider (POST
+    # /v1/chat/completions, not the Responses API) and wires OPENAI_BASE_URL; the
+    # base url is the resolved (ingress) api_base.
     from hpc.local_runner_utils import opencode_model_routing
 
     meta = {"api_base": "https://ingress.example/proxy/otagent-myjob/v1"}
@@ -314,7 +316,7 @@ def test_opencode_model_routing_uses_openai_provider_and_api_base():
         agent_name="opencode", served_model_id="1783107198924068", serving_meta=meta
     )
     assert route == (
-        "openai/1783107198924068",
+        "vllm/1783107198924068",
         "https://ingress.example/proxy/otagent-myjob/v1",
     )
 
