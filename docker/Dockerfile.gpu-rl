@@ -464,14 +464,21 @@ RUN . $RL_ENV_DIR/bin/activate && \
 #   carries the TrialNotScoredError de-flatten (stop flattening upstream errors
 #   into VNC) and the earlier reward-zeroing rmtree fix (342729d5).
 # --no-deps so this only swaps the harbor source, not its resolved deps.
-#   ef42e75e = "perf(daytona): replace 1s exec poll with 1ms+jitter (rollout-
-#   throughput fix)" — drops the Daytona per-exec poll from a 1s sleep to
-#   0.001s + jitter (asyncio.sleep(0.001 + random.uniform(0, 0.001)) in
-#   _poll_response), so each exec costs ~runtime+RTT instead of ceil(runtime)+1s.
-#   This is what feeds the RL engines faster (poll-starvation fix). Supersedes
-#   f7f51f13 (litellm-spam merge); its history still carries the TrialNotScoredError
-#   de-flatten + the reward-zeroing rmtree fix (342729d5).
-ENV HARBOR_COMMIT=ef42e75e400cec0a743bc051658d42b2da0af7d9
+#   0729a3e9 = "perf(daytona): bake tmux+asciinema into every snapshot at BUILD
+#   time" — sits ON TOP of ef42e75e, so it carries BOTH throughput fixes:
+#     (1) ef42e75e "perf(daytona): replace 1s exec poll with 1ms+jitter" — drops
+#         the Daytona per-exec poll from a 1s sleep to 0.001s + jitter
+#         (asyncio.sleep(0.001 + random.uniform(0, 0.001)) in _poll_response), so
+#         each exec costs ~runtime+RTT instead of ceil(runtime)+1s (poll-starvation).
+#     (2) 0729a3e9 tmux-bake — snapshots.py bake_agent_tooling()/_AGENT_TOOLING_LAYER
+#         installs tmux+asciinema at snapshot BUILD time, so the terminus-2 per-episode
+#         tmux/asciinema install short-circuits (`tmux -V`/`asciinema --version` probes
+#         satisfied) → kills the ~401s agent_setup / 63% AgentSetupTimeout.
+#   Supersedes f7f51f13 (litellm-spam merge); its history still carries the
+#   TrialNotScoredError de-flatten + the reward-zeroing rmtree fix (342729d5).
+#   NOTE: the tmux-bake only takes effect on a FRESH snapshot mint — the stale
+#   per-env snapshot must be deleted so harbor re-builds it with the baked layer.
+ENV HARBOR_COMMIT=0729a3e93c3679283ea560d70d03b3e4af05700c
 RUN . $RL_ENV_DIR/bin/activate && \
     uv pip install --no-deps --force-reinstall \
         "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
