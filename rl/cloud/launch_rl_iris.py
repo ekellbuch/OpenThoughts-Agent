@@ -140,14 +140,15 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # attempt (diagnosed restart-from-0 across all 8 r4 pods → ImagePullBackOff; the incremental-base
     # rebuild ALSO failed because the build pod had to pull the same 16.6 GB base). 48 small layers each
     # pull+retry independently. Build asserts green (baked harbor 0.8.0 @ 0729a3e9). Digest below.
-    # gpu-rl-e79c224b (built 2026-07-03, kaniko job gpurl-kaniko-e79c224b): HARBOR_COMMIT-only bump of
-    # gpu-rl-efd77b98 → harbor a4957ef1 "reuse one persistent exec session per sandbox" (descends from
-    # 0729a3e9, so keeps the 1ms poll + tmux-bake AND adds _ensure_exec_session — cuts the per-turn
-    # Daytona-exec overhead that starved the engines at n=256). Same PULLABLE re-layered build recipe
-    # (SINGLE_SNAPSHOT=0 + torch nvidia-CUDA split, max layer 3.46 GB, 48 layers). Everything else
-    # unchanged (MarinSkyRL 39faff7d baked, vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128).
-    "@sha256:d6a6da981afcac5c8afe2ee7d87b18551591e0e78fcd3f675d9e91caede7d3a0"  # noqa: E501  (gpu-rl-e79c224b)
-    # (prev: gpu-rl-efd77b98 @sha256:59cef2f5… harbor 0729a3e9; gpu-rl-69634c0b @sha256:d9c7e604… un-pullable)
+    # gpu-rl-a003838c (built 2026-07-03, kaniko job gpurl-kaniko-a003838c): HARBOR_COMMIT-only bump →
+    # harbor 9416d5f3 "default-OFF episode logging" (descends from a4957ef1, so keeps 1ms poll + tmux-bake
+    # + persistent exec session, AND gates the 3 big synchronous per-turn S3 writes — debug.json + prompt
+    # + response — behind default-OFF enable_episode_logging, the real throughput lever py-spy found: a
+    # sync S3 write per LLM call blocking the shared asyncio loop). Same PULLABLE recipe (SINGLE_SNAPSHOT=0
+    # + torch nvidia-CUDA split, max layer 3.46 GB, 48 layers). Everything else unchanged (MarinSkyRL
+    # 39faff7d baked, vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128).
+    "@sha256:8088222c43b8a7d74d39da59f2523f2a000d8ce44566117c052f7b028a9f44f3"  # noqa: E501  (gpu-rl-a003838c)
+    # (prev: gpu-rl-e79c224b @sha256:d6a6da98… harbor a4957ef1; efd77b98 @sha256:59cef2f5… harbor 0729a3e9)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
