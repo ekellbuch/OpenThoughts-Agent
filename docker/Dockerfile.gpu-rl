@@ -317,7 +317,10 @@ ENV SKYRL_BRANCH=penfever/working
 #   - 39faff7d "make rollout_routed_experts dtype deterministic (num_experts-keyed)"
 #     — the production-safe hardening of ac4b3806 (rank-invariant dtype; forward-fix
 #     validated end-to-end gs-1 + regression-free at the forward on 131k, 2026-07-01).
-ENV SKYRL_COMMIT=39faff7d4deef25336617032f14f17a7d68aaa93
+#   - 3caeb79f "fix(tis): generalized served-id splice (Fix A) for 35B interleaved-
+#     thinking" — bake the TIS served-id-splice fix (previously runtime-only via
+#     --skyrl-ref) so future 35B launches get it by default (2026-07-04).
+ENV SKYRL_COMMIT=3caeb79f529ea60d646dabfb404f741809c7d8e8
 
 RUN git clone --branch $SKYRL_BRANCH https://github.com/marin-community/MarinSkyRL.git $SKYRL_HOME && \
     git -C $SKYRL_HOME checkout $SKYRL_COMMIT
@@ -526,7 +529,12 @@ RUN . $RL_ENV_DIR/bin/activate && \
 #   default-OFF `enable_episode_logging` switch (terminus_2.py:191 `= False`). A 4th
 #   per-turn write (trajectory.json, training-critical) REMAINS — r8 measures
 #   whether removing 3 of 4 unblocks training at n=256.
-ENV HARBOR_COMMIT=9416d5f341bf416c3d63c7641b0d797ae8997c0c
+#   - 2e42d312 "perf(lite_llm): cheap reaper DEFAULT-ON (opt out via HARBOR_CHEAP_REAPER=0)"
+#     — the O(orphans) cheap-reaper fix (descends from 4fcbea0a) now made DEFAULT-ON
+#     (os.environ.get("HARBOR_CHEAP_REAPER","1") != "0"; =0 is the opt-out) that
+#     relieves the n=384 coordinator bottleneck. THIS is the reason for the rebuild
+#     (2026-07-04).
+ENV HARBOR_COMMIT=2e42d31218277c5474d2a538ca32fd83caa96b06
 RUN . $RL_ENV_DIR/bin/activate && \
     uv pip install --no-deps --force-reinstall \
         "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
