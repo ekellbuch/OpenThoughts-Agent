@@ -40,7 +40,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from upath import UPath
 
@@ -259,10 +259,22 @@ def inject_literals(trajectory: dict[str, Any], chain: Chain) -> int:
 # --------------------------------------------------------------------------- #
 # I/O boundary
 # --------------------------------------------------------------------------- #
-def load_literal_records(literal_log_uri: str) -> list[LiteralRecord]:
-    """Read + parse the (possibly gs://) literal.jsonl into LiteralRecords."""
-    text = UPath(literal_log_uri).read_text()
-    return parse_literal_records(text.splitlines())
+def load_literal_records(literal_log_uri: "str | Sequence[str]") -> list[LiteralRecord]:
+    """Read + parse one OR MANY (possibly gs://) literal.jsonl files into records.
+
+    A preempted campaign job accumulates ONE durable ``literal.jsonl`` per serve
+    attempt (the slug carries the per-serve timestamp, so attempts do not clobber),
+    e.g. ``…_111941_literal.jsonl`` (attempt 0) + ``…_161605_literal.jsonl`` (attempt
+    1). Each trial's records live entirely in whichever serve handled it, so binding
+    is correct over the UNION of all attempts' records — pass every matched file so
+    no attempt's literals are silently dropped.
+    """
+    uris = [literal_log_uri] if isinstance(literal_log_uri, str) else list(literal_log_uri)
+    records: list[LiteralRecord] = []
+    for uri in uris:
+        text = UPath(uri).read_text()
+        records.extend(parse_literal_records(text.splitlines()))
+    return records
 
 
 def _trial_window(trial_dir: UPath) -> Optional[tuple[float, float]]:
@@ -320,15 +332,16 @@ class EnrichStats:
 
 def enrich_trajectories_with_literals(
     job_dir: str,
-    literal_log_uri: str,
+    literal_log_uri: "str | Sequence[str]",
     *,
     iter_trial_dirs,
     verbose: bool = False,
 ) -> EnrichStats:
     """Populate opencode trajectory step metrics with proxy-captured literals.
 
-    Reconstructs per-trial chains from ``literal_log_uri`` once, then for each trial
-    under ``job_dir`` binds its trajectory to a chain (verify-or-skip) and rewrites
+    Reconstructs per-trial chains from ``literal_log_uri`` (one file, OR the UNION of
+    every serve attempt's file for a preempted job) once, then for each trial under
+    ``job_dir`` binds its trajectory to a chain (verify-or-skip) and rewrites
     ``agent/trajectory.json`` in place with the token IDs / logprobs. ``iter_trial_dirs``
     is injected (harbor's pruning enumerator) to avoid importing harbor here.
     Idempotent: re-running re-injects the same values.
@@ -337,9 +350,10 @@ def enrich_trajectories_with_literals(
     chains = reconstruct_chains(records)
     stats = EnrichStats(chains=len(chains), ambiguous_chains=sum(ch.ambiguous for ch in chains))
     if verbose:
+        n_files = 1 if isinstance(literal_log_uri, str) else len(list(literal_log_uri))
         print(
             f"[literal-correlator] {len(records)} records -> {len(chains)} chains "
-            f"({stats.ambiguous_chains} ambiguous) from {literal_log_uri}"
+            f"({stats.ambiguous_chains} ambiguous) from {n_files} literal file(s)"
         )
 
     for trial_dir in iter_trial_dirs(job_dir):
@@ -379,12 +393,16 @@ def enrich_trajectories_with_literals(
     return stats
 
 
-def discover_literal_log(job_dir: str) -> Optional[str]:
-    """Find the durable literal.jsonl for a job dir, or None.
+def discover_literal_logs(job_dir: str) -> list[str]:
+    """Find ALL durable literal.jsonl files for a job dir (empty list if none).
 
-    The proxy writes it to ``<experiments_dir>/logs/<slug>_literal.jsonl``. The
-    export ``--job_dir`` may be that experiments_dir or a child; search the dir and
-    up to a few parents for a ``logs/*_literal.jsonl``.
+    The proxy writes one per serve attempt to
+    ``<experiments_dir>/logs/<slug>_literal.jsonl`` (the slug carries a per-serve
+    timestamp, so a preempt-resume produces multiple non-clobbering files). The
+    export ``--job_dir`` may be that experiments_dir or a child; search the dir and a
+    few parents, and return EVERY match from the first ``logs/`` that has any — so a
+    preempted job's records are correlated over the full union, never just one
+    attempt. Returns them sorted (stable order; the union is order-independent).
     """
     cur = UPath(job_dir)
     for _ in range(4):
@@ -393,10 +411,16 @@ def discover_literal_log(job_dir: str) -> Optional[str]:
             if logs.exists():
                 hits = sorted(logs.glob("*_literal.jsonl"))
                 if hits:
-                    return str(hits[0])
+                    return [str(h) for h in hits]
         except (FileNotFoundError, NotImplementedError):
             pass
         if cur.parent == cur:
             break
         cur = cur.parent
-    return None
+    return []
+
+
+def discover_literal_log(job_dir: str) -> Optional[str]:
+    """Back-compat single-file discovery: the first of :func:`discover_literal_logs`."""
+    logs = discover_literal_logs(job_dir)
+    return logs[0] if logs else None

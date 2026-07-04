@@ -373,3 +373,30 @@ def test_enrich_zero_bind_condition_for_fail_loud(tmp_path):
     ))
     stats = enrich_trajectories_with_literals(str(job), str(log), iter_trial_dirs=_iter)
     assert stats.trials > 0 and stats.trials_enriched == 0
+
+
+def test_enrich_binds_across_two_serve_files(tmp_path):
+    # Resume-safety: a preempted job has TWO per-serve literal files; a trial's
+    # records live entirely in whichever serve ran it. enrich over the UNION must
+    # bind BOTH attempts' trials, with no cross-attempt mis-merge (0 ambiguous).
+    job = tmp_path / "job"
+    job.mkdir()
+    trial_a = _write_trial(job, "trial-A", [(5, 2), (9, 3)])   # served by attempt 0
+    trial_b = _write_trial(job, "trial-B", [(6, 4)])           # served by attempt 1
+    a = _trial_records("TASK_A", [([1, 2, 3, 4, 5], [70, 71]), (list(range(9)), [72, 73, 74])], base_ts=100)
+    b = _trial_records("TASK_B", [([1, 2, 3, 4, 5, 6], [80, 81, 82, 83])], base_ts=9000)
+    f0 = tmp_path / "s0_literal.jsonl"
+    f1 = tmp_path / "s1_literal.jsonl"
+    f0.write_text("\n".join(
+        _record_line(r.messages, r.prompt_token_ids, r.completion_token_ids, r.logprobs, r.timestamp) for r in a))
+    f1.write_text("\n".join(
+        _record_line(r.messages, r.prompt_token_ids, r.completion_token_ids, r.logprobs, r.timestamp) for r in b))
+
+    stats = enrich_trajectories_with_literals(str(job), [str(f0), str(f1)], iter_trial_dirs=_iter)
+    assert stats.trials == 2
+    assert stats.trials_enriched == 2       # BOTH attempts' trials bound
+    assert stats.ambiguous_chains == 0      # no cross-attempt mis-merge
+    ta = json.loads((trial_a / "agent" / "trajectory.json").read_text())
+    tb = json.loads((trial_b / "agent" / "trajectory.json").read_text())
+    assert ta["steps"][0]["metrics"]["completion_token_ids"] == [70, 71]
+    assert tb["steps"][0]["metrics"]["completion_token_ids"] == [80, 81, 82, 83]

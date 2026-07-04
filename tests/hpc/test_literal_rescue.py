@@ -47,24 +47,24 @@ def test_parity_no_literal_no_flags_is_text_only(tmp_path):
     job = _job_without_literal(tmp_path)
     assert resolve_literal_inclusion(
         str(job), literal_log=None, include_literal_tokens=False, no_literal_tokens=False
-    ) == (False, None)
+    ) == (False, [])
 
 
 def test_favor_literal_present_default_on(tmp_path):
     # FAVOR: a discoverable sibling logs/*literal.jsonl -> literals ON, no flag needed.
     job = _job_with_literal(tmp_path)
-    include, uri = resolve_literal_inclusion(
+    include, uris = resolve_literal_inclusion(
         str(job), literal_log=None, include_literal_tokens=False, no_literal_tokens=False
     )
     assert include is True
-    assert uri is not None and uri.endswith("job_literal.jsonl")
+    assert len(uris) == 1 and uris[0].endswith("job_literal.jsonl")
 
 
 def test_opt_out_forces_text_only_even_with_literal(tmp_path):
     job = _job_with_literal(tmp_path)
     assert resolve_literal_inclusion(
         str(job), literal_log=None, include_literal_tokens=False, no_literal_tokens=True
-    ) == (False, None)
+    ) == (False, [])
 
 
 def test_explicit_literal_log_wins(tmp_path):
@@ -72,7 +72,7 @@ def test_explicit_literal_log_wins(tmp_path):
     explicit = "gs://bucket/x/logs/y_literal.jsonl"
     assert resolve_literal_inclusion(
         str(job), literal_log=explicit, include_literal_tokens=False, no_literal_tokens=False
-    ) == (True, explicit)
+    ) == (True, [explicit])
 
 
 def test_require_missing_fails_loud(tmp_path):
@@ -91,7 +91,7 @@ def test_no_literal_wins_over_require(tmp_path):
     job = _job_without_literal(tmp_path)
     assert resolve_literal_inclusion(
         str(job), literal_log=None, include_literal_tokens=True, no_literal_tokens=True
-    ) == (False, None)
+    ) == (False, [])
 
 
 # --------------------------------------------------------------------------- #
@@ -107,3 +107,57 @@ def test_count_populated_literal_rows():
     # column absent -> 0 (a text-only dataset), never raises.
     t2 = pa.table({"conversations": [[], []]})
     assert count_populated_literal_rows(t2) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Resume-safety: multiple per-serve literal.jsonl files (preempted job)
+# --------------------------------------------------------------------------- #
+def _job_with_two_literal_files(tmp_path):
+    """A job dir with a logs/ holding TWO per-serve literal files (attempt 0 + 1)."""
+    job = tmp_path / "job"
+    (job / "logs").mkdir(parents=True)
+    (job / "trial-A" / "agent").mkdir(parents=True)
+    (job / "trial-A" / "agent" / "trajectory.json").write_text(json.dumps({"steps": []}))
+    (job / "logs" / "tracegen__x__20260704_111941_literal.jsonl").write_text(
+        '{"status_code":200,"request":{"messages":[]},"literal":{"completion_token_ids":[1]}}\n'
+    )
+    (job / "logs" / "tracegen__x__20260704_161605_literal.jsonl").write_text(
+        '{"status_code":200,"request":{"messages":[]},"literal":{"completion_token_ids":[2]}}\n'
+    )
+    return job
+
+
+def test_discover_literal_logs_returns_all_attempts(tmp_path):
+    from scripts.harbor.literal_correlator import discover_literal_logs, discover_literal_log
+
+    job = _job_with_two_literal_files(tmp_path)
+    logs = discover_literal_logs(str(job))
+    assert len(logs) == 2
+    assert any("111941" in u for u in logs) and any("161605" in u for u in logs)
+    # back-compat singular still returns the first (sorted)
+    assert discover_literal_log(str(job)).endswith("111941_literal.jsonl")
+
+
+def test_resolve_returns_all_literal_files(tmp_path):
+    job = _job_with_two_literal_files(tmp_path)
+    include, uris = resolve_literal_inclusion(
+        str(job), literal_log=None, include_literal_tokens=False, no_literal_tokens=False
+    )
+    assert include is True and len(uris) == 2
+
+
+def test_load_literal_records_unions_multiple_files(tmp_path):
+    from scripts.harbor.literal_correlator import load_literal_records
+
+    a = tmp_path / "a_literal.jsonl"
+    b = tmp_path / "b_literal.jsonl"
+    a.write_text('{"status_code":200,"request":{"messages":[{"role":"user","content":"A"}]},'
+                 '"literal":{"prompt_token_ids":[1],"completion_token_ids":[9]}}\n')
+    b.write_text('{"status_code":200,"request":{"messages":[{"role":"user","content":"B"}]},'
+                 '"literal":{"prompt_token_ids":[2],"completion_token_ids":[8]}}\n')
+    # one file
+    assert len(load_literal_records(str(a))) == 1
+    # union of both
+    recs = load_literal_records([str(a), str(b)])
+    assert len(recs) == 2
+    assert {r.completion_token_ids[0] for r in recs} == {9, 8}

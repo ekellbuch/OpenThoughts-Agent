@@ -909,25 +909,26 @@ def resolve_literal_inclusion(
     literal_log: Optional[str],
     include_literal_tokens: bool,
     no_literal_tokens: bool,
-) -> tuple[bool, Optional[str]]:
+) -> tuple[bool, list[str]]:
     """Decide whether to include literal token columns, FAVORING them when present.
 
-    Returns ``(include, literal_log_uri)``:
-      - ``--no_literal_tokens`` -> ``(False, None)`` (forced text-only).
-      - else resolve ``literal_log`` (explicit) or auto-discover the sibling
-        ``<job_dir>/logs/*literal.jsonl`` (also a few parents; gs:// ok):
-          - found -> ``(True, <uri>)`` (favor: default-on WHEN PRESENT).
+    Returns ``(include, literal_log_uris)`` — a LIST so a preempted job's multiple
+    per-serve ``*_literal.jsonl`` files are ALL correlated (never just one):
+      - ``--no_literal_tokens`` -> ``(False, [])`` (forced text-only).
+      - else resolve ``[literal_log]`` (explicit) or auto-discover ALL sibling
+        ``<job_dir>/logs/*_literal.jsonl`` (also a few parents; gs:// ok):
+          - found -> ``(True, [<uris>])`` (favor: default-on WHEN PRESENT).
           - not found and ``--include_literal_tokens`` (REQUIRE) -> SystemExit.
-          - not found otherwise -> ``(False, None)`` (parity: byte-identical text-only).
+          - not found otherwise -> ``(False, [])`` (parity: byte-identical text-only).
 
     GLOBAL INVARIANT: a job with no discoverable literal.jsonl and no force flag is
     text-only, exactly as before this change.
     """
-    from scripts.harbor.literal_correlator import discover_literal_log
+    from scripts.harbor.literal_correlator import discover_literal_logs
 
     if no_literal_tokens:
-        return (False, None)
-    resolved = literal_log or discover_literal_log(job_dir)
+        return (False, [])
+    resolved = [literal_log] if literal_log else discover_literal_logs(job_dir)
     if resolved:
         return (True, resolved)
     if include_literal_tokens:
@@ -938,7 +939,7 @@ def resolve_literal_inclusion(
             "refusing to silently export a literal-less dataset. Pass --no_literal_tokens "
             "to export text-only intentionally."
         )
-    return (False, None)
+    return (False, [])
 
 
 def main() -> None:
@@ -956,7 +957,7 @@ def main() -> None:
     # per-trial trajectory step metrics here, BEFORE export. Verify-or-skip: only
     # steps whose token COUNTS match a correlated record are enriched, so a wrong
     # join omits rather than corrupts. No-op for non-literal jobs.
-    include_literal_tokens, literal_log = resolve_literal_inclusion(
+    include_literal_tokens, literal_logs = resolve_literal_inclusion(
         str(job_dir),
         literal_log=args.literal_log,
         include_literal_tokens=bool(args.include_literal_tokens),
@@ -966,10 +967,13 @@ def main() -> None:
         from scripts.harbor.literal_correlator import enrich_trajectories_with_literals
 
         traces_utils = _import_traces_utils()
-        print(f"[trace-export] Correlating literal tokens from {literal_log} ...")
+        print(
+            f"[trace-export] Correlating literal tokens from {len(literal_logs)} "
+            f"file(s): {literal_logs} ..."
+        )
         stats = enrich_trajectories_with_literals(
             str(job_dir),
-            literal_log,
+            literal_logs,
             iter_trial_dirs=lambda root: traces_utils.iter_trial_dirs(root, recursive=True),
             verbose=bool(args.verbose),
         )
