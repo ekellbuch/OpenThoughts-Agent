@@ -481,6 +481,16 @@ generator:
   timeout_multiplier: 1.0
   model_dtype: bfloat16
 
+  # THROUGHPUT LEVER (2026-07-04 max-conc finding): CUDA graphs ON — mirror the 30B config.
+  # SkyRL ppo_base_config.yaml defaults generator.enforce_eager: TRUE (CUDA-graphs OFF); this
+  # 35B cell never overrode it, so the max-concurrency probe served cudagraph_mode=NONE (decode
+  # ~10x below floor → the sweep was decode-throttled + its saturation onset understated).
+  # enforce_eager=false is safe for the same reason as the 30B cell (the R3 routed-experts
+  # capturer is cudagraph-designed; the cudagraph pool is carved from gpu_memory_utilization and
+  # KV had headroom at max_num_seqs=20) — see grid_30b_EP8_FSDP4_CP1.yaml's enforce_eager comment
+  # for the full justification.
+  enforce_eager: false
+
   # TP=4 — the Qwen3-Next/3.5 hybrid-MoE model-card recommendation. Divides 16
   # attn heads (4/GPU) + 256 experts (64/GPU); 2 KV heads REPLICATED across TP
   # (GQA, legal — and the reason the 131k KV is not sharded; see MEMORY (A)).
