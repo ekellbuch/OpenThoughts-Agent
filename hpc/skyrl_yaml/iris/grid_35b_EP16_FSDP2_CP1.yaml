@@ -604,6 +604,13 @@ extra_env:
   # (and the long-ctx chunked scan whose peak we watch at step 1 — MEMORY (B)).
   SKYRL_GDN_MASK_FLA: "1"
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  # --- TIS Fix A (skyrl 3caeb79f): generalized served-id splice ---
+  # Forces per-turn use of vLLM's raw served completion_token_ids as the generated
+  # region so TIS tier-1 exact-by-id alignment holds by construction, closing the
+  # residual off-by-1..4 think-block re-tok divergence on this interleaved-thinking
+  # 35B (see agent_logs/2026-07-04_35b_tis_tokenizer_divergence.md). Env-gated in
+  # get_response_ids_and_loss_mask_from_messages; requires --skyrl-ref >= 3caeb79f.
+  SKYRL_TIS_SERVED_ID_SPLICE: "1"
   # --- vLLM serve flags ---
   VLLM_USE_FLASHINFER_SAMPLER: "0"
   VLLM_ATTENTION_BACKEND: FLASH_ATTN
