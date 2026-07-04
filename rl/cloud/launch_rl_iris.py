@@ -147,7 +147,11 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # sync S3 write per LLM call blocking the shared asyncio loop). Same PULLABLE recipe (SINGLE_SNAPSHOT=0
     # + torch nvidia-CUDA split, max layer 3.46 GB, 48 layers). Everything else unchanged (MarinSkyRL
     # 39faff7d baked, vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128).
-    "@sha256:8088222c43b8a7d74d39da59f2523f2a000d8ce44566117c052f7b028a9f44f3"  # noqa: E501  (gpu-rl-a003838c)
+    # gpu-rl-722fec34 (built 2026-07-04, kaniko gpurl-kaniko-722fec34): harbor 2e42d312 (cheap reaper
+    # DEFAULT-ON — fixes the n=384 O(N) coordinator-reaper bottleneck py-spy found; opt out via
+    # HARBOR_CHEAP_REAPER=0) + skyrl 3caeb79f (TIS served-id splice, now baked-default — no --skyrl-ref
+    # needed for 35B). Same PULLABLE recipe; vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128 unchanged.
+    "@sha256:928946fdf69bde2512ae7740ad53dec27b65c2ca8bf97932c72cd63c558390b6"  # noqa: E501  (gpu-rl-722fec34)
     # (prev: gpu-rl-e79c224b @sha256:d6a6da98… harbor a4957ef1; efd77b98 @sha256:59cef2f5… harbor 0729a3e9)
 )
 _SUPERSEDED_RL_IMAGES = (
