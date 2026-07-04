@@ -890,6 +890,19 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def count_populated_literal_rows(table) -> int:
+    """Number of rows whose ``prompt_token_ids`` column is non-empty (a pyarrow Table).
+
+    Post-upload sanity check for the rescue path: a job that HAD a ``literal.jsonl``
+    must land >0 such rows; 0 means the literals silently dropped somewhere. Returns 0
+    when the column is absent entirely. Pure (operates on an already-loaded table) so
+    it is unit-testable and reusable from a skill's post-upload snippet.
+    """
+    if "prompt_token_ids" not in table.column_names:
+        return 0
+    return sum(1 for v in table.column("prompt_token_ids").to_pylist() if v)
+
+
 def resolve_literal_inclusion(
     job_dir: str,
     *,

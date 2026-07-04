@@ -106,9 +106,13 @@ job_id prefix:
   image resume in minutes; surface "relaunch on the current image to eliminate the resume tax" for a job that keeps
   paying it. ESCALATE (report as an OUTLIER worth a look, still NO auto-kill) only if the resume exceeds ~8h with a
   still-healthy engine (beyond the observed max); if there is NO healthy engine, it is the §4b zombie path.
-- **Rescue mechanics (both):** `gsutil rsync` `gs://marin-models-{us,eu}/ot-agent/<job>/<job>/` → `/tmp/<job>_traces`,
+- **Rescue mechanics (both):** `gsutil rsync` the OUTER `gs://marin-models-{us,eu}/ot-agent/<job>/` → `/tmp/<job>_traces`
+  (the OUTER `<job>/` — carries the trial dirs AND the sibling `logs/<slug>_literal.jsonl`; do NOT rsync only the
+  inner `<job>/<job>/`, which drops `logs/` and silently loses the literals for a `--record_literal` job),
   then `make_and_upload_trace_dataset.py --job_dir /tmp/<job>_traces --repo_id penfever/<slug>-qwen3.5-122b-32k-traces
-  --episodes last --filter none --skip_register` (source `secrets.env` first). Report row count + update the tracker.
+  --episodes last --filter none --skip_register` (source `secrets.env` first). Literals AUTO-INCLUDE when a
+  `logs/*_literal.jsonl` is present (`--no_literal_tokens` to force text-only; FAILS LOUD on a present-literal /
+  0-bind). Report row count AND the `Literal yield: X/Y` line (X>0 for a `--record_literal` job); update the tracker.
   (Full launch/rescue detail: **datagen-launch-iris**.)
 
 ## 5. KEEP TWO DATAGEN IN-FLIGHT (datagen only)

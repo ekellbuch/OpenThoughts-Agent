@@ -75,6 +75,21 @@ python -m scripts.harbor.make_and_upload_trace_dataset \
 Default to the `penfever/` org and `--episodes last`. For a chunked launch, upload each chunk's trace_jobs
 to its own `_chunk{i}` repo. Public by default (per `feedback_hf_public_default`).
 
+**Literals are AUTO-INCLUDED when present (no flag needed).** The uploader now FAVORS the durable
+`literal.jsonl`: it auto-discovers the sibling `<experiments_dir>/logs/*_literal.jsonl` (searching `--job_dir`
+and a few parents) and, when found, correlates the RecordProxy records into the trajectory step metrics so the
+exported dataset carries the trainable `prompt_token_ids` / `completion_token_ids` / `logprobs` columns.
+Requirements + knobs:
+- **`--job_dir` must sit inside the experiments-dir tree** so the parent-walk reaches `…/logs/`. `$INNER` (the
+  trial-containing dir) qualifies as long as the local run dir still has its sibling `logs/` (local runs do).
+  For a gs:// rescue see monitor-restore-iris / monitor-cron-sweep-iris §4a (rsync the OUTER `<job>/` so `logs/`
+  rides along, NOT just the inner trial dir).
+- A job with **no** `literal.jsonl` exports text-only, byte-identical to before (parity).
+- `--no_literal_tokens` forces text-only even when a `literal.jsonl` is present.
+- `--include_literal_tokens` now means REQUIRE: it fails loud if literals are expected but none are found (use
+  it in a cron to guarantee a `--record_literal` job never silently ships literal-less).
+- The uploader FAILS LOUD if a `literal.jsonl` is present but 0 trials bind (a regression, not a valid dataset).
+
 ## 4. Verify the HF dataset is non-empty
 The repo may exist as a 0-row shell (a prior failed/partial upload, or Harbor pre-creating it); an existing
 repo is NOT proof of success. Confirm row count:
@@ -85,6 +100,18 @@ curl -s -H "Authorization: Bearer $HF_TOKEN" \
 ```
 The uploader's own "Generating train split: N examples" line is the ground-truth count — N should match the
 real (non-1-turn) trial count from step 2. Zero files / 0 rows = the upload did not land; re-run step 3.
+
+**Also verify the literal columns landed (jobs run with `--record_literal`).** The uploader prints a
+`[trace-export] Literal yield: X/Y trials …` line — X should be > 0. Post-upload, confirm the columns are
+populated in the pushed dataset (>0 non-empty `prompt_token_ids` rows):
+```python
+import datasets
+from scripts.harbor.make_and_upload_trace_dataset import count_populated_literal_rows
+ds = datasets.load_dataset("penfever/<descriptive-name>", split="train")
+print("rows w/ literals:", count_populated_literal_rows(ds.data.table))   # must be > 0 for a --record_literal job
+```
+0 populated rows on a `--record_literal` job = the literals dropped — re-run step 3 with the correct
+`--job_dir` (must reach the sibling `logs/`), or pass `--literal_log <gs://…/logs/<slug>_literal.jsonl>`.
 
 ## 5. Clean up disk (only after step 4 confirms the upload)
 - **Remove the run/experiments dir** (trace_jobs is the bulk — tens of GB for a full tezos run):

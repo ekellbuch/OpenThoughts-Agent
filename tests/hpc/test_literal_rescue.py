@@ -92,3 +92,18 @@ def test_no_literal_wins_over_require(tmp_path):
     assert resolve_literal_inclusion(
         str(job), literal_log=None, include_literal_tokens=True, no_literal_tokens=True
     ) == (False, None)
+
+
+# --------------------------------------------------------------------------- #
+# Stage 2 — post-upload literal-column verify helper
+# --------------------------------------------------------------------------- #
+def test_count_populated_literal_rows():
+    import pyarrow as pa
+    from scripts.harbor.make_and_upload_trace_dataset import count_populated_literal_rows
+
+    # 3 rows: two with non-empty prompt_token_ids, one empty.
+    t = pa.table({"prompt_token_ids": [[[1, 2, 3]], [], [[4]]], "conversations": [[], [], []]})
+    assert count_populated_literal_rows(t) == 2
+    # column absent -> 0 (a text-only dataset), never raises.
+    t2 = pa.table({"conversations": [[], []]})
+    assert count_populated_literal_rows(t2) == 0
