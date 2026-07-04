@@ -22,6 +22,7 @@ if str(_REPO_ROOT) not in sys.path:
 from scripts.harbor.literal_correlator import (  # noqa: E402
     Chain,
     LiteralRecord,
+    _strip_literal_metrics,
     bind_chain,
     enrich_trajectories_with_literals,
     inject_literals,
@@ -270,3 +271,105 @@ def test_enrich_skips_ambiguous_duplicate_tasks(tmp_path):
     for trial in (trial_a, trial_c):
         traj = json.loads((trial / "agent" / "trajectory.json").read_text())
         assert "completion_token_ids" not in traj["steps"][0]["metrics"]
+
+
+# --------------------------------------------------------------------------- #
+# Stage 1 — strip stale trajectory token_ids (correlator is the sole authority)
+# --------------------------------------------------------------------------- #
+def _write_trial_with_bogus_ids(root: Path, name: str, count_seq) -> Path:
+    """A trial whose steps carry BOGUS prompt/completion token_ids in metrics."""
+    trial = root / name
+    (trial / "agent").mkdir(parents=True)
+    steps = [
+        {
+            "source": "agent",
+            "message": f"turn-{i}",
+            "metrics": {
+                "prompt_tokens": p,
+                "completion_tokens": c,
+                "prompt_token_ids": [999] * p,      # BOGUS
+                "completion_token_ids": [999] * c,  # BOGUS
+                "logprobs": [-9.9] * c,             # BOGUS
+            },
+        }
+        for i, (p, c) in enumerate(count_seq)
+    ]
+    (trial / "agent" / "trajectory.json").write_text(json.dumps({"steps": steps}))
+    (trial / "result.json").write_text(json.dumps({"trial_name": name}))
+    return trial
+
+
+def _iter(root):
+    return [p for p in Path(root).iterdir() if (p / "agent").exists()]
+
+
+def test_strip_literal_metrics_removes_ids_keeps_counts():
+    traj = {
+        "steps": [
+            {"source": "agent", "metrics": {"prompt_tokens": 5, "completion_tokens": 2,
+                                            "prompt_token_ids": [9, 9, 9, 9, 9],
+                                            "completion_token_ids": [9, 9], "logprobs": [-1.0, -1.0]}},
+            {"source": "agent", "metrics": {"prompt_tokens": 9, "completion_tokens": 3}},  # counts only
+        ]
+    }
+    n = _strip_literal_metrics(traj)
+    assert n == 1  # only the first step had token_ids
+    m0 = traj["steps"][0]["metrics"]
+    assert "prompt_token_ids" not in m0 and "completion_token_ids" not in m0 and "logprobs" not in m0
+    # counts preserved (binding relies on them)
+    assert m0["prompt_tokens"] == 5 and m0["completion_tokens"] == 2
+
+
+def test_enrich_overwrites_bogus_ids_on_bound_trial(tmp_path):
+    job = tmp_path / "job"
+    job.mkdir()
+    trial = _write_trial_with_bogus_ids(job, "trial-A", [(5, 2), (9, 3)])
+    a = _trial_records("TASK_A", [([1, 2, 3, 4, 5], [70, 71]), (list(range(9)), [72, 73, 74])], base_ts=100)
+    log = tmp_path / "literal.jsonl"
+    log.write_text("\n".join(
+        _record_line(r.messages, r.prompt_token_ids, r.completion_token_ids, r.logprobs, r.timestamp)
+        for r in a
+    ))
+    stats = enrich_trajectories_with_literals(str(job), str(log), iter_trial_dirs=_iter)
+    assert stats.trials_enriched == 1
+    traj = json.loads((trial / "agent" / "trajectory.json").read_text())
+    # bogus [999...] replaced by the REAL literal.jsonl values, never left as-is
+    assert traj["steps"][0]["metrics"]["completion_token_ids"] == [70, 71]
+    assert traj["steps"][1]["metrics"]["prompt_token_ids"] == list(range(9))
+    assert 999 not in traj["steps"][0]["metrics"]["prompt_token_ids"]
+
+
+def test_enrich_strips_bogus_ids_on_unbound_trial(tmp_path):
+    # A trajectory with bogus token_ids that DOES NOT bind (no matching literal chain)
+    # must have its bogus ids STRIPPED, never leaked into the export.
+    job = tmp_path / "job"
+    job.mkdir()
+    trial = _write_trial_with_bogus_ids(job, "trial-Z", [(5, 2)])
+    # literal.jsonl for a DIFFERENT trial with different counts -> no bind for trial-Z
+    other = _trial_records("TASK_OTHER", [([1, 2, 3], [7, 7, 7, 7])], base_ts=100)
+    log = tmp_path / "literal.jsonl"
+    log.write_text("\n".join(
+        _record_line(r.messages, r.prompt_token_ids, r.completion_token_ids, r.logprobs, r.timestamp)
+        for r in other
+    ))
+    stats = enrich_trajectories_with_literals(str(job), str(log), iter_trial_dirs=_iter)
+    assert stats.trials_enriched == 0
+    assert stats.trials_stripped == 1
+    m = json.loads((trial / "agent" / "trajectory.json").read_text())["steps"][0]["metrics"]
+    assert "prompt_token_ids" not in m and "completion_token_ids" not in m and "logprobs" not in m
+
+
+def test_enrich_zero_bind_condition_for_fail_loud(tmp_path):
+    # The main() fail-loud guard triggers on (trials > 0 and trials_enriched == 0);
+    # assert enrich produces exactly that when nothing binds.
+    job = tmp_path / "job"
+    job.mkdir()
+    _write_trial(job, "trial-Z", [(5, 2)])
+    other = _trial_records("OTHER", [([1, 2, 3], [7, 7, 7, 7])], base_ts=100)
+    log = tmp_path / "literal.jsonl"
+    log.write_text("\n".join(
+        _record_line(r.messages, r.prompt_token_ids, r.completion_token_ids, r.logprobs, r.timestamp)
+        for r in other
+    ))
+    stats = enrich_trajectories_with_literals(str(job), str(log), iter_trial_dirs=_iter)
+    assert stats.trials > 0 and stats.trials_enriched == 0

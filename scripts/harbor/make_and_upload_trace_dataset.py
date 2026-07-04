@@ -856,12 +856,20 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--include_literal_tokens",
         action="store_true",
-        help="Emit per-turn prompt_token_ids / completion_token_ids / logprobs columns "
-        "from step.metrics (for agents with SUPPORTS_LITERAL_TRACES, e.g. opencode run "
-        "behind the RecordProxy via --record_literal). When set, Harbor's native "
-        "literal-aware extraction is used (the inline-subagent-merger patch, which drops "
-        "token columns, is skipped). Default off = current text-only behavior. Pass this "
-        "when the job was generated with hpc.launch --record_literal.",
+        help="REQUIRE literal token columns (prompt_token_ids / completion_token_ids / "
+        "logprobs). Literals are now auto-included whenever a literal.jsonl is "
+        "discoverable (see --literal_log / sibling <job_dir>/logs/*literal.jsonl), so "
+        "this flag is only needed to FAIL LOUD when literals are expected but none are "
+        "found (e.g. a job that should have run with --record_literal). It never "
+        "downgrades: a job with no literal.jsonl and no --include_literal_tokens exports "
+        "text-only, byte-identical to before.",
+    )
+    p.add_argument(
+        "--no_literal_tokens",
+        action="store_true",
+        help="Force TEXT-ONLY export even when a literal.jsonl is present (opt out of the "
+        "default favor-literals-when-present behavior). Mutually exclusive intent with "
+        "--include_literal_tokens.",
     )
     p.add_argument(
         "--literal_log",
@@ -882,6 +890,44 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def resolve_literal_inclusion(
+    job_dir: str,
+    *,
+    literal_log: Optional[str],
+    include_literal_tokens: bool,
+    no_literal_tokens: bool,
+) -> tuple[bool, Optional[str]]:
+    """Decide whether to include literal token columns, FAVORING them when present.
+
+    Returns ``(include, literal_log_uri)``:
+      - ``--no_literal_tokens`` -> ``(False, None)`` (forced text-only).
+      - else resolve ``literal_log`` (explicit) or auto-discover the sibling
+        ``<job_dir>/logs/*literal.jsonl`` (also a few parents; gs:// ok):
+          - found -> ``(True, <uri>)`` (favor: default-on WHEN PRESENT).
+          - not found and ``--include_literal_tokens`` (REQUIRE) -> SystemExit.
+          - not found otherwise -> ``(False, None)`` (parity: byte-identical text-only).
+
+    GLOBAL INVARIANT: a job with no discoverable literal.jsonl and no force flag is
+    text-only, exactly as before this change.
+    """
+    from scripts.harbor.literal_correlator import discover_literal_log
+
+    if no_literal_tokens:
+        return (False, None)
+    resolved = literal_log or discover_literal_log(job_dir)
+    if resolved:
+        return (True, resolved)
+    if include_literal_tokens:
+        raise SystemExit(
+            "--include_literal_tokens requires a literal.jsonl but none was found "
+            f"under {job_dir}/logs/*_literal.jsonl (nor --literal_log). This job either "
+            "was not run with --record_literal or its durable literal log is missing; "
+            "refusing to silently export a literal-less dataset. Pass --no_literal_tokens "
+            "to export text-only intentionally."
+        )
+    return (False, None)
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -897,33 +943,40 @@ def main() -> None:
     # per-trial trajectory step metrics here, BEFORE export. Verify-or-skip: only
     # steps whose token COUNTS match a correlated record are enriched, so a wrong
     # join omits rather than corrupts. No-op for non-literal jobs.
-    if args.include_literal_tokens:
-        from scripts.harbor.literal_correlator import (
-            discover_literal_log,
-            enrich_trajectories_with_literals,
-        )
+    include_literal_tokens, literal_log = resolve_literal_inclusion(
+        str(job_dir),
+        literal_log=args.literal_log,
+        include_literal_tokens=bool(args.include_literal_tokens),
+        no_literal_tokens=bool(args.no_literal_tokens),
+    )
+    if include_literal_tokens:
+        from scripts.harbor.literal_correlator import enrich_trajectories_with_literals
 
         traces_utils = _import_traces_utils()
-        literal_log = args.literal_log or discover_literal_log(str(job_dir))
-        if not literal_log:
-            print(
-                "[trace-export] --include_literal_tokens set but no literal.jsonl found "
-                "(pass --literal_log <gs://…/logs/<slug>_literal.jsonl>); exporting "
-                "text-only (token columns will be absent)."
-            )
-        else:
-            print(f"[trace-export] Correlating literal tokens from {literal_log} ...")
-            stats = enrich_trajectories_with_literals(
-                str(job_dir),
-                literal_log,
-                iter_trial_dirs=lambda root: traces_utils.iter_trial_dirs(root, recursive=True),
-                verbose=bool(args.verbose),
-            )
-            yield_pct = (100.0 * stats.trials_enriched / stats.trials) if stats.trials else 0.0
-            print(
-                f"[trace-export] Literal yield: {stats.trials_enriched}/{stats.trials} trials "
-                f"({yield_pct:.1f}%), {stats.steps_enriched} steps enriched; "
-                f"{stats.chains} chains ({stats.ambiguous_chains} ambiguous)."
+        print(f"[trace-export] Correlating literal tokens from {literal_log} ...")
+        stats = enrich_trajectories_with_literals(
+            str(job_dir),
+            literal_log,
+            iter_trial_dirs=lambda root: traces_utils.iter_trial_dirs(root, recursive=True),
+            verbose=bool(args.verbose),
+        )
+        yield_pct = (100.0 * stats.trials_enriched / stats.trials) if stats.trials else 0.0
+        print(
+            f"[trace-export] Literal yield: {stats.trials_enriched}/{stats.trials} trials "
+            f"({yield_pct:.1f}%), {stats.steps_enriched} steps enriched, "
+            f"{stats.trials_stripped} stripped; {stats.chains} chains "
+            f"({stats.ambiguous_chains} ambiguous)."
+        )
+        # Fail loud: a literal-bearing job that bound ZERO trials is a regression, not a
+        # valid dataset — never silently ship a text-only-looking dataset for a job whose
+        # whole point was the literals. A partial yield (>0) reports and proceeds.
+        if stats.trials > 0 and stats.trials_enriched == 0:
+            raise SystemExit(
+                f"[trace-export] Literal correlation bound 0/{stats.trials} trials from "
+                f"{literal_log} ({stats.chains} chains) — refusing to export a "
+                "literal-less dataset for a job that HAS a literal.jsonl. Check the "
+                "literal log / job-dir pairing, or pass --no_literal_tokens to force "
+                "text-only."
             )
 
     # Step 1 — the single, always-streaming, memory-safe upload mechanism.
@@ -946,7 +999,7 @@ def main() -> None:
         private=bool(args.private),
         chunk_size=max(1, int(args.chunk_size)),
         verbose=bool(args.verbose),
-        include_literal_tokens=bool(args.include_literal_tokens),
+        include_literal_tokens=include_literal_tokens,
     )
     if single_commit_dir is not None:
         from huggingface_hub import HfApi  # type: ignore

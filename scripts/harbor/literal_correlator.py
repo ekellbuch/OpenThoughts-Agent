@@ -282,11 +282,38 @@ def _trial_window(trial_dir: UPath) -> Optional[tuple[float, float]]:
     return (start, end)
 
 
+_LITERAL_METRIC_KEYS = ("prompt_token_ids", "completion_token_ids", "logprobs")
+
+
+def _strip_literal_metrics(trajectory: dict[str, Any]) -> int:
+    """Remove any pre-existing literal token_ids/logprobs from every step's metrics.
+
+    The correlator is the SOLE authority on literal columns when active: token IDs must
+    come from the RecordProxy ``literal.jsonl`` via :func:`inject_literals`, never from
+    whatever happened to be sitting in ``trajectory.json`` (bogus/stale values, or a
+    different agent's fields). Stripping first guarantees an unbound trial contributes
+    NO literal columns rather than leaking mined trajectory-json token_ids. Returns the
+    number of steps actually modified (0 for the common opencode case, whose trajectory
+    steps carry only token COUNTS, never IDs — so no rewrite is triggered).
+    """
+    modified = 0
+    for step in trajectory.get("steps", []):
+        metrics = step.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        if any(k in metrics for k in _LITERAL_METRIC_KEYS):
+            for k in _LITERAL_METRIC_KEYS:
+                metrics.pop(k, None)
+            modified += 1
+    return modified
+
+
 @dataclass
 class EnrichStats:
     trials: int = 0
     trials_enriched: int = 0
     steps_enriched: int = 0
+    trials_stripped: int = 0
     chains: int = 0
     ambiguous_chains: int = 0
 
@@ -323,17 +350,26 @@ def enrich_trajectories_with_literals(
         except (FileNotFoundError, json.JSONDecodeError, NotImplementedError):
             continue
         stats.trials += 1
+        # Strip any pre-existing literal fields FIRST so the correlator is the sole
+        # source of token columns (no trajectory-json token mining). Counts used for
+        # binding (prompt_tokens/completion_tokens) are untouched by the strip.
+        stripped = _strip_literal_metrics(trajectory)
         seq = trajectory_count_sequence(trajectory)
         chain = bind_chain(chains, seq, window=_trial_window(trial_dir))
-        if chain is None:
-            continue
-        n = inject_literals(trajectory, chain)
+        n = inject_literals(trajectory, chain) if chain is not None else 0
         if n:
             traj_path.write_text(json.dumps(trajectory))
             stats.trials_enriched += 1
             stats.steps_enriched += n
             if verbose:
                 print(f"[literal-correlator] {trial_dir.name}: enriched {n} step(s)")
+        elif stripped:
+            # Unbound (or bound-but-0-injected) trial that HAD stale literal fields:
+            # persist the stripped trajectory so those bogus token_ids can't leak.
+            traj_path.write_text(json.dumps(trajectory))
+            stats.trials_stripped += 1
+            if verbose:
+                print(f"[literal-correlator] {trial_dir.name}: stripped stale literal fields")
 
     if verbose:
         print(
