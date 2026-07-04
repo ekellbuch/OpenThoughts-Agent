@@ -90,6 +90,27 @@ def test_literal_log_remote_uri_none_for_local_experiments_dir(tmp_path):
     assert lp.literal_log_remote_uri("/tmp/experiments", "myjob") is None
 
 
+def test_literal_log_remote_uri_reexpands_path_collapsed_scheme():
+    # pathlib.Path collapses "gs://x" -> "gs:/x"; the remote URI must still be
+    # detected (regression: a Path-wrapped gs:// dir silently returned None ->
+    # the literal log was never uploaded).
+    from pathlib import Path
+
+    collapsed = Path("gs://marin-models-us/ot-agent/tgen-x")  # str() == "gs:/marin-models-us/..."
+    assert "gs:/" in str(collapsed) and "gs://" not in str(collapsed)
+    uri = lp.literal_log_remote_uri(collapsed, "myjob")
+    assert uri == "gs://marin-models-us/ot-agent/tgen-x/logs/myjob_literal.jsonl"
+    # bare collapsed string form too
+    assert lp.literal_log_remote_uri("gs:/marin-models-us/ot-agent/tgen-x", "myjob") == uri
+
+
+def test_literal_log_remote_uri_resolved_local_path_stays_local():
+    # A fully resolve()'d form ("/app/gs:/…") is genuinely local (scheme lost to
+    # the leading "/") and must NOT be treated as remote — callers pass the raw
+    # gs:// arg for that case (local_runner_utils fix), not this resolved Path.
+    assert lp.literal_log_remote_uri("/app/gs:/marin-models-us/ot-agent/tgen-x", "j") is None
+
+
 def test_maybe_serve_remote_stages_locally_and_passes_upload_uri(monkeypatch):
     # On a gs:// experiments_dir the proxy must APPEND to a real local path (object
     # stores have no append) and hand serve_record_proxy the durable upload URI.

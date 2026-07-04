@@ -76,6 +76,22 @@ def literal_log_path(experiments_dir: str | Path, job_name: str) -> Path:
 # schemes we treat as durable object stores (upload target) rather than a local FS.
 _REMOTE_PROTOCOLS = frozenset({"gs", "gcs", "s3", "az", "abfs", "abfss", "http", "https"})
 
+# A remote URI survives a ``str()`` round-trip, but ``pathlib.Path`` collapses the
+# ``//`` after the scheme (``Path("gs://x")`` -> ``"gs:/x"``), which hides the scheme
+# from UPath (protocol -> ""). Re-expand a single-slash scheme so a Path-wrapped
+# remote dir is still detected as remote. NB: a fully ``resolve()``-d local form
+# (``"/app/gs:/x"``) keeps its leading ``/`` and is CORRECTLY treated as local — the
+# scheme is unrecoverable once resolve() prepends the cwd, so callers must pass the
+# ORIGINAL remote URI in that case (see local_runner_utils._serving_endpoint_meta,
+# which passes the raw ``--experiments_dir`` arg rather than get_experiments_dir()'s
+# resolved Path).
+_COLLAPSED_SCHEME_RE = re.compile(r"^(gs|gcs|s3|az|abfs|abfss|https?):/(?=[^/])")
+
+
+def _as_remote_uri_str(experiments_dir: str | Path) -> str:
+    """Coerce ``experiments_dir`` to a string, re-expanding a Path-collapsed scheme."""
+    return _COLLAPSED_SCHEME_RE.sub(lambda m: m.group(1) + "://", str(experiments_dir))
+
 
 def literal_log_remote_uri(experiments_dir: str | Path, job_name: str) -> Optional[str]:
     """Durable remote URI for the literal log, or ``None`` for local ``experiments_dir``.
@@ -87,10 +103,11 @@ def literal_log_remote_uri(experiments_dir: str | Path, job_name: str) -> Option
     ``experiments_dir`` is remote; ``None`` when it is an ordinary local path (local
     runs and unit tests need no upload).
     """
-    protocol = UPath(experiments_dir).protocol
+    uri = _as_remote_uri_str(experiments_dir)
+    protocol = UPath(uri).protocol
     if protocol not in _REMOTE_PROTOCOLS:
         return None
-    return str(UPath(experiments_dir) / "logs" / f"{_slug(job_name)}_{LITERAL_LOG_FILENAME}")
+    return str(UPath(uri) / "logs" / f"{_slug(job_name)}_{LITERAL_LOG_FILENAME}")
 
 
 def _local_staging_path(job_name: str) -> Path:

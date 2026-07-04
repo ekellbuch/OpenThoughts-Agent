@@ -972,10 +972,19 @@ class LocalHarborRunner:
         )
         # The RecordProxy binds 0.0.0.0 so the (remote) controller can reach it at
         # IRIS_ADVERTISE_HOST; the disabled path yields `upstream` unchanged.
+        #
+        # Pass the RAW ``--experiments_dir`` arg (a ``gs://…`` URI on iris), NOT the
+        # ``experiments_dir`` Path — ``get_experiments_dir()`` runs
+        # ``Path(gs://…).expanduser().resolve()``, which mangles the URI into a local
+        # ``/app/gs:/…`` path and destroys the ``gs://`` scheme, so the literal log
+        # could never be detected as remote and never uploaded (it landed on the
+        # worker's ephemeral tmpfs and was lost). The raw arg keeps the scheme so
+        # ``literal_log_remote_uri`` resolves the durable ``gs://…/logs/…`` target.
+        literal_experiments_dir = getattr(self.args, "experiments_dir", None) or str(experiments_dir)
         with maybe_serve_literal_proxy(
             record_literal,
             upstream,
-            experiments_dir=experiments_dir,
+            experiments_dir=literal_experiments_dir,
             job_name=job_name,
             host="0.0.0.0",
         ):
