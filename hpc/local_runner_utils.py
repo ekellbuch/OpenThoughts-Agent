@@ -432,6 +432,43 @@ def start_vllm_controller(
     return process
 
 
+def _drop_tpu_unsupported_serve_flags(cli_args: List[str]) -> List[str]:
+    """Strip serve flags the tpu-inference api_server rejects, from a vLLM CLI arg list.
+
+    ``--swap-space`` (CPU KV offload) is a GPU-only vLLM concept. The tpu-inference
+    api_server (the iris/TPU serve path via ``start_vllm_iris_controller.py``) has no
+    such argument and exits with ``error: unrecognized arguments: --swap-space``,
+    tearing down the whole serve (vLLM never comes up → Ray torn down → job dead).
+
+    A ``swap_space`` reaches ``_vllm_cli_args`` from either a model_config entry
+    (``model_config/<org>/<slug>.yaml``) or a datagen config's ``vllm_server`` block,
+    regardless of accelerator; this drops it (and its value) ONLY on the TPU serve
+    path. GPU serves keep it. This mirrors the same-hazard guards elsewhere:
+    ``model_config/_patterns.yaml`` (the TPU qwen3.5 profile omits swap_space) and
+    ``eval/build_vllm_cmd.sh`` (probes ``--help`` before adding ``--swap-space``).
+    The build_vllm_cmd.sh guard does NOT cover this path — the iris TPU serve command
+    is built in Python here, not by sourcing that shell helper.
+    """
+    out: List[str] = []
+    i = 0
+    n = len(cli_args)
+    while i < n:
+        tok = cli_args[i]
+        if tok == "--swap-space":
+            # Skip the flag plus its value token (if present and not itself a flag).
+            if i + 1 < n and not str(cli_args[i + 1]).startswith("--"):
+                i += 2
+            else:
+                i += 1
+            continue
+        if isinstance(tok, str) and tok.startswith("--swap-space="):
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
 def start_vllm_iris_controller(
     model: str,
     host: str,
@@ -1076,7 +1113,11 @@ class LocalHarborRunner:
                 controller_script=self.repo_root / "scripts" / "vllm" / "start_vllm_iris_controller.py",
                 log_path=controller_log,
                 served_model_name=getattr(args, "_served_model_id", None),
-                extra_cli_args=getattr(args, "_vllm_cli_args", []),
+                # TPU serve: strip --swap-space (GPU-only; tpu-inference api_server
+                # rejects it and exits, killing the serve). GPU serves keep it.
+                extra_cli_args=_drop_tpu_unsupported_serve_flags(
+                    getattr(args, "_vllm_cli_args", [])
+                ),
                 extra_env_vars=getattr(args, "_vllm_env_vars", {}),
             )
             self.processes.append(vllm_proc)
