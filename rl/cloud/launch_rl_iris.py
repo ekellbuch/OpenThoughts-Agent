@@ -165,8 +165,12 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # (2) auto_stop_interval_mins 0→5 — killed-job orphaned sandboxes idle-stop then auto-delete (self-clean)
     # instead of leaking forever. Same PULLABLE recipe; skyrl 7b7d627b, vLLM-fork 76259c63, flash-attn 2.8.3,
     # torch 2.11.0+cu128 unchanged (harbor-only bump — wheels + rl_env_constraints untouched).
-    "@sha256:a8f76d48feed95800d8d1442bb0db89fc14a00027830c408bdf6e776cab4d93a"  # noqa: E501  (gpu-rl-bd888d27)
-    # (prev: gpu-rl-dc56d265 @sha256:f67c80a4… harbor 2e42d312 + skyrl 7b7d627b routing; gpu-rl-722fec34 @sha256:928946fd…)
+    # gpu-rl-2712998d (built 2026-07-05, kaniko gpurl-kaniko-2712998d): PULLABLE re-layer of bd888d27 —
+    # bd888d27 (@sha256:a8f76d48…) baked identical contents but with --single-snapshot → one 16.6 GB layer that
+    # EOFs on the CoreWeave→ghcr pull (ImagePullBackOff + whiteout conflict). This is SINGLE_SNAPSHOT=0
+    # (48 layers, max 3.5 GB), same baked harbor d58043c3 + wheels. Verified pullable; pods reached Running.
+    "@sha256:861656ba5ceee4772677720952da114eed222cd529a4257325e8ca255c60309e"  # noqa: E501  (gpu-rl-2712998d)
+    # (prev: gpu-rl-bd888d27 @sha256:a8f76d48… UN-PULLABLE single-snapshot; gpu-rl-dc56d265 @sha256:f67c80a4…)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
