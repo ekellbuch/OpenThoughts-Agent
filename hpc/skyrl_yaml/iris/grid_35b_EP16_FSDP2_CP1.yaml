@@ -231,7 +231,7 @@ terminal_bench:
 
     auto_snapshot: true
 
-    verifier_override_timeout_sec: 120
+    verifier_override_timeout_sec: 300
 
     max_retries: 3
     min_wait_sec: 60.0
