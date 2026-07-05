@@ -358,6 +358,19 @@ class IrisLauncher:
             )
 
         job_name = self._derive_job_name(args)
+        # Persist the derived job_name back onto args so build_task_command bakes it
+        # into the worker command as ``--job_name``. On iris this name is IDENTICAL
+        # across every preempt-retry of the job (the retry re-runs the same baked
+        # command), which is what makes the harbor identity DETERMINISTIC per job:
+        #   - harbor jobs_dir/<job_name>/ run dir is the SAME each serve, so harbor's
+        #     _maybe_init_existing_job finds the prior serve's trials and CONTINUES
+        #     instead of re-running the whole dataset from task 1 in a fresh dir;
+        #   - generate_served_model_id(job_name) / default_job_name() no longer fall
+        #     back to their per-serve time-based values (the run_tracegen worker only
+        #     got a stable name when --job_name was passed — it never was).
+        # Resume mode already set args.job_name (+ _harbor_job_name_override) above;
+        # _derive_job_name returns that, so this is a no-op there.
+        args.job_name = job_name
         user = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
 
         remote_output_dir = resolve_remote_output_dir(
