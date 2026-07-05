@@ -265,6 +265,7 @@ terminal_bench:
 
     enable_error_classification: true
     mask_exceptions:
+      - VerifierTimeoutError
       - DaytonaError
       - EnvironmentStartTimeoutError
       - NetworkError
