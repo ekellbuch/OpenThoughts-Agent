@@ -161,3 +161,69 @@ def test_load_literal_records_unions_multiple_files(tmp_path):
     recs = load_literal_records([str(a), str(b)])
     assert len(recs) == 2
     assert {r.completion_token_ids[0] for r in recs} == {9, 8}
+
+
+# --------------------------------------------------------------------------- #
+# Tokenizer provenance stamp (self-service decodability of literal columns)
+# --------------------------------------------------------------------------- #
+def test_read_served_model_name_from_literals_first_record(tmp_path):
+    from scripts.harbor.make_and_upload_trace_dataset import read_served_model_name_from_literals
+
+    lit = tmp_path / "j_literal.jsonl"
+    lit.write_text(
+        '{"status_code":200,"request":{"messages":[]},"literal":{"model":"served-slug-abc","completion_token_ids":[1]}}\n'
+        '{"status_code":200,"request":{"messages":[]},"literal":{"model":"other","completion_token_ids":[2]}}\n'
+    )
+    assert read_served_model_name_from_literals([str(lit)]) == "served-slug-abc"
+
+
+def test_read_served_model_name_absent_returns_none(tmp_path):
+    from scripts.harbor.make_and_upload_trace_dataset import read_served_model_name_from_literals
+
+    lit = tmp_path / "j_literal.jsonl"
+    lit.write_text('{"status_code":200,"request":{"messages":[]},"literal":{"completion_token_ids":[1]}}\n')
+    assert read_served_model_name_from_literals([str(lit)]) is None
+    # unreadable file -> None, never raises
+    assert read_served_model_name_from_literals([str(tmp_path / "missing.jsonl")]) is None
+
+
+def test_build_tokenizer_provenance_carries_served_model():
+    from scripts.harbor.make_and_upload_trace_dataset import build_tokenizer_provenance
+
+    prov = build_tokenizer_provenance(
+        served_model="Qwen/Qwen3.5-122B-A10B-FP8", served_model_name_observed="served-slug"
+    )
+    assert prov["served_model"] == "Qwen/Qwen3.5-122B-A10B-FP8"
+    assert prov["served_model_name_observed"] == "served-slug"
+    assert prov["literal_columns"] == ["prompt_token_ids", "completion_token_ids", "logprobs"]
+    assert prov["schema"] == "tokenizer_provenance/v1"
+
+
+def test_write_tokenizer_provenance_stamps_json_and_readme():
+    from scripts.harbor.make_and_upload_trace_dataset import (
+        PROVENANCE_FILENAME,
+        build_tokenizer_provenance,
+        write_tokenizer_provenance,
+    )
+
+    class _FakeApi:
+        def __init__(self):
+            self.uploads = {}
+
+        def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message):
+            self.uploads[path_in_repo] = bytes(path_or_fileobj)
+
+    api = _FakeApi()
+    prov = build_tokenizer_provenance(
+        served_model="Qwen/Qwen3.5-122B-A10B-FP8", served_model_name_observed="served-slug"
+    )
+    write_tokenizer_provenance(api, "penfever/example-traces", prov)
+
+    assert set(api.uploads) == {PROVENANCE_FILENAME, "README.md"}
+    parsed = json.loads(api.uploads[PROVENANCE_FILENAME].decode("utf-8"))
+    assert parsed["served_model"] == "Qwen/Qwen3.5-122B-A10B-FP8"
+    readme = api.uploads["README.md"].decode("utf-8")
+    # the decode recipe + exact model ref + per-turn note must be in the card
+    assert "Qwen/Qwen3.5-122B-A10B-FP8" in readme
+    assert "AutoTokenizer.from_pretrained" in readme
+    assert PROVENANCE_FILENAME in readme

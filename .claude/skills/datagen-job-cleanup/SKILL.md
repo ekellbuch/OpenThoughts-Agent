@@ -89,6 +89,13 @@ Requirements + knobs:
 - `--include_literal_tokens` now means REQUIRE: it fails loud if literals are expected but none are found (use
   it in a cron to guarantee a `--record_literal` job never silently ships literal-less).
 - The uploader FAILS LOUD if a `literal.jsonl` is present but 0 trials bind (a regression, not a valid dataset).
+- **Pass `--served_model` on any literal upload.** The token-id columns are only decodable with the EXACT
+  tokenizer the engine served with (a same-family tokenizer decodes word tokens to garbage), so the uploader
+  stamps the model ref into `tokenizer_provenance.json` + the dataset-card README. For the opencode-131k
+  campaign that is `--served_model Qwen/Qwen3.5-122B-A10B-FP8` (or the gs:// mirror
+  `gs://marin-models-us/ot-agent/models/Qwen/Qwen3.5-122B-A10B-FP8/`). Omitting it still uploads the columns
+  but only stamps the engine-reported served-name (a warning prints) — always pass the real ref so consumers
+  can pull the tokenizer.
 
 ## 4. Verify the HF dataset is non-empty
 The repo may exist as a 0-row shell (a prior failed/partial upload, or Harbor pre-creating it); an existing

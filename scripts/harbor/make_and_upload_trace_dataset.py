@@ -67,10 +67,9 @@ import gc
 import json
 import os
 import shutil
-import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 
 # ---------------------------------------------------------------------------
@@ -880,6 +879,15 @@ def _parse_args() -> argparse.Namespace:
         "<job_dir>/logs/*_literal.jsonl (searching a few parents).",
     )
     p.add_argument(
+        "--served_model",
+        default=None,
+        help="Authoritative tokenizer/model reference the engine served with (HF repo id "
+        "e.g. 'Qwen/Qwen3.5-122B-A10B-FP8', or a gs:// mirror path). Stamped into the "
+        "dataset (tokenizer_provenance.json + README) so the literal token columns are "
+        "self-service decodable. Only used when literals are included; strongly "
+        "recommended for any literal upload (a same-family tokenizer decodes to garbage).",
+    )
+    p.add_argument(
         "--single_commit",
         action="store_true",
         help="Stage all shards locally, then push them in ONE upload_folder commit instead of "
@@ -888,6 +896,136 @@ def _parse_args() -> argparse.Namespace:
         "the single upload (peak disk ~ full dataset), vs one shard at a time for the default path.",
     )
     return p.parse_args()
+
+
+PROVENANCE_FILENAME = "tokenizer_provenance.json"
+
+# The literal token columns (prompt_token_ids / completion_token_ids) are only
+# decodable with the EXACT tokenizer the serving engine used. A same-family
+# tokenizer (e.g. a stock Qwen3 for a Qwen3.5 checkpoint) shares low-id
+# digit/whitespace/structure tokens but has a different merge table + vocab
+# size, so word tokens decode to garbage. This template records the one that
+# works so consumers never have to reverse-engineer it.
+_DECODE_RECIPE_TEMPLATE = """\
+The `prompt_token_ids` / `completion_token_ids` / `logprobs` columns are the
+verbatim tokens the serving engine emitted, stored PER AGENT STEP as a
+list-of-lists (one inner list per turn). To turn them back into text you MUST
+use the exact tokenizer the model was served with — a generic same-family
+tokenizer will decode word tokens to garbage.
+
+Served model / tokenizer source: `{served_model}`
+
+```python
+from transformers import AutoTokenizer
+# Use the served model's own tokenizer (pull from the ref above; if it is a
+# gs:// mirror, copy tokenizer.json/tokenizer_config.json/vocab.json/merges.txt
+# locally first and point AutoTokenizer at that dir).
+tok = AutoTokenizer.from_pretrained("{served_model}")
+# token_ids are list-of-lists (one list per turn) — decode each turn:
+text = [tok.decode(turn, skip_special_tokens=False) for turn in completion_token_ids]
+```
+"""
+
+
+def read_served_model_name_from_literals(literal_logs: Sequence[str]) -> Optional[str]:
+    """Best-effort: the ``literal.model`` the serving engine reported, from the first record.
+
+    Reads only the FIRST non-empty line of the first literal log (streamed, so a
+    multi-hundred-MB gs:// log is not slurped) and returns its ``literal.model``
+    field — the served-model-name vLLM echoed. This is secondary provenance (it is
+    the served-endpoint id, not necessarily the tokenizer repo), captured so the
+    stamp records what the engine actually reported alongside the authoritative
+    ``served_model`` ref. Returns None if unreadable.
+    """
+    from upath import UPath  # lazy: fsspec/upath is only needed on the literal path
+
+    for uri in literal_logs:
+        try:
+            with UPath(uri).open("r") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    entry = json.loads(line)
+                    literal = entry.get("literal")
+                    if isinstance(literal, dict) and literal.get("model"):
+                        return str(literal["model"])
+                    break
+        except (FileNotFoundError, OSError, json.JSONDecodeError, NotImplementedError):
+            continue
+    return None
+
+
+def build_tokenizer_provenance(
+    *,
+    served_model: Optional[str],
+    served_model_name_observed: Optional[str],
+) -> Dict[str, Any]:
+    """Assemble the machine-readable tokenizer-provenance record for a literal dataset."""
+    return {
+        "schema": "tokenizer_provenance/v1",
+        "served_model": served_model,
+        "served_model_name_observed": served_model_name_observed,
+        "literal_columns": ["prompt_token_ids", "completion_token_ids", "logprobs"],
+        "literal_columns_shape": "list-of-lists (one inner list per agent step/turn)",
+        "decode_with": "transformers.AutoTokenizer.from_pretrained(served_model)",
+        "note": (
+            "Decode with the EXACT served-model tokenizer; a same-family tokenizer "
+            "decodes word tokens to garbage. Use skip_special_tokens=False to keep "
+            "<|im_end|>/<tool_call>/<think> markers."
+        ),
+    }
+
+
+def write_tokenizer_provenance(api, repo_id: str, provenance: Dict[str, Any]) -> None:
+    """Upload the provenance JSON + a dataset-card README section to the HF repo.
+
+    Idempotent: re-running overwrites both files with the same deterministic
+    content. The README is a minimal auto-generated card (these trace repos carry
+    no hand-curated card) whose whole purpose is to make the literal token IDs
+    self-service decodable.
+    """
+    from huggingface_hub import HfApi  # type: ignore
+
+    api = api or HfApi()
+    served_model = provenance.get("served_model") or provenance.get("served_model_name_observed") or "<unknown>"
+
+    prov_bytes = (json.dumps(provenance, indent=2) + "\n").encode("utf-8")
+    api.upload_file(
+        path_or_fileobj=prov_bytes,
+        path_in_repo=PROVENANCE_FILENAME,
+        repo_id=repo_id,
+        repo_type="dataset",
+        commit_message="Add tokenizer provenance for literal token columns",
+    )
+
+    recipe = _DECODE_RECIPE_TEMPLATE.format(served_model=served_model)
+    observed = provenance.get("served_model_name_observed")
+    observed_line = (
+        f"\nEngine-reported served model name: `{observed}`\n" if observed else ""
+    )
+    readme = (
+        "---\n"
+        "tags:\n"
+        "- agent-traces\n"
+        "- literal-tokens\n"
+        "---\n\n"
+        "# Agent trace dataset\n\n"
+        "## Decoding the literal token IDs\n\n"
+        f"{recipe}{observed_line}\n"
+        f"See `{PROVENANCE_FILENAME}` for a machine-readable version.\n"
+    )
+    api.upload_file(
+        path_or_fileobj=readme.encode("utf-8"),
+        path_in_repo="README.md",
+        repo_id=repo_id,
+        repo_type="dataset",
+        commit_message="Document literal-token decoding (tokenizer provenance)",
+    )
+    print(
+        f"[trace-export] Stamped tokenizer provenance ({served_model}) into "
+        f"{repo_id} ({PROVENANCE_FILENAME} + README)."
+    )
 
 
 def count_populated_literal_rows(table) -> int:
@@ -990,7 +1128,7 @@ def main() -> None:
         if stats.trials > 0 and stats.trials_enriched == 0:
             raise SystemExit(
                 f"[trace-export] Literal correlation bound 0/{stats.trials} trials from "
-                f"{literal_log} ({stats.chains} chains) — refusing to export a "
+                f"{literal_logs} ({stats.chains} chains) — refusing to export a "
                 "literal-less dataset for a job that HAS a literal.jsonl. Check the "
                 "literal log / job-dir pairing, or pass --no_literal_tokens to force "
                 "text-only."
@@ -1037,6 +1175,28 @@ def main() -> None:
         f"[trace-export] Upload complete ({total} rows): "
         f"https://huggingface.co/datasets/{args.repo_id}"
     )
+
+    # Step 1b — stamp tokenizer/model provenance so the literal token columns are
+    # self-service decodable. Only meaningful when literals are included; token IDs
+    # are useless to a consumer who cannot map them back to text with the EXACT
+    # served-model tokenizer. Warn loud if literals shipped without a --served_model
+    # ref (the columns are still valid, just harder to decode later).
+    if include_literal_tokens:
+        from huggingface_hub import HfApi  # type: ignore
+
+        served_model_name_observed = read_served_model_name_from_literals(literal_logs)
+        if not args.served_model:
+            print(
+                "[trace-export] WARNING: literal token columns were uploaded but no "
+                "--served_model was given. Stamping only the engine-reported name "
+                f"({served_model_name_observed!r}); pass --served_model <hf-repo-or-gs-path> "
+                "so consumers can pull the exact tokenizer."
+            )
+        provenance = build_tokenizer_provenance(
+            served_model=args.served_model,
+            served_model_name_observed=served_model_name_observed,
+        )
+        write_tokenizer_provenance(HfApi(), args.repo_id, provenance)
 
     # Step 2 — ORTHOGONAL post-upload Supabase registration, gated only by
     # --skip_register. This runs against the finished HF repo and cannot affect
