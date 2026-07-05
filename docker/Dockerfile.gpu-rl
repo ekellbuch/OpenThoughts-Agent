@@ -320,7 +320,13 @@ ENV SKYRL_BRANCH=penfever/working
 #   - 3caeb79f "fix(tis): generalized served-id splice (Fix A) for 35B interleaved-
 #     thinking" — bake the TIS served-id-splice fix (previously runtime-only via
 #     --skyrl-ref) so future 35B launches get it by default (2026-07-04).
-ENV SKYRL_COMMIT=3caeb79f529ea60d646dabfb404f741809c7d8e8
+#   - 7b7d627b "fix(inference-routing): load-aware P2C for agentic RL session routing"
+#     — bake the load-aware power-of-two-choices session router (new-session pick via
+#     P2C, then sticky per session) into inference_engine_client.py so agentic RL
+#     rollouts balance sessions across inference engines by default (2026-07-05).
+#     This is the ONLY code delta vs the prior baked image (SKYRL_COMMIT-only bump;
+#     wheels + harbor 2e42d312 + rl_env_constraints unchanged).
+ENV SKYRL_COMMIT=7b7d627b19d7e85c308b6ce521a75238b31667a2
 
 RUN git clone --branch $SKYRL_BRANCH https://github.com/marin-community/MarinSkyRL.git $SKYRL_HOME && \
     git -C $SKYRL_HOME checkout $SKYRL_COMMIT
