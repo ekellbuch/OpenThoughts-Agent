@@ -157,8 +157,16 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # while siblings idled at n=384; preserves per-session stickiness for prefix-cache reuse). Same PULLABLE
     # recipe (SINGLE_SNAPSHOT=0, max layer <8 GB; pull-verified 4m0s, 22.5 GB, skyrl HEAD=7b7d627b in-pod).
     # vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128 unchanged.
-    "@sha256:f67c80a48212928619769e3be4e3a6edb780a9f22e42cbe8d83cb584093db9d9"  # noqa: E501  (gpu-rl-dc56d265)
-    # (prev: gpu-rl-722fec34 @sha256:928946fd… harbor 2e42d312 + skyrl 3caeb79f; e79c224b @sha256:d6a6da98… harbor a4957ef1)
+    # gpu-rl-bd888d27 (built 2026-07-05, kaniko gpurl-kaniko-bd888d27): HARBOR_COMMIT-only bump → harbor
+    # d58043c3, TWO Daytona fixes: (1) connection-pool cap 250→2048 (fleet knob
+    # HARBOR_DAYTONA_CONNECTION_POOL_MAXSIZE) — the SDK's 250-connection aiohttp pool starved the verifier's
+    # upload/exec/download round-trip for a socket at n_concurrent>>250 → 100% VerifierTimeoutError on the slow
+    # 35B (verifier isn't slow; its HTTP calls can't get a connection). 2048 lets the grid run clean at n=768.
+    # (2) auto_stop_interval_mins 0→5 — killed-job orphaned sandboxes idle-stop then auto-delete (self-clean)
+    # instead of leaking forever. Same PULLABLE recipe; skyrl 7b7d627b, vLLM-fork 76259c63, flash-attn 2.8.3,
+    # torch 2.11.0+cu128 unchanged (harbor-only bump — wheels + rl_env_constraints untouched).
+    "@sha256:a8f76d48feed95800d8d1442bb0db89fc14a00027830c408bdf6e776cab4d93a"  # noqa: E501  (gpu-rl-bd888d27)
+    # (prev: gpu-rl-dc56d265 @sha256:f67c80a4… harbor 2e42d312 + skyrl 7b7d627b routing; gpu-rl-722fec34 @sha256:928946fd…)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
