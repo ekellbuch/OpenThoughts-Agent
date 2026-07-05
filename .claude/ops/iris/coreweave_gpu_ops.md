@@ -326,6 +326,59 @@ in the cluster.
 
 ---
 
+## Daytona (orgs + sandbox lifecycle)
+
+**Org routing — RL ALWAYS on the RL org.** Agentic RL (Daytona backend) runs on the dedicated
+**Daytona RL org** (`DAYTONA_RL_API_KEY`, sha1 `f8f0296c1680`) — ~6000 fast sandboxes, so many
+concurrent gangs fit; do NOT spread RL across other orgs to "balance load" (the old ~1472
+control-plane ceiling was stale/wrong). Route it via the committed
+**`--daytona-api-key-env DAYTONA_RL_API_KEY`** flag (`rl/cloud/launch_rl_iris.py`), NOT a pre-launch
+`export DAYTONA_API_KEY=…` — the launcher re-sources `secrets.env` after any shell export
+(`hpc/iris/env.py` "file overrides shell") and CLOBBERS it. VERIFY in-pod:
+`kubectl exec … printenv DAYTONA_API_KEY | sha1sum` == the RL key hash.
+- **DATA (`DAYTONA_DATA_API_KEY`) and main (`DAYTONA_API_KEY`) are interchangeable** general-purpose
+  pools (evals use main, datagen uses DATA; either takes the other's overflow).
+- **B org (`DAYTONA_B_KEY`) is USER-ONLY — NO agents / no automated jobs there, ever** (it also has a
+  ~250-sandbox cap; do not confuse it with the RL org). Never pass `DAYTONA_B_KEY` in an agent launch.
+
+**Killed jobs ORPHAN their in-flight sandboxes → reap after every kill.** Harbor auto-destroys a
+trial's sandbox only when the trial COMPLETES normally (the live RolloutCoordinator tears it down).
+An `iris --cluster coreweave job stop` HARD-kills → the coordinator dies **before** destroying its
+in-flight sandboxes → ~250–384 sandboxes ORPHAN and linger. (Verified 2026-07-04: killing 3 probes in
+a day left ~579 stale >120min-idle sandboxes on the RL org, while a concurrent live job cycled cleanly
+— teardown WORKS for completed trials; the pile was 100% kill-orphans.)
+- **Root cause (corrected):** `DaytonaEnvironment` set `auto_stop_interval_mins=0` (auto-stop OFF) +
+  `auto_delete_interval_mins=0` (delete-immediately-on-stop) — delete is armed, but with auto-stop off
+  an orphan never stops → the instant-delete never fires → it runs forever. (0 = immediate, `-1` =
+  never; the bug was auto_stop=0 defeating delete-on-stop.)
+- **Fix — harbor `1143aba8`** (marin-community/harbor `penfever/working`): `auto_stop_interval_mins`
+  default 0→5, so an idle orphan stops after 5 min → auto_delete removes it (the idle timer resets on
+  every sandbox exec, so active trials never trip it). **Takes effect on the NEXT image rebake**
+  (harbor is baked into the gpu-rl RL + eval images).
+- **Until rebaked, manually reap after every kill:**
+  `python scripts/daytona/cleanup_stale_sandboxes.py --api-key-env DAYTONA_RL_API_KEY --threshold 120 --delete`
+  (`--threshold ≥120` so you never reap an active trial while OTHER jobs run — active agentic trials
+  idle 15–60 min, never >2h). Orphans take ~1h to cross the idle threshold, so a kill + immediate reap
+  MISSES them — reap ~1–2h later (or let the monitor/harvest cron catch them at its >1200-count trigger).
+
+## Monitoring & debugging practices
+
+- **Throughput / max-concurrency probes: fixed 60/120-min check-ins + DIRECT log reads — NEVER
+  watcher-park a subagent.** Parked "bring-up/generation watcher" subagents re-invoke unreliably and
+  once stalled a 35B max-conc probe **~8h** with no number. The throughput signal (vLLM scheduler
+  `Running:/Waiting:/GPU KV cache usage:` lines + in-flight Daytona sandbox count) is readable DIRECTLY
+  in one command (`iris job logs --since-ms … | grep 'loggers.py.*Running:'` + a Daytona `list()`
+  count). Take the measurement at ~60 min (bring-up ~10–15 + sandbox ramp ~15–30 + steady-state),
+  confirm at ~120 min, then move on; drive it with scheduled ticks, NOT an indefinite park.
+- **Debug on the REAL failing config with the fix as the SOLE variable.** A/B: identical config, two
+  runs differing only in the fix (env flag or `--skyrl-ref`) — fix-OFF must FAIL and fix-ON must PASS;
+  one arm alone proves nothing. Do NOT build reduced/faster "canary" configs (smaller ctx/batch/steps)
+  to debug a bug you have NOT proven they reproduce — a green result with no failing control is
+  INCONCLUSIVE. (E.g. `canary_moe_dispatchfix_8k` "validated" a MoE-wedge fix by completing 2 steps but
+  was never run WITHOUT the fix → never proved the 8k config reproduces the 131k wedge; the later
+  heavy-8k A/B then burned ~107 min and never reached the failure point.) A slower GUARANTEED repro
+  beats a fast UNCERTAIN one; reduced configs are for SPEED of a *proven* repro only.
+
 ## Cross-reference
 
 - **Launch procedure** (the flag set, config map + node-count derivation, config-authoring

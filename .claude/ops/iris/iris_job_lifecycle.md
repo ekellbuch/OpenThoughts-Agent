@@ -24,6 +24,15 @@ Both forward `--harbor_config`, `--model` (or infer from `--datagen_config`),
 so harbor writes through fsspec/UPath straight to GCS. (See the `run-datagen-iris`
 / `run-eval-iris` skills for full launch templates.)
 
+**Eval on `dev_set_v2` — pass `--hf-offline-mode off`.** The Part-A pre-cache default
+`--hf-offline-mode auto` is NOT inert on a dataset cache-MISS: it runs an inline
+`snapshot_download` of the full `dev_set_v2` tree (300 task-environment folders, hundreds of
+tiny files) + GCS mirror **before** the job submits → a 15–25 min (hours-with-flakes)
+submit-stall. The model side stays inert on a miss (online fallback); only heavy unmirrored
+DATASETS bite. `off` is byte-identical to the online behavior every prior campaign job used.
+(Safe to kill a stalled launcher mid-`snapshot_download` — the GCS upload only starts after
+the snapshot completes, so nothing partial is left; clean the tmp mirror dir.)
+
 **Before you submit, get three things right — region, disk, node shape:**
 
 ### Region — the #1 cost footgun (cross-region egress)
@@ -160,6 +169,19 @@ Means the workload didn't route through UPath. Confirm
 `--harbor_extra_arg=--jobs-dir=<gcs>` is in the submitted command
 (`iris job bug-report <id>`), and that the harbor pin is the UPath-aware build.
 
+### TPU agentic eval `--upload_to_database` is a NO-OP (GCS-only results)
+An `eval/cloud/launch_eval_iris.py` eval with `--upload_to_database` does NOT push traces to HF
+and does NOT register the score to Supabase — the post-eval upload keys off a local Harbor job
+dir (`/app/jobs/<job>`) that doesn't exist on the TPU runtime (trials stream to GCS). Log tell:
+`[upload] Expected Harbor job directory /app/jobs/<job> does not exist; upload skipped.`
+GPU/SLURM has the local dir so upload works there; TPU is the broken path (affects every TPU
+eval). Results land in **GCS only**: `gs://marin-models-us/ot-agent/<job>/<job>/`.
+- **Harvest scores from GCS**, not Supabase: `result.json` → `stats.evals.<id>.reward_stats`
+  (+ `exception_stats`).
+- **Traces to the Hub:** `gsutil rsync` the GCS job dir, then
+  `scripts/harbor/make_and_upload_trace_dataset.py --episodes last --filter none --skip_register
+  --chunk_size 300` (→ one row per trial; `--episodes all` explodes to per-step rows).
+
 ---
 
 ## 4. Teardown
@@ -176,6 +198,15 @@ $IRIS --cluster=marin job kill /benjaminfeuer/<job>
   (with permission); cluster ops are not.
 - Releasing capacity: killing the job frees its workers; there is no separate
   teardown step for the TPU slice (iris reclaims preemptible workers).
+
+> **CoreWeave GPU cluster (a DIFFERENT cluster) —** stop a job with
+> `iris --cluster coreweave job stop /<user>/<job>` (full binary
+> `/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris`; `which iris` fails). **`--cluster`
+> goes BEFORE the subcommand** (the global flag) — bare `job stop <jid>` errors "No controller
+> specified"; `job stop <jid> --cluster …` errors "No such option". Export
+> `KUBECONFIG=~/.kube/coreweave-iris-gpu` first or it falls back to a stale lambdaconfig and
+> errors. `stop`/`kill` are aliases → prints `Terminated jobs:`. Full GPU-RL ops:
+> `coreweave_gpu_ops.md` (and note: a hard-kill ORPHANS in-flight Daytona sandboxes — reap them).
 
 ---
 

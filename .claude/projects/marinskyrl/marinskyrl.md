@@ -146,6 +146,28 @@ NOT swap** → the same skip is harmless there (the likely Jupiter-GH200-OK reco
 
 ---
 
+## MoE-RL 131k first-step forward wedge → `SKYRL_R3_RESIDENT` (FIXED `ac4b3806`)
+
+The long-standing MoE agentic-RL **wedge at the first training-step policy forward** (Qwen3-Coder-30B-A3B,
+131k ctx, CoreWeave `8node_qwen3_30b_a3b_131k_cp_dcp2_r3.yaml`) is **FIXED** — validated end-to-end 2026-07-01
+(a full gs-1 completed with healthy metrics: entropy 0.15, tis_ratio ~0.98, no collapse; ckpt saved).
+
+- **Root cause:** `rollout_routed_experts` `[B,seq,L=48,K=8]` was shipped BY VALUE through every per-forward
+  Ray task arg — ~3.0 GB/dp-chunk even at uint8 (~24 GB at int64), and the naive dispatch loop re-serialized
+  it per actor (~16×/dp-group) → Ray object-store spill (96 GB plasma cap) → peers' forward arg never
+  materializes → rank-0 unshards alone → silent hang (a Ray-store wait, **NOT** an NCCL watchdog).
+- **Fix (MarinSkyRL `ac4b3806`, penfever/working) — BOTH levers load-bearing:** (1) `dataset/preprocess.py`
+  narrows routed_experts to uint8/int16 (consumer upcasts); (2) `distributed/dispatch.py MeshDispatch.dispatch`
+  `ray.put`s each dp-chunk ONCE + shares the ObjectRef across the dp-group (gated `SKYRL_R3_RESIDENT`, default
+  on; marker `R3_RESIDENT_SET`). uint8 alone would NOT fit. (Cross-framework-validated: prime-rl/verl/slime
+  never ship R3 by-value through Ray args.)
+- **Next bottleneck (does NOT block correctness):** throughput ~2h/step — `policy_train` ~7600s from the 3 GB
+  **router-replay backward** (80 steps ≈ a week on 8 nodes). Open follow-up: harden the per-batch `.max()`
+  dtype pick to a DETERMINISTIC int16/num_experts choice (per-batch max diverges across ranks for a >127-expert
+  model like Qwen3-Next; safe for Qwen3-Coder's 128).
+
+---
+
 ## 80B RL is TRAINING-bound, and SkyRL FSDP is ALWAYS cross-node
 
 The Qwen3-Next-80B-A3B production RL step (EP=8×FSDP=8, 32k, R3+TIS) is **training-bound, NOT
