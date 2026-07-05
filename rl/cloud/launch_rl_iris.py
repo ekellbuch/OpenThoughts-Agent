@@ -151,8 +151,14 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # DEFAULT-ON — fixes the n=384 O(N) coordinator-reaper bottleneck py-spy found; opt out via
     # HARBOR_CHEAP_REAPER=0) + skyrl 3caeb79f (TIS served-id splice, now baked-default — no --skyrl-ref
     # needed for 35B). Same PULLABLE recipe; vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128 unchanged.
-    "@sha256:928946fdf69bde2512ae7740ad53dec27b65c2ca8bf97932c72cd63c558390b6"  # noqa: E501  (gpu-rl-722fec34)
-    # (prev: gpu-rl-e79c224b @sha256:d6a6da98… harbor a4957ef1; efd77b98 @sha256:59cef2f5… harbor 0729a3e9)
+    # gpu-rl-dc56d265 (built 2026-07-05, kaniko gpurl-kaniko-dc56d265): harbor 2e42d312 (unchanged, cheap
+    # reaper DEFAULT-ON) + skyrl 7b7d627b (load-aware power-of-two-choices inference-engine routing — fixes
+    # the sticky hash-at-birth session routing that pinned agentic-RL rollout load onto one vLLM engine
+    # while siblings idled at n=384; preserves per-session stickiness for prefix-cache reuse). Same PULLABLE
+    # recipe (SINGLE_SNAPSHOT=0, max layer <8 GB; pull-verified 4m0s, 22.5 GB, skyrl HEAD=7b7d627b in-pod).
+    # vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128 unchanged.
+    "@sha256:f67c80a48212928619769e3be4e3a6edb780a9f22e42cbe8d83cb584093db9d9"  # noqa: E501  (gpu-rl-dc56d265)
+    # (prev: gpu-rl-722fec34 @sha256:928946fd… harbor 2e42d312 + skyrl 3caeb79f; e79c224b @sha256:d6a6da98… harbor a4957ef1)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
