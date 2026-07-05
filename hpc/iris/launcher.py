@@ -236,6 +236,18 @@ class IrisLauncher:
         """
         return {}
 
+    def pre_submit_precache(self, args: argparse.Namespace, *, remote_output_dir: str) -> dict:
+        """Subclass hook: pre-cache artifacts + return extra env, after region pin.
+
+        Runs in ``run()`` AFTER the region pin (so ``args._pinned_region`` is
+        known) and BEFORE ``build_task_command`` (so a subclass may rewrite
+        args.model / args.dataset_path onto region-local cloud URIs). The
+        returned dict is merged into the task env with ``setdefault`` semantics
+        (an explicit build_env / runtime value wins). Default: no-op — the base
+        launcher and every non-eval subclass keep byte-identical behavior.
+        """
+        return {}
+
     # ------------------------------------------------------------------
     # Main entry
     # ------------------------------------------------------------------
@@ -360,8 +372,17 @@ class IrisLauncher:
             LOCAL_PATHS.home, LOCAL_PATHS.state, LOCAL_PATHS.runs, LOCAL_PATHS.logs,
         )
 
+        # Pre-submit artifact pre-cache (offline staging). Runs after the region
+        # pin so a subclass can target the region-local mirror; may rewrite
+        # args.model / args.dataset_path and returns extra env (e.g. offline
+        # flags). Default no-op -> byte-identical for non-eval launchers.
+        precache_env = self.pre_submit_precache(args, remote_output_dir=remote_output_dir)
+
         command = self.build_task_command(args, remote_output_dir)
         env_vars = self.build_env(args)
+        if precache_env:
+            for _k, _v in precache_env.items():
+                env_vars.setdefault(_k, _v)
 
         # Default extras = ["datagen-tpu"]; allow override via repeated --extras
         # or --extras '' (single empty) to install nothing extra.

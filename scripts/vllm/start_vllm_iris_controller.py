@@ -368,6 +368,17 @@ def build_vllm_command(args: argparse.Namespace, extra_args: List[str]) -> List[
         cmd.extend(["--served-model-name", args.served_model_name])
     if extra_args:
         cmd.extend(extra_args)
+
+    # Remote (object-store) model dir => vLLM needs the Run:ai model streamer to
+    # read weights over the S3/GCS-compat endpoint. Auto-inject --load-format
+    # runai_streamer when the model is an s3://|gs:// URI and nothing already set
+    # a load-format (this is the offline pre-cache serve path; env aliases the
+    # MARIN_HMAC/LAION creds onto AWS_* in hpc.iris.env). A local HF path/id is
+    # untouched -> byte-identical to before for the normal serve path.
+    if model.startswith(("s3://", "gs://")) and not any(
+        str(a).startswith(("--load-format", "--load_format")) for a in cmd
+    ):
+        cmd.extend(["--load-format", "runai_streamer"])
     return cmd
 
 

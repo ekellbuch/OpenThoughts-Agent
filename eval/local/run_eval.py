@@ -59,6 +59,15 @@ class EvalRunner(LocalHarborRunner):
         parser.add_argument("--datagen-config", dest="datagen_config", help=argparse.SUPPRESS)
 
         parser.add_argument(
+            "--vllm_model_uri",
+            help="Object-store URI (s3://|gs://) the vLLM server loads weights from "
+                 "(via runai_streamer), while --model stays the HF id used for "
+                 "model_config resolution + the served-model name. Set by the iris "
+                 "launcher's offline pre-cache; leave unset for normal HF loads.",
+        )
+        parser.add_argument("--vllm-model-uri", dest="vllm_model_uri", help=argparse.SUPPRESS)
+
+        parser.add_argument(
             "--experiments_dir",
             default=str(PROJECT_ROOT / cls.DEFAULT_EXPERIMENTS_SUBDIR),
             help="Directory for logs + endpoint JSON.",

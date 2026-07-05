@@ -1101,8 +1101,13 @@ class LocalHarborRunner:
             # api_server on the head. It manages Ray itself, so we do NOT call
             # start_ray() here. On non-0 ranks the controller blocks as a Ray
             # worker until SIGTERM and never writes the endpoint JSON.
+            # Offline serve path: when the launcher pre-cached the model to the
+            # region-local mirror it passes --vllm_model_uri (an s3://|gs:// dir
+            # runai_streamer reads). Serve from THAT while args.model stays the
+            # HF id already consumed by model_config resolution above.
+            _serve_model = getattr(args, "vllm_model_uri", None) or args.model
             vllm_proc = start_vllm_iris_controller(
-                model=args.model,
+                model=_serve_model,
                 host=args.host,
                 ray_port=args.ray_port,
                 api_port=args.api_port,

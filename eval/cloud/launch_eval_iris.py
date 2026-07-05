@@ -136,6 +136,17 @@ class EvalIrisLauncher(IrisLauncher):
                             type=float, default=None,
                             help="Ray object store (plasma) size in GB.")
 
+        parser.add_argument(
+            "--hf-offline-mode", "--hf_offline_mode", dest="hf_offline_mode",
+            choices=["auto", "strict", "off"], default="auto",
+            help="Pre-cache the model+dataset to the region-local GCS mirror and run "
+                 "HF-offline (HF_HUB_OFFLINE=1) when present. "
+                 "'auto' (default): cache-HIT => offline + region-local runai_streamer "
+                 "serve; any MISS => today's ONLINE behavior (launch never blocked). "
+                 "'strict': a MISS fails LOUD at launch with the mirror command. "
+                 "'off': skip entirely (byte-identical to the pre-precache behavior).",
+        )
+
         # NOTE: --job_name comes from add_harbor_args above.
 
         add_hf_upload_args(parser)
@@ -246,7 +257,20 @@ class EvalIrisLauncher(IrisLauncher):
         args.harbor_config = repo_relative(args.harbor_config, self.repo_root)
         if args.datagen_config:
             args.datagen_config = repo_relative(args.datagen_config, self.repo_root)
-        if args.dataset_path and not args.dataset_path.startswith("/"):
+        # Capture the original HF dataset repo id (if any) BEFORE any path
+        # rewriting, so pre_submit_precache can mirror it. repo_relative only
+        # applies to in-repo local task dirs; an HF-id (org/repo) or a remote
+        # gs://|s3:// URI passes through untouched (the worker's
+        # resolve_dataset_path handles those).
+        from hpc.hf_utils import is_hf_dataset_path
+        args._orig_dataset_repo = None
+        if args.dataset_path and is_hf_dataset_path(args.dataset_path):
+            args._orig_dataset_repo = args.dataset_path
+        elif (
+            args.dataset_path
+            and not args.dataset_path.startswith("/")
+            and not args.dataset_path.startswith(("gs://", "s3://"))
+        ):
             args.dataset_path = repo_relative(args.dataset_path, self.repo_root)
 
         infer_harbor_env_from_config(args, args.harbor_config, log_prefix="[eval-iris]")
@@ -314,12 +338,58 @@ class EvalIrisLauncher(IrisLauncher):
         # wrong for. (Datagen uses force_build: false and DOES pre-build, via
         # data/cloud/launch_tracegen_iris.py.)
 
+    def pre_submit_precache(self, args: argparse.Namespace, *, remote_output_dir: str) -> dict:
+        """Ensure the model + dataset are region-cached, then wire the offline plan.
+
+        Runs after the region pin. On a full cache-HIT: serve the model from the
+        region-local GCS mirror via runai_streamer (``args._vllm_model_uri``),
+        route the dataset read through GCS (``args.dataset_path`` -> gs://), and
+        return HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1 / the GCS S3 endpoint.
+        On a MISS (auto mode) it returns {} -> the launch runs online, unchanged.
+        """
+        mode = getattr(args, "hf_offline_mode", "auto")
+        if mode == "off":
+            return {}
+        from hpc.iris.precache import precache_for_eval
+
+        dataset_repos = (
+            [args._orig_dataset_repo] if getattr(args, "_orig_dataset_repo", None) else []
+        )
+        result = precache_for_eval(
+            args.model,
+            dataset_repos,
+            region=getattr(args, "_pinned_region", None),
+            mode=mode,
+            verbose=True,
+        )
+        for note in result.notes:
+            print(f"[eval-iris] {note}", flush=True)
+        if not result.offline_ok:
+            return {}
+        # Serve the model from the region-local mirror via runai_streamer, but
+        # KEEP args.model as the HF id so the worker still resolves model_config/
+        # (max_model_len, tool/reasoning parser, ...) from the registry by id.
+        args._vllm_model_uri = result.model_serve_uri
+        if dataset_repos and result.dataset_uris:
+            args.dataset_path = result.dataset_uris[0]
+            print(f"[eval-iris] dataset -> {args.dataset_path} (offline GCS read)", flush=True)
+        print(f"[eval-iris] model serve URI -> {args._vllm_model_uri} "
+              "(runai_streamer); HF_HUB_OFFLINE=1", flush=True)
+        return result.env
+
     def build_task_command(self, args: argparse.Namespace, remote_output_dir: str) -> List[str]:
         cmd: List[str] = [
             "python", "eval/local/run_eval.py",
             "--harbor_config", args.harbor_config,
             "--model", args.model,
         ]
+
+        # Offline: serve the vLLM model from the region-local mirror URI while
+        # --model stays the HF id (for model_config resolution). Only set when
+        # pre_submit_precache confirmed the mirror is present.
+        vllm_model_uri = getattr(args, "_vllm_model_uri", None)
+        if vllm_model_uri:
+            cmd.extend(["--vllm_model_uri", vllm_model_uri])
 
         if args.datagen_config:
             cmd.extend(["--datagen_config", args.datagen_config])
