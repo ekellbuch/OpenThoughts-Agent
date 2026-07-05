@@ -538,9 +538,16 @@ RUN . $RL_ENV_DIR/bin/activate && \
 #   - 2e42d312 "perf(lite_llm): cheap reaper DEFAULT-ON (opt out via HARBOR_CHEAP_REAPER=0)"
 #     — the O(orphans) cheap-reaper fix (descends from 4fcbea0a) now made DEFAULT-ON
 #     (os.environ.get("HARBOR_CHEAP_REAPER","1") != "0"; =0 is the opt-out) that
-#     relieves the n=384 coordinator bottleneck. THIS is the reason for the rebuild
-#     (2026-07-04).
-ENV HARBOR_COMMIT=2e42d31218277c5474d2a538ca32fd83caa96b06
+#     relieves the n=384 coordinator bottleneck.
+#   - d58043c3 "raise default Daytona connection-pool cap 250->2048" — the verifier
+#     round-trip (upload/exec/download) starved for an HTTP connection out of the
+#     Daytona SDK's aiohttp 250-cap pool at n_concurrent >> 250 -> mass
+#     VerifierTimeoutError (100% on the slow 35B). New default 2048 (fleet knob
+#     HARBOR_DAYTONA_CONNECTION_POOL_MAXSIZE). THIS is the reason for the rebuild
+#     (2026-07-05) — it lets the grid run clean at n=768.
+#   - 1143aba8 "auto_stop_interval_mins 0->5" — killed-job orphaned sandboxes now
+#     idle-stop after 5 min then auto-delete (self-clean) instead of leaking forever.
+ENV HARBOR_COMMIT=d58043c3679f152ac1483bee81bb7ea653463df4
 RUN . $RL_ENV_DIR/bin/activate && \
     uv pip install --no-deps --force-reinstall \
         "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
