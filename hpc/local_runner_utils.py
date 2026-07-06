@@ -469,6 +469,35 @@ def _drop_tpu_unsupported_serve_flags(cli_args: List[str]) -> List[str]:
     return out
 
 
+def _add_tpu_serve_default_flags(cli_args: List[str], default_flags: List[str]) -> List[str]:
+    """Append cluster-level default TPU-serve flags that aren't already present.
+
+    Cluster-wide defaults for the iris/TPU vLLM api_server (e.g.
+    ``--enable-prefix-caching`` on the agentic-eval path — see
+    ``EvalRunner.TPU_SERVE_DEFAULT_CLI_ARGS``). A default flag is only added when
+    neither it, its ``=value`` form, nor its ``--no-<flag>`` negation already
+    appears in ``cli_args`` — so an explicit model_config / datagen-config setting
+    (including an explicit opt-out) always wins over the cluster default.
+    """
+    if not default_flags:
+        return list(cli_args)
+
+    def _stem(tok: str) -> str:
+        # "--enable-prefix-caching=1" -> "enable-prefix-caching";
+        # "--no-enable-prefix-caching" -> "enable-prefix-caching".
+        name = str(tok).lstrip("-").split("=", 1)[0]
+        if name.startswith("no-"):
+            name = name[3:]
+        return name
+
+    present = {_stem(tok) for tok in cli_args if isinstance(tok, str) and tok.startswith("--")}
+    out = list(cli_args)
+    for flag in default_flags:
+        if _stem(flag) not in present:
+            out.append(flag)
+    return out
+
+
 def start_vllm_iris_controller(
     model: str,
     host: str,
@@ -682,6 +711,12 @@ class LocalHarborRunner:
     DEFAULT_N_CONCURRENT: int = 16
     DATAGEN_CONFIG_REQUIRED: bool = False
     DEFAULT_ENDPOINT_FILENAME: str = "vllm_endpoint.json"
+    # Cluster-level default vLLM CLI flags appended to the iris/TPU serve command
+    # (start_vllm_iris_controller.py -> tpu-inference api_server) for ALL models on
+    # that path, applied idempotently via _add_tpu_serve_default_flags (an explicit
+    # model_config / datagen-config flag, incl. an opt-out, always wins). Empty by
+    # default; overridden per-runner (e.g. EvalRunner enables prefix caching).
+    TPU_SERVE_DEFAULT_CLI_ARGS: List[str] = []
 
     def __init__(self, args: argparse.Namespace, repo_root: Path):
         """Initialize the runner.
@@ -1119,9 +1154,35 @@ class LocalHarborRunner:
                 log_path=controller_log,
                 served_model_name=getattr(args, "_served_model_id", None),
                 # TPU serve: strip --swap-space (GPU-only; tpu-inference api_server
-                # rejects it and exits, killing the serve). GPU serves keep it.
-                extra_cli_args=_drop_tpu_unsupported_serve_flags(
-                    getattr(args, "_vllm_cli_args", [])
+                # rejects it and exits, killing the serve; GPU serves keep it), then
+                # append this runner's cluster-level TPU-serve defaults. EvalRunner
+                # defaults --enable-prefix-caching here: without APC every agentic
+                # turn re-prefills the full growing conversation (~30x redundant
+                # prefill on the v6e-4 agentic-eval path -> AgentTimeout -> deflated
+                # scores), mirroring the GPU/SLURM harness's per-model
+                # --enable-prefix-caching. The GPU path proves it's a pure win.
+                #
+                # CAVEAT — VALIDATE ON THE NEXT REAL IRIS EVAL: the pinned TPU
+                # backend tpu-inference==0.23.0 (marin lib/marin/pyproject.toml)
+                # has NOT been confirmed to support APC. Two failure modes to watch
+                # on the next v6e-4 eval leg:
+                #   (1) the api_server rejects --enable-prefix-caching as an
+                #       unrecognized/unsupported arg and exits -> the serve never
+                #       boots -> job dies at startup (check vllm_controller.log). If
+                #       so, revert EvalRunner.TPU_SERVE_DEFAULT_CLI_ARGS to [] until
+                #       a TPU build with confirmed APC lands.
+                #   (2) the flag is accepted but silently no-ops -> confirm it
+                #       actually took effect by checking n_cache_tokens > 0 in the
+                #       eval result.json (it was 0 / all-redundant-prefill before).
+                # NOTE: we deliberately do NOT also raise max_num_batched_tokens
+                # (=512) here — larger prefill batches grow the TPU paged-attention
+                # VMEM scratch and can overflow at compile; leave that as a separate,
+                # measured option if APC alone proves insufficient.
+                extra_cli_args=_add_tpu_serve_default_flags(
+                    _drop_tpu_unsupported_serve_flags(
+                        getattr(args, "_vllm_cli_args", [])
+                    ),
+                    self.TPU_SERVE_DEFAULT_CLI_ARGS,
                 ),
                 extra_env_vars=getattr(args, "_vllm_env_vars", {}),
             )

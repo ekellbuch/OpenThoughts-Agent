@@ -26,6 +26,14 @@ class EvalRunner(LocalHarborRunner):
     DEFAULT_EXPERIMENTS_SUBDIR = "eval_runs"
     DEFAULT_N_CONCURRENT = 16
     DATAGEN_CONFIG_REQUIRED = False
+    # Cluster-level default for the Iris/TPU agentic-eval serve: enable vLLM prefix
+    # caching (APC) so each agentic turn reuses the KV cache for the shared, growing
+    # conversation prefix instead of re-prefilling it (~30x redundant-prefill fix on
+    # v6e-4). Applied to ALL models on the iris eval path, NOT per-model. Scoped to
+    # eval (not the shared base) as a canary while APC support on tpu-inference
+    # 0.23.0 is unconfirmed — see the CAVEAT at the call site in
+    # hpc/local_runner_utils.py (validate n_cache_tokens>0 on the next eval leg).
+    TPU_SERVE_DEFAULT_CLI_ARGS = ["--enable-prefix-caching"]
 
     @classmethod
     def create_parser(cls) -> argparse.ArgumentParser:
