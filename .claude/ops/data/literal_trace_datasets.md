@@ -59,9 +59,9 @@ missing literals) — **re-rescue them with the fixed exporter to recover full y
 | arm | pre-fix literal | post-fix literal | status |
 |---|---|---|---|
 | #6 exp_rpt_stack-junit-v6 | 205 / 858 | **660 / 858** | re-rescued 2026-07-06 (`7c978b78`) |
-| #1 inferredbugs | ~5640 (partial, whole shard 5 empty) | — | re-rescue pending |
-| #2 code-contests | 4619 (shards 1,19 empty, ~86% row-level) | — | re-rescue pending |
-| #3 nemotron-code-oracle | 5447 (tail shard empty) | — | re-rescue pending |
+| #1 inferredbugs | 5441 / 5827 (shard 00005 empty) | **5633 / 5827** | re-rescued 2026-07-06 (`8c588783`, 3-file union) |
+| #2 code-contests | 4240 / 4914 (shards 00001,00019 empty) | **4616 / 4914** | re-rescued 2026-07-06 (`8c588783`, 2-file union) |
+| #3 nemotron-code-oracle | 5351 / 5688 (tail shard 00028 empty) | **5441 / 5688** | re-rescued 2026-07-06 (`8c588783`, 2-file union) |
 
 Re-rescue = rsync the OUTER `gs://marin-models-{us,eu}/ot-agent/<job>/` (so sibling
 `logs/*_literal.jsonl` rides along), clear the target repo's partial `data/` (keep README +
