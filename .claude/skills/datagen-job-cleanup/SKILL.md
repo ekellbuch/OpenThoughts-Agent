@@ -96,6 +96,12 @@ Requirements + knobs:
   `gs://marin-models-us/ot-agent/models/Qwen/Qwen3.5-122B-A10B-FP8/`). Omitting it still uploads the columns
   but only stamps the engine-reported served-name (a warning prints) — always pass the real ref so consumers
   can pull the tokenizer.
+- **Schema-pin (fixed OT-Agent `7c978b78`):** the exporter now pins the literal token columns to an explicit
+  nested type per shard. Before this fix, a chunk whose leading rows had no literals dropped the token lists of
+  every other row in the chunk → under-populated literal yield + whole shards with no token columns (and
+  `load_dataset` `CastError`); `--chunk_size` larger made it worse. Datasets uploaded before `7c978b78` are
+  degraded — **re-rescue them to recover full yield.** Full reference (decoding, tokenizer provenance,
+  re-rescue procedure, literals→SFT): **`.claude/ops/data/literal_trace_datasets.md`**.
 
 ## 4. Verify the HF dataset is non-empty
 The repo may exist as a 0-row shell (a prior failed/partial upload, or Harbor pre-creating it); an existing

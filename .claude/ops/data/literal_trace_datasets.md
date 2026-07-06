@@ -1,0 +1,84 @@
+# Literal-token trace datasets (opencode datagen)
+
+Canonical reference for the `--record_literal` opencode trace datasets and their
+downstream SFT use. Applies to the opencode-131k campaign
+(`penfever/<task>-qwen3.5-122b-131k-opencode-traces`) and any future literal datagen.
+
+## What the literal columns are
+
+`make_and_upload_trace_dataset` on a `--record_literal` job emits three parallel columns
+alongside the text `conversations`:
+
+- `prompt_token_ids`, `completion_token_ids` — **list-of-lists**, one inner list per agent
+  step (turn). The verbatim tokens the serving engine emitted (RecordProxy capture, correlated
+  by `literal_correlator.py`).
+- `logprobs` — list-of-lists of floats, same shape as `completion_token_ids`.
+
+A row is "literal-populated" when `prompt_token_ids` is non-empty
+(`count_populated_literal_rows` checks exactly this).
+
+## Decoding the token IDs → text
+
+The IDs only decode with the **EXACT tokenizer the engine served with**. For the 131k
+campaign that is **`Qwen/Qwen3.5-122B-A10B-FP8`** (a `qwen3_5_moe`, `Qwen2Tokenizer`, **vocab
+248044**, specials at 248044–248076). A stock Qwen3 tokenizer (~152k vocab) shares only the
+low-id digit/whitespace/structure tokens, so word tokens decode to **garbage** — verified.
+
+- GCS mirror (guaranteed source; the HF repo may be gated):
+  `gs://marin-models-us/ot-agent/models/Qwen/Qwen3.5-122B-A10B-FP8/` — pull just
+  `tokenizer.json`/`tokenizer_config.json`/`vocab.json`/`merges.txt` (~22 MB, no weights).
+- Which tokenizer produced a given dataset is recorded in its **`tokenizer_provenance.json`**
+  (+ a README decode recipe), written by `make_and_upload_trace_dataset` when you pass
+  `--served_model`. **Always pass `--served_model Qwen/Qwen3.5-122B-A10B-FP8` on any literal
+  upload/rescue** — omitting it still uploads the columns but stamps only the engine-reported
+  served-name (a warning prints).
+- Decode per-turn (list-of-lists) with `skip_special_tokens=False` to keep
+  `<|im_end|>`/`<tool_call>`/`<think>` markers.
+
+## Export schema-pin bug — FIXED (OT-Agent `7c978b78`), but old datasets are still degraded
+
+**Symptom:** a job whose literal correlation enriched N trials landed far fewer literal rows
+in parquet; whole shards came out with **no token columns at all**, and `load_dataset` fails
+with a schema `CastError` from the heterogeneous shards.
+
+**Root cause:** `make_and_upload_trace_dataset` wrote the token columns with pyarrow/HF type
+inference driven by each **chunk's leading rows**. A chunk whose first rows had no literals
+inferred a null/empty type and **silently dropped the token lists of every other row in that
+chunk**. `--chunk_size` larger makes it WORSE (bigger chunks → more rows lost per null-leading
+chunk), not better.
+
+**Fix:** `_pin_literal_token_columns` rebuilds the three token columns from the source rows
+with an explicit `Sequence(Sequence(int64/float64))` type as the last step before writing each
+shard (the chunk pipeline preserves row order, so `ds[i]` aligns to `rows[i]`). Every
+literal-job shard now carries the columns with a stable schema; text-only exports are
+unchanged (gated on `include_literal_tokens`).
+
+**ACTION for datasets uploaded before `7c978b78`:** they are under-populated (whole shards
+missing literals) — **re-rescue them with the fixed exporter to recover full yield.** Observed:
+
+| arm | pre-fix literal | post-fix literal | status |
+|---|---|---|---|
+| #6 exp_rpt_stack-junit-v6 | 205 / 858 | **660 / 858** | re-rescued 2026-07-06 (`7c978b78`) |
+| #1 inferredbugs | ~5640 (partial, whole shard 5 empty) | — | re-rescue pending |
+| #2 code-contests | 4619 (shards 1,19 empty, ~86% row-level) | — | re-rescue pending |
+| #3 nemotron-code-oracle | 5447 (tail shard empty) | — | re-rescue pending |
+
+Re-rescue = rsync the OUTER `gs://marin-models-{us,eu}/ot-agent/<job>/` (so sibling
+`logs/*_literal.jsonl` rides along), clear the target repo's partial `data/` (keep README +
+`tokenizer_provenance.json`), then re-run the uploader with `--served_model` from the
+otagent env. Verify with `count_populated_literal_rows` that literal count ≈ the correlation
+yield, not the old partial.
+
+## Literal traces → SFT
+
+`scripts/harbor/literal_traces_to_sft.py` converts a literal trace dataset into an SFT
+dataset whose **assistant turns are decoded verbatim from the literal completion tokens**
+(real `<think>` + native tool calls). It emits `conversations` (ShareGPT) + a
+reasoning-preserving `text` string, and **auto-resolves the tokenizer from the source's
+`tokenizer_provenance.json`** (override with `--tokenizer`). Rows without literals, or whose
+assistant-turn count ≠ literal step count, are dropped. `--validate N` dry-runs. First output:
+`laion/nemotron-code-oracle-qwen3.5-122b-opencode-sft` (5351 rows).
+
+**LAION upload gotcha:** the `laion` org's PRIVATE storage quota is full — push SFT datasets
+there **public** (public storage isn't quota-capped). A private push succeeds but 403s on
+readback (`Private repository storage limit reached`).
