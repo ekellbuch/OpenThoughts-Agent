@@ -506,10 +506,10 @@ generator:
   # (GQA, legal — and the reason the 131k KV is not sharded; see MEMORY (A)).
   # RETUNED 2026-06-27: TP=4 was overkill for a 35B-A3B MoE (~3B active) -> TP=2 + EP=2.
   # A TP=2 engine places intra-node on 2 of the 8 GPUs (NVLink decode); 4 engines/node.
-  inference_engine_tensor_parallel_size: 2
+  inference_engine_tensor_parallel_size: 4  # RESTORED 2026-07-06: was drifted to 2 while the KV-sizing above stayed TP=4 -> at TP=2 only ~16 of the advertised 20 seqs of KV fit -> intermittent OOM -> a rank dies -> TP peer hangs on _ALLGATHER_BASE. TP=4 = the documented safe design.
   # 16 TP=2 engines = 32 inference GPU = 4 engine nodes (4 engines/node). Set EXPLICITLY
   # (not null): the launcher derivation counts the 4 policy-only nodes too and would be WRONG.
-  num_inference_engines: 16
+  num_inference_engines: 8  # RESTORED 2026-07-06: 8 engines x TP4 = 32 gen GPU (was 16 x TP2)
 
   # EP=2 (= TP), ENABLED 2026-06-27: the 256 experts are expert-parallel across the engine's
   # 2 GPUs (128 whole experts/GPU) rather than TP-sharded. 256 % 2 == 0. (Was UNVALIDATED on
@@ -544,7 +544,7 @@ generator:
   # documented ~20-concurrency KV ceiling at gpu_mem 0.85 (NOT higher — 24 risks an
   # OOM at KV bind per MEMORY (A)); more decode slots help drain the rollout. Drop back
   # to 16->12 if the vLLM "Maximum concurrency" line comes in low / KV bind OOMs.
-  max_num_seqs: 20
+  max_num_seqs: 16  # RESTORED 2026-07-06: the sizing's stated SAFE value at TP=4/0.85 (20 was at the ~19-20 KV ceiling; trials are sandbox-bound so ~5 generate at once -> negligible throughput cost)
   max_num_batched_tokens: 16384
 
   enable_prefix_caching: true
