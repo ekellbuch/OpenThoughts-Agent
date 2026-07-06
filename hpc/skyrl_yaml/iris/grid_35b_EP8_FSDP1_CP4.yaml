@@ -480,7 +480,7 @@ trainer:
 
   fully_async:
     max_staleness_steps: 16
-    num_parallel_generation_workers: 256
+    num_parallel_generation_workers: 900
 
 # =============================================================================
 # Generator configuration (vLLM)
