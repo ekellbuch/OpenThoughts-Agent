@@ -516,7 +516,7 @@ generator:
   # EP=2 (= TP), ENABLED 2026-06-27: the 256 experts are expert-parallel across the engine's
   # 2 GPUs (128 whole experts/GPU) rather than TP-sharded. 256 % 2 == 0. (Was UNVALIDATED on
   # qwen3_5_moe in vLLM — watch generation correctness on relaunch.)
-  inference_engine_expert_parallel_size: 2
+  inference_engine_expert_parallel_size: 4  # RESTORED 2026-07-06 with TP=4: inference-EP requires ep = dp*tp = 1*4 = 4 (was 2, matching the drifted TP=2). EP=4 shards experts across all 4 engine GPUs -> matches the (A) 8.6 GB/GPU weight sizing.
 
   # DCP OFF (decode-context-parallel = 1): the hybrid arch's low 131k KV (~2.68
   # GB/seq, ~20 concurrent at 0.85) does NOT need KV sharding. If DCP were ever
