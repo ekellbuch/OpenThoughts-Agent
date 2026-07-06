@@ -326,7 +326,12 @@ ENV SKYRL_BRANCH=penfever/working
 #     rollouts balance sessions across inference engines by default (2026-07-05).
 #     This is the ONLY code delta vs the prior baked image (SKYRL_COMMIT-only bump;
 #     wheels + harbor 2e42d312 + rl_env_constraints unchanged).
-ENV SKYRL_COMMIT=7b7d627b19d7e85c308b6ce521a75238b31667a2
+#   - cdca0b3a "diag(moe): per-phase EPDIAG fwd/modelfwd counters for EP-dispatch
+#     fwd-op audit" — LOGGING-ONLY instrumentation (EPDIAG-gated) to measure
+#     MoE.forward-per-model-forward per phase, for the EP16-vs-EP8 fwd-op diagnostic
+#     (FINDING #2, moe_sharding_grid_131k). No routing/correctness change; another
+#     SKYRL_COMMIT-only bump (wheels + harbor + rl_env_constraints unchanged) (2026-07-06).
+ENV SKYRL_COMMIT=cdca0b3af091e04bd27b98a64360fc1fce6b6bf8
 
 RUN git clone --branch $SKYRL_BRANCH https://github.com/marin-community/MarinSkyRL.git $SKYRL_HOME && \
     git -C $SKYRL_HOME checkout $SKYRL_COMMIT
