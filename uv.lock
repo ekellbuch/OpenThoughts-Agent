@@ -3265,7 +3265,7 @@ wheels = [
 [[package]]
 name = "marin-finelog"
 version = "0.2.11"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ffinelog&rev=2595163da#2595163daff92688e4f43e83d59ed36605fa3772" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ffinelog&rev=33525a77c#33525a77c777d4baab7049d565b013eccd3be58f" }
 dependencies = [
     { name = "click" },
     { name = "connect-python" },
@@ -3294,7 +3294,7 @@ wheels = [
 [[package]]
 name = "marin-iris"
 version = "0.2.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Firis&rev=2595163da#2595163daff92688e4f43e83d59ed36605fa3772" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Firis&rev=33525a77c#33525a77c777d4baab7049d565b013eccd3be58f" }
 dependencies = [
     { name = "click" },
     { name = "cloudpickle" },
@@ -3310,7 +3310,7 @@ dependencies = [
     { name = "marin-finelog-server" },
     { name = "marin-rigging" },
     { name = "pydantic" },
-    { name = "pyjwt" },
+    { name = "pyjwt", extra = ["crypto"], marker = "extra == 'extra-18-openthoughts-agent-datagen-tpu' or (extra == 'extra-18-openthoughts-agent-datagen' and extra == 'extra-18-openthoughts-agent-rl') or (extra == 'extra-18-openthoughts-agent-datagen' and extra == 'extra-18-openthoughts-agent-sft-qwen35') or (extra == 'extra-18-openthoughts-agent-rl' and extra == 'extra-18-openthoughts-agent-sft-qwen35')" },
     { name = "pyyaml" },
     { name = "s3fs", version = "2026.1.0", source = { registry = "https://pypi.org/simple" } },
     { name = "sqlalchemy" },
@@ -3324,16 +3324,18 @@ dependencies = [
 [[package]]
 name = "marin-rigging"
 version = "0.2.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=2595163da#2595163daff92688e4f43e83d59ed36605fa3772" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=33525a77c#33525a77c777d4baab7049d565b013eccd3be58f" }
 dependencies = [
     { name = "click" },
     { name = "connect-python" },
     { name = "fsspec", version = "2026.1.0", source = { registry = "https://pypi.org/simple" } },
     { name = "gcsfs" },
     { name = "google-auth" },
+    { name = "pyjwt", extra = ["crypto"], marker = "extra == 'extra-18-openthoughts-agent-datagen-tpu' or (extra == 'extra-18-openthoughts-agent-datagen' and extra == 'extra-18-openthoughts-agent-rl') or (extra == 'extra-18-openthoughts-agent-datagen' and extra == 'extra-18-openthoughts-agent-sft-qwen35') or (extra == 'extra-18-openthoughts-agent-rl' and extra == 'extra-18-openthoughts-agent-sft-qwen35')" },
     { name = "pyyaml" },
     { name = "requests" },
     { name = "s3fs", version = "2026.1.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "starlette" },
 ]
 
 [[package]]
@@ -5126,8 +5128,8 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.20.0,<2.0.0" },
     { name = "jinja2", marker = "extra == 'rl'" },
     { name = "liger-kernel", marker = "extra == 'sft-qwen35'", specifier = ">=0.5.0" },
-    { name = "marin-iris", marker = "extra == 'datagen-tpu'", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Firis&rev=2595163da" },
-    { name = "marin-rigging", marker = "extra == 'datagen-tpu'", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=2595163da" },
+    { name = "marin-iris", marker = "extra == 'datagen-tpu'", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Firis&rev=33525a77c" },
+    { name = "marin-rigging", marker = "extra == 'datagen-tpu'", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=33525a77c" },
     { name = "modal", marker = "extra == 'harbor-all'", specifier = ">=0.60.0" },
     { name = "modal", marker = "extra == 'harbor-modal'", specifier = ">=0.60.0" },
     { name = "numpy", specifier = "<=2.26.0" },

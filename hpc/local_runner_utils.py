@@ -1036,8 +1036,7 @@ class LocalHarborRunner:
                 "controller ingress requires a local vLLM endpoint (api_base); none resolved."
             )
 
-        endpoint_name, register_address, api_base = controller_registration_plan(
-            ingress_host,
+        endpoint_name, register_address = controller_registration_plan(
             job_name,
             record_literal=record_literal,
             proxy_port=DEFAULT_LITERAL_PROXY_PORT,
@@ -1069,11 +1068,13 @@ class LocalHarborRunner:
             print(
                 f"[{self.JOB_PREFIX}-local] ingress_mode=controller "
                 f"record_literal={record_literal}: registered {endpoint_name} -> "
-                f"{register_address} (id={registration.endpoint_id}); harbor endpoint={api_base} "
-                f"(agent key injected={injected})",
+                f"{register_address} (id={registration.endpoint_id}, access=LINK); harbor "
+                f"endpoint=/proxy/t/<token>/{endpoint_name}/v1 (dummy key injected={injected})",
                 flush=True,
             )
             try:
+                # Mint + build the capability api_base AFTER register (the mint
+                # resolves the just-registered endpoint).
                 yield build_controller_endpoint_meta(ingress_host, endpoint_name)
             finally:
                 registration.close()
