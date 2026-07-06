@@ -1,32 +1,61 @@
-"""ingress_utils.py — controller-ingress wiring helpers (Stage 4).
+"""ingress_utils.py — native controller-ingress wiring helpers (capability-URL scheme).
 
 Shared by the RL / datagen launchers and the eval listener when
 ``--ingress-mode controller`` is selected. Under the default ``pinggy`` mode
-NONE of this is reached, so the legacy path stays byte-identical (plan G0).
+NONE of this is reached, so the legacy path stays byte-identical.
 
-The controller path replaces the pinggy tunnel with a stable public URL fronting
-the Iris controller proxy behind our auth-gating sidecar (``hpc/ingress_sidecar``):
+The controller path replaces the pinggy tunnel with the native iris
+capability-URL scheme that shipped in marin #6857 (``/proxy/t/*``): the co-located
+vLLM (or the RecordProxy in the literal combo) is registered with the iris
+controller under ``ENDPOINT_ACCESS_LINK``, then a scoped capability token is
+minted for it and carried IN THE URL PATH:
 
-    api_base = https://<ingress_host>/proxy/<endpoint_name>/v1
+    api_base = https://<ingress_host>/proxy/t/<token>/<encoded_endpoint>/v1
 
-and the sandbox carries ``IRIS_INGRESS_API_KEY`` as a bearer. The installed
-OpenAI-compatible agents (qwen-code/codex/hermes/trae/openhands) read the key
-from ``OPENAI_API_KEY`` / ``LLM_API_KEY`` beside their base URL (evidence B), so
-injecting the key into those env vars is the universal lever — no per-agent code
-change. Secrets are referenced by env-var NAME only; the real token is never
-hardcoded, and never written to a file (the api_key kwarg uses the
-``${IRIS_INGRESS_API_KEY}`` placeholder so it is resolved at agent runtime).
+Possession of the URL is the credential — there is NO auth header, and the
+sandbox-facing ``api_key`` is an unused dummy (installed OpenAI-compatible agents
+still require a non-empty key string, so we inject one, but it never rides the
+wire). ``<encoded_endpoint>`` is the registered wire name with a leading ``/``
+dropped and ``/`` -> ``.`` (the exact encoding of ``rigging.connect.capability_path``
+/ ``proxy_path``); our single-segment ``otagent-<slug>`` name encodes to itself.
+
+TOKEN LIFETIME. The controller clamps a minted token to
+``MAX_ENDPOINT_TOKEN_TTL_SECONDS`` = 24h (``DEFAULT`` = 1h). The endpoint
+REGISTRATION is separately lease-renewed for the whole run (see
+:class:`ControllerEndpointRegistration`); only the token expires. So the api_base
+is resolved through :func:`capability_api_base`, which mints a 24h token, caches
+it worker-side keyed by endpoint name, and re-mints when within
+``TOKEN_REFRESH_MARGIN_SECONDS`` of expiry.
+
+INJECTION CADENCE (important). The launchers bake the resolved api_base into the
+harbor command once per harbor spawn (``_run_harbor`` -> ``build_harbor_command``),
+so it is a PER-HARBOR-SPAWN value, not a per-trial one: a single harbor process
+uses one api_base string for its whole lifetime. The worker-side cache therefore
+refreshes the token across harbor RE-SPAWNS (resume / campaign refills), not
+across trials within one running harbor process. A harbor run that stays up
+longer than the token TTL will outlive its token — keep individual harbor runs
+under 24h, or re-spawn to re-mint. There is no per-trial base_url resolution hook
+in the current OT-Agent->harbor plumbing.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Protocol, Tuple
 
-# The sandbox-facing static bearer token secret (name-only; see secrets.env).
-INGRESS_KEY_ENV = "IRIS_INGRESS_API_KEY"
+# The sandbox-facing api_key. The capability token rides in the URL path, so no
+# bearer is needed; but installed OpenAI-compatible agents refuse to start
+# without SOME non-empty key, so we hand them this inert placeholder. It is
+# NOT a secret and never authenticates anything.
+DUMMY_API_KEY = "capability-url-no-auth-header"
+
+# Env vars the installed OpenAI-compatible agents read beside their base URL:
+# OPENAI_API_KEY (qwen/codex/hermes/trae/opencode) and LLM_API_KEY (openhands).
+_AGENT_KEY_ENV_VARS = ("OPENAI_API_KEY", "LLM_API_KEY")
 
 # Env var iris sets in-cluster to the externally-visible host a task should
 # advertise its services under (``JobInfo.advertise_host``). The controller
@@ -40,66 +69,203 @@ DEFAULT_ADVERTISE_HOST = "127.0.0.1"
 # The raw vLLM HTTP port the RL/datagen servers bind on the task node.
 DEFAULT_VLLM_PORT = 8000
 
-# Env vars the five installed OpenAI-compatible agents read beside their base URL
-# (evidence B): OPENAI_API_KEY (qwen/codex/hermes/trae) and LLM_API_KEY (openhands).
-_AGENT_KEY_ENV_VARS = ("OPENAI_API_KEY", "LLM_API_KEY")
+# Token TTL we request when minting (clamped server-side to the controller's
+# MAX_ENDPOINT_TOKEN_TTL_SECONDS, currently 24h) and the safety margin at which a
+# cached token is re-minted rather than reused.
+DEFAULT_TOKEN_TTL_HOURS = 24.0
+TOKEN_REFRESH_MARGIN_SECONDS = 2 * 3600  # re-mint when <2h remains
 
-# Placeholder written into agent kwargs so the real secret never lands in a
-# config file; Harbor's resolve_env_vars expands it from the process env.
-INGRESS_KEY_PLACEHOLDER = "${" + INGRESS_KEY_ENV + "}"
+
+def encode_endpoint_name(name: str) -> str:
+    """Encode a wire endpoint name for the ``/proxy`` path (``/`` -> ``.``, leading ``/`` dropped).
+
+    Byte-identical to ``rigging.connect.proxy_path`` / ``capability_path``'s
+    ``name.strip('/').replace('/', '.')``. Replicated here (rather than imported)
+    so the pure-string helpers stay usable on a launch host whose pinned iris
+    predates the capability APIs; the worker runtime (post pin-bump) agrees.
+    """
+    return name.strip("/").replace("/", ".")
 
 
 def controller_endpoint_name(job_name: Optional[str]) -> str:
-    """Deterministic iris endpoint name for a job's vLLM (Stage 2 registers this name).
+    """Deterministic iris endpoint wire name for a job's vLLM.
 
-    ``otagent-<sanitized-job-name>`` — unique per job, single path segment. The name
-    MUST be DOT-FREE: the controller EndpointProxy decodes ``.`` -> ``/`` in the
-    ``/proxy/<name>/`` route (``endpoint_proxy.py``: ``slashed = encoded_name.replace('.','/')``,
-    then resolves ``/<slashed>``). So a literal dot in the registered name is looked up
-    as a ``/`` path segment and can never match — that is the 404 the first live smoke
-    hit despite a successful register. We map dots (and anything outside ``[A-Za-z0-9_-]``)
-    to ``-`` so the registered name and the dot-decoded lookup are identical.
+    ``otagent-<sanitized-job-name>`` — unique per job, a single DOT-FREE path
+    segment, so ``encode_endpoint_name`` is the identity and the registered name,
+    the minted token's audience, and the capability path all agree. Anything
+    outside ``[A-Za-z0-9_-]`` (including dots and slashes) maps to ``-``.
     """
     slug = re.sub(r"[^A-Za-z0-9_-]+", "-", (job_name or "job")).strip("-_").lower()
     return f"otagent-{slug or 'job'}"
 
 
-def build_controller_api_base(ingress_host: str, endpoint_name: str) -> str:
-    """``https://<ingress_host>/proxy/<endpoint_name>/v1`` (scheme optional on host)."""
+def build_capability_api_base(ingress_host: str, endpoint_name: str, token: str) -> str:
+    """``https://<ingress_host>/proxy/t/<token>/<encoded_endpoint>/v1``.
+
+    The capability URL for an OpenAI server: the scoped token rides in the path
+    and no auth header is needed. ``ingress_host`` may omit the scheme.
+    """
     host = (ingress_host or "").rstrip("/")
     if not (host.startswith("http://") or host.startswith("https://")):
         host = f"https://{host}"
-    return f"{host}/proxy/{endpoint_name}/v1"
-
-
-def controller_api_base_for_job(ingress_host: str, job_name: Optional[str]) -> str:
-    return build_controller_api_base(ingress_host, controller_endpoint_name(job_name))
+    return f"{host}/proxy/t/{token}/{encode_endpoint_name(endpoint_name)}/v1"
 
 
 def inject_ingress_agent_key(env: Optional[dict] = None) -> bool:
-    """Copy ``IRIS_INGRESS_API_KEY`` into the agent-facing key env vars.
+    """Set the inert :data:`DUMMY_API_KEY` into the agent-facing key env vars.
 
-    Returns True if the key was present and injected. Reads the secret by env-var
-    NAME only; never prints it. No-op (returns False) if the key is unset.
+    The capability token is in the URL path, so no real bearer is injected; this
+    only satisfies agents that refuse to start without a non-empty key. Always
+    returns True (there is no secret to be missing).
     """
     env = os.environ if env is None else env
-    key = env.get(INGRESS_KEY_ENV)
-    if not key:
-        return False
     for var in _AGENT_KEY_ENV_VARS:
-        env[var] = key
+        env[var] = DUMMY_API_KEY
     return True
 
 
-def build_controller_endpoint_meta(ingress_host: str, endpoint_name: str) -> Dict[str, str]:
-    """Endpoint metadata dict for controller mode (api_base + placeholder api_key).
+# --------------------------------------------------------------------------- #
+# Capability-token minting + worker-side cache
+# --------------------------------------------------------------------------- #
 
-    metrics_endpoint is intentionally omitted: the sidecar forwards ONLY the
-    ``/v1`` inference surface, so ``/metrics`` is not reachable through it.
+
+class CapabilityMinter(Protocol):
+    """Mints a scoped capability token for a registered endpoint.
+
+    Returns ``(token, expires_at_epoch_seconds)``. The in-cluster controller-RPC
+    adapter and unit-test fakes both satisfy it, so the cache is testable
+    in-process without a live controller.
+    """
+
+    def mint(self, endpoint_name: str, ttl_hours: float) -> Tuple[str, float]: ...
+
+
+@dataclass
+class _CachedToken:
+    token: str
+    expires_at: float  # epoch seconds
+
+
+class CapabilityTokenCache:
+    """Worker-side cache of scoped capability tokens, keyed by endpoint name.
+
+    Mints on first use and re-mints when a cached token is within
+    :data:`TOKEN_REFRESH_MARGIN_SECONDS` of expiry, so every resolve of the
+    api_base hands out a token with ample life left. Thread-safe: harbor spawns
+    and lease renewers touch it from different threads.
+    """
+
+    def __init__(self, minter: CapabilityMinter, *, ttl_hours: float = DEFAULT_TOKEN_TTL_HOURS) -> None:
+        self._minter = minter
+        self._ttl_hours = ttl_hours
+        self._lock = threading.Lock()
+        self._cache: Dict[str, _CachedToken] = {}
+
+    def token_for(self, endpoint_name: str, *, now: Optional[float] = None) -> str:
+        now = time.time() if now is None else now
+        with self._lock:
+            cached = self._cache.get(endpoint_name)
+            if cached is not None and cached.expires_at - now > TOKEN_REFRESH_MARGIN_SECONDS:
+                return cached.token
+            token, expires_at = self._minter.mint(endpoint_name, self._ttl_hours)
+            if not token:
+                raise RuntimeError(
+                    f"minting a capability token for {endpoint_name} returned an empty "
+                    "token; refusing to build an unreachable api_base."
+                )
+            self._cache[endpoint_name] = _CachedToken(token=token, expires_at=expires_at)
+            return token
+
+
+class _ControllerCapabilityMinter:
+    """Mints via the in-cluster controller ``MintEndpointToken`` RPC.
+
+    Builds a ``ControllerServiceClientSync`` from the task's
+    ``IRIS_CONTROLLER_ADDRESS`` (network-level trust in-cluster, no explicit
+    credentials — mirroring the leased ``EndpointClient``). The mint is
+    authorized to the endpoint's owning user or an admin; an in-cluster task
+    registering its own endpoint is that owner.
+    """
+
+    def __init__(self) -> None:
+        from iris.cluster.client.job_info import get_job_info
+        from iris.rpc.compression import IRIS_RPC_COMPRESSIONS
+        from iris.rpc.controller_connect import ControllerServiceClientSync
+
+        info = get_job_info()
+        if info is None or not info.controller_address:
+            raise RuntimeError(
+                "capability-token minting requires an in-cluster iris task "
+                "(IRIS_TASK_ID + IRIS_CONTROLLER_ADDRESS); none found."
+            )
+        self._stub = ControllerServiceClientSync(
+            info.controller_address,
+            accept_compression=IRIS_RPC_COMPRESSIONS,
+            send_compression=None,
+        )
+
+    def mint(self, endpoint_name: str, ttl_hours: float) -> Tuple[str, float]:
+        from iris.rpc import controller_pb2
+        from iris.time_proto import duration_to_proto
+        from rigging.timing import Duration
+
+        request = controller_pb2.Controller.MintEndpointTokenRequest(
+            endpoint_name=endpoint_name,
+            ttl=duration_to_proto(Duration.from_hours(ttl_hours)),
+        )
+        resp = self._stub.mint_endpoint_token(request)
+        return resp.token, resp.expires_at.epoch_ms / 1000.0
+
+
+# Process-wide cache; the default minter is constructed lazily on first resolve
+# (it needs the in-cluster controller address, unavailable at import time).
+_TOKEN_CACHE: Optional[CapabilityTokenCache] = None
+_TOKEN_CACHE_LOCK = threading.Lock()
+
+
+def _default_token_cache() -> CapabilityTokenCache:
+    global _TOKEN_CACHE
+    with _TOKEN_CACHE_LOCK:
+        if _TOKEN_CACHE is None:
+            _TOKEN_CACHE = CapabilityTokenCache(_ControllerCapabilityMinter())
+        return _TOKEN_CACHE
+
+
+def capability_api_base(
+    ingress_host: str,
+    endpoint_name: str,
+    *,
+    cache: Optional[CapabilityTokenCache] = None,
+    now: Optional[float] = None,
+) -> str:
+    """Resolve the current capability api_base for a REGISTERED endpoint.
+
+    Mints (or reuses a cached, still-fresh) scoped token and returns
+    ``https://<ingress_host>/proxy/t/<token>/<encoded_endpoint>/v1``. The endpoint
+    MUST already be registered with ``ENDPOINT_ACCESS_LINK`` (see
+    :func:`register_controller_endpoint`), else the mint has nothing to resolve.
+    ``cache`` is injectable for tests; production uses the process-wide worker
+    cache backed by the controller RPC.
+    """
+    token_cache = cache if cache is not None else _default_token_cache()
+    token = token_cache.token_for(endpoint_name, now=now)
+    return build_capability_api_base(ingress_host, endpoint_name, token)
+
+
+def build_controller_endpoint_meta(
+    ingress_host: str,
+    endpoint_name: str,
+    *,
+    cache: Optional[CapabilityTokenCache] = None,
+) -> Dict[str, str]:
+    """Endpoint metadata dict for controller mode (capability api_base + dummy key).
+
+    metrics_endpoint is intentionally omitted: the capability route fronts only
+    the ``/v1`` inference surface, so ``/metrics`` is not reachable through it.
     """
     return {
-        "api_base": build_controller_api_base(ingress_host, endpoint_name),
-        "api_key": INGRESS_KEY_PLACEHOLDER,
+        "api_base": capability_api_base(ingress_host, endpoint_name, cache=cache),
+        "api_key": DUMMY_API_KEY,
     }
 
 
@@ -107,42 +273,45 @@ def build_controller_endpoint_meta(ingress_host: str, endpoint_name: str) -> Dic
 # Endpoint registration (shared by the controller path and the +literal combo)
 # --------------------------------------------------------------------------- #
 #
-# The controller-ingress api_base ``https://<host>/proxy/<name>/v1`` only
-# resolves once the vLLM (or, in the literal combo, the co-located RecordProxy)
-# is REGISTERED with the iris controller under ``<name>``. This registration is
-# the missing link the ``--ingress-mode controller`` path did not yet wire; the
-# helpers below fill it and are shared so the plain and the record_literal combo
-# register the SAME name (only the address differs), keeping the api_base fixed.
+# The capability api_base only resolves once the vLLM (or, in the literal combo,
+# the co-located RecordProxy) is REGISTERED with the iris controller under
+# ``<endpoint_name>`` AND with ``ENDPOINT_ACCESS_LINK`` — a PRIVATE (default)
+# endpoint rejects a scoped capability token (the controller's proxy authorizer
+# returns 403 "endpoint-scoped token cannot access this endpoint"). The helpers
+# below register with LINK access and are shared so the plain and the
+# record_literal combo register the SAME name (only the address differs).
 #
-# NOTE ON NAMESPACING: we register through the leased :class:`EndpointClient`
+# NAMESPACING: we register through the leased :class:`EndpointClient`
 # (``iris.cluster.client.endpoint_client``) directly rather than through
-# ``ctx.registry`` — the latter (``NamespacedEndpointRegistry``) auto-prefixes the
-# name with the job namespace (``<user>/<root>/<name>``), which would break the
-# fixed single-segment ``/proxy/otagent.<slug>/v1`` route the ingress path already
-# builds (and that the live smoke verified with the un-prefixed name).
-# ``EndpointClient.register(name, address, task_attempt, metadata)`` does NOT
-# prefix, so the wire name stays the single ``otagent.<slug>`` segment.
+# ``ctx.registry`` — the latter auto-prefixes the name with the job namespace,
+# which would break the fixed single-segment ``otagent-<slug>`` name the mint's
+# token audience and the capability path both use. ``EndpointClient.register``
+# does NOT prefix, so the wire name stays that single segment.
 #
-# NOTE ON LEASING: iris endpoints are LEASED. ``EndpointClient`` owns the RPC stub
-# AND a background ``EndpointLeaseRenewer`` daemon — the lease is what keeps the
-# controller serving the endpoint, and a one-shot register with no renewal expires
-# within minutes (which 404'd the whole run). So we build a dedicated
-# ``EndpointClient`` (its renewer daemon running), register through it, and KEEP IT
-# ALIVE for the entire harbor run via the returned :class:`ControllerEndpointRegistration`
-# handle, then ``close()`` it (stops renewing + unregisters) on run exit.
+# LEASING: iris endpoints are LEASED. ``EndpointClient`` owns the RPC stub AND a
+# background ``EndpointLeaseRenewer`` daemon — the lease keeps the controller
+# serving the endpoint, and a one-shot register with no renewal expires within
+# minutes. So we build a dedicated ``EndpointClient`` (its renewer running),
+# register through it with LINK access, and KEEP IT ALIVE for the whole harbor
+# run via the returned :class:`ControllerEndpointRegistration`, then ``close()``
+# it (stops renewing + unregisters) on run exit. The token expiring is orthogonal
+# — the lease renews the registration; the token cache re-mints the token.
 
 
 class EndpointRegistrar(Protocol):
-    """The ``register(name, address, metadata) -> endpoint_id`` shape we drive.
+    """The ``register(name, address, metadata, access) -> endpoint_id`` shape we drive.
 
     The in-cluster leased-``EndpointClient`` adapter and unit-test fakes both
-    satisfy it, so the registration wiring is testable in-process without a live
-    controller. An implementation MAY also expose ``close()`` to stop lease
+    satisfy it. An implementation MAY also expose ``close()`` to stop lease
     renewal and unregister; the registration handle calls it on teardown.
     """
 
     def register(
-        self, name: str, address: str, metadata: Optional[Dict[str, str]] = None
+        self,
+        name: str,
+        address: str,
+        metadata: Optional[Dict[str, str]] = None,
+        access: Optional[int] = None,
     ) -> str: ...
 
 
@@ -152,9 +321,8 @@ class ControllerEndpointRegistration:
 
     Holds the real ``endpoint_id`` and a ``close`` callable that stops the
     background lease renewer and unregisters the endpoint. The caller MUST keep
-    this handle alive for the whole harbor run (so the daemon keeps renewing) and
-    call :meth:`close` on exit; a dropped handle lets the lease lapse and the
-    ``/proxy/<name>/v1`` route starts 404-ing mid-run.
+    this handle alive for the whole harbor run and call :meth:`close` on exit; a
+    dropped handle lets the lease lapse and the ``/proxy`` route starts 404-ing.
     """
 
     endpoint_id: str
@@ -170,19 +338,28 @@ class _LeasedEndpointRegistrar:
 
     Owns the ``EndpointClient`` (and thus its background ``EndpointLeaseRenewer``
     daemon), so ``register`` returns the real endpoint_id and keeps the lease
-    renewed until ``close``. Registers WITHOUT namespace-prefixing (see module
-    note) so the wire name is the single ``otagent.<slug>`` segment the
-    ``/proxy/<name>/v1`` api_base uses.
+    renewed until ``close``. Registers WITHOUT namespace-prefixing and with
+    ``ENDPOINT_ACCESS_LINK`` so the capability token minted for the single
+    ``otagent-<slug>`` wire name resolves and is accepted by the proxy.
     """
 
-    def __init__(self, client: "EndpointClient", task_attempt: "TaskAttempt") -> None:
+    def __init__(self, client: "EndpointClient", task_attempt: "TaskAttempt") -> None:  # noqa: F821
         self._client = client
         self._task_attempt = task_attempt
 
     def register(
-        self, name: str, address: str, metadata: Optional[Dict[str, str]] = None
+        self,
+        name: str,
+        address: str,
+        metadata: Optional[Dict[str, str]] = None,
+        access: Optional[int] = None,
     ) -> str:
-        return self._client.register(name, address, self._task_attempt, metadata or {})
+        from iris.cluster.types import EndpointAccess
+
+        access_mode = access if access is not None else EndpointAccess.ENDPOINT_ACCESS_LINK
+        return self._client.register(
+            name, address, self._task_attempt, metadata or {}, access=access_mode
+        )
 
     def close(self) -> None:
         # Stops the renewer daemon and best-effort unregisters everything still
@@ -209,14 +386,9 @@ def _default_endpoint_registrar() -> _LeasedEndpointRegistrar:
     Constructs a dedicated ``EndpointClient`` from the task's
     ``IRIS_CONTROLLER_ADDRESS`` (network-level trust in-cluster, no credentials)
     and the task identity from :func:`iris.cluster.client.job_info.get_job_info`.
-    The ``EndpointClient`` starts a background lease renewer on ``register`` so
-    the controller keeps serving the endpoint for the whole run.
-
     Raises loudly (never returns ``None``) when iris is unavailable or we are not
-    inside a task — a silent no-op here is exactly what produced the 404-ing run.
+    inside a task — a silent no-op here is exactly what produces a 404-ing run.
     """
-    # iris is only importable inside the cluster runtime image; on the
-    # controller-ingress path (worker / SLURM node) it is always present.
     from iris.cluster.client.endpoint_client import EndpointClient
     from iris.cluster.client.job_info import get_job_info
     from iris.rpc.compression import IRIS_RPC_COMPRESSIONS
@@ -227,7 +399,7 @@ def _default_endpoint_registrar() -> _LeasedEndpointRegistrar:
         raise RuntimeError(
             "controller endpoint registration requires an in-cluster iris task "
             "(IRIS_TASK_ID + IRIS_CONTROLLER_ADDRESS); none found. Registration "
-            "cannot proceed — the /proxy/<name>/v1 route would 404."
+            "cannot proceed — the /proxy route would 404."
         )
     stub = EndpointServiceClientSync(
         info.controller_address,
@@ -244,12 +416,13 @@ def register_controller_endpoint(
     registrar: Optional[EndpointRegistrar] = None,
     metadata: Optional[Dict[str, str]] = None,
 ) -> ControllerEndpointRegistration:
-    """Register ``address`` under ``endpoint_name`` with the iris controller.
+    """Register ``address`` under ``endpoint_name`` (``ENDPOINT_ACCESS_LINK``).
 
     Registers through a leased ``EndpointClient`` (its background lease renewer
-    keeps the controller serving the endpoint) so ``/proxy/<endpoint_name>/v1``
-    resolves to ``address`` for the whole run. ``registrar`` is injectable for
-    unit tests; in production it is the in-cluster :func:`_default_endpoint_registrar`.
+    keeps the controller serving the endpoint) so the capability route resolves
+    to ``address`` for the whole run. LINK access is what lets the minted scoped
+    token reach it. ``registrar`` is injectable for unit tests; in production it
+    is the in-cluster :func:`_default_endpoint_registrar`.
 
     Returns a :class:`ControllerEndpointRegistration` handle with the REAL
     ``endpoint_id`` and a ``close()`` that stops renewal + unregisters. The caller
@@ -273,28 +446,29 @@ def register_controller_endpoint(
 
 
 def controller_registration_plan(
-    ingress_host: str,
     job_name: Optional[str],
     *,
     record_literal: bool,
     proxy_port: int,
     vllm_port: int = DEFAULT_VLLM_PORT,
     env: Optional[dict] = None,
-) -> Tuple[str, str, str]:
-    """Compute ``(endpoint_name, register_address, api_base)`` for controller mode.
+) -> Tuple[str, str]:
+    """Compute ``(endpoint_name, register_address)`` for controller mode.
 
     The single decision point the launchers share so the plain and the
     ``record_literal`` combo stay consistent:
 
-      * ``endpoint_name`` — the same ``otagent.<slug>`` either way, so ``api_base``
-        is byte-identical whether or not literal capture is on.
+      * ``endpoint_name`` — the same ``otagent-<slug>`` either way, so the
+        capability api_base (built after register+mint) is stable whether or not
+        literal capture is on.
       * ``register_address`` — the co-located RecordProxy's ``proxy_port`` when
         ``record_literal`` is set (controller -> RecordProxy -> vLLM, so literal
         tokens are captured on the served path), otherwise raw vLLM's ``vllm_port``.
-      * ``api_base`` — ``https://<ingress_host>/proxy/<endpoint_name>/v1``.
+
+    The api_base is NOT returned here: it can only be built AFTER the endpoint is
+    registered and a token minted (:func:`capability_api_base`).
     """
     endpoint_name = controller_endpoint_name(job_name)
     port = proxy_port if record_literal else vllm_port
     register_address = controller_upstream_address(port, env=env)
-    api_base = build_controller_api_base(ingress_host, endpoint_name)
-    return endpoint_name, register_address, api_base
+    return endpoint_name, register_address

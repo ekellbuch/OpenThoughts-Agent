@@ -119,8 +119,8 @@ datagen-tpu = [
     # required dependency of marin-iris and lives in the same monorepo; both are
     # git subdirectory installs (not published to PyPI). marin-finelog(+server)
     # and connect-python come in transitively from PyPI.
-    "marin-iris @ git+https://github.com/marin-community/marin.git@2595163da#subdirectory=lib/iris",
-    "marin-rigging @ git+https://github.com/marin-community/marin.git@2595163da#subdirectory=lib/rigging",
+    "marin-iris @ git+https://github.com/marin-community/marin.git@33525a77c#subdirectory=lib/iris",
+    "marin-rigging @ git+https://github.com/marin-community/marin.git@33525a77c#subdirectory=lib/rigging",
 ]
 cloud = [
     "skypilot>=0.6.1",

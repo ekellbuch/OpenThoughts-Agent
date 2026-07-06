@@ -1,11 +1,10 @@
-"""Stage 4 wiring unit tests — controller-mode api_base + key injection.
+"""Native controller-ingress wiring unit tests — capability-URL api_base + registration.
 
-Proves the controller-ingress wiring lever WITHOUT launching a job (gate (b) of
-Stage 4): the shared helpers build the right ``/proxy/<name>/v1`` api_base and
-inject the key env, and merge_agent_kwargs carries the api_key placeholder in
-controller mode while staying byte-identical (no api_key) on the legacy path.
-
-All tokens are in-process dummies; no real secret is referenced.
+Proves the controller-ingress wiring lever WITHOUT launching a job: the shared
+helpers register under ENDPOINT_ACCESS_LINK, mint a scoped capability token
+(worker-side cache), build the ``/proxy/t/<token>/<name>/v1`` api_base, and inject
+the inert dummy key. All tokens are in-process fakes; no real secret or live
+controller is referenced.
 
 Run:
     .venv/bin/python -m pytest tests/hpc/test_ingress_wiring.py -v
@@ -30,59 +29,108 @@ from hpc.harbor_utils import build_endpoint_meta, merge_agent_kwargs  # noqa: E4
 from hpc.ingress_utils import (  # noqa: E402
     ADVERTISE_HOST_ENV,
     DEFAULT_VLLM_PORT,
-    INGRESS_KEY_ENV,
-    INGRESS_KEY_PLACEHOLDER,
-    build_controller_api_base,
+    DUMMY_API_KEY,
+    TOKEN_REFRESH_MARGIN_SECONDS,
+    CapabilityTokenCache,
+    build_capability_api_base,
     build_controller_endpoint_meta,
-    controller_api_base_for_job,
+    capability_api_base,
     controller_endpoint_name,
     controller_registration_plan,
     controller_upstream_address,
+    encode_endpoint_name,
     inject_ingress_agent_key,
     register_controller_endpoint,
 )
 from hpc.literal_proxy_utils import DEFAULT_LITERAL_PROXY_PORT  # noqa: E402
 
 
+class _FakeMinter:
+    """Returns a token per mint and records mint-count for assertions."""
+
+    def __init__(self, expires_at: float = 10_000_000_000.0):
+        self.expires_at = expires_at
+        self.calls = 0
+
+    def mint(self, endpoint_name, ttl_hours):
+        self.calls += 1
+        return f"TKN-{self.calls}", self.expires_at
+
+
+def _fixed_cache(token: str = "TKN", expires_at: float = 10_000_000_000.0) -> CapabilityTokenCache:
+    class _Fixed:
+        def mint(self, endpoint_name, ttl_hours):
+            return token, expires_at
+
+    return CapabilityTokenCache(_Fixed())
+
+
 def test_controller_endpoint_name_sanitizes():
-    # DOT-FREE: the EndpointProxy decodes '.' -> '/' in /proxy/<name>/, so the name
-    # must contain no literal dots (else the register-name != dot-decoded-lookup 404).
+    # single DOT-FREE segment so encode_endpoint_name is the identity and the
+    # registered name == token audience == capability-path name.
     assert controller_endpoint_name("rl-qwen3_8b/run.1") == "otagent-rl-qwen3_8b-run-1"
     assert controller_endpoint_name(None) == "otagent-job"
     assert controller_endpoint_name("") == "otagent-job"
-    # single path segment (no slashes) AND no dots — both required by the /proxy/<name>/ route
     name = controller_endpoint_name("a/b.c/d")
     assert "/" not in name and "." not in name
+    assert encode_endpoint_name(name) == name
 
 
-def test_build_controller_api_base_scheme_handling():
+def test_encode_endpoint_name_matches_rigging_scheme():
+    # Byte-identical to rigging.connect.capability_path/proxy_path encoding:
+    # strip leading/trailing '/', then '/' -> '.'.
+    assert encode_endpoint_name("/serve/foo") == "serve.foo"
+    assert encode_endpoint_name("otagent-job") == "otagent-job"
+    assert encode_endpoint_name("/serve/serve-qwen3-0-6b-973241") == "serve.serve-qwen3-0-6b-973241"
+
+
+def test_build_capability_api_base_puts_token_in_path():
     assert (
-        build_controller_api_base("ingress.example", "otagent.job1")
-        == "https://ingress.example/proxy/otagent.job1/v1"
+        build_capability_api_base("ingress.example", "otagent-job1", "JWT.abc.def")
+        == "https://ingress.example/proxy/t/JWT.abc.def/otagent-job1/v1"
     )
     # explicit scheme preserved; trailing slash stripped
     assert (
-        build_controller_api_base("http://10.0.0.1:8443/", "ep")
-        == "http://10.0.0.1:8443/proxy/ep/v1"
+        build_capability_api_base("http://10.0.0.1:8443/", "ep", "TK")
+        == "http://10.0.0.1:8443/proxy/t/TK/ep/v1"
     )
 
 
-def test_controller_api_base_for_job():
-    assert (
-        controller_api_base_for_job("ingress.example", "myjob")
-        == "https://ingress.example/proxy/otagent-myjob/v1"
-    )
+def test_capability_api_base_uses_cached_token():
+    cache = _fixed_cache(token="ABC")
+    url = capability_api_base("ingress.example", "otagent-myjob", cache=cache)
+    assert url == "https://ingress.example/proxy/t/ABC/otagent-myjob/v1"
 
 
-def test_inject_ingress_agent_key():
-    env = {INGRESS_KEY_ENV: "dummy-key-123"}
+def test_capability_token_cache_reuses_until_margin_then_remints():
+    minter = _FakeMinter(expires_at=1000.0)
+    cache = CapabilityTokenCache(minter)
+    # first call mints
+    t1 = cache.token_for("ep", now=0.0)
+    assert t1 == "TKN-1" and minter.calls == 1
+    # well before the refresh margin -> reuse (no new mint)
+    t2 = cache.token_for("ep", now=1000.0 - TOKEN_REFRESH_MARGIN_SECONDS - 1)
+    assert t2 == "TKN-1" and minter.calls == 1
+    # inside the refresh margin -> re-mint
+    t3 = cache.token_for("ep", now=1000.0 - TOKEN_REFRESH_MARGIN_SECONDS + 1)
+    assert t3 == "TKN-2" and minter.calls == 2
+
+
+def test_capability_token_cache_rejects_empty_token():
+    class _EmptyMinter:
+        def mint(self, endpoint_name, ttl_hours):
+            return "", 10_000_000_000.0
+
+    cache = CapabilityTokenCache(_EmptyMinter())
+    with pytest.raises(RuntimeError):
+        cache.token_for("ep", now=0.0)
+
+
+def test_inject_ingress_agent_key_sets_dummy():
+    env: dict = {}
     assert inject_ingress_agent_key(env) is True
-    assert env["OPENAI_API_KEY"] == "dummy-key-123"
-    assert env["LLM_API_KEY"] == "dummy-key-123"
-    # no-op when unset
-    empty: dict = {}
-    assert inject_ingress_agent_key(empty) is False
-    assert empty == {}
+    assert env["OPENAI_API_KEY"] == DUMMY_API_KEY
+    assert env["LLM_API_KEY"] == DUMMY_API_KEY
 
 
 def test_build_endpoint_meta_api_key_dormant_by_default():
@@ -90,12 +138,21 @@ def test_build_endpoint_meta_api_key_dormant_by_default():
     meta = build_endpoint_meta("http://host:8000/v1")
     assert "api_key" not in meta
     assert meta["api_base"] == "http://host:8000/v1"
-    # controller path: api_key carried through
-    meta2 = build_endpoint_meta("http://host:8000/v1", api_key=INGRESS_KEY_PLACEHOLDER)
-    assert meta2["api_key"] == INGRESS_KEY_PLACEHOLDER
+    # controller path: dummy api_key carried through
+    meta2 = build_endpoint_meta("http://host:8000/v1", api_key=DUMMY_API_KEY)
+    assert meta2["api_key"] == DUMMY_API_KEY
 
 
-def test_merge_agent_kwargs_carries_api_key_only_in_controller_mode():
+def test_build_controller_endpoint_meta_mints_capability_url():
+    cache = _fixed_cache(token="XYZ")
+    meta = build_controller_endpoint_meta("ingress.example", "otagent-myjob", cache=cache)
+    assert meta["api_base"] == "https://ingress.example/proxy/t/XYZ/otagent-myjob/v1"
+    assert meta["api_key"] == DUMMY_API_KEY
+    # metrics endpoint intentionally absent (capability route fronts only /v1)
+    assert "metrics_endpoint" not in meta
+
+
+def test_merge_agent_kwargs_carries_capability_url_in_controller_mode():
     cfg = {"agents": [{"name": "qwen-code", "kwargs": {"model_name": "m"}}]}
 
     # legacy/pinggy endpoint_meta (no api_key) -> agent_kwargs has NO api_key
@@ -104,25 +161,22 @@ def test_merge_agent_kwargs_carries_api_key_only_in_controller_mode():
     assert "api_key" not in merged_legacy
     assert merged_legacy["api_base"] == "http://host:8000/v1"
 
-    # controller endpoint_meta -> api_base is /proxy/<name>/v1 + api_key placeholder
-    ctrl_meta = build_controller_endpoint_meta("ingress.example", "otagent.myjob")
+    # controller endpoint_meta -> api_base is the capability URL + dummy key
+    cache = _fixed_cache(token="XYZ")
+    ctrl_meta = build_controller_endpoint_meta("ingress.example", "otagent-myjob", cache=cache)
     merged_ctrl, _ = merge_agent_kwargs(cfg, agent_name="qwen-code", endpoint_meta=ctrl_meta)
-    assert merged_ctrl["api_base"] == "https://ingress.example/proxy/otagent.myjob/v1"
-    assert merged_ctrl["api_key"] == INGRESS_KEY_PLACEHOLDER
-    # metrics endpoint intentionally absent in controller mode (sidecar blocks /metrics)
-    assert "metrics_endpoint" not in ctrl_meta
+    assert merged_ctrl["api_base"] == "https://ingress.example/proxy/t/XYZ/otagent-myjob/v1"
+    assert merged_ctrl["api_key"] == DUMMY_API_KEY
 
 
 def test_eval_listener_to_env_controller_additive():
     """SbatchParams.to_env(): pinggy default byte-identical; controller adds EVAL_INGRESS_*."""
     from eval.unified_eval_listener import SbatchParams
 
-    # default (pinggy) mode: no EVAL_INGRESS_* keys
     default_env = SbatchParams(pinggy_url="x.a.pinggy.link", pinggy_token="tok").to_env()
     assert not any(k.startswith("EVAL_INGRESS_") for k in default_env)
     assert default_env["EVAL_PINGGY_URL"] == "x.a.pinggy.link"
 
-    # controller mode: EVAL_INGRESS_* emitted
     ctrl_env = SbatchParams(ingress_mode="controller", ingress_host="ingress.example").to_env()
     assert ctrl_env["EVAL_INGRESS_MODE"] == "controller"
     assert ctrl_env["EVAL_INGRESS_HOST"] == "ingress.example"
@@ -132,18 +186,16 @@ def test_eval_listener_to_env_controller_additive():
 # Endpoint registration helpers (shared by the controller + literal-combo path)
 # --------------------------------------------------------------------------- #
 class _FakeRegistrar:
-    """Records register(name, address, metadata) calls; returns a fixed id.
-
-    Also records close() so tests can assert the registration handle stops lease
-    renewal on teardown (mirroring the real leased ``EndpointClient``).
-    """
+    """Records register(name, address, metadata, access) calls; returns a fixed id."""
 
     def __init__(self):
         self.calls = []
         self.closed = False
 
-    def register(self, name, address, metadata=None):
-        self.calls.append({"name": name, "address": address, "metadata": metadata})
+    def register(self, name, address, metadata=None, access=None):
+        self.calls.append(
+            {"name": name, "address": address, "metadata": metadata, "access": access}
+        )
         return "endpoint-id-xyz"
 
     def close(self):
@@ -151,54 +203,46 @@ class _FakeRegistrar:
 
 
 def test_controller_upstream_address_uses_advertise_host():
-    # in-cluster: IRIS_ADVERTISE_HOST wins, on the requested port
     env = {ADVERTISE_HOST_ENV: "10.16.4.7"}
     assert controller_upstream_address(8010, env=env) == "http://10.16.4.7:8010"
-    # off-cluster (unset) -> loopback fallback
     assert controller_upstream_address(8000, env={}) == "http://127.0.0.1:8000"
 
 
 def test_register_controller_endpoint_uses_injected_registrar():
     reg = _FakeRegistrar()
     registration = register_controller_endpoint(
-        "otagent.myjob", "http://10.0.0.1:8010", registrar=reg, metadata={"k": "v"}
+        "otagent-myjob", "http://10.0.0.1:8010", registrar=reg, metadata={"k": "v"}
     )
-    # returns a handle carrying the REAL endpoint_id (never None)
     assert registration.endpoint_id == "endpoint-id-xyz"
-    assert reg.calls == [
-        {"name": "otagent.myjob", "address": "http://10.0.0.1:8010", "metadata": {"k": "v"}}
-    ]
-    # closing the handle stops lease renewal / unregisters via the registrar
+    assert reg.calls[0]["name"] == "otagent-myjob"
+    assert reg.calls[0]["address"] == "http://10.0.0.1:8010"
+    assert reg.calls[0]["metadata"] == {"k": "v"}
     assert reg.closed is False
     registration.close()
     assert reg.closed is True
 
 
 def test_register_controller_endpoint_fails_loud_without_registrar(monkeypatch):
-    # A broken registration (no in-cluster registrar) must raise, not silently
-    # no-op — a silent no-op is exactly what 404'd the whole run.
     def _boom():
         raise RuntimeError("no in-cluster iris task")
 
     monkeypatch.setattr("hpc.ingress_utils._default_endpoint_registrar", _boom)
     with pytest.raises(RuntimeError):
-        register_controller_endpoint("otagent.j", "http://h:8000")
+        register_controller_endpoint("otagent-j", "http://h:8000")
 
 
 def test_register_controller_endpoint_fails_loud_on_empty_id():
-    # A registrar that returns no id must raise (would 404 the /proxy route).
     class _EmptyRegistrar:
-        def register(self, name, address, metadata=None):
+        def register(self, name, address, metadata=None, access=None):
             return ""
 
     with pytest.raises(RuntimeError):
-        register_controller_endpoint("otagent.j", "http://h:8000", registrar=_EmptyRegistrar())
+        register_controller_endpoint("otagent-j", "http://h:8000", registrar=_EmptyRegistrar())
 
 
 def test_controller_registration_plan_plain_registers_vllm_port():
-    """Plain controller: register raw vLLM:8000; api_base is the /proxy/<name>/v1 URL."""
-    name, address, api_base = controller_registration_plan(
-        "ingress.example",
+    """Plain controller: register raw vLLM:8000; api_base built later from the name."""
+    name, address = controller_registration_plan(
         "myjob",
         record_literal=False,
         proxy_port=DEFAULT_LITERAL_PROXY_PORT,
@@ -207,42 +251,36 @@ def test_controller_registration_plan_plain_registers_vllm_port():
     assert name == "otagent-myjob"
     assert address == f"http://10.0.0.5:{DEFAULT_VLLM_PORT}"
     assert address.endswith(":8000")
-    assert api_base == "https://ingress.example/proxy/otagent-myjob/v1"
 
 
 def test_controller_registration_plan_literal_registers_proxy_port():
     """COMBINED path: the REGISTERED address is the RecordProxy's port, NOT vLLM's.
 
-    api_base + endpoint name are IDENTICAL to the plain path (only the address
-    differs), so the controller URL the agent targets is unchanged.
+    The endpoint name is IDENTICAL to the plain path, so the capability URL the
+    agent targets is unchanged (only the registered upstream address differs).
     """
-    name, address, api_base = controller_registration_plan(
-        "ingress.example",
+    name, address = controller_registration_plan(
         "myjob",
         record_literal=True,
         proxy_port=DEFAULT_LITERAL_PROXY_PORT,
         env={ADVERTISE_HOST_ENV: "10.0.0.5"},
     )
     assert name == "otagent-myjob"
-    # the proxy's address is registered, never raw vLLM:8000
     assert address == f"http://10.0.0.5:{DEFAULT_LITERAL_PROXY_PORT}"
     assert address.endswith(":8010")
     assert ":8000" not in address
-    # api_base unchanged vs the plain path
-    assert api_base == "https://ingress.example/proxy/otagent-myjob/v1"
 
 
-def test_combined_path_registers_proxy_and_sets_api_base_and_key():
+def test_combined_path_registers_link_and_builds_capability_url():
     """End-to-end (in-process) proof of the record_literal x controller wiring.
 
-    Mirrors exactly what the launcher does when BOTH flags are set: compute the
-    registration plan, register via the (fake) registrar, build the agent kwargs.
-    Asserts: registered address is the PROXY's (not vLLM's), api_base is the
-    /proxy/<name>/v1 URL, api_key == the IRIS_INGRESS_API_KEY placeholder.
+    Mirrors what the launcher does with BOTH flags set: compute the plan,
+    register via the (fake) registrar, mint via the (fake) cache, build agent
+    kwargs. Asserts: registered address is the PROXY's (not vLLM's), api_base is
+    the capability URL, api_key is the inert dummy.
     """
     reg = _FakeRegistrar()
-    name, address, api_base = controller_registration_plan(
-        "ingress.example",
+    name, address = controller_registration_plan(
         "myjob",
         record_literal=True,
         proxy_port=DEFAULT_LITERAL_PROXY_PORT,
@@ -250,21 +288,18 @@ def test_combined_path_registers_proxy_and_sets_api_base_and_key():
     )
     register_controller_endpoint(name, address, registrar=reg)
 
-    # the endpoint registered points at the RecordProxy, not raw vLLM
     assert reg.calls[0]["address"].endswith(f":{DEFAULT_LITERAL_PROXY_PORT}")
     assert not reg.calls[0]["address"].endswith(":8000")
 
-    # the agent sees the controller /proxy/<name>/v1 URL + the ingress key placeholder
-    meta = build_controller_endpoint_meta("ingress.example", name)
+    cache = _fixed_cache(token="XYZ")
+    meta = build_controller_endpoint_meta("ingress.example", name, cache=cache)
     merged, _ = merge_agent_kwargs(
         {"agents": [{"name": "qwen-code", "kwargs": {"model_name": "m"}}]},
         agent_name="qwen-code",
         endpoint_meta=meta,
     )
-    assert merged["api_base"] == "https://ingress.example/proxy/otagent-myjob/v1"
-    assert merged["api_base"] == api_base
-    assert merged["api_key"] == INGRESS_KEY_PLACEHOLDER
-    assert INGRESS_KEY_PLACEHOLDER == "${" + INGRESS_KEY_ENV + "}"
+    assert merged["api_base"] == "https://ingress.example/proxy/t/XYZ/otagent-myjob/v1"
+    assert merged["api_key"] == DUMMY_API_KEY
 
 
 def test_record_proxy_accepts_unauthenticated_calls():
@@ -272,7 +307,6 @@ def test_record_proxy_accepts_unauthenticated_calls():
 
     EndpointProxy strips Authorization before forwarding upstream, so the
     RecordProxy — like raw vLLM today — must serve requests with no bearer.
-    Exercised in-process via httpx.ASGITransport (no socket/GPU/controller).
     """
     from harbor.literal.proxy import RecordProxy
 
@@ -295,7 +329,6 @@ def test_record_proxy_accepts_unauthenticated_calls():
 
         proxy._get_client = _fake_get_client  # type: ignore[assignment]
         with TestClient(proxy.app()) as client:
-            # NO Authorization header — must still forward + 200.
             r = client.post("/v1/chat/completions", json={"model": "m", "messages": []})
         assert r.status_code == 200
         assert "authorization" not in {k.lower() for k in r.request.headers}
@@ -305,35 +338,27 @@ def test_record_proxy_accepts_unauthenticated_calls():
 # opencode model routing (openai provider + OPENAI_BASE_URL)
 # --------------------------------------------------------------------------- #
 def test_opencode_model_routing_uses_vllm_provider_and_api_base():
-    # opencode must get vllm/<served_id> (NOT openai/<id> or hosted_vllm/<id>) so
-    # harbor registers the "@ai-sdk/openai-compatible" provider (POST
-    # /v1/chat/completions, not the Responses API) and wires OPENAI_BASE_URL; the
-    # base url is the resolved (ingress) api_base.
     from hpc.local_runner_utils import opencode_model_routing
 
-    meta = {"api_base": "https://ingress.example/proxy/otagent-myjob/v1"}
+    meta = {"api_base": "https://ingress.example/proxy/t/TK/otagent-myjob/v1"}
     route = opencode_model_routing(
         agent_name="opencode", served_model_id="1783107198924068", serving_meta=meta
     )
     assert route == (
         "vllm/1783107198924068",
-        "https://ingress.example/proxy/otagent-myjob/v1",
+        "https://ingress.example/proxy/t/TK/otagent-myjob/v1",
     )
 
 
 def test_opencode_model_routing_inert_for_other_agents():
-    # terminus-2 (litellm) must keep the hosted_vllm alias -> routing returns None.
     from hpc.local_runner_utils import opencode_model_routing
 
     meta = {"api_base": "http://host:8000/v1"}
     assert opencode_model_routing("terminus-2", "abc123", meta) is None
-    # no served id (API engine) -> also inert
     assert opencode_model_routing("opencode", None, meta) is None
 
 
 def test_opencode_model_routing_requires_api_base():
-    # opencode with no resolved api_base must fail loud (its openai provider would
-    # otherwise have nowhere to point -> undefined/chat/completions).
     from hpc.local_runner_utils import opencode_model_routing
 
     with pytest.raises(ValueError):
@@ -348,4 +373,3 @@ def test_notimplementederror_guard_removed_from_launchers():
     for fname in ("rl_launch_utils.py", "datagen_launch_utils.py"):
         src = (_REPO_ROOT / "hpc" / fname).read_text()
         assert guard not in src, f"stale NotImplementedError guard still in hpc/{fname}"
-        assert "NotImplementedError(\n" not in src or guard not in src

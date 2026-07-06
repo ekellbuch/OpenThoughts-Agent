@@ -1310,11 +1310,11 @@ class TracegenJobRunner:
                 if self.config.ingress_mode == "controller":
                     from hpc.pinggy_utils import needs_pinggy_tunnel
                     from hpc.ingress_utils import (
-                        controller_api_base_for_job,
+                        capability_api_base,
                         controller_registration_plan,
                         inject_ingress_agent_key,
                         register_controller_endpoint,
-                        INGRESS_KEY_PLACEHOLDER,
+                        DUMMY_API_KEY,
                     )
 
                     if needs_pinggy_tunnel(self.config.agent, self.config.trace_env):
@@ -1323,65 +1323,58 @@ class TracegenJobRunner:
                                 "--ingress-mode controller requires --ingress-host "
                                 "(the public controller-ingress host)."
                             )
-                        if self.config.record_literal:
-                            # COMBINED path (record_literal x controller): co-locate
-                            # the RecordProxy in front of vLLM and register the
-                            # PROXY's address as the iris endpoint, so the served
-                            # path is controller -> RecordProxy -> vLLM and literal
-                            # tokens are captured. The proxy binds 0.0.0.0 so the
-                            # (remote) controller can reach it at IRIS_ADVERTISE_HOST;
-                            # it needs no bearer (EndpointProxy strips Authorization
-                            # upstream). api_base + endpoint name match the plain path.
-                            from hpc.literal_proxy_utils import (
-                                maybe_serve_literal_proxy,
-                                DEFAULT_LITERAL_PROXY_PORT,
-                            )
+                        # Register the co-located upstream with the iris controller
+                        # under ENDPOINT_ACCESS_LINK, then mint a scoped capability
+                        # token and build the /proxy/t/<token>/<name>/v1 api_base. The
+                        # upstream is the RecordProxy (record_literal: controller ->
+                        # RecordProxy -> vLLM, so literal tokens are captured) or raw
+                        # vLLM otherwise; the proxy binds 0.0.0.0 so the (remote)
+                        # controller reaches it at IRIS_ADVERTISE_HOST. record_literal
+                        # off = maybe_serve_literal_proxy is a null CM (no proxy), and
+                        # controller_registration_plan registers raw vLLM's port.
+                        from hpc.literal_proxy_utils import (
+                            maybe_serve_literal_proxy,
+                            DEFAULT_LITERAL_PROXY_PORT,
+                        )
 
-                            endpoint_name, register_address, api_base = (
-                                controller_registration_plan(
-                                    self.config.ingress_host,
-                                    self.config.job_name,
-                                    record_literal=True,
-                                    proxy_port=DEFAULT_LITERAL_PROXY_PORT,
-                                )
+                        endpoint_name, register_address = controller_registration_plan(
+                            self.config.job_name,
+                            record_literal=self.config.record_literal,
+                            proxy_port=DEFAULT_LITERAL_PROXY_PORT,
+                        )
+                        with maybe_serve_literal_proxy(
+                            self.config.record_literal,
+                            vllm_server.endpoint,
+                            experiments_dir=self.config.experiments_dir,
+                            job_name=self.config.job_name,
+                            host="0.0.0.0",
+                        ):
+                            # The leased EndpointClient must stay alive for the whole
+                            # harbor run; _run_harbor runs synchronously here, so close
+                            # (stop renewal + unregister) after it.
+                            registration = register_controller_endpoint(
+                                endpoint_name, register_address
                             )
-                            with maybe_serve_literal_proxy(
-                                True,
-                                vllm_server.endpoint,
-                                experiments_dir=self.config.experiments_dir,
-                                job_name=self.config.job_name,
-                                host="0.0.0.0",
-                            ):
-                                # The leased EndpointClient must stay alive for the
-                                # whole harbor run; _run_harbor runs synchronously
-                                # here, so close (stop renewal + unregister) after it.
-                                registration = register_controller_endpoint(
-                                    endpoint_name, register_address
+                            try:
+                                # Mint + build the capability api_base AFTER register
+                                # (the mint resolves the just-registered endpoint).
+                                api_base = capability_api_base(
+                                    self.config.ingress_host, endpoint_name
                                 )
                                 injected = inject_ingress_agent_key()
                                 print(
                                     f"[TracegenJobRunner] ingress_mode=controller "
-                                    f"+record_literal: registered {endpoint_name} -> "
-                                    f"{register_address} (id={registration.endpoint_id}); Harbor "
-                                    f"endpoint={api_base} (agent key injected={injected})"
+                                    f"record_literal={self.config.record_literal}: registered "
+                                    f"{endpoint_name} -> {register_address} "
+                                    f"(id={registration.endpoint_id}, access=LINK); Harbor "
+                                    f"endpoint=/proxy/t/<token>/{endpoint_name}/v1 "
+                                    f"(dummy key injected={injected})"
                                 )
-                                try:
-                                    return self._run_harbor(
-                                        endpoint=api_base, api_key=INGRESS_KEY_PLACEHOLDER
-                                    )
-                                finally:
-                                    registration.close()
-                        api_base = controller_api_base_for_job(
-                            self.config.ingress_host, self.config.job_name
-                        )
-                        injected = inject_ingress_agent_key()
-                        print(
-                            f"[TracegenJobRunner] ingress_mode=controller: "
-                            f"Harbor endpoint={api_base} (agent key injected={injected})"
-                        )
-                        return self._run_harbor(
-                            endpoint=api_base, api_key=INGRESS_KEY_PLACEHOLDER
-                        )
+                                return self._run_harbor(
+                                    endpoint=api_base, api_key=DUMMY_API_KEY
+                                )
+                            finally:
+                                registration.close()
                     else:
                         print(
                             "[TracegenJobRunner] ingress_mode=controller but local "

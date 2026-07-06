@@ -1768,7 +1768,7 @@ class RLJobRunner:
             if self.config.ingress_mode == "controller":
                 from hpc.pinggy_utils import needs_pinggy_tunnel
                 from hpc.ingress_utils import (
-                    controller_api_base_for_job,
+                    capability_api_base,
                     controller_registration_plan,
                     inject_ingress_agent_key,
                     register_controller_endpoint,
@@ -1780,67 +1780,58 @@ class RLJobRunner:
                             "--ingress-mode controller requires --ingress-host "
                             "(the public controller-ingress host)."
                         )
-                    if self.config.record_literal:
-                        # COMBINED path (record_literal x controller): co-locate the
-                        # RecordProxy in front of vLLM and register the PROXY's
-                        # address as the iris endpoint, so the served path is
-                        # controller -> RecordProxy -> vLLM and literal tokens are
-                        # captured. The proxy binds 0.0.0.0 so the (remote)
-                        # controller can reach it at IRIS_ADVERTISE_HOST; it needs no
-                        # bearer (EndpointProxy strips Authorization upstream). The
-                        # api_base + endpoint name are identical to the plain path.
-                        from hpc.literal_proxy_utils import (
-                            maybe_serve_literal_proxy,
-                            DEFAULT_LITERAL_PROXY_PORT,
-                        )
+                    # Register the co-located upstream with the iris controller under
+                    # ENDPOINT_ACCESS_LINK, then mint a scoped capability token and
+                    # build the /proxy/t/<token>/<name>/v1 api_base. The upstream is
+                    # the RecordProxy (record_literal: controller -> RecordProxy ->
+                    # vLLM, so literal tokens are captured) or raw vLLM otherwise; the
+                    # proxy binds 0.0.0.0 so the (remote) controller reaches it at
+                    # IRIS_ADVERTISE_HOST. record_literal off = maybe_serve_literal_proxy
+                    # is a null CM (no proxy) and the plan registers raw vLLM's port.
+                    from hpc.literal_proxy_utils import (
+                        maybe_serve_literal_proxy,
+                        DEFAULT_LITERAL_PROXY_PORT,
+                    )
 
-                        endpoint_name, register_address, api_base = (
-                            controller_registration_plan(
-                                self.config.ingress_host,
-                                self.config.job_name,
-                                record_literal=True,
-                                proxy_port=DEFAULT_LITERAL_PROXY_PORT,
-                            )
+                    endpoint_name, register_address = controller_registration_plan(
+                        self.config.job_name,
+                        record_literal=self.config.record_literal,
+                        proxy_port=DEFAULT_LITERAL_PROXY_PORT,
+                    )
+                    _RL_VLLM_LOCAL = "http://localhost:8000/v1"
+                    with maybe_serve_literal_proxy(
+                        self.config.record_literal,
+                        _RL_VLLM_LOCAL,
+                        experiments_dir=self.config.experiments_dir,
+                        job_name=self.config.job_name,
+                        host="0.0.0.0",
+                    ):
+                        # The leased EndpointClient must stay alive for the whole
+                        # skyrl run; _run_skyrl runs synchronously here, so close
+                        # (stop renewal + unregister) after it.
+                        registration = register_controller_endpoint(
+                            endpoint_name, register_address
                         )
-                        _RL_VLLM_LOCAL = "http://localhost:8000/v1"
-                        with maybe_serve_literal_proxy(
-                            True,
-                            _RL_VLLM_LOCAL,
-                            experiments_dir=self.config.experiments_dir,
-                            job_name=self.config.job_name,
-                            host="0.0.0.0",
-                        ):
-                            # The leased EndpointClient must stay alive for the
-                            # whole skyrl run; _run_skyrl runs synchronously here,
-                            # so close (stop renewal + unregister) after it.
-                            registration = register_controller_endpoint(
-                                endpoint_name, register_address
+                        try:
+                            # Mint + build the capability api_base AFTER register
+                            # (the mint resolves the just-registered endpoint).
+                            api_base = capability_api_base(
+                                self.config.ingress_host, endpoint_name
                             )
                             os.environ["HARBOR_MODEL_ENDPOINT"] = api_base
                             injected = inject_ingress_agent_key()
                             print(
-                                f"[RLJobRunner] ingress_mode=controller +record_literal: "
-                                f"registered {endpoint_name} -> {register_address} "
-                                f"(id={registration.endpoint_id}); HARBOR_MODEL_ENDPOINT={api_base} "
-                                f"(agent key injected={injected})",
+                                f"[RLJobRunner] ingress_mode=controller "
+                                f"record_literal={self.config.record_literal}: registered "
+                                f"{endpoint_name} -> {register_address} "
+                                f"(id={registration.endpoint_id}, access=LINK); "
+                                f"HARBOR_MODEL_ENDPOINT=/proxy/t/<token>/{endpoint_name}/v1 "
+                                f"(dummy key injected={injected})",
                                 flush=True,
                             )
-                            try:
-                                return self._run_skyrl()
-                            finally:
-                                registration.close()
-                    api_base = controller_api_base_for_job(
-                        self.config.ingress_host, self.config.job_name
-                    )
-                    os.environ["HARBOR_MODEL_ENDPOINT"] = api_base
-                    injected = inject_ingress_agent_key()
-                    print(
-                        f"[RLJobRunner] ingress_mode=controller: "
-                        f"HARBOR_MODEL_ENDPOINT={api_base} "
-                        f"(agent key injected={injected})",
-                        flush=True,
-                    )
-                    return self._run_skyrl()
+                            return self._run_skyrl()
+                        finally:
+                            registration.close()
                 else:
                     print(
                         "[RLJobRunner] ingress_mode=controller but local backend "
