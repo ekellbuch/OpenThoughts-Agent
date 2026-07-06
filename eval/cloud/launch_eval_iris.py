@@ -246,13 +246,23 @@ class EvalIrisLauncher(IrisLauncher):
             raise ValueError("Must provide --dataset or --dataset-path for eval workloads.")
 
         # --gpus is the downstream run_eval.py knob for vLLM tensor_parallel_size.
-        # On TPU, derive it from the TPU variant's chip count.
+        # On TPU, derive it from the TPU variant's TRUE chip count. Use the
+        # authoritative topology (get_tpu_topology(...).chip_count), NOT the "-N"
+        # suffix: TPU naming is a trap — v5p-N counts CORES not chips (v5p-8 = 4
+        # chips), so a naive suffix parse overcounts on v5p and would set TP too
+        # high -> fit-fail. v6e uses chips-naming (v6e-4 = 4 chips) so both agree
+        # there; the topology lookup is correct for every family.
         if args.gpus is None:
+            chips = None
             try:
-                chips = int(args.tpu.rsplit("-", 1)[-1])
-                args.gpus = chips
-            except (ValueError, AttributeError):
-                args.gpus = parse_gpu_count(getattr(args, "accelerator", "") or "")
+                from iris.cli.job import get_tpu_topology
+                chips = int(get_tpu_topology(args.tpu).chip_count)
+            except Exception:
+                try:  # fallback: naive suffix (correct for v6e; may overcount v5p)
+                    chips = int(args.tpu.rsplit("-", 1)[-1])
+                except (ValueError, AttributeError):
+                    chips = None
+            args.gpus = chips or parse_gpu_count(getattr(args, "accelerator", "") or "")
 
         args.harbor_config = repo_relative(args.harbor_config, self.repo_root)
         if args.datagen_config:
