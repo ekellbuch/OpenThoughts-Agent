@@ -126,7 +126,7 @@ $IRIS --cluster=cw-us-east-02a job run \
   --job-name gpurl-kaniko-$GITSHA \
   --max-retries 0 --timeout 18000 \
   -e DOCKER_USER_ID penfever -e DOCKER_TOKEN "$GHCR_TOKEN" -e BUILD_B64 "$B64" \
-  -e GITSHA "$GITSHA" -e WHEEL_SOURCE prebuilt-wheelhouse --no-wait \
+  -e GITSHA "$GITSHA" -e WHEEL_SOURCE prebuilt-wheelhouse -e SINGLE_SNAPSHOT 0 --no-wait \
   -- bash -lc 'echo "$BUILD_B64" | base64 -d > /tmp/build.sh && exec bash /tmp/build.sh'
 ```
 > **`-e GITSHA` is MANDATORY** (`build_gpu_rl_kaniko.sh` hard-requires it via `: "${GITSHA:?}"` for the immutable
@@ -134,6 +134,15 @@ $IRIS --cluster=cw-us-east-02a job run \
 > path (§0/§4) — the script default is the slow `wheel-builder`, so pass it explicitly for a SKYRL-only bump.
 > (Both were paid for on the 2026-07-01 `39faff7d` bake — job `gpurl-kaniko-1af0ae2d`, ~34 min, digest
 > `sha256:d77b34dd…`.)
+> **`-e SINGLE_SNAPSHOT 0` is MANDATORY for a PULLABLE image** (`build_gpu_rl_kaniko.sh` defaults it to `1` =
+> `--single-snapshot` = ONE ~16.6 GB final layer that **CANNOT be pulled** over the CoreWeave→ghcr egress —
+> containerd EOFs the single-blob GET mid-download + hits a whiteout-extraction conflict → every pod
+> `ImagePullBackOff`, gang never starts). `SINGLE_SNAPSHOT=0` gives 48 per-instruction layers (max ~3.5 GB),
+> each retryable. **The build SUCCEEDS + pushes either way — the un-pullable-ness only shows at LAUNCH**, so if
+> you forget it the build looks green but the grid dies on `ImagePullBackOff`. Paid for 2026-07-05 (bd888d27
+> baked one 16.6 GB layer, all 24 grid pods ImagePullBackOff; re-layered as 2712998d @sha256:861656ba, 48
+> layers max 3.5 GB → pods Running). ALWAYS verify post-build: `docker buildx imagetools inspect
+> :gpu-rl-<gitsha> --raw` → max layer <8 GB, layers >20.
 The build script (`build_gpu_rl_kaniko.sh`) does, in order: fetch crane → `crane export` the kaniko executor
 over `/` → write `$DOCKER_CONFIG/config.json` with the ghcr `penfever:$GHCR_TOKEN` auth → run
 `/kaniko/executor --context dir:///app --dockerfile docker/Dockerfile.gpu-rl --build-arg
