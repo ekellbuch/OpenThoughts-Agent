@@ -110,6 +110,64 @@ def test_count_populated_literal_rows():
 
 
 # --------------------------------------------------------------------------- #
+# Schema-pin: null-leading chunks must not drop the literal token columns
+# --------------------------------------------------------------------------- #
+def test_pin_literal_token_columns_recovers_dropped_tokens():
+    """The pin rebuilds token columns from source rows even when the Dataset dropped them.
+
+    Reproduces the data-loss failure mode: type inference on a null-leading chunk drops the
+    token columns from the built Dataset, but the enriched rows still hold the tokens in the
+    source `rows`. The pin must re-materialize them with the correct nested type.
+    """
+    from datasets import Dataset, Sequence, Value
+
+    from scripts.harbor.make_and_upload_trace_dataset import (
+        count_populated_literal_rows,
+        _pin_literal_token_columns,
+    )
+
+    # source rows: row 0 has no literals (leading null), row 1 does
+    rows = [
+        {"conversations": [{"role": "user", "content": "a"}], "prompt_token_ids": [], "completion_token_ids": [], "logprobs": []},
+        {"conversations": [{"role": "user", "content": "b"}], "prompt_token_ids": [[1, 2]], "completion_token_ids": [[10, 11, 12]], "logprobs": [[-0.1, -0.2, -0.3]]},
+    ]
+    # Dataset as the lossy pipeline would leave it: token columns absent entirely.
+    ds = Dataset.from_list([{"conversations": r["conversations"]} for r in rows])
+    assert "completion_token_ids" not in ds.column_names
+
+    pinned = _pin_literal_token_columns(ds, rows)
+
+    # columns restored, with the explicit nested types
+    for name in ("prompt_token_ids", "completion_token_ids"):
+        assert pinned.features[name] == Sequence(Sequence(Value("int64")))
+    assert pinned.features["logprobs"] == Sequence(Sequence(Value("float64")))
+    # values preserved from source, aligned by row index
+    assert pinned["completion_token_ids"] == [[], [[10, 11, 12]]]
+    assert pinned["prompt_token_ids"] == [[], [[1, 2]]]
+    # exactly the one enriched row survives as populated (not zero — the bug)
+    assert count_populated_literal_rows(pinned.data.table) == 1
+    # other columns untouched, order/count preserved
+    assert pinned["conversations"] == [r["conversations"] for r in rows]
+
+
+def test_pin_literal_token_columns_all_empty_chunk_is_present_but_empty():
+    """A chunk with zero enriched rows still gets the columns (present-but-empty, stable schema)."""
+    from datasets import Dataset
+
+    from scripts.harbor.make_and_upload_trace_dataset import (
+        count_populated_literal_rows,
+        _pin_literal_token_columns,
+    )
+
+    rows = [{"conversations": [{"role": "user", "content": "x"}]} for _ in range(3)]
+    ds = Dataset.from_list(rows)
+    pinned = _pin_literal_token_columns(ds, rows)
+    assert "completion_token_ids" in pinned.column_names
+    assert count_populated_literal_rows(pinned.data.table) == 0
+    assert pinned["completion_token_ids"] == [[], [], []]
+
+
+# --------------------------------------------------------------------------- #
 # Resume-safety: multiple per-serve literal.jsonl files (preempted job)
 # --------------------------------------------------------------------------- #
 def _job_with_two_literal_files(tmp_path):

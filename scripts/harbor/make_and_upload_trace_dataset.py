@@ -534,12 +534,57 @@ def _release_arrow_memory() -> None:
         pass
 
 
+_LITERAL_TOKEN_COLUMNS = ("prompt_token_ids", "completion_token_ids", "logprobs")
+
+
+def _literal_token_features():
+    """Explicit nested feature types for the literal token columns (datasets import deferred)."""
+    from datasets import Sequence, Value  # type: ignore
+
+    return {
+        "prompt_token_ids": Sequence(Sequence(Value("int64"))),
+        "completion_token_ids": Sequence(Sequence(Value("int64"))),
+        "logprobs": Sequence(Sequence(Value("float64"))),
+    }
+
+
+def _pin_literal_token_columns(ds, rows: List[Dict[str, Any]]):
+    """Rebuild the literal token columns from ``rows`` with an EXPLICIT nested type.
+
+    ``Dataset.from_list`` and the finalize ``.map()`` passes infer feature types from each
+    chunk's leading rows, so a chunk whose first rows carry no literals infers a null/empty
+    type for these columns and silently DROPS the token lists of every *other* row in the
+    chunk (the "whole shards missing literals" data-loss bug: correlation enriches N trials
+    but only the rows in literal-leading chunks survive to parquet).
+
+    The chunk pipeline (``from_list`` + order-preserving, non-filtering ``.map()`` passes)
+    never reorders or drops rows, so ``ds[i]`` corresponds to ``rows[i]``. We therefore
+    rebuild the three columns straight from the source ``rows`` with a pinned type as the LAST
+    step before writing — bypassing inference entirely. Every literal-job shard then carries
+    the columns with a stable schema (present-but-empty for a chunk with zero enriched rows,
+    rather than absent), and enriched rows keep their tokens regardless of chunk ordering.
+    """
+    feats = _literal_token_features()
+
+    def column(key):
+        return [v if isinstance((v := row.get(key)), list) else [] for row in rows]
+
+    for name in _LITERAL_TOKEN_COLUMNS:
+        if name in ds.column_names:
+            ds = ds.remove_columns([name])
+        ds = ds.add_column(name, column(name))
+    schema = ds.features.copy()
+    schema.update(feats)
+    return ds.cast(schema)
+
+
 def _flush_chunk_to_parquet(
     rows: List[Dict[str, Any]],
     to_sharegpt: bool,
     traces_utils,
     shard_path: Path,
     cache_dir: Path,
+    include_literal_tokens: bool = False,
 ) -> int:
     """Convert a chunk of rows to a (finalized) Dataset and write one parquet shard.
 
@@ -548,6 +593,11 @@ def _flush_chunk_to_parquet(
     on disk, so peak RAM (and disk-cache) is bounded to one chunk. ``cache_dir``
     isolates this chunk's ``.map`` cache files so they can be deleted eagerly
     instead of piling up under the shared ``~/.cache/huggingface`` tree.
+
+    When ``include_literal_tokens`` is set, the literal token columns are re-pinned from the
+    source rows with an explicit nested type as the final step (see
+    :func:`_pin_literal_token_columns`) so type inference on a null-leading chunk cannot drop
+    them.
     """
     if not rows:
         return 0
@@ -563,6 +613,8 @@ def _flush_chunk_to_parquet(
         if to_sharegpt:
             ds = traces_utils.convert_openai_to_sharegpt(ds, "conversations", "conversations_sharegpt")
         ds = _finalize_chunk(ds)
+        if include_literal_tokens:
+            ds = _pin_literal_token_columns(ds, rows)
         n = len(ds)
         ds.to_parquet(str(shard_path))
         del ds
@@ -652,7 +704,8 @@ def _process_one_shard_in_subprocess(
     shard_path = Path(tmp_root) / f"train-{shard_idx:05d}.parquet"
     cache_dir = Path(tmp_root) / f"_cache-{shard_idx:05d}"
     written = _flush_chunk_to_parquet(
-        chunk, to_sharegpt, traces_utils, shard_path, cache_dir
+        chunk, to_sharegpt, traces_utils, shard_path, cache_dir,
+        include_literal_tokens=include_literal_tokens,
     )
     if not written:
         shard_path.unlink(missing_ok=True)
