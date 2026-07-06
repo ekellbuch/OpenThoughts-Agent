@@ -169,8 +169,12 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # bd888d27 (@sha256:a8f76d48…) baked identical contents but with --single-snapshot → one 16.6 GB layer that
     # EOFs on the CoreWeave→ghcr pull (ImagePullBackOff + whiteout conflict). This is SINGLE_SNAPSHOT=0
     # (48 layers, max 3.5 GB), same baked harbor d58043c3 + wheels. Verified pullable; pods reached Running.
-    "@sha256:861656ba5ceee4772677720952da114eed222cd529a4257325e8ca255c60309e"  # noqa: E501  (gpu-rl-2712998d)
-    # (prev: gpu-rl-bd888d27 @sha256:a8f76d48… UN-PULLABLE single-snapshot; gpu-rl-dc56d265 @sha256:f67c80a4…)
+    # gpu-rl-4e505a4e (built 2026-07-06, kaniko gpurl-kaniko-4e505a4e, SINGLE_SNAPSHOT=0 pullable): SKYRL_COMMIT
+    # bump 7b7d627b→cdca0b3a = EPDIAG per-phase fwd/modelfwd instrumentation (LOGGING-ONLY, EPDIAG-gated, no
+    # routing/correctness change) for the EP16-vs-EP8 fwd-op diagnostic (FINDING #2). Strict superset of 861656ba
+    # (instrumentation is a no-op when EPDIAG unset). wheels + harbor d58043c3 + rl_env_constraints unchanged.
+    "@sha256:84ffafacde0729ec5056f8327f40bd493d12268fd364fb8a823d98e356883a85"  # noqa: E501  (gpu-rl-4e505a4e)
+    # (prev: gpu-rl-2712998d @sha256:861656ba…; gpu-rl-bd888d27 @sha256:a8f76d48… UN-PULLABLE single-snapshot)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
