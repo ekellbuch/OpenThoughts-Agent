@@ -182,8 +182,8 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # NOTE: gpu-rl-f9806065 @sha256:37cdc3e6 was UN-PULLABLE (built --single-snapshot by DEFAULT = one 16 GB
     # layer -> ImagePullBackOff on CoreWeave). gpu-rl-addb348e below is the SINGLE_SNAPSHOT=0 re-layer (48
     # layers, max 3.5 GB, pull-verified) with IDENTICAL contents (SKYRL b2ff8bf2 drain fix).
-    "@sha256:2f7a4f7a99bf1d72e260599e43d804a9fc9333cd71a6925bccc2f9f51dc879ea"  # noqa: E501  (gpu-rl-addb348e, PULLABLE)
-    # (prev: gpu-rl-f9806065 @sha256:37cdc3e6 UN-PULLABLE single-snapshot; gpu-rl-4e505a4e @sha256:84ffafac)
+    "@sha256:9a96ad1f7e765fdcc20c3f02c947e6059b3a420d34a86060f67ff61e2f1bebc7"  # noqa: E501  (gpu-rl-1a32669c, PULLABLE; SKYRL 613e225d loop-abort+non-fatal drain)
+    # (prev: gpu-rl-addb348e @sha256:2f7a4f7a drain-v1 60s-fail-loud; gpu-rl-f9806065 @sha256:37cdc3e6 UN-PULLABLE)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
