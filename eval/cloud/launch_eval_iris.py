@@ -29,7 +29,7 @@ if str(_repo_root) not in sys.path:
     sys.path.append(str(_repo_root))
 
 from hpc.iris_launch_utils import IrisLauncher
-from hpc.cloud_launch_utils import repo_relative, parse_gpu_count, infer_harbor_env_from_config
+from hpc.cloud_launch_utils import repo_relative, infer_harbor_env_from_config
 from hpc.arg_groups import (
     add_harbor_args,
     add_harbor_env_arg,
@@ -39,6 +39,7 @@ from hpc.arg_groups import (
 )
 from hpc.harbor_utils import load_harbor_config
 from hpc.datagen_config_utils import parse_datagen_config
+from hpc.hf_utils import is_hf_dataset_path
 from hpc.launch_utils import PROJECT_ROOT
 from eval.presets import load_presets
 
@@ -152,6 +153,30 @@ class EvalIrisLauncher(IrisLauncher):
         add_hf_upload_args(parser)
         add_database_upload_args(parser)
 
+    def _validate_gpu_mode(self, args: argparse.Namespace) -> None:
+        accelerator = self.resolved_accelerator(args)
+        if not accelerator.is_gpu:
+            return
+
+        if accelerator.gpu_variant != "H100" or accelerator.gpu_count != 8:
+            raise SystemExit(
+                "GPU eval is currently limited to --gpu H100x8 on "
+                "cw-use02a-h100-8x."
+            )
+
+        if (args.replicas or 1) > 1:
+            raise SystemExit(
+                "GPU eval replicas > 1 need task sharding and are not supported yet. "
+                "Use --replicas 1 for the single-node CoreWeave H100x8 path on "
+                "cw-use02a-h100-8x."
+            )
+
+        # NOTE: --upload_to_database IS supported on the GPU path. Harbor writes
+        # trace_jobs to the pod-local jobs dir (or durable R2 with --output-mode
+        # s3) and run_eval performs the Supabase + HF registration in-pod before
+        # teardown — the same code path the TPU eval uses. (PR #33 blocked this;
+        # unblocking it is the fix for defect #1.)
+
     def _apply_preset(self, args: argparse.Namespace) -> None:
         """Resolve a named preset onto the launcher args.
 
@@ -239,6 +264,7 @@ class EvalIrisLauncher(IrisLauncher):
         )
 
     def normalize_paths(self, args: argparse.Namespace) -> None:
+        self._validate_gpu_mode(args)
         self._apply_preset(args)
         if args.dataset and args.dataset_path:
             raise ValueError("Specify either --dataset or --dataset-path (not both).")
@@ -246,32 +272,25 @@ class EvalIrisLauncher(IrisLauncher):
             raise ValueError("Must provide --dataset or --dataset-path for eval workloads.")
 
         # --gpus is the downstream run_eval.py knob for vLLM tensor_parallel_size.
-        # On TPU, derive it from the TPU variant's TRUE chip count. Use the
-        # authoritative topology (get_tpu_topology(...).chip_count), NOT the "-N"
-        # suffix: TPU naming is a trap — v5p-N counts CORES not chips (v5p-8 = 4
-        # chips), so a naive suffix parse overcounts on v5p and would set TP too
-        # high -> fit-fail. v6e uses chips-naming (v6e-4 = 4 chips) so both agree
-        # there; the topology lookup is correct for every family.
+        # Ask the resolved Iris accelerator for the OT-A runtime device count:
+        #  - GPU (CoreWeave H100x8): the GPU count.
+        #  - TPU: the variant's TRUE chip count via the accelerator's
+        #    tpu_topology.chip_count (get_tpu_topology, resolved at
+        #    from_args()), NOT the "-N" suffix. TPU naming is a trap — v5p-N
+        #    counts CORES not chips (v5p-8 = 4 chips) so a naive suffix parse
+        #    overcounts on v5p and sets TP too high -> fit-fail; v6e uses
+        #    chips-naming so both agree. The topology is authoritative per family.
         if args.gpus is None:
-            chips = None
-            try:
-                from iris.cli.job import get_tpu_topology
-                chips = int(get_tpu_topology(args.tpu).chip_count)
-            except Exception:
-                try:  # fallback: naive suffix (correct for v6e; may overcount v5p)
-                    chips = int(args.tpu.rsplit("-", 1)[-1])
-                except (ValueError, AttributeError):
-                    chips = None
-            args.gpus = chips or parse_gpu_count(getattr(args, "accelerator", "") or "")
+            args.gpus = self.resolved_accelerator(args).downstream_eval_device_count
 
         args.harbor_config = repo_relative(args.harbor_config, self.repo_root)
         if args.datagen_config:
             args.datagen_config = repo_relative(args.datagen_config, self.repo_root)
         # Capture the original HF dataset repo id (if any) BEFORE any path
         # rewriting, so pre_submit_precache can mirror it. repo_relative only
-        # applies to in-repo local task dirs; an HF-id (org/repo) or a remote
-        # gs://|s3:// URI passes through untouched (the worker's
-        # resolve_dataset_path handles those).
+        # applies to in-repo local task dirs; an HF-id (org/repo) passes through
+        # untouched (the GPU-path HF-dataset guard) and a remote gs://|s3:// URI
+        # also passes through (the worker's resolve_dataset_path handles those).
         from hpc.hf_utils import is_hf_dataset_path
         args._orig_dataset_repo = None
         if args.dataset_path and is_hf_dataset_path(args.dataset_path):
@@ -408,12 +427,16 @@ class EvalIrisLauncher(IrisLauncher):
         elif args.dataset_path:
             cmd.extend(["--dataset_path", args.dataset_path])
 
+        # For s3/local output modes the runtime scratch (endpoint.json, logs)
+        # lives on pod-local disk; for gcs it is the same remote path.
+        work_output_dir = getattr(args, "_work_output_dir", remote_output_dir)
+
         cmd.extend([
             "--agent", args.agent,
             "--n_concurrent", str(args.n_concurrent),
             "--n_attempts", str(args.n_attempts),
             "--gpus", str(args.gpus),
-            "--experiments_dir", remote_output_dir,
+            "--experiments_dir", work_output_dir,
         ])
 
         if args.harbor_env:
@@ -429,13 +452,16 @@ class EvalIrisLauncher(IrisLauncher):
 
         for kwarg in args.agent_kwarg:
             cmd.extend(["--agent_kwarg", kwarg])
-        # Auto-inject --jobs-dir so harbor writes outputs to the same GCS
-        # prefix the workload's --experiments_dir points at. With harbor's
-        # UPath patch (penfever/otagent-latest @ dc41d295a4) this routes
-        # all per-job/per-trial writes through fsspec to GCS instead of
-        # local /app/trace_jobs/. User --harbor_extra_arg entries follow
-        # below so an explicit --harbor_extra_arg=--jobs-dir=... wins.
-        cmd.append(f"--harbor_extra_arg=--jobs-dir={remote_output_dir}")
+        # Auto-inject --jobs-dir so harbor writes outputs under the durable
+        # jobs root (harbor appends the job-name below it). With harbor's UPath
+        # patch (penfever/otagent-latest @ dc41d295a4) remote schemes route all
+        # per-job/per-trial writes through fsspec (GCS/S3) instead of local
+        # /app/trace_jobs/; for --output-mode local it is a fast pod-local dir
+        # that run_eval's in-pod --upload_to_database then reads. User
+        # --harbor_extra_arg entries follow below so an explicit
+        # --harbor_extra_arg=--jobs-dir=... wins.
+        harbor_jobs_dir = getattr(args, "_harbor_jobs_dir", remote_output_dir)
+        cmd.append(f"--harbor_extra_arg=--jobs-dir={harbor_jobs_dir}")
         for extra in args.harbor_extra_arg:
             # Use the `=` form so argparse on the worker side accepts values
             # that start with `-` (e.g. --harbor_extra_arg=--n-tasks). The

@@ -262,6 +262,26 @@ class FileDescriptorMonitor:
         print("[fd-monitor] Stopped", flush=True)
 
 
+def _extract_injected_jobs_dir(harbor_extra_args: Optional[List[str]]) -> Optional[str]:
+    """Return the last ``--jobs-dir`` value injected via ``--harbor_extra_arg``.
+
+    The Iris eval launcher appends ``--harbor_extra_arg=--jobs-dir=<root>`` so
+    Harbor routes trace_jobs to a chosen root. The in-pod DB/HF upload must read
+    the same root. Accepts both the ``--jobs-dir=<v>`` and ``--jobs-dir <v>``
+    forms; the last occurrence wins (mirrors argparse's last-wins semantics).
+    """
+    if not harbor_extra_args:
+        return None
+    found: Optional[str] = None
+    tokens = list(harbor_extra_args)
+    for i, tok in enumerate(tokens):
+        if tok.startswith("--jobs-dir="):
+            found = tok.split("=", 1)[1]
+        elif tok == "--jobs-dir" and i + 1 < len(tokens):
+            found = tokens[i + 1]
+    return found or None
+
+
 def _open_log_file(log_path: Optional[Path]) -> tuple:
     """Open a log file with line buffering for real-time tail access.
 
@@ -934,6 +954,21 @@ class LocalHarborRunner:
         harbor_config_data = load_harbor_config(args.harbor_config)
         jobs_dir_value = harbor_config_data.get("jobs_dir") if isinstance(harbor_config_data, dict) else None
         args._jobs_dir_path = resolve_jobs_dir_path(jobs_dir_value, self.repo_root)
+        # If a --jobs-dir was injected on the CLI (the Iris GPU eval launcher does
+        # this to route Harbor's trace_jobs to a pod-local scratch root or durable
+        # R2), Harbor writes each job under <injected>/<job_name>/ — NOT the
+        # config-derived jobs_dir. Point the in-pod DB/HF upload
+        # (_maybe_upload_results reads <_jobs_dir_path>/<job_name>) at the same
+        # root so it finds the results. Only override for LOCAL filesystem paths;
+        # remote schemes (gs://, s3://) are not read back by Path.exists() in-pod.
+        injected_jobs_dir = _extract_injected_jobs_dir(getattr(args, "harbor_extra_arg", None))
+        if injected_jobs_dir and "://" not in injected_jobs_dir:
+            args._jobs_dir_path = Path(injected_jobs_dir).expanduser()
+            print(
+                f"[{self.JOB_PREFIX}-local] jobs-dir override: in-pod upload will read "
+                f"{args._jobs_dir_path}/<job_name> (matches injected --jobs-dir)",
+                flush=True,
+            )
         args._harbor_config_data = harbor_config_data
 
         # Load structured JobConfig to extract defaults (same as HPC eval launcher)

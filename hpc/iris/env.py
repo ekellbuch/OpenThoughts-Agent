@@ -6,6 +6,39 @@ import argparse
 import os
 from pathlib import Path
 
+from hpc.iris.accelerator import ResolvedIrisAccelerator
+
+
+# Object-storage credential/endpoint keys that must NOT be forwarded from the
+# launch host into a CoreWeave GPU task pod. The cw-us-east-02a cluster projects
+# an ``iris-task-env`` k8s Secret into every task pod via ``envFrom`` (because
+# storage.remote_state_dir is an s3:// URI); that Secret already carries the
+# correct in-cluster R2 credentials + endpoint (AWS_ACCESS_KEY_ID /
+# AWS_SECRET_ACCESS_KEY / AWS_ENDPOINT_URL / AWS_REGION / FSSPEC_S3). Explicit
+# container ``env`` entries take precedence over ``envFrom``, so forwarding the
+# launch host's AWS_*/LAION_* (a DIFFERENT account, no R2 endpoint) would CLOBBER
+# the pod's R2 creds and make Harbor's ``--jobs-dir=s3://marin-na/...`` write
+# fail with HeadObject 400. We let the cluster-injected R2 creds win, exactly as
+# rl/cloud/launch_rl_iris.py does for the RL rendezvous.
+_GPU_STORAGE_CRED_KEYS = frozenset({
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_ENDPOINT_URL",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "LAION_ENDPOINT",
+    "LAION_ACCESS_KEY",
+    "LAION_SECRET_KEY",
+    "LAION_BUCKET_NAME",
+    "MARIN_HMAC_ACCESS_ID",
+    "MARIN_HMAC_SECRET",
+    "MARIN_PREFIX",
+    "R2_ENDPOINT",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+})
+
 
 def default_secrets_env() -> str | None:
     """Return the default launch-host secrets file if one exists."""
@@ -47,46 +80,36 @@ def apply_iris_runtime_env(
     *,
     env_vars: dict[str, str],
     args: argparse.Namespace,
+    accelerator: ResolvedIrisAccelerator,
+    output_mode: str,
     remote_output_dir: str,
     extras: list[str],
 ) -> None:
     """Apply OT-Agent Iris runtime defaults in-place to ``env_vars``."""
-    # iris-serve gating. iris runs the entrypoint on EVERY VM of the slice
-    # (one task/VM; adjust_tpu_replicas scales replicas=1 -> vm_count), so
-    # the worker's LocalHarborRunner.run() must (a) bring up ONE cross-host
-    # Ray cluster via scripts/vllm/start_vllm_iris_controller.py instead of
-    # the SLURM/single-host start_vllm_ray_controller.py, and (b) gate
-    # harbor to the driver rank (IRIS_TASK_ID==0). This env var is the
-    # signal - it is only ever set here, on the iris entrypoint path. The
-    # rendezvous dir is a shared gs:// location (under the job's GCS output
-    # prefix) where rank 0 publishes the Ray head IP for the worker ranks.
-    env_vars.setdefault("OT_AGENT_IRIS_SERVE", "1")
-    env_vars.setdefault(
-        "OT_AGENT_IRIS_RENDEZVOUS_DIR",
-        f"{remote_output_dir.rstrip('/')}/_ray_rendezvous",
-    )
+    if accelerator.uses_iris_serve:
+        # TPU Iris jobs use the cross-host serve path: iris runs the entrypoint
+        # on EVERY VM of the slice, so the worker's LocalHarborRunner.run()
+        # brings up ONE cross-host Ray cluster and gates harbor to the driver
+        # rank (IRIS_TASK_ID==0). GPU Iris jobs use the normal single-pod
+        # Ray/vLLM path and do neither.
+        env_vars.setdefault("OT_AGENT_IRIS_SERVE", "1")
+        env_vars.setdefault(
+            "OT_AGENT_IRIS_RENDEZVOUS_DIR",
+            f"{remote_output_dir.rstrip('/')}/_ray_rendezvous",
+        )
 
-    # Wire the iris controller's XLA persistent cache to the same
-    # region-matched bucket we picked above. The worker appends
-    # /<cpu_tag>/<model_tag>/ to namespace per-microarch (the only
-    # axis the JAX cache key doesn't already discriminate; see
-    # [[xla-persistent-cache-cross-host-poison]]). One shared base
-    # across all jobs is fine - JAX hashes the HLO into per-config
-    # subdirs of its own beneath the dir we hand it. Disable with
-    # OT_AGENT_XLA_CACHE_BASE=disabled in the environment.
-    if args.gcs_output_dir:
+    # Wire the iris controller's XLA persistent cache to the region-matched GCS
+    # bucket (TPU + gcs output only). Disable with OT_AGENT_XLA_CACHE_BASE=disabled.
+    if accelerator.is_tpu and output_mode == "gcs" and args.gcs_output_dir:
         cache_root = args.gcs_output_dir.rstrip("/").rsplit("/ot-agent", 1)[0]
         env_vars.setdefault(
             "OT_AGENT_XLA_CACHE_BASE",
             f"{cache_root}/ot-agent/xla_cache",
         )
 
-    # OT-Agent's build_support.py syncs the sft/llamafactory git submodule
-    # at every setuptools.build_meta call (i.e. every editable install),
-    # even when no sft-* extra is being installed. Inside the iris worker
-    # container there's no git remote configured for that submodule, so
-    # the sync errors out with exit 128. The build_support helper already
-    # supports an escape hatch - opt in when no sft-* extra is requested.
+    # OT-Agent's build_support.py syncs the sft/llamafactory git submodule at
+    # every editable install; inside the iris worker there's no git remote for
+    # it, so opt out when no sft-* extra is requested.
     if not any(e.startswith("sft-") for e in extras):
         env_vars.setdefault("OT_AGENT_SKIP_SFT_SYNC", "1")
 
@@ -96,17 +119,35 @@ def apply_iris_runtime_env(
     env_vars.setdefault("UV_LINK_MODE", "copy")
     env_vars.setdefault("OT_AGENT_INHERIT_SUBPROC_LOGS", "1")
 
-    env_vars.setdefault("VLLM_SKIP_FLAG_DISCOVERY", "1")
-    env_vars.setdefault("VLLM_SKIP_RAY_PROBE", "1")
-    env_vars.setdefault("MODEL_IMPL_TYPE", "vllm")
+    if accelerator.is_tpu:
+        env_vars.setdefault("VLLM_SKIP_FLAG_DISCOVERY", "1")
+        env_vars.setdefault("VLLM_SKIP_RAY_PROBE", "1")
+        env_vars.setdefault("MODEL_IMPL_TYPE", "vllm")
 
     # Run:AI Model Streamer config for S3-compatible safetensor reads.
     env_vars.setdefault("RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING", "False")
     env_vars.setdefault("AWS_EC2_METADATA_DISABLED", "true")
 
     _forward_launcher_env(env_vars)
-    _load_worker_secrets_env(env_vars, getattr(args, "secrets_env", None))
-    _alias_s3_credentials(env_vars)
+    # On the GPU path, drop the launch host's object-storage creds so the pod's
+    # injected R2 creds win (see _GPU_STORAGE_CRED_KEYS). On TPU keep them —
+    # the TPU serve path reads weights from marin/laion object storage.
+    exclude = _GPU_STORAGE_CRED_KEYS if accelerator.is_gpu else frozenset()
+    _load_worker_secrets_env(
+        env_vars, getattr(args, "secrets_env", None), exclude_keys=exclude
+    )
+    if accelerator.is_gpu:
+        # Belt-and-suspenders: strip any storage creds that slipped in (e.g. via
+        # a harbor-config env block) so nothing overrides the pod's R2 envFrom.
+        stripped = [k for k in _GPU_STORAGE_CRED_KEYS if env_vars.pop(k, None) is not None]
+        if stripped:
+            print(
+                f"[iris] GPU path: withheld launch-host storage creds "
+                f"({', '.join(sorted(stripped))}) so the pod's injected R2 creds win.",
+                flush=True,
+            )
+    else:
+        _alias_s3_credentials(env_vars)
 
 
 def _forward_launcher_env(env_vars: dict[str, str]) -> None:
@@ -131,13 +172,19 @@ def _forward_launcher_env(env_vars: dict[str, str]) -> None:
             env_vars.setdefault(key, value)
 
 
-def _load_worker_secrets_env(env_vars: dict[str, str], secrets_env: str | None) -> None:
+def _load_worker_secrets_env(
+    env_vars: dict[str, str],
+    secrets_env: str | None,
+    *,
+    exclude_keys: frozenset[str] = frozenset(),
+) -> None:
     if not secrets_env:
         return
     secrets_path = Path(secrets_env).expanduser().resolve()
     if not secrets_path.exists():
         raise FileNotFoundError(f"--secrets-env file not found: {secrets_path}")
     loaded: list[str] = []
+    skipped: list[str] = []
     for raw_line in secrets_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -153,6 +200,9 @@ def _load_worker_secrets_env(env_vars: dict[str, str], secrets_env: str | None) 
             v = v[1:-1]
         if not k:
             continue
+        if k in exclude_keys:
+            skipped.append(k)
+            continue
         env_vars[k] = v  # file values override passthrough
         loaded.append(k)
     print(
@@ -160,6 +210,12 @@ def _load_worker_secrets_env(env_vars: dict[str, str], secrets_env: str | None) 
         f"{secrets_path}: {', '.join(sorted(loaded))}",
         flush=True,
     )
+    if skipped:
+        print(
+            f"[iris] Secrets:    withheld {len(skipped)} storage creds "
+            f"(GPU pod uses cluster-injected R2): {', '.join(sorted(skipped))}",
+            flush=True,
+        )
 
 
 def _alias_s3_credentials(env_vars: dict[str, str]) -> None:
