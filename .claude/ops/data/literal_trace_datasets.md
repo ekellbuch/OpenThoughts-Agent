@@ -69,6 +69,31 @@ Re-rescue = rsync the OUTER `gs://marin-models-{us,eu}/ot-agent/<job>/` (so sibl
 otagent env. Verify with `count_populated_literal_rows` that literal count ≈ the correlation
 yield, not the old partial.
 
+## Why in-job auto-upload is unreliable → rescue is MANDATORY, not optional
+
+Two independent reasons the worker's end-of-job HF upload cannot be trusted for these
+preemptible (v5p + `--max-retries`) datagen jobs — so **every terminal job must be rescued
+from banked GCS**, and "SUCCEEDED" or "repo exists" is never proof of trainable data:
+
+1. **Text-only when it does run** — the pinned `:tpu` worker image predates the schema-pin
+   fix, so its in-job export lands the `conversations` text but drops the literal token
+   columns (see above). Observed on #4/#5/#7/#8/#9/#12.
+2. **Fails outright on preempt-resumed runs (SYSTEMIC, harbor bug).** The end-of-job
+   `harbor jobs start … --export-push` step **re-invokes `harbor jobs start`** against the
+   already-populated gs:// job dir. On a preempt-resumed run the on-disk config no longer
+   byte-matches the relaunch config, so `Job.create` (`harbor/job.py:263 _maybe_init_existing_job`)
+   raises `FileExistsError: Job directory <gs://…/<job>/<job>> already exists and cannot be
+   resumed with a different config` **before export runs** → the job goes FAILED (state 5)
+   with no upload. Deterministic (not HF 429 / not OOM); recurs on any preempted job.
+   Observed on #10 (recovered 4081/4095) and #11 (339/381). The banked trials + the durable
+   `logs/*_literal.jsonl` are intact in GCS, so the rescue recovers full yield regardless.
+
+Consequence: `FAILED at export-push` ≈ `landed text-only` — both mean "rescue from GCS." The
+3-hourly ops cron auto-rescues every terminal job for exactly this reason. (Candidate real
+fixes, for later: rebuild the `:tpu` worker with the schema-pin fix so #1 goes away; and make
+harbor's `--export-push` not re-enter `Job.create` / tolerate the existing dir so #2 goes
+away — until then rescue is the reliable path.)
+
 ## Literal traces → SFT
 
 `scripts/harbor/literal_traces_to_sft.py` converts a literal trace dataset into an SFT
