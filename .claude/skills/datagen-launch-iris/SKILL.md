@@ -155,9 +155,38 @@ deletes by your task set and would remove teammates' ACTIVE snapshots.
 `--gcs-output-dir gs://marin-models-us/ot-agent` flag above). Kill the stuck
 submission first only with user permission.
 
+## Current campaign: 131k A2 opencode (2026-07) — deltas from the 32k S1 default above
+
+The live campaign (`qwen3.5-122b-131k-opencode`) runs a different operating point + hard-won
+guards. Campaign specifics (dataset order, keep-3 state, per-arm status) live in the tracker:
+`/Users/benjaminfeuer/Documents/experiments/active/datagen/qwen3.5-122b-131k-opencode/tracker.md`.
+Literal-trace decode/rescue reference: `.claude/ops/data/literal_trace_datasets.md`.
+
+**Recipe deltas from the Launch block above:**
+- `--datagen_config hpc/datagen_yaml/extra/qwen3_5_122b_a10b_fp8_runai_v5p8_131k_dp1_tp4_ep1_s32.yaml` (A2: TP4/DP1/EP-on/seqs32/131k), `--n_concurrent 32`.
+- `--harbor_config hpc/harbor_yaml/datagen/opencode_ctx131k.yaml` — **FULL path required** (a bare `opencode_ctx131k.yaml` `FileNotFoundError`s on the worker — no config-dir fallback).
+- `--agent opencode --record_literal` (literal-token capture; per-serve-unique log filenames since `c4728060`, so a preempt-resume can't clobber attempt-0's log).
+- `--max-retries 200` — auto-resume across v5p preempts; the resume-fix (`a25a6125`) bakes a stable `--job_name` → deterministic `jobs_dir`/served-model-id, so a resume **continues the same GCS serve dir** (one serve dir, rising task count) instead of restarting from task 1.
+- repo naming `penfever/<slug>-qwen3.5-122b-131k-opencode-traces`.
+
+**⚠️ MODEL PATH GUARD (the #1 launch pitfall):** `--model gs://marin-models-us/ot-agent/models/Qwen/Qwen3.5-122B-A10B-FP8/` — the mirror, which streams via runai-streamer **direct-to-device (~0 local disk)**. **NEVER the bare HF id `Qwen/Qwen3.5-122B-A10B-FP8`** — that string is ONLY the uploader's `--served_model` provenance stamp; passing it as `--model` defeats streaming → vLLM `snapshot_download`s the full ~120GB → OOMs the 100GB worker disk → **deterministic startup hang (0 trials for hours, never self-heals)**. After launch, grep the new job's log to confirm the baked command carries `--model gs://…`.
+
+**Native ingress (pinggy retired 2026-07-06):** add `--ingress_mode controller --ingress_host https://iris.oa.dev`. The Daytona sandbox reaches the co-located vLLM via the capability URL `https://iris.oa.dev/proxy/t/<token>/otagent-<slug>/v1` (access=LINK, 24h token re-minted per serve-spawn). Route health: `curl -sk -w "%{http_code}" https://iris.oa.dev/proxy/t/badtoken/serve.nope/v1/models` → **401**. If a job fails specifically on `/proxy/t`, do NOT redeploy pinggy — flag it (rollback = redeploy the sidecar via `scripts/inference/deploy_ingress_sidecar.py`).
+
+**Terminal-job triage — rescue vs BLOCKED (precheck before rescuing):**
+- Worker in-job auto-upload lands **TEXT-ONLY** (the pinned `:tpu` predates the schema-pin fix) OR fails at **export-push** (harbor `FileExistsError` on preempt-resume) — both leave banked GCS trials + `logs/*_literal.jsonl` intact → **RESCUE** from GCS (see Manual cleanup) with `--served_model Qwen/Qwen3.5-122B-A10B-FP8`, verify `count_populated_literal_rows` ≈ correlation yield. "SUCCEEDED"/"repo exists" is NEVER proof of trainable literals — always check the true count.
+- A job with **0 valid traces** (100% `steps:0` / `NonZeroAgentExitCodeError exit 127` = agent binary absent in the sandbox) is GARBAGE → mark **BLOCKED**, NOT rescuable, needs a full re-run after the sandbox-install fix. Spot-check a few trials' `result.json`/`exception.txt` before rescuing.
+
+**Harbor editable guard:** the uploader imports harbor from `/Users/benjaminfeuer/Documents/harbor` — it MUST be on `penfever/working` (verify + `git checkout penfever/working` if drifted) before any rescue, or the export crashes.
+
 ## Guardrails
 
-- NEVER stop/restart/bounce a RUNNING job or the Iris cluster without explicit
+- **Kill authority:** a HEALTHY (progressing) running job → NEVER kill without explicit
+  user permission. BUT a CLEARLY-DOOMED / mis-launched job that makes 0 progress for hours
+  and won't self-heal — bare-HF-id disk-full hang, exit-127 garbage, or a severed-Daytona
+  zombie (frozen samples AND frozen harbor exception counters) — MAY be killed + relaunched
+  correctly WITHOUT asking (user standing authorization, 2026-07-07); log it to the tracker.
+- NEVER stop/restart/bounce a HEALTHY RUNNING job or the Iris cluster without explicit
   user permission in the current thread.
 - NEVER read/write GCS across regions (cost). Keep everything in the
   bucket-matched US region.
