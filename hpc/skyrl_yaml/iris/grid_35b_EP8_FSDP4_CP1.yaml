@@ -351,8 +351,8 @@ trainer:
   max_steps: 80
   update_epochs_per_batch: 1
 
-  train_batch_size: 64
-  policy_mini_batch_size: 64
+  train_batch_size: 32       # ⚠ TEMPORARY 2026-07-07 (64->32) to halve time-to-first-weight-sync for the drain-fix debug loop. RESTORE to 64 for the real step-time measurement.
+  policy_mini_batch_size: 32 # ⚠ TEMPORARY 2026-07-07 (64->32) — must equal train_batch_size (fully-async assert). RESTORE to 64.
   eval_batch_size: 64
 
   # micro_train 1 (sharded all-gather + MoE expert FFN backward dominates).
