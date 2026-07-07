@@ -94,6 +94,24 @@ fixes, for later: rebuild the `:tpu` worker with the schema-pin fix so #1 goes a
 harbor's `--export-push` not re-enter `Job.create` / tolerate the existing dir so #2 goes
 away — until then rescue is the reliable path.)
 
+**BUT precheck before rescuing: is there anything to rescue?** A THIRD terminal mode is a job
+that produced **zero valid traces** — every trial errored with `steps: 0` / no LLM calls
+(e.g. `NonZeroAgentExitCodeError` exit **127**: the `opencode` binary/nvm/node absent in the
+Daytona sandbox — a task-env/snapshot provisioning failure, dataset-specific). Such a job has
+**no literal.jsonl AND no usable text** — the `logs/` dir never gets created (the "uploaded
+final literal log" line was a `FileNotFoundError` no-op; fixed to log truthfully in
+`c4728060`). These are NOT rescuable — they need a **full RE-RUN after the sandbox issue is
+fixed**, not a GCS rescue. So before rescuing a FAILED job, spot-check a few trials'
+`result.json`/`exception.txt`: if they're 100% errored with 0 steps, don't waste a rescue —
+mark BLOCKED + flag for re-run. (Seen on #13 stack-jest-large / #14 stack-jest-v2, 2026-07-07.)
+
+**Resume-clobber of the literal log — FIXED (`c4728060`).** The resume-fix (`a25a6125`) had
+collapsed the literal remote path to per-job-stable, so a low-traffic preempt-resume could
+overwrite attempt-0's populated `literal.jsonl` with an empty one. Restored per-serve-UNIQUE
+filenames `logs/<slug>__<serve-token>_literal.jsonl` (serve-start timestamp + IRIS_TASK_ID
+retry leaf); the correlator already unions multi-file, so this is backward-compatible.
+Worker-bundle change — deploys on the next fresh datagen launch, not an image rebuild.
+
 ## Literal traces → SFT
 
 `scripts/harbor/literal_traces_to_sft.py` converts a literal trace dataset into an SFT
