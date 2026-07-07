@@ -177,9 +177,13 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # bump cdca0b3a→b2ff8bf2 = abort_generation DRAIN fix — drains the vLLM engine (poll has_unfinished_requests
     # until idle, bounded 60s fail-loud) before the caller meta-izes params in the layerwise weight-sync reload.
     # Fixes the _C::rms_norm meta-tensor crash on eager decode (grid-30b-c) + the masked stale-weight read under
-    # cudagraph replay. wheels + harbor d58043c3 + rl_env_constraints unchanged (skyrl-only, prebuilt-wheelhouse).
-    "@sha256:37cdc3e6a94394ea3942a0ea64a635df27aa1a6deec95ab2ec67a89b059e841f"  # noqa: E501  (gpu-rl-f9806065)
-    # (prev: gpu-rl-4e505a4e @sha256:84ffafac…; gpu-rl-2712998d @sha256:861656ba… UN-PULLABLE single-snapshot)
+    # cudagraph replay (BOTH 35B rungs died at gs1's weight sync on 84ffafac). wheels + harbor d58043c3 +
+    # rl_env_constraints unchanged (skyrl-only, prebuilt-wheelhouse).
+    # NOTE: gpu-rl-f9806065 @sha256:37cdc3e6 was UN-PULLABLE (built --single-snapshot by DEFAULT = one 16 GB
+    # layer -> ImagePullBackOff on CoreWeave). gpu-rl-addb348e below is the SINGLE_SNAPSHOT=0 re-layer (48
+    # layers, max 3.5 GB, pull-verified) with IDENTICAL contents (SKYRL b2ff8bf2 drain fix).
+    "@sha256:2f7a4f7a99bf1d72e260599e43d804a9fc9333cd71a6925bccc2f9f51dc879ea"  # noqa: E501  (gpu-rl-addb348e, PULLABLE)
+    # (prev: gpu-rl-f9806065 @sha256:37cdc3e6 UN-PULLABLE single-snapshot; gpu-rl-4e505a4e @sha256:84ffafac)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
