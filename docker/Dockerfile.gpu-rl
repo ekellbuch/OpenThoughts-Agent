@@ -331,7 +331,12 @@ ENV SKYRL_BRANCH=penfever/working
 #     MoE.forward-per-model-forward per phase, for the EP16-vs-EP8 fwd-op diagnostic
 #     (FINDING #2, moe_sharding_grid_131k). No routing/correctness change; another
 #     SKYRL_COMMIT-only bump (wheels + harbor + rl_env_constraints unchanged) (2026-07-06).
-ENV SKYRL_COMMIT=613e225d1b873d712df0d199fbc87ab2798f5ca2
+#   - 822221a0 "engine-readiness gate in ray_wrapped_inference_engine.py" — bake the
+#     already-validated engine-readiness gate (previously runtime-only via --skyrl-ref)
+#     so future RL launches get it by default. Parent is exactly 613e225d, so this ADDS
+#     one commit and preserves everything baked above; another SKYRL_COMMIT-only bump
+#     (wheels + harbor + rl_env_constraints unchanged) (2026-07-07).
+ENV SKYRL_COMMIT=822221a054341f1068995308110394a6ecbd6d9e
 
 RUN git clone --branch $SKYRL_BRANCH https://github.com/marin-community/MarinSkyRL.git $SKYRL_HOME && \
     git -C $SKYRL_HOME checkout $SKYRL_COMMIT
