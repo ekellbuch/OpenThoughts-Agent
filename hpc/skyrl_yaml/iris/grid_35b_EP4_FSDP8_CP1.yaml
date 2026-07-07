@@ -353,8 +353,8 @@ trainer:
   max_steps: 80
   update_epochs_per_batch: 1
 
-  train_batch_size: 32       # ⚠ TEMPORARY 2026-07-07 (64->32) to halve time-to-first-weight-sync for the drain-fix debug loop. RESTORE to 64 for the real step-time measurement.
-  policy_mini_batch_size: 32 # ⚠ TEMPORARY 2026-07-07 (64->32) — must equal train_batch_size (fully-async assert). RESTORE to 64.
+  train_batch_size: 64       # CANONICAL 2026-07-07: restored 32->64 (the debug reduction is retired). E4 (EP4×FSDP8×CP1) is the ACCEPTED 35B RL config going forward — it cleared init + first-training-step backward + sync_weights (feasibility proven 2026-07-07). bs=64 matches the 30B cells.
+  policy_mini_batch_size: 64 # CANONICAL 2026-07-07: restored 32->64 (must equal train_batch_size, fully-async assert).
   eval_batch_size: 64
 
   # micro_train 1 (sharded all-gather + MoE expert FFN backward dominates).
