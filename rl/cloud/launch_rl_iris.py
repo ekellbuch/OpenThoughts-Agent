@@ -173,8 +173,13 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # bump 7b7d627b→cdca0b3a = EPDIAG per-phase fwd/modelfwd instrumentation (LOGGING-ONLY, EPDIAG-gated, no
     # routing/correctness change) for the EP16-vs-EP8 fwd-op diagnostic (FINDING #2). Strict superset of 861656ba
     # (instrumentation is a no-op when EPDIAG unset). wheels + harbor d58043c3 + rl_env_constraints unchanged.
-    "@sha256:84ffafacde0729ec5056f8327f40bd493d12268fd364fb8a823d98e356883a85"  # noqa: E501  (gpu-rl-4e505a4e)
-    # (prev: gpu-rl-2712998d @sha256:861656ba…; gpu-rl-bd888d27 @sha256:a8f76d48… UN-PULLABLE single-snapshot)
+    # gpu-rl-f9806065 (built 2026-07-06, kaniko gpurl-kaniko-f9806065, SINGLE_SNAPSHOT=0 pullable): SKYRL_COMMIT
+    # bump cdca0b3a→b2ff8bf2 = abort_generation DRAIN fix — drains the vLLM engine (poll has_unfinished_requests
+    # until idle, bounded 60s fail-loud) before the caller meta-izes params in the layerwise weight-sync reload.
+    # Fixes the _C::rms_norm meta-tensor crash on eager decode (grid-30b-c) + the masked stale-weight read under
+    # cudagraph replay. wheels + harbor d58043c3 + rl_env_constraints unchanged (skyrl-only, prebuilt-wheelhouse).
+    "@sha256:37cdc3e6a94394ea3942a0ea64a635df27aa1a6deec95ab2ec67a89b059e841f"  # noqa: E501  (gpu-rl-f9806065)
+    # (prev: gpu-rl-4e505a4e @sha256:84ffafac…; gpu-rl-2712998d @sha256:861656ba… UN-PULLABLE single-snapshot)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
