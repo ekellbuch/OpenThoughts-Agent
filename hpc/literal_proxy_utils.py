@@ -31,10 +31,12 @@ disabled path are fully unit-testable without a server (see tests/hpc/test_liter
 
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 import threading
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -58,19 +60,51 @@ def _slug(job_name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", (job_name or "job")).strip("-.") or "job"
 
 
-def literal_log_path(experiments_dir: str | Path, job_name: str) -> Path:
+def serve_token() -> str:
+    """A per-serve token that distinguishes one serve attempt's literal log from another.
+
+    ``--job_name`` is STABLE across a job's preempt-retries (resume fix a25a6125), so
+    every serve attempt derives the SAME ``<slug>`` — and thus, without a per-serve
+    qualifier, the SAME remote literal-log path. A low/zero-traffic RESUME serve (e.g.
+    one that only re-runs export-push) would then overwrite attempt-0's populated log
+    with an empty one. The historical design gave each serve a UNIQUE filename (that is
+    why pre-resume-fix jobs left 2-3 ``logs/*_literal.jsonl`` files), and the correlator
+    already unions every matched file — so restoring per-serve uniqueness is the fix.
+
+    The token folds in the iris task attempt id when present (``IRIS_TASK_ID`` gains a
+    ``:N`` retry suffix on a preempt-retried task) plus a serve-start timestamp, so a
+    retry, a fresh relaunch, and a local run each get a DISTINCT
+    ``logs/<slug>__<token>_literal.jsonl``. Computed ONCE at serve start and threaded
+    through both the local staging path and the remote URI so they stay in sync.
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    task_id = os.environ.get("IRIS_TASK_ID")
+    if task_id:
+        # "/user/job/0:2" -> "0-2": the rank + retry-attempt leaf, the per-serve id.
+        leaf = _slug(task_id.rsplit("/", 1)[-1].replace(":", "-"))
+        return f"{stamp}-{leaf}"
+    return stamp
+
+
+def _literal_log_name(job_name: str, token: str) -> str:
+    """``<slug>__<token>_literal.jsonl`` — keeps the ``_literal.jsonl`` discovery suffix."""
+    return f"{_slug(job_name)}__{_slug(token)}_{LITERAL_LOG_FILENAME}"
+
+
+def literal_log_path(experiments_dir: str | Path, job_name: str, token: str) -> Path:
     """Deterministic LOCAL path for the co-located RecordProxy's ``literal.jsonl`` log.
 
     Lives under ``<experiments_dir>/logs/`` beside the other per-job logs. This is
     the path the proxy APPENDS to (harbor's ``RecordProxy`` uses a plain
-    ``open(..., "a")``, which only works on a local filesystem). When
-    ``experiments_dir`` is itself a remote URI (``gs://…``), do NOT collapse it to a
-    junk local path (``Path("gs://…")`` → CWD-relative ``gs:/…``): the launch path
-    stages the log locally under the system temp dir instead and uploads to the
-    durable remote location via :func:`literal_log_remote_uri`. See
-    :func:`maybe_serve_literal_proxy`.
+    ``open(..., "a")``, which only works on a local filesystem). ``token`` (a
+    :func:`serve_token`) makes each serve attempt write a DISTINCT file so a resume
+    cannot clobber attempt-0's log. When ``experiments_dir`` is itself a remote URI
+    (``gs://…``), do NOT collapse it to a junk local path (``Path("gs://…")`` →
+    CWD-relative ``gs:/…``): the launch path stages the log locally under the system
+    temp dir instead and uploads to the durable remote location via
+    :func:`literal_log_remote_uri`. See :func:`maybe_serve_literal_proxy`.
     """
-    return Path(experiments_dir) / "logs" / f"{_slug(job_name)}_{LITERAL_LOG_FILENAME}"
+    return Path(experiments_dir) / "logs" / _literal_log_name(job_name, token)
 
 
 # schemes we treat as durable object stores (upload target) rather than a local FS.
@@ -93,31 +127,34 @@ def _as_remote_uri_str(experiments_dir: str | Path) -> str:
     return _COLLAPSED_SCHEME_RE.sub(lambda m: m.group(1) + "://", str(experiments_dir))
 
 
-def literal_log_remote_uri(experiments_dir: str | Path, job_name: str) -> Optional[str]:
+def literal_log_remote_uri(experiments_dir: str | Path, job_name: str, token: str) -> Optional[str]:
     """Durable remote URI for the literal log, or ``None`` for local ``experiments_dir``.
 
     On iris ``experiments_dir`` is a ``gs://…`` remote_output_dir. The proxy cannot
     append to object storage (no append semantics), so it writes locally and the
     launch path uploads the whole file here on a periodic + on-exit flush. Returns
-    ``<experiments_dir>/logs/<slug>_literal.jsonl`` as a ``gs://…`` string when
-    ``experiments_dir`` is remote; ``None`` when it is an ordinary local path (local
-    runs and unit tests need no upload).
+    ``<experiments_dir>/logs/<slug>__<token>_literal.jsonl`` as a ``gs://…`` string
+    when ``experiments_dir`` is remote; ``None`` when it is an ordinary local path
+    (local runs and unit tests need no upload). ``token`` (a :func:`serve_token`) makes
+    each serve attempt target a DISTINCT object so a resume cannot clobber attempt-0's
+    log; the correlator globs ``*_literal.jsonl`` and unions every attempt.
     """
     uri = _as_remote_uri_str(experiments_dir)
     protocol = UPath(uri).protocol
     if protocol not in _REMOTE_PROTOCOLS:
         return None
-    return str(UPath(uri) / "logs" / f"{_slug(job_name)}_{LITERAL_LOG_FILENAME}")
+    return str(UPath(uri) / "logs" / _literal_log_name(job_name, token))
 
 
-def _local_staging_path(job_name: str) -> Path:
+def _local_staging_path(job_name: str, token: str) -> Path:
     """A stable, absolute LOCAL staging path for the proxy to append to.
 
     Used when ``experiments_dir`` is remote (``gs://…``): the proxy appends here and
     the launch path uploads the file to :func:`literal_log_remote_uri`. Absolute (not
-    CWD-relative) so it is robust regardless of the worker's working directory.
+    CWD-relative) so it is robust regardless of the worker's working directory. Carries
+    the same per-serve ``token`` as the remote URI so staging + upload stay in sync.
     """
-    return Path(tempfile.gettempdir()) / "ot-agent-literal" / f"{_slug(job_name)}_{LITERAL_LOG_FILENAME}"
+    return Path(tempfile.gettempdir()) / "ot-agent-literal" / _literal_log_name(job_name, token)
 
 
 def literal_proxy_endpoint(
@@ -143,21 +180,26 @@ def upstream_origin(endpoint: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
 
 
-def _upload_literal_log(local_path: str | Path, remote_uri: str) -> None:
+def _upload_literal_log(local_path: str | Path, remote_uri: str) -> bool:
     """Copy the whole local literal log to ``remote_uri`` (full-object overwrite).
 
     Object stores have no append, so each flush rewrites the entire object. The log
     is a JSONL of token IDs — small enough to rewrite periodically for a smoke and
-    for a preempt-durable snapshot. A missing local file (proxy saw no traffic yet)
-    is a no-op.
+    for a preempt-durable snapshot. Returns ``True`` iff a NON-EMPTY local file was
+    actually uploaded; a missing OR empty local file (the proxy saw no traffic this
+    serve) uploads nothing and returns ``False`` — so callers never claim a successful
+    upload, and an empty resume serve never writes a 0-byte object.
     """
     try:
         data = Path(local_path).read_bytes()
     except FileNotFoundError:
-        return
+        return False
+    if not data:
+        return False
     remote = UPath(remote_uri)
     remote.parent.mkdir(parents=True, exist_ok=True)
     remote.write_bytes(data)
+    return True
 
 
 @contextmanager
@@ -251,11 +293,17 @@ def serve_record_proxy(
             uploader.join(timeout=5.0)
         if remote_uri:
             try:
-                _upload_literal_log(log_path, remote_uri)
-                print(
-                    f"[literal-proxy] uploaded final literal log -> {remote_uri}",
-                    flush=True,
-                )
+                if _upload_literal_log(log_path, remote_uri):
+                    print(
+                        f"[literal-proxy] uploaded final literal log -> {remote_uri}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "[literal-proxy] no literal records captured this serve "
+                        f"(nothing to upload; {remote_uri} left untouched)",
+                        flush=True,
+                    )
             except Exception as exc:
                 print(f"[literal-proxy] final literal-log upload failed: {exc}", flush=True)
 
@@ -280,15 +328,19 @@ def maybe_serve_literal_proxy(
     if not enabled:
         yield upstream_endpoint
         return
+    # Per-serve token minted ONCE so the staging path and the remote URI share it: a
+    # preempt-resume serve then writes a DISTINCT ``logs/<slug>__<token>_literal.jsonl``
+    # instead of clobbering attempt-0's populated log (the correlator unions all).
+    token = serve_token()
     # Remote experiments_dir (iris ``gs://…``): the proxy cannot append to object
     # storage, so stage the log on the LOCAL worker FS and upload it to the durable
     # remote URI (periodic + on-exit). Local experiments_dir (local runs / tests):
     # write directly under ``<exp>/logs/`` with no upload — byte-identical to before.
-    remote_uri = literal_log_remote_uri(experiments_dir, job_name)
+    remote_uri = literal_log_remote_uri(experiments_dir, job_name, token)
     if remote_uri is not None:
-        log_path: str | Path = _local_staging_path(job_name)
+        log_path: str | Path = _local_staging_path(job_name, token)
     else:
-        log_path = literal_log_path(experiments_dir, job_name)
+        log_path = literal_log_path(experiments_dir, job_name, token)
     with serve_record_proxy(
         upstream_endpoint, log_path, host=host, port=port, remote_uri=remote_uri
     ) as proxy_endpoint:
