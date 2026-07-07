@@ -262,6 +262,20 @@ class FileDescriptorMonitor:
         print("[fd-monitor] Stopped", flush=True)
 
 
+def _cli_has_option(*flags: str) -> bool:
+    """Return whether the current command line provided any of ``flags``.
+
+    Argparse stores parsed values but not whether a value came from a default,
+    so a config-vs-CLI override decision needs this to tell an explicit
+    ``--n_attempts 1`` apart from the default 1.
+    """
+    for arg in sys.argv[1:]:
+        token = arg.split("=", 1)[0]
+        if token in flags:
+            return True
+    return False
+
+
 def _extract_injected_jobs_dir(harbor_extra_args: Optional[List[str]]) -> Optional[str]:
     """Return the last ``--jobs-dir`` value injected via ``--harbor_extra_arg``.
 
@@ -981,15 +995,23 @@ class LocalHarborRunner:
         from scripts.harbor._harbor_compat import get_orchestrator_field
         config_n_concurrent = get_orchestrator_field(harbor_job, "n_concurrent_trials")
         if config_n_concurrent is not None and config_n_concurrent > 0:
-            # Only override if args.n_concurrent is at the class default
-            if getattr(args, "n_concurrent", None) == self.DEFAULT_N_CONCURRENT:
+            # Only override if the CLI didn't pass it AND it's at the class default.
+            if (
+                not _cli_has_option("--n_concurrent", "--n-concurrent")
+                and getattr(args, "n_concurrent", None) == self.DEFAULT_N_CONCURRENT
+            ):
                 args.n_concurrent = int(config_n_concurrent)
 
         # Apply n_attempts from harbor config if CLI didn't override
         config_n_attempts = harbor_job.n_attempts
         if config_n_attempts is not None and config_n_attempts > 0:
-            # Only override if args.n_attempts is at the default of 1
-            if getattr(args, "n_attempts", 1) == 1:
+            # Only override if the CLI didn't pass it AND it's at the default of 1.
+            # Without the _cli_has_option guard, an explicit `--n_attempts 1` is
+            # indistinguishable from the default and gets clobbered by the config.
+            if (
+                not _cli_has_option("--n_attempts", "--n-attempts")
+                and getattr(args, "n_attempts", 1) == 1
+            ):
                 args.n_attempts = int(config_n_attempts)
 
         # Subclass-specific validation
