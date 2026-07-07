@@ -201,9 +201,11 @@ trainer:
   max_steps: 6
   update_epochs_per_batch: 1
 
-  # SMOKE: 16 (cp4 base: 64). train_batch_size == policy_mini_batch_size (fully-async assert).
-  train_batch_size: 16
-  policy_mini_batch_size: 16
+  # SMOKE: 32 (cp4 base: 64). Two asserts bind: (1) fully-async train_batch_size == policy_mini_batch_size;
+  # (2) validate_batch_sizes floor train_batch_size >= lcm_dp_size — for EP8×FSDP2×CP2 (32 policy GPU)
+  # SkyRL computes policy_dp_size=32, so bs MUST be >= 32. bs=16 FAILED this floor (2026-07-07 first smoke).
+  train_batch_size: 32
+  policy_mini_batch_size: 32
   eval_batch_size: 64
 
   # micro_forward 4 (Jupiter rationale: halves the micro-batch all-to-all count, ->
