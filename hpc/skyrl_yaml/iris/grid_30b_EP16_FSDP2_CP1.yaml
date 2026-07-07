@@ -365,6 +365,7 @@ trainer:
 # =============================================================================
 generator:
   backend: vllm
+  enforce_eager: false  # NO eager (operator 2026-07-06): eager decode is too slow AND re-dispatches _C::rms_norm on the weight-sync meta-window -> crash; cudagraphs mask both. Pairs w/ abort_generation drain fix.
   timeout_multiplier: 1.0
   model_dtype: bfloat16
 
