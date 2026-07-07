@@ -182,8 +182,14 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # NOTE: gpu-rl-f9806065 @sha256:37cdc3e6 was UN-PULLABLE (built --single-snapshot by DEFAULT = one 16 GB
     # layer -> ImagePullBackOff on CoreWeave). gpu-rl-addb348e below is the SINGLE_SNAPSHOT=0 re-layer (48
     # layers, max 3.5 GB, pull-verified) with IDENTICAL contents (SKYRL b2ff8bf2 drain fix).
-    "@sha256:9a96ad1f7e765fdcc20c3f02c947e6059b3a420d34a86060f67ff61e2f1bebc7"  # noqa: E501  (gpu-rl-1a32669c, PULLABLE; SKYRL 613e225d loop-abort+non-fatal drain)
-    # (prev: gpu-rl-addb348e @sha256:2f7a4f7a drain-v1 60s-fail-loud; gpu-rl-f9806065 @sha256:37cdc3e6 UN-PULLABLE)
+    # gpu-rl-cf1ecea6 (built 2026-07-07, kaniko gpurl-kaniko-cf1ecea6, SINGLE_SNAPSHOT=0 pullable):
+    # SKYRL_COMMIT bump 613e225d->822221a0 = engine-readiness gate in ray_wrapped_inference_engine.py
+    # (already-validated; previously runtime-only via --skyrl-ref, now baked-default). Parent is exactly
+    # 613e225d, so this ADDS one commit and preserves everything baked in gpu-rl-1a32669c. wheels + harbor
+    # + rl_env_constraints UNCHANGED (skyrl-only, prebuilt-wheelhouse). Pull-verified: 48 layers, max 3.46
+    # GB, 22.6 GB total. Build asserts green (skyrl_train/vllm/flash_attn/torchtitan.ExpertParallel import).
+    "@sha256:74d6d3e2d05b62cb9c9a8262a171eaa7abf31810ec2dc4f2d4ae544ef907747c"  # noqa: E501  (gpu-rl-cf1ecea6, PULLABLE; SKYRL 822221a0 engine-readiness gate)
+    # (prev: gpu-rl-1a32669c @sha256:9a96ad1f SKYRL 613e225d loop-abort+non-fatal drain; gpu-rl-addb348e @sha256:2f7a4f7a drain-v1; gpu-rl-f9806065 @sha256:37cdc3e6 UN-PULLABLE)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
