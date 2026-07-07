@@ -1,6 +1,6 @@
 ---
 name: eval-agentic-launch-iris
-description: Launch, monitor, and manually clean up an eval job on Marin's Iris TPU cluster via the OpenThoughts-Agent entrypoint. Use when asked to start, watch, or kill a model evaluation (evalchemy / agent-harness benchmarks) on Iris.
+description: Launch, monitor, and manually clean up an eval job on Marin's Iris TPU or CoreWeave H100x8 GPU cluster via the OpenThoughts-Agent entrypoint. Use when asked to start, watch, or kill a model evaluation (evalchemy / agent-harness benchmarks) on Iris.
 ---
 
 # eval-agentic-launch-iris
@@ -185,6 +185,44 @@ python eval/cloud/launch_eval_iris.py \
 # Custom benchmark (no preset): drop --preset and pass --dataset <harbor-slug>
 # or --dataset_path <tasks dir | HF id>, plus --n_concurrent <N>.
 ```
+
+### CoreWeave H100x8 GPU eval (single node, `cw-us-east-02a`)
+
+Pass `--gpu H100x8` (mutually exclusive with `--tpu`) to run on one CoreWeave
+H100x8 node instead of a TPU. The launcher then defaults to the `gpu-8x`
+OT-Agent image and the `cw-us-east-02a` iris config, installs the `datagen`
+extra (not `datagen-tpu`), and skips the TPU iris-serve/`patch_tpu_inference`
+path. `export KUBECONFIG=~/.kube/coreweave-iris-gpu` first.
+
+```bash
+export KUBECONFIG=~/.kube/coreweave-iris-gpu
+python eval/cloud/launch_eval_iris.py \
+  --preset swebench \
+  --harbor_config hpc/harbor_yaml/eval/dcagent_eval_defaults.yaml \
+  --model Qwen/Qwen3-32B \
+  --gpu H100x8 --replicas 1 \
+  --n_concurrent 3 --n_attempts 1 \
+  --harbor_extra_arg=--n-tasks=3 --harbor_extra_arg=--max-retries=0 \  # small subset for fast iteration
+  --job_name "eval-<slug>-cw-gpu-${TS}" \
+  --secrets-env /Users/benjaminfeuer/Documents/secrets.env \
+  --upload_to_database --no-wait
+```
+
+- **Output mode (GPU)**: defaults to `--output-mode local` — Harbor writes
+  `trace_jobs` to pod-local NVMe and `run_eval --upload_to_database` registers
+  to Supabase + HF **in-pod** before the ephemeral pod is torn down (the same
+  registration path TPU/SLURM use). `--upload_to_database` IS supported on the
+  GPU path. For a durable copy of the raw Harbor artifacts, add
+  `--output-mode s3 --s3-output-dir s3://marin-na/tmp/ttl=7d/ot-agent/evals/<user>`
+  (Cloudflare R2 under the cluster's `marin-na` bucket).
+- **Storage creds (GPU)**: the launcher WITHHOLDS the launch host's
+  `AWS_*/LAION_*/MARIN_HMAC_*` from the pod so they cannot clobber the R2 creds
+  the `cw-us-east-02a` cluster injects via the `iris-task-env` `envFrom` Secret.
+  Do not re-add them. (This is why `--jobs-dir=s3://marin-na/...` used to fail
+  with HeadObject 400.)
+- Single-node only: do **not** pass `--replicas > 1` (task sharding + shared
+  multi-node vLLM are not implemented for GPU eval). `--gpu` is limited to
+  `H100x8`. Use a model known to serve on the runtime (Qwen/Qwen3-32B works).
 
 Flag notes:
 - **Supabase sync = `--upload_to_database`** (the opposite of datagen's
