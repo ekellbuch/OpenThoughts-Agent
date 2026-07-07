@@ -472,7 +472,12 @@ class IrisLauncher:
         if output_mode == "s3":
             args._harbor_jobs_dir = args.s3_output_dir
         elif output_mode == "local":
-            args._harbor_jobs_dir = args.local_output_dir
+            # Distinct from the experiments/work dir (local_output_dir/<job>) so
+            # Harbor's job dir (<root>/<job_name>/) holds ONLY trial subdirs +
+            # config.json/result.json — run_eval's _extract_job_metadata globs
+            # job-dir subdirs for trials, so a colliding experiments `logs/` dir
+            # would be mistaken for a trial and crash the in-pod DB upload.
+            args._harbor_jobs_dir = f"{args.local_output_dir.rstrip('/')}/harbor_jobs"
         else:
             args._harbor_jobs_dir = remote_output_dir
 

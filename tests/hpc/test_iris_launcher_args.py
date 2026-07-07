@@ -174,8 +174,9 @@ def test_eval_iris_gpu_local_default_registers_in_pod():
     assert args.output_mode == "local"
     assert launcher.remote_output_dir == "/tmp/ot-agent-runs/gpu-local-smoke"
     assert _option_value(launcher.command, "--experiments_dir") == "/tmp/ot-agent-runs/gpu-local-smoke"
-    # Harbor jobs-dir is the ROOT so run_eval reads <root>/<job_name>.
-    assert "--jobs-dir=/tmp/ot-agent-runs" in _equals_option_values(launcher.command, "--harbor_extra_arg")
+    # Harbor jobs-dir root is DISTINCT from the experiments dir so the harbor
+    # job dir holds only trial subdirs; run_eval reads <root>/<job_name>.
+    assert "--jobs-dir=/tmp/ot-agent-runs/harbor_jobs" in _equals_option_values(launcher.command, "--harbor_extra_arg")
     assert "--upload_to_database" in launcher.command
     assert (args.dataset_path, args.gpus) == (HF_DATASET, 8)
 
