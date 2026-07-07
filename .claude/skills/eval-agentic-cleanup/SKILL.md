@@ -285,7 +285,53 @@ the bulk). Detach a large GPFS `rm` (nohup/tmux); never `du`/`find` to size it f
 canonical task dirs.
 
 ---
-Sibling cleanups: **`rl-agentic-job-cleanup`** (RL model), **`sft-job-cleanup`** (SFT model), **`datagen-job-cleanup`** (trace dataset). Launching evals → **`eval-agentic-launch`**. Per-cluster particulars → `.claude/ops/<cluster>/`.
+## 5. IRIS TPU evals — the idempotent path (GCS-backed, no SLURM)
+
+Iris (marin v6e TPU) evals run through `eval/cloud/launch_eval_iris.py`, NOT SLURM — so the SLURM mechanics
+above (sacct, cluster `eval_jobs`/`trace_jobs` run-dirs, sbatch resume, GPFS `rm`) DON'T apply. The **audit
+logic is identical** (the same 4 checks + the same >10% error-fraction HARD gate + the same <90%→resume-not-
+register rule + the same cross-user FK safety); only the DATA SOURCE and the resume/register MECHANICS differ.
+
+- **Enumerate** terminal evals (no sacct): the marin jobs table.
+  `iris=/Users/benjaminfeuer/Documents/marin/.venv/bin/iris`
+  `$iris --cluster=marin query "SELECT job_id,state FROM jobs WHERE job_id LIKE '%eval-%' ORDER BY job_id DESC" -f csv`
+  **State codes: 4=COMPLETED (terminal-good), 5=FAILED, 6=KILLED, 1/2/3=pending/running (SKIP — live).** There is
+  no `-S <date>` filter; the job_id timestamp suffix (or a `created_at` column) bounds "since June 3". EXEMPT the
+  `DCAgent2/*` grid/throughput/OOM measurement runs (§0 pre-gate) same as SLURM.
+- **Results live in GCS, NOT on a filesystem.** The aggregate is
+  `gs://<bucket>/ot-agent/<job>/<job>/result.json`. **⚠ CHECK BOTH BUCKETS: `gs://marin-models-us` (us-east5, the
+  intended region) AND `gs://marin-eu-west4`.** A launch-host region-discovery fallback (the marin `iris` CLI not
+  on PATH → the launcher can't discover the region → it silently writes to the static `gs://marin-eu-west4`
+  default). Verified 2026-07-07: a whole class of legs (all the flawed-summ `-rf` re-fires) landed in eu-west4 —
+  a us-east5-only audit returns "no output" FALSELY. Always `gsutil ls` both, and prefer whichever has the
+  aggregate `result.json`. (The data is valid + self-consistent, just in the wrong region — no cross-region
+  egress; harvest it where it is, don't re-run for region alone.)
+- **Audit the GCS `result.json`** — schema is `stats.evals.<key>` (NOT top-level `metrics`). Per eval key:
+  `score = metrics[0].mean`; `n_trials` / `n_total_trials` (swe/v2=300, tb2=267); `exception_stats[<name>]` is a
+  **LIST of trial ids → use `len()`** (Σlen over NON-benign names / n_trials = error-fraction; same benign set as
+  §0 check-4). Reward buckets under the eval key. (A minimal aggregator: gsutil cp the result.json, then sum
+  `len()` over exception_stats.) `n_cache_tokens=0` in the row is the prefix-cache-off fingerprint (below).
+  - **⚠ IRIS-ONLY CONTAMINATION DISCRIMINATOR (flawed-summ / pre-2026-07-06 legs):** the TPU eval serve had NO
+    prefix caching before OT-Agent `274e93dd` (+ the TP=chips fix `aeb2e876`/`b20aa60f`), which deflated scores
+    via an AgentTimeout blow-up. So for a TPU leg ALSO gate on the **AgentTimeout RATE**: **≥~80% AgentTimeout =
+    CONTAMINATED (pre-fix, no cache) → VOID + re-fire, do NOT record**, even though AgentTimeout is otherwise a
+    benign passthrough. Clean post-fix legs run ~40% (swe) to ~68% (tb2). This discriminator is Iris-TPU-specific
+    (the GPU/SLURM harness always had prefix caching); do NOT apply it to TACC/Leonardo evals.
+- **Resume (<90% OR >10% err)** — no sbatch; **relaunch `launch_eval_iris.py` with the SAME `--job_name`** (Harbor
+  resumes the incomplete/errored trials of that run dir; helpers `scripts/iris/check_resume_needed.py` +
+  `check_progress.py`). **REGION-CORRECT the relaunch** (else it re-lands in eu-west4): run with BOTH
+  `export PATH=/Users/benjaminfeuer/Documents/marin/.venv/bin:$PATH` (marin iris → region discovery → us-east5)
+  AND the otagent python by FULL PATH `/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python` (the launcher
+  needs omegaconf, which the marin venv lacks). Add `--max-retries 2` (a fraction of fresh preemptible v6e-4
+  slices silently WEDGE at model-load `model_loader.py:476` ~50min then die; `--max-retries 2` auto-reschedules to
+  a fresh slice). Confirm the launch prints `Region pin: … → us-east5`. Iris eval = MAIN Daytona org
+  (`DAYTONA_API_KEY`), `force_build: true` (no snapshot pre-build / cap).
+- **Register (≥90%, not auto-registered)** — Iris evals auto-register via `--upload_to_database` on completion, so
+  most complete legs ARE registered; for one that isn't, `gsutil -m rsync -r gs://<bucket>/ot-agent/<job>/<job>/
+  <local_tmp>/` then `manual_db_eval_push.py --job-dir <local_tmp>` (+ the §2/§2b model/benchmark FK fixes, same
+  own-rows-only pre-check). Then remove the local tmp (GCS is the durable store — no cluster-filesystem cleanup).
+
+Sibling cleanups: **`rl-agentic-job-cleanup`** (RL model), **`sft-job-cleanup`** (SFT model), **`datagen-job-cleanup`** (trace dataset). Launching evals → **`eval-agentic-launch`** (+ the `*-iris` variant for TPU). Per-cluster particulars → `.claude/ops/<cluster>/`.
 
 ---
 
