@@ -53,6 +53,15 @@ asciinema recorder). Load-bearing behaviors:
 - **`trajectory.json`** (per episode): ATIF `steps[]` with `source`/`message`/`tool_calls`; subagent (summarization) trajectories are separate files. `raw_content` dumps the raw LLM response instead of parsed tool_calls.
 - **Per-trial footprint is large** — terminus-2 writes ~70–120 files/trial (3 per episode + subagent dirs); a 30k-trial job ≈ 2–3M FS entries. This is why trace export must prune (see below) and why GPFS hygiene matters.
 
+### opencode literal tokens — capture + correlation, and why "literal yield" varies by arm
+
+For **installed agents like `opencode`** the LLM calls happen INSIDE the Daytona sandbox (via ai-sdk), so Harbor's `RolloutDetail` never sees the token IDs — the trajectory steps carry only token *counts*. A co-located `harbor.literal.proxy.RecordProxy` on the iris worker captures the real `prompt_token_ids`/`completion_token_ids`/`logprobs` into one job-global `literal.jsonl` (interleaving all ~N concurrent trials). ai-sdk strips the upstream vLLM completion id, so there is **no join key**; OT-Agent's `scripts/harbor/literal_correlator.py` reconstructs attribution from content, verify-or-skip (omit rather than mis-attribute). A trial's tokens must clear **two gates** to land in the exported dataset:
+
+- **Gate 1 — capture.** The proxy only logs `status==200` responses carrying a `completion_token_ids` block. A trial that makes few successful LLM calls contributes few/zero records. This is the dominant yield driver and it is **task-shaped**: short/fast or early-failing interactions (e.g. `llm-verifier`, `methods2test`) leave almost no records, while long multi-turn debugging loops (code/bug-fix arms) capture richly.
+- **Gate 2 — unique binding.** Records are grouped into per-trial chains by exact message-**prefix** extension (opencode replays full history each turn), then a chain binds to a trajectory only if their per-step `(prompt_tokens, completion_tokens)` **count sequences match exactly and uniquely**. Fails when: duplicate/templated task prompts make a record extend two chains (**ambiguous → skipped**), or a **short trajectory** yields a non-distinctive count signature that collides across trials (long trajectories are effectively fingerprints).
+
+**So low "literal yield" (populated-rows / total-trials) is usually a Gate-1 capture ceiling, not corruption or a binding bug.** Measured on the qwen3.5-122b-131k-opencode campaign: code/bug arms ~77–95% (nl2bash 90%, nemotron 95%, stack-junit 77%); verifier/test arms ~6–10% (llm-verifier 510/8965=5.7%, methods2test 108/1039=10.4%). For llm-verifier the log held only ~678 chains for 8965 trials (capture ceiling ~7.6%), and binding then succeeded on ~75% of *captured* chains — i.e. the low headline is few-records-captured, not can't-bind. The literals that *are* captured are correct (verify-or-skip guarantees omission over mis-join). Full ops reference (decode, tokenizer provenance, export schema-pin, rescue): `.claude/ops/data/literal_trace_datasets.md`.
+
 ---
 
 ## Resume + cross-cluster port
