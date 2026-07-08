@@ -77,6 +77,15 @@ datasets:
 # Plain ChatML == LF qwen3 encode_multiturn training format (see header). NOT qwen3.jinja.
 chat_template: chatml
 
+# NODE-LOCAL prepared-dataset path (TACC gh nodes: /tmp = node-local XFS, 261GB, NOT shared
+# Lustre). Each node tokenizes its own copy under its own /tmp -> the axolotl FileLockLoader's
+# datasets_prep.lock is per-node + uncontended. Job 815251 died at ~1h26m because the DEFAULT
+# ./last_run_prepared lands on shared Lustre $SCRATCH, so all 16 nodes serialized on ONE lock
+# held across a multi-minute tokenize+save -> Lustre ENOLCK ("No locks available") + filelock
+# Deadlock. Node-local eliminates the cross-node contention entirely. (Passed through by the
+# launcher translator: hpc/axolotl_config_utils.py same-name passthroughs.)
+dataset_prepared_path: /tmp/axolotl_prep_qwen3_32b_ot_sft_10k
+
 attn_implementation: sdpa
 sample_packing: false
 
