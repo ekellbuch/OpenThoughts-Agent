@@ -39,10 +39,16 @@
 #
 # NOTED DEVIATIONS (learning-neutral; matched where it matters, noted where it can't be identical):
 #   1. DeepSpeed offload: LF uses ds_z3_offload (optimizer states on CPU). aarch64 TACC
-#      cannot use CPU-offload with axolotl (DeepSpeedCPUAdam JIT -> GCC rejects armv9 flags;
-#      axolotl.md gotcha #2), so we use zero3_bf16.json (no offload). ZeRO-3 sharding is
-#      numerically transparent -> identical learned function; only GPU-memory footprint
-#      differs (this drove the 16-node choice).
+#      cannot use CPU-offload with axolotl (DeepSpeedCPUAdam JIT fails to build on aarch64 —
+#      RE-CONFIRMED 2026-07-08 job 817101: CPUAdamBuilder().load() -> RuntimeError, nvc++/g++
+#      incompatible; axolotl.md gotcha #2), so we use zero3_bf16.json (no offload). ZeRO-3
+#      sharding is numerically transparent -> identical learned function; only GPU-memory
+#      footprint differs. Because offload is off, the fp32 optimizer states (~12B/param) live
+#      in HBM -> at 16 nodes that + the 32768-seqlen backward activations OOM'd the 96GB GH200
+#      (job 816487, Cuda OOM in the first backward). LAUNCH AT **32 nodes** (--num_nodes 32,
+#      grad_accum 96/32=3): halves the ZeRO-3 shard (opt states ~24->12GB/GPU) for OOM headroom.
+#      Learning-parity intact (global batch 96 fixed; 32-node no-offload == LF's 16-node offloaded
+#      ZeRO-3, numerically). 96%32=0 clean.
 #   2. Attention: LF fa2 vs axolotl sdpa (no flash-attn-2 wheel for torch 2.11+cu128 on
 #      aarch64; ops/tacc/ops.md). Both are exact attention -> learning-neutral.
 #   3. Liger kernel: LF enable_liger_kernel:true; omitted here (unvalidated in sft-axolotl,
