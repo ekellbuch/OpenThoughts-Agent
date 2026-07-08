@@ -33,7 +33,7 @@ SF=/leonardo_scratch/fast/AIFAC_5C0_290/bfeuer00
 SANDBOX=$SF/marinskyrl_sandbox
 VENV=$SF/marin_venv
 MARIN=$WORK/code/MarinSkyRL/skyrl-train
-CFG=$WORK/code/OpenThoughts-Agent/hpc/skyrl_yaml/leonardo
+CFG=$WORK/code/OpenThoughts-Agent/hpc/skyrl_standard/leonardo
 
 export DATA_DIR=$WORK/data/gsm8k
 export MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct      # resolved from offline HF cache

@@ -2,7 +2,7 @@
 name: rl-standard-job-cleanup
 description: >-
   Preserve + publish a finished STANDARD (non-agentic GRPO) SkyRL RL checkpoint — the Delphi/rlvr/dapo
-  math-and-reasoning cells launched via rl-standard-launch-leonardo (raw sbatch of hpc/skyrl_yaml/leonardo/*,
+  math-and-reasoning cells launched via rl-standard-launch-leonardo (raw sbatch of hpc/skyrl_standard/leonardo/*,
   logger=console, NO Harbor/Daytona/trace_jobs). Covers: cancel pending retries, pick the BEST checkpoint by
   the trailing-5 EMA of reward via `parse_skyrl_metrics.py --format standard` (chain-aware, capped at the
   latest saved step), flatten weights to repo root, secret-scan, `hf upload` (Leonardo sbatch-tunnel) to
@@ -18,7 +18,7 @@ description: >-
 
 Cleanup for a finished **STANDARD (non-agentic) GRPO** SkyRL run on Leonardo — the math/reasoning cells
 (`delphi-…`, `rlvr_math`, `dapo`, gsm8k/aime) launched per **`rl-standard-launch-leonardo`** (raw `sbatch`
-of `hpc/skyrl_yaml/leonardo/*`, `logger=console`, **no Harbor / no Daytona / no `trace_jobs/`**). The final
+of `hpc/skyrl_standard/leonardo/*`, `logger=console`, **no Harbor / no Daytona / no `trace_jobs/`**). The final
 HF artifact is **`laion/<run_name>-<step>-<size>B`** (weights at repo root) + the metric CSVs/report; a
 Supabase `models` row (`training_type=RL`) **only if the cell's series is DB-registerable** (§7).
 
@@ -56,10 +56,10 @@ RUN_DIR=$WORK/rl_ckpts/<RUN_NAME>
 ls -d $RUN_DIR/exports/global_step_*/        # the HF-exportable checkpoints (every hf_save_interval steps)
 cat $RUN_DIR/latest_ckpt_global_step.txt     # the last saved step — the selection CAP
 ```
-The `.out` files are `%x_%j.out` in the **sbatch CWD** — `hpc/skyrl_yaml/leonardo/<JobName>_<jobid>.out`
+The `.out` files are `%x_%j.out` in the **sbatch CWD** — `hpc/skyrl_standard/leonardo/<JobName>_<jobid>.out`
 (NOT an `experiments/<job>/logs/` dir; standard RL has no such dir). A chain restart = one `.out` per link:
 ```bash
-cd $WORK/code/OpenThoughts-Agent/hpc/skyrl_yaml/leonardo
+cd $WORK/code/OpenThoughts-Agent/hpc/skyrl_standard/leonardo
 ls -lt *<RUN_NAME>*_*.out      # collect ALL links of the chain (sorted by jobid/time)
 ```
 
@@ -92,7 +92,7 @@ OUTLOGS=$WORK/rl_cleanup/<RUN_NAME>/outlogs
 OUT=$WORK/rl_cleanup/<RUN_NAME>/metrics
 mkdir -p $OUTLOGS
 # Copy ALL real chain-link TRAINING .out logs (one per restart link) — NOT the _rayw*/_rayhead worker logs:
-cd $WORK/code/OpenThoughts-Agent/hpc/skyrl_yaml/leonardo
+cd $WORK/code/OpenThoughts-Agent/hpc/skyrl_standard/leonardo
 for f in *<RUN_NAME>*_*.out; do
   case "$f" in *_rayw*|*_rayhead*) continue;; esac   # skip per-worker logs
   cp "$f" $OUTLOGS/
@@ -177,8 +177,8 @@ you used). The size suffix is **required**.
 
 ## 5. Copy the launch config + scan for secrets
 ```bash
-cp $WORK/code/OpenThoughts-Agent/hpc/skyrl_yaml/leonardo/run_delphi_math_rl.sh   $UPLOAD_DIR/rl_run_script.sh 2>/dev/null
-cp $WORK/code/OpenThoughts-Agent/hpc/skyrl_yaml/leonardo/sbatch_delphi_math_rl.sh $UPLOAD_DIR/rl_sbatch.sh    2>/dev/null
+cp $WORK/code/OpenThoughts-Agent/hpc/skyrl_standard/leonardo/run_delphi_math_rl.sh   $UPLOAD_DIR/rl_run_script.sh 2>/dev/null
+cp $WORK/code/OpenThoughts-Agent/hpc/skyrl_standard/leonardo/sbatch_delphi_math_rl.sh $UPLOAD_DIR/rl_sbatch.sh    2>/dev/null
 trufflehog filesystem $UPLOAD_DIR --no-update    # if installed; else the grep fallback:
 grep -rIE '(sk-[a-zA-Z0-9]{20,}|AKIA[0-9A-Z]{16}|ghp_[a-zA-Z0-9]{36}|hf_[a-zA-Z0-9]{34}|eyJ[a-zA-Z0-9._-]+)' $UPLOAD_DIR
 ```
@@ -190,7 +190,7 @@ W&B-equivalent — runs are `WANDB_MODE=offline`):
 ```bash
 mkdir -p $UPLOAD_DIR/training_logs
 cp $OUT/metrics.csv $OUT/vllm_metrics.csv $OUT/report.md $OUT/reward_plot.png $UPLOAD_DIR/training_logs/ 2>/dev/null
-cp $WORK/code/OpenThoughts-Agent/hpc/skyrl_yaml/leonardo/<JobName>_*.out      $UPLOAD_DIR/training_logs/    2>/dev/null
+cp $WORK/code/OpenThoughts-Agent/hpc/skyrl_standard/leonardo/<JobName>_*.out      $UPLOAD_DIR/training_logs/    2>/dev/null
 ```
 Upload via the **Leonardo sbatch-tunnel** (NOT a login-node `hf upload` — it dies at ~100 s). Use the sbatch
 template in `.claude/ops/leonardo/ops.md` ("sbatch template for HF upload"); point `cd` at `$UPLOAD_DIR` and

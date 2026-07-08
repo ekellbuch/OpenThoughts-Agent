@@ -3,7 +3,7 @@ name: rl-standard-launch-leonardo
 description: >-
   Launch, relaunch, or sweep STANDARD (non-agentic) SkyRL RL on CINECA Leonardo —
   GRPO on math/reasoning datasets (gsm8k, MATH/aime) and on-policy distillation
-  (OPD, teacher→student) — via raw `sbatch` of the `hpc/skyrl_yaml/leonardo/*` run
+  (OPD, teacher→student) — via raw `sbatch` of the `hpc/skyrl_standard/leonardo/*` run
   scripts inside the writable apptainer SANDBOX + uv `marin_venv` (NOT `python -m
   hpc.launch`, NOT a `.sif`, NOT `--rl_use_conda`). Use when asked to run/relaunch
   a gsm8k or OPD GRPO canary, throughput/accuracy grid, or multi-node RL on
@@ -41,7 +41,7 @@ Authoritative source docs (this skill distills them — read for full numbers):
 > ⚠️ **The launch mechanism is NOT `hpc.launch`.** Unlike SFT (which uses
 > `python -m hpc.launch`) and unlike Perlmutter RL (`--rl_use_conda`), standard
 > Leonardo RL is launched by **`sbatch`-ing a wrapper script** in
-> `hpc/skyrl_yaml/leonardo/` that `singularity exec`s a writable **sandbox dir**
+> `hpc/skyrl_standard/leonardo/` that `singularity exec`s a writable **sandbox dir**
 > (not a `.sif`) + an external **uv** venv, and invokes the SkyRL entrypoint
 > directly. The run scripts say so explicitly: *"does NOT go through the OTA
 > hpc.py launcher and has NO Harbor/Daytona/terminal_bench/agentic dependency."*
@@ -97,7 +97,7 @@ cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/MarinSkyRL && GIT_TERMINAL_PROMPT=
 hf download Qwen/Qwen2.5-1.5B-Instruct    # → $WORK/data/hub  (the model the cell uses)
 # gsm8k parquet → $WORK/data/gsm8k/{train,validation}.parquet
 #   (built with MarinSkyRL examples/gsm8k/gsm8k_dataset.py)
-# MATH:  build via hpc/skyrl_yaml/leonardo/math_dataset.py → $WORK/data/math/
+# MATH:  build via hpc/skyrl_standard/leonardo/math_dataset.py → $WORK/data/math/
 ```
 All code edits: edit local Mac → commit/push → `ssh Leonardo 'git pull'` (CLAUDE.md
 sync discipline — never patch remote files). SkyRL fixes → MarinSkyRL `main`, pulled
@@ -106,7 +106,7 @@ on `$WORK/code/MarinSkyRL`.
 ## 3. Launch — single node (the canary + grid cells)
 
 ```bash
-cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent/hpc/skyrl_yaml/leonardo
+cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent/hpc/skyrl_standard/leonardo
 sbatch sbatch_gsm8k_canary.sh             # bare canary: 1 node × 4 A100, ≤30 min
 ```
 The sbatch sets `DATA_DIR / MODEL_PATH / NUM_GPUS=4 / CKPT_DIR` + the offline env,
@@ -136,7 +136,7 @@ The `--job-name=grid_<cell>` is load-bearing: `sbatch_gsm8k_grid.sh` derives the
 fresh ckpt dir from it (`CKPT_DIR=$SF/grid_ckpts/${SLURM_JOB_NAME#grid_}`). Per-cell
 ready-made scripts live in `notes/RL/gsm8k_grid_leonardo/scripts/run_<cell>.sh`;
 launchers `launch_throughput_grid.sh` / `launch_accuracy_grid.sh` + cell catalogs
-`*_grid_cells.txt` are in `hpc/skyrl_yaml/leonardo/`.
+`*_grid_cells.txt` are in `hpc/skyrl_standard/leonardo/`.
 
 ## 4. Grid structure + what the cells vary
 
@@ -250,7 +250,7 @@ the head with `RAY_ADDRESS` set. Multi-node gotchas it handles (keep them):
 
 ## 8. Guardrails
 
-- **Launch via `sbatch hpc/skyrl_yaml/leonardo/sbatch_*.sh`, NOT `python -m hpc.launch`,
+- **Launch via `sbatch hpc/skyrl_standard/leonardo/sbatch_*.sh`, NOT `python -m hpc.launch`,
   NOT a `.sif`, NOT `--rl_use_conda`** — Leonardo standard RL = sandbox-dir + uv venv.
 - **Fully offline** — pre-stage model + parquet on the login node; `HF_HUB_OFFLINE=1`,
   `WANDB_MODE=offline`; the `/leonardo/home` RO `FileNotFoundError`/`Traceback` lines
