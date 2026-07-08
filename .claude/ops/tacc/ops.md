@@ -56,6 +56,16 @@ source $SCRATCH/miniconda3/bin/activate otagent
 > **1 running job** — requesting `>120 min` on `gh-dev` triggers `QOSMaxWallDurationPerJobLimit`
 > even though the partition shows `MaxTime=UNLIMITED`.
 
+> **⚠ PER-USER RUNNING-JOB CAP = 20 (production QOS `qgh`/`qgg`/`qnormal`).** Hitting it holds further jobs
+> PENDING with reason **`QOSMaxJobsPerUserLimit`** — it is a job-COUNT cap, **not** a node cap, so it fires
+> **even when compute nodes are free.** Consequence: a queue of 20+ one-node jobs (e.g. the flawed_summ eval
+> fill) will **STARVE a big multi-node job** (e.g. a 16-node SFT) indefinitely, because the big job can't get
+> a running-slot no matter how many nodes are idle. **BUDGET penfever's concurrent jobs accordingly** — leave
+> headroom for other work. Standing rule (see the flawed_summ tracker): **cap the flawed_summ eval fill at ≤16
+> concurrent on TACC**, filling the rest of the campaign target on Leonardo/Iris-TPU. (Observed 2026-07-08:
+> 20 running penfever eval legs blocked a 16-node axolotl SFT with `QOSMaxJobsPerUserLimit`; freed it by
+> cancelling eval legs below the cap.)
+
 **Interactive session** (for debugging / manual runs):
 ```bash
 idev -A CCR24067 -p gg -m 1400     # 23h20m on gg

@@ -52,6 +52,8 @@ lost on a session restart, so this skill is the durable source of truth: the can
 3-HOURLY CLUSTER SWEEP — clusters: leonardo, coreweave(iris), tacc (active session only, run to max duration).
 [Jupiter is SKIPPED — down for MDC maintenance until ~2026-07-12; re-add it as a 4th cluster when it returns.]
 
+⚠ NO EXPERIMENT-SPECIFICS IN THIS PROMPT (they go stale): per-campaign values — in-flight TARGET, refill cluster/grouping/order, harvest gates + discriminators, region/launch gotchas, per-config reminders (e.g. a debug batch-size to restore), current bugs — live in the EXPERIMENT TRACKERS under `~/Documents/experiments/active/` (+ the `*-launch` / `*-cleanup` / `analyze-*` skills). READ the relevant tracker each sweep and drive off IT; never hardcode a number/rule here. The CAMPAIGN DRIVER sections below name WHICH tracker to read, not its contents.
+
 STEP 0 (do this FIRST, every sweep): read EACH cluster's ops doc for its BINDING gotchas before touching it —
 - leonardo → `.claude/ops/leonardo/ops.md`: hardened `ssh Leonardo` ControlMaster (host keys rotate, benign;
   use login02/03/04 on false-drain); GPFS — no `find`/`du`, locate logs via `scontrol show job <id> -o`
