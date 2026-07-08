@@ -480,6 +480,24 @@ extra_env:
   #     all-reduce). The Jupiter NCCL_P2P_DISABLE / NVLS / COLLNET disables were
   #     GH200/SIF-specific and are DROPPED here. ---
   NCCL_DEBUG: WARN
+  # --- NCCL SOCKET IFNAME PIN (v4 root-cause fix) ---
+  # v4 (grid-30b-c-cp4-timing-v4) WEDGED 75 min in cross-node NCCL bring-up: all 64
+  # GPUs 0% util, FSDP policy workers stuck in socketPollConnect on fe80::…%enp157s0v0
+  # (Connection timed out, retrying N/34), weights never loaded, global_step never
+  # advanced. Root cause: the controller config's NCCL_SOCKET_IFNAME EXCLUDE-list
+  # (^ibs,ibp,lo,docker,veth,cilium,lxc — from coreweave-controller-gpu-smoke.yaml)
+  # was inherited into the pod env + forwarded to the Ray actors; it excludes the IB
+  # ifaces but does NOT exclude the enp157s0v0..v7 ethernet VFs, which carry ONLY
+  # unroutable IPv6 link-local fe80:: addrs → NCCL enumerated unroutable VF addrs and
+  # the cross-node CP4 policy mesh never formed. (IB is NOT usable — the image logged
+  # NET/Plugin: Could not find libnccl-net.so → no IB plugin without an image rebuild.)
+  # FIX: positively PIN the routable ethernet NIC (enp157s0np0 = IPv4 10.184.200.x)
+  # instead of the broken exclude-list, and force AF_INET (hard-excludes the fe80::
+  # IPv6 link-local). extra_env is the most-specific env layer (launch_rl_iris.py:802
+  # env_vars.update(config_extra_env)) → MarinSkyRL's passthrough forwards the CORRECT
+  # value to the Ray actors.
+  NCCL_SOCKET_IFNAME: enp157s0np0
+  NCCL_SOCKET_FAMILY: AF_INET
   # --- AXIS 2/3 (R3 + DCP) transport / guard env ---
   # R3 + DCP>1 guard-lift — LOAD-BEARING (DCP=2). Clears vLLM's R3+DCP rejection.
   VLLM_ALLOW_ROUTED_EXPERTS_DCP: "1"
