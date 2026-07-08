@@ -216,15 +216,19 @@ in the cluster.
   overhead above), so an N-node single-leaf gang can never be satisfied and sits
   SchedulingGated forever with a Kueue `topology 'infiniband' allows to fit only 2 out of
   N pod(s)` message. `--cpu 48` fits all nodes → admits immediately (QuotaReserved=True).
-- **Multi-node Ray rendezvous via an `s3://` (R2) bucket.** `--num-nodes>1` REQUIRES
+- **Multi-node Ray rendezvous via an `s3://` object-store bucket.** `--num-nodes>1` REQUIRES
   `--rendezvous-dir` (the launcher hard-errors otherwise). On `cw-us-east-02a` use an
-  **`s3://` URI under the cluster's `marin-na` bucket** (R2), e.g.
-  `s3://marin-na/iris/rl-<slug>/<run>`. The cluster injects working R2 creds into every
+  **`s3://` URI under the cluster's default bucket** (`marin-us-east-02a`), e.g.
+  `s3://marin-us-east-02a/iris/rl-<slug>/<run>`. **⚠ Store moved R2 (`s3://marin-na`) → CW
+  (`s3://marin-us-east-02a`) on 2026-07-05 (marin `c7caecc95a`):** pods now inject CW creds +
+  `AWS_ENDPOINT_URL=cwlota.com` and can NO LONGER reach `s3://marin-na` (R2) — a `marin-na`
+  rendezvous PUT resolves to the nonexistent `marin-na.cwlota.com` and STALLS (this killed
+  CP4 v1/v2/v3). The cluster injects working creds into every
   task pod via the **`iris-task-env` k8s Secret** (`envFrom`, because
   `storage.remote_state_dir` is an `s3://` URI), so **no external creds are needed** — and
   you must **NOT forward `AWS_*`/`R2_*`**: explicit container `env` overrides `envFrom`, so
   forwarding the launch host's `AWS_*` (different account, no `AWS_ENDPOINT_URL`) clobbers
-  the pod's R2 creds and silently targets real AWS S3. Use a **fresh sub-path per run** so
+  the pod's injected creds and silently targets real AWS S3. Use a **fresh sub-path per run** so
   a stale head file from a prior attempt isn't picked up. Mechanism: one
   `start_rl_iris_controller.py` per node; rank 0 writes `ray_head.json` to the rendezvous,
   workers poll for it and join; rank 0 publishes `ray_head.done` on completion.

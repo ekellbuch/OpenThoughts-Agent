@@ -71,7 +71,7 @@ terminal_bench:
   # GC/preempt; the cw-us-east-02a pods inject in-cluster R2 creds (iris-task-env
   # Secret), so fsspec/UPath writes here. null would resolve to an EPHEMERAL
   # pod-local path. launch_rl_iris.py --trials-dir auto overrides this per-job-name.
-  trials_dir: s3://marin-na/iris/rl-56gpu-seqnorm-tis/trace_jobs
+  trials_dir: s3://marin-us-east-02a/iris/rl-56gpu-seqnorm-tis/trace_jobs
 
   # Harbor configuration - schema-driven mapping to TrialConfig
   harbor:

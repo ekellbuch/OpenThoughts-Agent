@@ -57,7 +57,7 @@
 #     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
 #     --num-nodes 2 --gpus_per_node 8 --cpu 48 --memory 1800GB --disk 512GB \
 #     --max-retries 1 --skyrl-ref 4ba60a1 \
-#     --rendezvous-dir s3://marin-na/iris/rl-35b-a3b-131k/smoke-<stamp> \
+#     --rendezvous-dir s3://marin-us-east-02a/iris/rl-35b-a3b-131k/smoke-<stamp> \
 #     --job-name rl-35b-a3b-smoke --priority interactive --no-wait
 # =============================================================================
 
@@ -69,7 +69,7 @@ config_groups:
 terminal_bench:
   # R2 (s3://) so rollouts survive pod GC/preempt; cw pods inject R2 creds.
   # null = ephemeral pod-local. launch_rl_iris.py --trials-dir auto overrides per-job.
-  trials_dir: s3://marin-na/iris/rl-smoke-qwen3-6-35b-a3b/trace_jobs
+  trials_dir: s3://marin-us-east-02a/iris/rl-smoke-qwen3-6-35b-a3b/trace_jobs
 
   harbor:
     name: terminus-2

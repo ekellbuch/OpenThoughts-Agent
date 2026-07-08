@@ -191,8 +191,6 @@ def _write_rendezvous_once(fs, path: str, payload: dict) -> None:
 
 
 def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
-    import concurrent.futures
-
     uri = _rendezvous_uri(rendezvous_dir)
     payload = {
         "head_ip": head_ip,
@@ -201,13 +199,16 @@ def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
         "written_at": time.time(),
     }
     fs, path = _fs_and_path(uri)
-    # Bound the object-store PutObject with a hard per-attempt futures timeout +
-    # bounded retries/backoff. WHY: an unbounded s3fs/fsspec put here deterministically
-    # hangs the head (no connect/read timeout on the underlying client), and because it
-    # is invisible, every worker only discovers it at the 1800s rendezvous deadline.
-    # NOTE: a fresh executor per attempt + shutdown(wait=False) so a stalled put thread
-    # never blocks us on __exit__ (ThreadPoolExecutor's context-manager exit would wait
-    # on the wedged worker, defeating the timeout).
+    # Bound the object-store PutObject with a hard per-attempt timeout via a DAEMON
+    # thread + join(timeout) + bounded retries/backoff. WHY: an unbounded s3fs/fsspec put
+    # here deterministically hangs the head (no connect/read timeout on the underlying
+    # client), and because it is invisible, every worker only discovers it at the 1800s
+    # rendezvous deadline.
+    # WHY a daemon thread and NOT a ThreadPoolExecutor: an executor's worker thread is
+    # NON-daemon, so even after we abandon a wedged put, Python's atexit `_python_exit`
+    # JOINS that thread forever at interpreter shutdown → the process can never exit →
+    # ZOMBIE (this bit CP4 v3). A daemon thread is NOT joined by `_python_exit`, so a
+    # wedged write can never block process exit; we simply abandon it after the timeout.
     last_exc: BaseException | None = None
     for attempt in range(1, RENDEZVOUS_WRITE_ATTEMPTS + 1):
         t0 = time.time()
@@ -215,31 +216,44 @@ def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
             f"Writing rendezvous {uri} (attempt {attempt}/{RENDEZVOUS_WRITE_ATTEMPTS}, "
             f"per-attempt timeout {RENDEZVOUS_WRITE_TIMEOUT}s)..."
         )
-        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        try:
-            ex.submit(_write_rendezvous_once, fs, path, payload).result(
-                timeout=RENDEZVOUS_WRITE_TIMEOUT
+        result_box: dict = {}
+
+        def _target() -> None:
+            try:
+                _write_rendezvous_once(fs, path, payload)
+                result_box["ok"] = True
+            except BaseException as exc:  # noqa: BLE001 - surface to the joiner
+                result_box["exc"] = exc
+
+        writer = threading.Thread(
+            target=_target, name=f"rendezvous-write-{attempt}", daemon=True
+        )
+        writer.start()
+        writer.join(timeout=RENDEZVOUS_WRITE_TIMEOUT)
+        if writer.is_alive():
+            # STALLED: the put is still running past the timeout. Abandon the daemon
+            # thread (never joined at exit, so it cannot wedge process teardown) and
+            # fall through to retry / fail-fast.
+            last_exc = TimeoutError(
+                f"rendezvous PutObject did not complete within {RENDEZVOUS_WRITE_TIMEOUT}s"
             )
-            _log(
-                f"Wrote rendezvous {uri}: head_ip={head_ip} port={ray_port} "
-                f"(attempt {attempt}, {time.time() - t0:.1f}s)"
-            )
-            return
-        except concurrent.futures.TimeoutError as exc:
-            last_exc = exc
             _log(
                 f"Rendezvous write STALLED — timed out after {time.time() - t0:.1f}s "
                 f"(attempt {attempt}/{RENDEZVOUS_WRITE_ATTEMPTS}); object-store PutObject "
                 f"to {uri} is not completing."
             )
-        except Exception as exc:  # noqa: BLE001 - transient object-store error
-            last_exc = exc
+        elif "exc" in result_box:
+            last_exc = result_box["exc"]
             _log(
                 f"Rendezvous write FAILED after {time.time() - t0:.1f}s "
-                f"(attempt {attempt}/{RENDEZVOUS_WRITE_ATTEMPTS}): {exc!r}"
+                f"(attempt {attempt}/{RENDEZVOUS_WRITE_ATTEMPTS}): {last_exc!r}"
             )
-        finally:
-            ex.shutdown(wait=False)  # never block on a wedged put thread
+        else:
+            _log(
+                f"Wrote rendezvous {uri}: head_ip={head_ip} port={ray_port} "
+                f"(attempt {attempt}, {time.time() - t0:.1f}s)"
+            )
+            return
         if attempt < RENDEZVOUS_WRITE_ATTEMPTS:
             backoff = min(2 ** (attempt - 1), 10)
             _log(f"Retrying rendezvous write in {backoff}s...")
@@ -385,7 +399,7 @@ def _ray_port_flags() -> list[str]:
 # to >1.6 TB and the kubelet EVICTS rank-0 on its ephemeral-storage limit -> gang
 # bounce. CoreWeave/iris task pods have R2 (Cloudflare S3-compatible) creds + endpoint
 # in env (AWS_ENDPOINT_URL / AWS_*_KEY / AWS_REGION=auto), and boto3 honors
-# AWS_ENDPOINT_URL natively, so we redirect Ray's spill to s3://marin-na/... instead of
+# AWS_ENDPOINT_URL natively, so we redirect Ray's spill to s3://marin-us-east-02a/... instead of
 # local disk. Validated 2026-06-28 in a running w13fix-r3 pod: with this exact config
 # Ray spilled 25 objects to R2 and 0 to /tmp (see ray._private.external_storage
 # ExternalStorageSmartOpenImpl, which does boto3.resource("s3") -> picks up the R2

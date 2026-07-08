@@ -145,7 +145,7 @@
 #     --model_path Qwen/Qwen3-30B-A3B-Thinking-2507 \
 #     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
 #     --num-nodes 8 \
-#     --rendezvous-dir s3://marin-na/iris/rl-131k-cpdcp2r3-thinking2507/<run> \
+#     --rendezvous-dir s3://marin-us-east-02a/iris/rl-131k-cpdcp2r3-thinking2507/<run> \
 #     --job-name rl-131k-cpdcp2r3-thinking2507 --priority interactive --no-wait
 # =============================================================================
 
@@ -159,7 +159,7 @@ config_groups:
 terminal_bench:
   # R2 (s3://) so rollouts survive pod GC/preempt; cw pods inject R2 creds.
   # null = ephemeral pod-local. launch_rl_iris.py --trials-dir auto overrides per-job.
-  trials_dir: s3://marin-na/iris/rl-8node-qwen3-30b-a3b-thinking2507-131k-cpdcp2r3/trace_jobs
+  trials_dir: s3://marin-us-east-02a/iris/rl-8node-qwen3-30b-a3b-thinking2507-131k-cpdcp2r3/trace_jobs
 
   harbor:
     name: terminus-2

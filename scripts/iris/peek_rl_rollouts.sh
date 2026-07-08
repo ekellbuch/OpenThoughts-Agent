@@ -4,11 +4,12 @@
 #
 # WHY: agentic RL (terminal_bench / Harbor) writes per-trial rollout artifacts (the literal agent
 # trajectory + prompts/responses + verifier_output + result.json reward) to
-# terminal_bench_config.trials_dir. Our jobs launch with a REMOTE R2 trials_dir
-# (s3://marin-na/iris/<job>/trace_jobs via launch_rl_iris.py --trials-dir auto) — DURABLE (survives
-# pod GC), unlike the old node-local ephemeral path (trials_dir: null). The rank-0 pod carries the
-# cluster-injected R2 creds + AWS_ENDPOINT_URL (iris-task-env Secret), but the LAUNCH HOST (Mac) does
-# NOT have working marin-na R2 creds. So this script does all R2 ops INSIDE the pod via boto3 (the
+# terminal_bench_config.trials_dir. Our jobs launch with a REMOTE object-store trials_dir
+# (s3://marin-us-east-02a/iris/<job>/trace_jobs via launch_rl_iris.py --trials-dir auto) — DURABLE (survives
+# pod GC), unlike the old node-local ephemeral path (trials_dir: null). NOTE: the default store moved
+# R2 (s3://marin-na) -> CW (s3://marin-us-east-02a) on 2026-07-05 (marin c7caecc95a). The rank-0 pod carries the
+# cluster-injected creds + AWS_ENDPOINT_URL (iris-task-env Secret), but the LAUNCH HOST (Mac) does
+# NOT have working cluster (CW) object-store creds. So this script does all object-store ops INSIDE the pod via boto3 (the
 # proven path). Legacy jobs that wrote to a node-local trials_dir are still handled via the pod's
 # local path. `result.json` is the COMPLETED-trial marker (it carries the reward) — its count is the
 # real "how many trials finished" answer (a started trial has config/prompt/debug but no result.json).
@@ -29,7 +30,7 @@
 # ENV: PEEK_KUBECONFIG (default ~/.kube/coreweave-iris-gpu), NS (default iris), CONTAINER (default task),
 #      PEEK_CLUSTER (default cw-us-east-02a), IRIS_BIN (default the otagent cw-capable iris),
 #      PEEK_OUT (default ~/Documents/experiments/traces),
-#      PEEK_TRIALS_S3 (override the remote trials_dir; default s3://marin-na/iris/<jobname>/trace_jobs),
+#      PEEK_TRIALS_S3 (override the remote trials_dir; default s3://marin-us-east-02a/iris/<jobname>/trace_jobs),
 #      PEEK_MAX_OBJECT_BYTES (pull: skip any single object larger than this; default 20MB=20971520,
 #                             set 0 to fetch everything incl. the 100s-of-MB result.json blobs)
 set -euo pipefail
@@ -77,13 +78,13 @@ kexec() { kubectl exec -n "$NS" "$POD" -c "$CONTAINER" -- bash -lc "$1"; }
 
 # --- trials_dir discovery: prefer a node-local path (legacy trials_dir: null); else REMOTE R2. ---
 TJ_LOCAL=$(kexec 'ls -d /app/experiments/*/trace_jobs 2>/dev/null | head -1' 2>/dev/null | tr -d '\r' || true)
-S3_TJ="${PEEK_TRIALS_S3:-s3://marin-na/iris/${JOBNAME}/trace_jobs}"
+S3_TJ="${PEEK_TRIALS_S3:-s3://marin-us-east-02a/iris/${JOBNAME}/trace_jobs}"
 if [ -n "$TJ_LOCAL" ]; then
   MODE_LOCAL=1
   echo "[peek] LOCAL trials_dir=$TJ_LOCAL"
 else
   MODE_LOCAL=0
-  echo "[peek] REMOTE trials_dir=$S3_TJ  (R2 via rank-0 pod boto3; Mac lacks marin-na R2 creds)"
+  echo "[peek] REMOTE trials_dir=$S3_TJ  (R2 via rank-0 pod boto3; Mac lacks cluster (CW) object-store creds)"
 fi
 
 # Run an R2 op INSIDE the rank-0 pod (it has AWS_ENDPOINT_URL + injected R2 creds + boto3).
@@ -248,7 +249,7 @@ PYEOF
       echo "[pull] downloading trace_jobs DIRECT from R2 ($S3_TJ) — Mac<-R2 via boto3 ..."
       # Bulk artifacts download DIRECTLY from R2 to the Mac (boto3 download_file = native
       # multipart + retries), NOT through `kubectl exec`: result.json can be 100s of MB and
-      # truncates over the exec/SPDY stream. The Mac has no marin-na creds of its own, so we
+      # truncates over the exec/SPDY stream. The Mac has no cluster object-store creds of its own, so we
       # lift the rank-0 pod's injected R2 creds (endpoint+key+secret) into THIS process's env
       # only (never printed). R2 (Cloudflare) is internet-reachable and egress-free; force
       # region=auto (the Mac's default AWS_REGION e.g. us-east-2 is rejected by R2).

@@ -230,7 +230,7 @@ def main() -> int:
     if args.job_name is None:
         args.job_name = f"ep8-{args.diag}-diag-{time.strftime('%Y%m%d-%H%M%S')}"
     if args.rendezvous_dir is None and args.num_nodes > 1:
-        args.rendezvous_dir = f"s3://marin-na/iris/{args.job_name}/rdv"
+        args.rendezvous_dir = f"s3://marin-us-east-02a/iris/{args.job_name}/rdv"
 
     cluster_config = _resolve_cluster_config_default()
     pod_stage = stage_inject_files(args.diag_cfg["inject"])

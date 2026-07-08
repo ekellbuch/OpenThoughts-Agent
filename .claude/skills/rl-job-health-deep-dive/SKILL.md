@@ -131,7 +131,7 @@ and pull any `worker-*.err` / `raylet.*` of interest (the finelog usually surfac
 >   with `$IRIS … job logs /benjaminfeuer/<job> --since-ms <ORIGINAL submitted_at_ms> --no-tail`, using the
 >   *first* submission time, not the latest generation's). Then **grep it for each prior attempt's terminal
 >   traceback** — the real reason each restart was burned (and whether it's the SAME failure every time).
-> - **The REMOTE R2 trials_dir is shared across generations** (`s3://marin-na/iris/<job>/trace_jobs`), so
+> - **The REMOTE R2 trials_dir is shared across generations** (`s3://marin-us-east-02a/iris/<job>/trace_jobs`), so
 >   `pull` already grabbed failed-generation trials too — segregate/label them by episode/timestamp so the
 >   §4 rollout read doesn't conflate a dead generation's reward-0 trials with the live one's.
 > - **SLURM:** the failed legs are *separate job IDs* in the `afterany` chain — `rsync` the **`.out`/`.err` of

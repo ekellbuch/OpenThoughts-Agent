@@ -74,7 +74,7 @@ config_groups:
 terminal_bench:
   # R2 (s3://) so rollouts survive pod GC/preempt; cw pods inject R2 creds.
   # null = ephemeral pod-local. launch_rl_iris.py --trials-dir auto overrides per-job.
-  trials_dir: s3://marin-na/iris/rl-smoke-seqnorm-tis/trace_jobs
+  trials_dir: s3://marin-us-east-02a/iris/rl-smoke-seqnorm-tis/trace_jobs
 
   harbor:
     name: terminus-2

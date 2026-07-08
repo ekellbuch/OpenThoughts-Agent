@@ -17,8 +17,11 @@ DEFAULT_GCS_OUTPUT_ROOT = "gs://marin-eu-west4/ot-agent"
 # Supabase + HF in-pod before the ephemeral pod is torn down.
 DEFAULT_LOCAL_OUTPUT_ROOT = "/tmp/ot-agent-runs"
 
-# No universal default S3 prefix — the CoreWeave R2 bucket (s3://marin-na/...)
-# is cluster-specific, so require it explicitly (flag or OT_AGENT_S3_OUTPUT_ROOT).
+# No universal default S3 prefix — the CoreWeave object-store bucket
+# (s3://marin-us-east-02a/...) is cluster-specific, so require it explicitly (flag
+# or OT_AGENT_S3_OUTPUT_ROOT). NOTE: the default store moved R2 (s3://marin-na) ->
+# CW (s3://marin-us-east-02a) on 2026-07-05 (marin c7caecc95a); s3://marin-na (R2)
+# is no longer reachable from pods.
 DEFAULT_S3_OUTPUT_ROOT = None
 
 

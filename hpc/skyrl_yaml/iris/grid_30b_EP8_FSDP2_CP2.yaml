@@ -71,7 +71,7 @@
 #     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
 #     --num-nodes 8 --gpus_per_node 8 --cpu 48 --max-retries 1 --memory 1700GB \
 #     --skyrl-ref 272bf011cfe96d3f9ad6b771761c2f2ded4ae443 \
-#     --rendezvous-dir s3://marin-na/iris/grid-30b-cp2-smoke/<run> \
+#     --rendezvous-dir s3://marin-us-east-02a/iris/grid-30b-cp2-smoke/<run> \
 #     --job-name grid-30b-cp2-smoke --priority interactive --no-wait
 # (For the dry-run validation, append --dry-run instead of --no-wait.)
 # =============================================================================
@@ -86,7 +86,7 @@ config_groups:
 terminal_bench:
   # R2 (s3://) so rollouts survive pod GC/preempt; cw pods inject R2 creds.
   # null = ephemeral pod-local. launch_rl_iris.py --trials-dir auto overrides per-job.
-  trials_dir: s3://marin-na/iris/grid-30b-cp2-smoke/trace_jobs
+  trials_dir: s3://marin-us-east-02a/iris/grid-30b-cp2-smoke/trace_jobs
 
   harbor:
     name: terminus-2
@@ -461,7 +461,7 @@ extra_env:
 #     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
 #     --num-nodes 8 --gpus_per_node 8 --cpu 48 --max-retries 1 --memory 1700GB \
 #     --skyrl-ref 272bf011cfe96d3f9ad6b771761c2f2ded4ae443 \
-#     --rendezvous-dir s3://marin-na/iris/grid-30b-cp2-smoke/x \
+#     --rendezvous-dir s3://marin-us-east-02a/iris/grid-30b-cp2-smoke/x \
 #     --job-name grid-30b-cp2-smoke --priority interactive --no-wait
 # (For the dry-run validation, append --dry-run instead of --no-wait.)
 # =============================================================================

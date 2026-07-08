@@ -61,8 +61,10 @@ progress per cycle (from harbor GCS output), **§3** serving throughput (full + 
 ### `peek_rl_rollouts.sh` — inspect / capture a running RL job's Harbor rollout artifacts
 Reaches the **rank-0 pod** of a running agentic-RL job and reads its `trace_jobs` (per-trial
 trajectory + prompts/responses + `verifier_output` + `result.json` reward). Our jobs use a **remote
-R2 `trials_dir`** (`s3://marin-na/iris/<job>/trace_jobs`, durable) whose creds live only in the pod
-(the launch-host Mac lacks marin-na R2 creds), so **all R2 ops run INSIDE the pod via boto3**.
+object-store `trials_dir`** (`s3://marin-us-east-02a/iris/<job>/trace_jobs`, durable) whose creds live only in the pod
+(the launch-host Mac lacks cluster creds), so **all object-store ops run INSIDE the pod via boto3**.
+(Store moved R2 `s3://marin-na` → CW `s3://marin-us-east-02a` 2026-07-05, marin `c7caecc95a`; the
+`finelog` archive path above is a SEPARATE marin-controlled location and stays `s3://marin-na/finelog/…`.)
 `result.json` is the COMPLETED-trial marker (carries the reward) → its count is the real "how many
 trials finished".
 - **Use:** "is the rollout buffer actually filling / what rewards are coming back / pull the full

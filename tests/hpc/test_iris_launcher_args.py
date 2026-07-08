@@ -186,19 +186,19 @@ def test_eval_iris_gpu_s3_dry_run_covers_runtime_paths():
         "--output-mode",
         "s3",
         "--s3-output-dir",
-        "s3://marin-na/evals",
+        "s3://marin-us-east-02a/evals",
         "--job_name",
         "gpu-infra-smoke",
         "--dry_run",
     )
     assert launcher.run(args) == 0
 
-    expected_remote_output = "s3://marin-na/evals/gpu-infra-smoke"
+    expected_remote_output = "s3://marin-us-east-02a/evals/gpu-infra-smoke"
     expected_work_output = "/tmp/ot-agent-runs/gpu-infra-smoke"
     assert launcher.remote_output_dir == expected_remote_output
     assert args._work_output_dir == expected_work_output
     assert _option_value(launcher.command, "--experiments_dir") == expected_work_output
-    assert "--jobs-dir=s3://marin-na/evals" in _equals_option_values(launcher.command, "--harbor_extra_arg")
+    assert "--jobs-dir=s3://marin-us-east-02a/evals" in _equals_option_values(launcher.command, "--harbor_extra_arg")
     assert (args.dataset_path, args.gpus) == (HF_DATASET, 8)
 
 

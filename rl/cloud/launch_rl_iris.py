@@ -397,19 +397,24 @@ def create_parser() -> argparse.ArgumentParser:
         "--rendezvous-dir", "--rendezvous_dir", dest="rendezvous_dir", default=None,
         help="Shared object-store/path (gs://, s3://, or shared dir) for the multi-node "
              "Ray head/worker rendezvous. Required for --num-nodes>1. On cw-us-east-02a "
-             "use an s3:// (R2) URI under the cluster's marin-na bucket, e.g. "
-             "s3://marin-na/iris/rl-rdv/<job>; the cluster injects working R2 creds into "
-             "every task pod (iris-task-env Secret), so no external creds are needed.",
+             "use an s3:// URI under the cluster's default bucket, e.g. "
+             "s3://marin-us-east-02a/iris/rl-rdv/<job>; the cluster injects working creds "
+             "+ AWS_ENDPOINT_URL into every task pod (iris-task-env Secret), so no external "
+             "creds are needed. NOTE: the default object store moved R2 (s3://marin-na) -> "
+             "CW (s3://marin-us-east-02a) on 2026-07-05 (marin c7caecc95a); pods now inject "
+             "CW creds+endpoint and can NO LONGER reach s3://marin-na (R2).",
     )
     parser.add_argument(
         "--trials-dir", "--trials_dir", dest="trials_dir", default="auto",
         help="Where Harbor writes per-trial agentic-RL rollout artifacts "
              "(terminal_bench_config.trials_dir). 'auto' (default) = "
-             "s3://marin-na/iris/<job_name>/trace_jobs — a DURABLE R2 path the cw-us-east-02a "
+             "s3://marin-us-east-02a/iris/<job_name>/trace_jobs — a DURABLE path the cw-us-east-02a "
              "pods reach via auto-injected creds, so rollouts survive pod GC and are inspectable "
              "post-hoc. 'local'/'off' = keep the config default (node-local "
              "/app/experiments/<run>/trace_jobs, EPHEMERAL — lost on GC, no shared FS/PVC). Or pass "
-             "an explicit s3://, gs://, or path URI. NOTE: cw uses R2 (s3://marin-na), NOT gs://; "
+             "an explicit s3://, gs://, or path URI. NOTE: cw uses s3://marin-us-east-02a (CW "
+             "object store; R2 s3://marin-na is no longer reachable — store moved 2026-07-05, "
+             "marin c7caecc95a), NOT gs://; "
              "ignored if you already set terminal_bench_config.trials_dir via --skyrl_override.",
     )
 
@@ -613,7 +618,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     user_set_trials = any("terminal_bench_config.trials_dir=" in o for o in (args.skyrl_override or []))
     if trials_dir.lower() not in ("local", "off", "none", "") and not user_set_trials:
         if trials_dir.lower() == "auto":
-            trials_dir = f"s3://marin-na/iris/{args.job_name}/trace_jobs"
+            trials_dir = f"s3://marin-us-east-02a/iris/{args.job_name}/trace_jobs"
         train_cmd.extend(["--skyrl_override", f"++terminal_bench_config.trials_dir={trials_dir}"])
 
     # The controller wraps the training command for the multi-node Ray bootstrap.
@@ -808,9 +813,12 @@ def main() -> int:
     # (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_ENDPOINT_URL / AWS_REGION /
     # FSSPEC_S3). In K8s, explicit container `env` entries take precedence over
     # `envFrom`, so forwarding the launch host's AWS_* (which point at a
-    # DIFFERENT account and lack AWS_ENDPOINT_URL) would CLOBBER the pod's R2
-    # creds and make the s3://marin-na rendezvous (multi-node) silently target
-    # real AWS S3 instead of R2. Let the cluster-injected R2 creds win; the
+    # DIFFERENT account and lack AWS_ENDPOINT_URL) would CLOBBER the pod's
+    # injected creds and make the s3://marin-us-east-02a rendezvous (multi-node)
+    # silently target real AWS S3 instead of the cluster store. NOTE: the default
+    # object store moved R2 (s3://marin-na) -> CW (s3://marin-us-east-02a) on
+    # 2026-07-05 (marin c7caecc95a) — pods now inject CW creds+AWS_ENDPOINT_URL and
+    # can no longer reach R2. Let the cluster-injected creds win; the
     # fsspec rendezvous in start_rl_iris_controller.py uses default credential
     # discovery and picks them up.
     #

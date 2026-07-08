@@ -186,11 +186,13 @@ class IrisLauncher:
                              f"{LOCAL_PATHS.runs}/<job-name>/.")
         og.add_argument("--s3-output-dir", "--s3_output_dir",
                         default=os.environ.get("OT_AGENT_S3_OUTPUT_ROOT", DEFAULT_S3_OUTPUT_ROOT),
-                        help="S3/R2-compatible prefix for durable GPU outputs, e.g. "
-                             "s3://marin-na/tmp/ttl=7d/ot-agent/evals/<user>. Defaults to "
-                             "$OT_AGENT_S3_OUTPUT_ROOT. The pod uses the cluster-injected R2 "
-                             "creds (iris-task-env envFrom); launch-host storage creds are "
-                             "withheld so they cannot clobber them.")
+                        help="S3-compatible prefix for durable GPU outputs, e.g. "
+                             "s3://marin-us-east-02a/tmp/ttl=7d/ot-agent/evals/<user>. Defaults "
+                             "to $OT_AGENT_S3_OUTPUT_ROOT. The pod uses the cluster-injected "
+                             "creds+endpoint (iris-task-env envFrom); launch-host storage creds "
+                             "are withheld so they cannot clobber them. NOTE: default store moved "
+                             "R2 (s3://marin-na) -> CW (s3://marin-us-east-02a) 2026-07-05 (marin "
+                             "c7caecc95a); s3://marin-na is no longer reachable from pods.")
         og.add_argument("--local-output-dir", "--local_output_dir",
                         default=os.environ.get("OT_AGENT_LOCAL_OUTPUT_ROOT", DEFAULT_LOCAL_OUTPUT_ROOT),
                         help="Pod-local runtime scratch root used with --output-mode local/s3. "
@@ -466,7 +468,7 @@ class IrisLauncher:
         # Harbor's --jobs-dir ROOT. Harbor writes each job under <jobs-dir>/<job-name>/,
         # and run_eval's in-pod DB/HF upload reads <_jobs_dir_path>/<job-name>/, so the
         # jobs-dir root must be the parent (no job-name) for those to line up.
-        #   - s3:   durable R2 root (s3://marin-na/.../<user>); harbor appends <job>.
+        #   - s3:   durable object-store root (s3://marin-us-east-02a/.../<user>); harbor appends <job>.
         #   - local: pod-local scratch root; run_eval reads it back in-pod.
         #   - gcs:  historical behavior (remote_output_dir already includes <job>).
         if output_mode == "s3":

@@ -16,10 +16,13 @@ from hpc.iris.accelerator import ResolvedIrisAccelerator
 # correct in-cluster R2 credentials + endpoint (AWS_ACCESS_KEY_ID /
 # AWS_SECRET_ACCESS_KEY / AWS_ENDPOINT_URL / AWS_REGION / FSSPEC_S3). Explicit
 # container ``env`` entries take precedence over ``envFrom``, so forwarding the
-# launch host's AWS_*/LAION_* (a DIFFERENT account, no R2 endpoint) would CLOBBER
-# the pod's R2 creds and make Harbor's ``--jobs-dir=s3://marin-na/...`` write
-# fail with HeadObject 400. We let the cluster-injected R2 creds win, exactly as
-# rl/cloud/launch_rl_iris.py does for the RL rendezvous.
+# launch host's AWS_*/LAION_* (a DIFFERENT account, no endpoint) would CLOBBER
+# the pod's injected creds and make Harbor's ``--jobs-dir=s3://marin-us-east-02a/...``
+# write fail with HeadObject 400. We let the cluster-injected creds win, exactly as
+# rl/cloud/launch_rl_iris.py does for the RL rendezvous. NOTE: the default object
+# store moved R2 (s3://marin-na) -> CW (s3://marin-us-east-02a) on 2026-07-05
+# (marin c7caecc95a); pods now inject CW creds+AWS_ENDPOINT_URL and can no longer
+# reach s3://marin-na (R2).
 _GPU_STORAGE_CRED_KEYS = frozenset({
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",

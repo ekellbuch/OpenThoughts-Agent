@@ -78,7 +78,7 @@ python -m rl.cloud.launch_rl_iris \
   --gpus_per_node 8 \
   --cpu 48 \
   --max-retries 1 \
-  --rendezvous-dir s3://marin-na/iris/rl-<slug>/<run> \
+  --rendezvous-dir s3://marin-us-east-02a/iris/rl-<slug>/<run> \
   --job-name <name> \
   --priority interactive \
   --no-wait
@@ -100,10 +100,13 @@ terminates the job). Flag glossary:
   iris task per node, all 8 GPUs each). `--num_nodes` underscore alias also works. (See §3 + §5.)
 - **`--rendezvous-dir`** — **REQUIRED for `--num-nodes>1`** (the launcher hard-errors otherwise). The shared
   store the multi-node Ray head/workers rendezvous through. On cw-us-east-02a use an **`s3://` (R2) URI under
-  the cluster's `marin-na` bucket** (e.g. `s3://marin-na/iris/rl-<slug>/<run>`); the cluster injects working
-  R2 creds into every task pod (the `iris-task-env` Secret), so **no external creds** are needed and you must
-  **NOT forward `AWS_*`/`R2_*`** (it would clobber the pod's R2 creds and silently target real AWS S3). Use a
+  the cluster's `marin-us-east-02a` bucket** (e.g. `s3://marin-us-east-02a/iris/rl-<slug>/<run>`); the cluster injects working
+  creds into every task pod (the `iris-task-env` Secret), so **no external creds** are needed and you must
+  **NOT forward `AWS_*`/`R2_*`** (it would clobber the pod's injected creds and silently target real AWS S3). Use a
   fresh sub-path per run so a stale head file from a prior attempt isn't picked up.
+  **⚠ Store moved R2 (`s3://marin-na`) → CW (`s3://marin-us-east-02a`) on 2026-07-05 (marin `c7caecc95a`):**
+  pods now inject CW creds + `AWS_ENDPOINT_URL` and can NO LONGER reach `s3://marin-na` (R2) — a `marin-na`
+  rendezvous PUT resolves to the nonexistent `marin-na.cwlota.com` and STALLS (killed CP4 v1/v2/v3). Always use `marin-us-east-02a`.
 - **`--job-name`** — controls the iris job id `/benjaminfeuer/<name>`; set it explicitly so monitoring +
   teardown land on a predictable name. (Auto-derived `rl-iris-<ts>` if unset.)
 - **`--priority`** — `production` / `interactive` / `batch` band.
@@ -323,7 +326,7 @@ These were paid for this week (`agent_logs/2026-06-25_coreweave_131k_cpdcp2r3_re
 > 5. **vLLM ACTUALLY GENERATING** = `loggers.py … Avg generation throughput: >0 tokens/s, Running: R reqs, Waiting: W` recurring. This is the literal "is vLLM firing" check. **`Waiting` persistently ≫ `Running` with flat throughput = the throughput-starvation WEDGE** (de-oversubscribe: lower `n_concurrent_trials` / raise `max_num_seqs`). `Waiting ≈ 0` = queue draining = healthy.
 > 6. **MoE DCP arm only:** `_validate_dcp_cfg VLLM_ALLOW_ROUTED_EXPERTS_DCP=1: allowing …` + `decode_context_parallel_size=2` — the R3+DCP guard engaged (the `Unknown vLLM environment variable` line is the benign whitelist note, NOT a no-op).
 > 7. **Train driver:** `Resumed training from global_step 0` + `TerminalBenchGenerator initialized … Concurrent trials: K` (Harbor RolloutCoordinator up; K×(#engines) = your `n_concurrent_trials`).
-> 8. **Trials completing:** first `result.json` / reward written + **`global_step` 0→1**. At 15/30 min a 131k arm usually has **ZERO** completed (episodes are long) — that is EXPECTED, but **report it as "rollouts executing, 0 trials completed yet," NEVER as "healthy/done."** Completed-trial artifacts land in the **remote** `s3://marin-na/iris/<job>/trace_jobs` (read via `aws s3 ls --endpoint-url <R2>`), not the pod.
+> 8. **Trials completing:** first `result.json` / reward written + **`global_step` 0→1**. At 15/30 min a 131k arm usually has **ZERO** completed (episodes are long) — that is EXPECTED, but **report it as "rollouts executing, 0 trials completed yet," NEVER as "healthy/done."** Completed-trial artifacts land in the **remote** `s3://marin-us-east-02a/iris/<job>/trace_jobs` (read via `aws s3 ls --endpoint-url <R2>`), not the pod.
 >
 > **Verdict rule:** rungs 1–7 green + generation throughput >0 + `Waiting≈0` ⇒ genuinely progressing (even with 0 completed trials). Generation throughput **0** after engines are up, or `Waiting≫Running`, or no RolloutCoordinator, or any rank missing its data-stage line ⇒ **escalate now** (wedge / starvation), do not wait for the next sweep. (Evidence: 2026-06-26 `think2507-r4` + `q36-35b-r3` relaunch — both showed rungs 1–7 + 33–75 tok/s, `Waiting 0`, `global_step 0`, 0 trials done at +30 min = correctly read as live, not wedged.)
 

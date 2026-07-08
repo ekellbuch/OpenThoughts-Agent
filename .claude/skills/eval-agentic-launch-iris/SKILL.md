@@ -213,12 +213,14 @@ python eval/cloud/launch_eval_iris.py \
   to Supabase + HF **in-pod** before the ephemeral pod is torn down (the same
   registration path TPU/SLURM use). `--upload_to_database` IS supported on the
   GPU path. For a durable copy of the raw Harbor artifacts, add
-  `--output-mode s3 --s3-output-dir s3://marin-na/tmp/ttl=7d/ot-agent/evals/<user>`
-  (Cloudflare R2 under the cluster's `marin-na` bucket).
+  `--output-mode s3 --s3-output-dir s3://marin-us-east-02a/tmp/ttl=7d/ot-agent/evals/<user>`
+  (CW object store under the cluster's `marin-us-east-02a` bucket). **⚠ Store moved R2
+  (`s3://marin-na`) → CW (`s3://marin-us-east-02a`) on 2026-07-05 (marin `c7caecc95a`); pods
+  can no longer reach `s3://marin-na` (R2), so never use it here.)
 - **Storage creds (GPU)**: the launcher WITHHOLDS the launch host's
   `AWS_*/LAION_*/MARIN_HMAC_*` from the pod so they cannot clobber the R2 creds
   the `cw-us-east-02a` cluster injects via the `iris-task-env` `envFrom` Secret.
-  Do not re-add them. (This is why `--jobs-dir=s3://marin-na/...` used to fail
+  Do not re-add them. (This is why `--jobs-dir=s3://marin-us-east-02a/...` used to fail
   with HeadObject 400.)
 - Single-node only: do **not** pass `--replicas > 1` (task sharding + shared
   multi-node vLLM are not implemented for GPU eval). `--gpu` is limited to

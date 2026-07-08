@@ -46,7 +46,7 @@
 #     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
 #     --num-nodes 8 \
 #     --skyrl-ref <MarinSkyRL HEAD with the drain fix> \
-#     --rendezvous-dir s3://marin-na/iris/rl-moe-dispatchfix-canary/<run> \
+#     --rendezvous-dir s3://marin-us-east-02a/iris/rl-moe-dispatchfix-canary/<run> \
 #     --job-name rl-moe-dispatchfix-canary --priority interactive --max-retries 1 --cpu 48 --no-wait
 # =============================================================================
 
@@ -56,7 +56,7 @@ config_groups:
   terminal_bench_config: terminal_bench
 
 terminal_bench:
-  trials_dir: s3://marin-na/iris/rl-moe-dispatchfix-canary/trace_jobs
+  trials_dir: s3://marin-us-east-02a/iris/rl-moe-dispatchfix-canary/trace_jobs
 
   harbor:
     name: terminus-2

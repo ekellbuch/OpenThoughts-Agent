@@ -184,7 +184,7 @@
 #     --gpus_per_node 8 \
 #     --cpu 48 \
 #     --max-retries 1 \
-#     --rendezvous-dir s3://marin-na/iris/rl-q36-35b-131k/<run> \
+#     --rendezvous-dir s3://marin-us-east-02a/iris/rl-q36-35b-131k/<run> \
 #     --job-name rl-q36-35b-131k --priority interactive --no-wait
 # =============================================================================
 
@@ -198,7 +198,7 @@ config_groups:
 terminal_bench:
   # R2 (s3://) so rollouts survive pod GC/preempt; cw pods inject R2 creds.
   # null = ephemeral pod-local. launch_rl_iris.py --trials-dir auto overrides per-job.
-  trials_dir: s3://marin-na/iris/rl-8node-qwen3-6-35b-a3b-baseline-seqnorm-tis/trace_jobs
+  trials_dir: s3://marin-us-east-02a/iris/rl-8node-qwen3-6-35b-a3b-baseline-seqnorm-tis/trace_jobs
 
   harbor:
     name: terminus-2
@@ -650,7 +650,7 @@ extra_env:
 #     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
 #     --num-nodes 8 --gpus_per_node 8 --cpu 48 --max-retries 1 --memory 1700GB \
 #     --skyrl-ref fcf09ede \
-#     --rendezvous-dir s3://marin-na/iris/grid/35B-B/x \
+#     --rendezvous-dir s3://marin-us-east-02a/iris/grid/35B-B/x \
 #     --job-name grid-35b-b --priority interactive --no-wait
 # (For the dry-run validation, append --dry-run instead of --no-wait.)
 # =============================================================================
