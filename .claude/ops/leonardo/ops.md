@@ -1,22 +1,14 @@
-## ⚠ SCHEDULED MAINTENANCE — `maint_3006_boost` reservation 2026-06-30 07:00 → 2026-07-01 07:00 UTC
-
-The **whole boost (GPU) partition is reserved/down for 24h**. Implications for any sweep in this window:
-- **Submits that would overlap the reservation are held `N/A`** — wall-times must fit before 06-30 07:00 UTC, else they queue until 07-01 07:00. (This forced w0's resume `48079459` to a 16h wall → it walls out ~step 304, needs a post-maintenance successor to finish →330.)
-- **Jobs still RUNNING at 06-30 07:00 UTC get drained** by the reservation — ensure resumable checkpoints; expect the slower eval legs / RL cells to die there and need a **post-maintenance (07-01 07:00+) resume sweep**.
-- Remove this block once the window has passed.
-
 ## CINECA Leonardo Access
 
-**SSH**: Uses ControlMaster multiplexing + step-ca certificate auth:
+**SSH**: ControlMaster multiplexing + step-ca cert:
 ```bash
-ssh Leonardo    # Complete 2FA once; socket persists 8h
+ssh Leonardo    # complete 2FA once; socket persists 8h
 ```
-> **Host keys ROTATE (benign — NOT an anomaly).** The round-robin login nodes rotate host keys, so a fresh
-> connection (esp. `-o ControlPath=none` / `-o ControlMaster=no`) can hit `REMOTE HOST IDENTIFICATION HAS
-> CHANGED` / a `known_hosts` mismatch. This is expected, not a compromise — just use the standard `ssh Leonardo`
-> (ControlMaster socket), which works. Do NOT flag it as a failure or block on a `known_hosts` refresh.
+> **Host keys ROTATE (benign — NOT an anomaly).** Round-robin login nodes rotate host keys, so a fresh connection (esp. `-o ControlPath=none` / `-o ControlMaster=no`) can hit `REMOTE HOST IDENTIFICATION HAS CHANGED` / a `known_hosts` mismatch. Use the standard `ssh Leonardo` (ControlMaster socket). Do NOT flag it as a failure or block on a `known_hosts` refresh.
 
-**Pre-launch preamble** (run before launching any new job):
+**Cluster facts**: A100 64GB GPUs, 4/node, 3456 nodes, SLURM scheduler. User `bfeuer00`, account `AIFAC_5C0_290`, partition `boost_usr_prod`. Max wall 24h (`--time 23:59:00`; `boost_usr_prod` has a 1-day limit). **No internet on compute nodes** (use the SOCKS5 proxy / SSH tunnel). Compilers come from conda (GCC 15.2, CUDA 13.2) — do NOT `module load gcc cuda` (too old). Leonardo is in use; cron covers Jupiter + Leonardo.
+
+## Pre-launch preamble
 ```bash
 source /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/etc/profile.d/conda.sh && \
 conda activate otagent && \
@@ -26,64 +18,40 @@ source hpc/dotenv/leonardo.env && source ~/secrets.env && \
 cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent
 ```
 
-**Key paths**:
+## Key paths
 - Code: `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent`
 - Harbor: `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/harbor`
-- MarinSkyRL: `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/MarinSkyRL` (the old `/code/SkyRL` clone was removed 2026-06-08)
-- evalchemy (standard / pass@k evals): `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy-marin` — the **single canonical** clone (remote `origin` = `marin-community/evalchemy`, branch `main`; editable-installed in the `evalchemy-marin` conda env; see ENVIRONMENT_MAP §2e). The redundant `/code/evalchemy` (stale `mlfoundations` clone) and its `/code/evalchemy-resume-test` linked worktree were removed 2026-06-18.
+- MarinSkyRL: `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/MarinSkyRL`
+- evalchemy (standard / pass@k evals): `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/evalchemy-marin` — **single canonical** clone (remote `origin` = `marin-community/evalchemy`, branch `main`; editable-installed in the `evalchemy-marin` conda env; see ENVIRONMENT_MAP §2e).
 - Data/HF cache: `/leonardo_work/AIFAC_5C0_290/bfeuer00/data/hub`
-- Experiments: `/leonardo_work/AIFAC_5C0_290/bfeuer00/experiments`
+- Experiments/`$CHECKPOINTS_DIR`: `/leonardo_work/AIFAC_5C0_290/bfeuer00/experiments`
 
-> **⚠ WRITE-PATH MANDATE (quota-bind — obey in every launcher/sbatch/subagent).** Two filesystems,
-> two purposes:
-> - **`$WORK` (`/leonardo_work/AIFAC_5C0_290/bfeuer00`, ~1.4 PB GPFS, persistent)** — **ALL persistent/large
->   writes go here:** RL/SFT **checkpoints**, `trainer.export_path`, HF cache (`$WORK/data/hub`), envs,
->   experiment outputs. The dotenv already sets `CHECKPOINTS_DIR=$WORK/experiments` — **use it; never
->   hardcode a checkpoint/export path onto scratch.**
-> - **`$SCRATCH_FAST` (`/leonardo_scratch/fast/AIFAC_5C0_290/bfeuer00`, 1 TB Lustre, auto-purged)** — **ONLY
->   ephemeral caches/tmp** (`VLLM_CONFIG_ROOT`/`TRITON_CACHE_DIR`/`FLASHINFER_WORKSPACE_BASE`). It is **1 TB,
->   shared, chronically OVER quota** — a checkpoint/export written here fails with `OSError: [Errno 122] Disk
->   quota exceeded` (NOT an OOM). **History (2026-06-19):** all 12 Delphi #6279 RL cells crashed at their
->   first ckpt-write because `sbatch_delphi_math_rl.sh` hardcoded `$SF/rl_ckpts`; fix = redirect ckpts to
->   `$WORK`. **Any launch subagent MUST verify its sbatch's checkpoint/export paths resolve to `$WORK`
->   (`$CHECKPOINTS_DIR`), not `$SF`/`$SCRATCH_FAST`, BEFORE submitting.**
+> **⚠ WRITE-PATH MANDATE (quota-bind — obey in every launcher/sbatch/subagent).** Two filesystems, two purposes:
+> - **`$WORK` (`/leonardo_work/AIFAC_5C0_290/bfeuer00`, ~1.4 PB GPFS, persistent)** — ALL persistent/large writes: RL/SFT checkpoints, `trainer.export_path`, HF cache (`$WORK/data/hub`), envs, experiment outputs. The dotenv sets `CHECKPOINTS_DIR=$WORK/experiments` — use it; never hardcode a checkpoint/export path onto scratch.
+> - **`$SCRATCH_FAST` (`/leonardo_scratch/fast/AIFAC_5C0_290/bfeuer00`, 1 TB Lustre, auto-purged)** — ONLY ephemeral caches/tmp (`VLLM_CONFIG_ROOT`/`TRITON_CACHE_DIR`/`FLASHINFER_WORKSPACE_BASE`). 1 TB, shared, chronically OVER quota — a checkpoint/export here fails with `OSError: [Errno 122] Disk quota exceeded` (NOT an OOM).
+> - **Any launch subagent MUST verify its sbatch's checkpoint/export paths resolve to `$WORK`/`$CHECKPOINTS_DIR`, not `$SF`/`$SCRATCH_FAST`, BEFORE submitting.**
 
-**Correct upstream per codebase** (SoT = the Mac clones under `/Users/benjaminfeuer/Documents/`; aligned on Leonardo 2026-06-05). All on branch `penfever/working`:
-- **OpenThoughts-Agent** → remote `origin` = `open-thoughts/OpenThoughts-Agent`.
-- **harbor** → remote `marin` = `marin-community/harbor` (NOT laude-institute / `penfever/temp-override` / `otagent-latest` — those were stale on Leonardo).
-- **MarinSkyRL** → `marin-community/MarinSkyRL` `penfever/working` (see `.claude/projects/marinskyrl/marinskyrl.md`; `penfever/SkyRL` is obsolete).
-- Sync discipline: commit on the Mac → push → `git pull` on the cluster (Leonardo can't push). The preamble also needs `git submodule update --init --remote sft/llamafactory` for SFT runs.
-- Leonardo is back in use as of 2026-06-05; cron covers Jupiter + Leonardo (Perlmutter dropped).
+## Correct upstream per codebase (SoT = Mac clones under `/Users/benjaminfeuer/Documents/`; all on branch `penfever/working`)
+- **OpenThoughts-Agent** → `origin` = `open-thoughts/OpenThoughts-Agent`.
+- **harbor** → `marin` = `marin-community/harbor`.
+- **MarinSkyRL** → `marin-community/MarinSkyRL` `penfever/working` (see `.claude/projects/marinskyrl/marinskyrl.md`).
+- Sync discipline: commit on Mac → push → `git pull` on the cluster (Leonardo can't push). SFT runs also need `git submodule update --init --remote sft/llamafactory`.
 
-**Cluster details**: A100 64GB GPUs, 4/node, 3456 nodes, SLURM scheduler. No internet on compute nodes (use proxychains/SSH tunnel). User: `bfeuer00`. Account: `AIFAC_5C0_290`.
+## Conda envs
+- **`otagent`** — dense Qwen3 / Llama-3-tokenizer (default)
+- **`sft-qwen35`** — Qwen3.5 hybrid arch ONLY
+- **`evalchemy-marin`** — evalchemy standard evals
 
-**Important**: Compilers come from conda (GCC 15.2, CUDA 13.2) — do NOT load system modules (`module load gcc cuda`), they are too old.
+## SIF / runtime — vLLM 0.20.2rc0 cross-cluster twin
+Leonardo analogue of Jupiter's prod `skyrl_megatron_vllm0202rc0_r3.sif` (vLLM fork `penfever/working @ 5d7319dd1`: 0.20.2rc0 + R3 capture + DCP GQA-LSE fp32 fix). Built as a **writable singularity sandbox dir** on `$WORK` (NOT a `.sif` — `mksquashfs` OOMs / `lustre.lov` xattr errors on the Lustre login node). Full runtime detail + recipe paths: `ENVIRONMENT_MAP.md` §2d.
+- **cu13/torch-2.9 path taken** (NGC `pytorch:25.09-py3`, arch 8.0, via `cuda-compat-13` forward-compat on the A100's 535.274.02 host driver — forward-compat verified: a cu13 fp32 matmul ran; `/proc/self/maps` confirmed the bundled `cuda-compat-13` `libcuda.so.580.82.07` loaded). Sandbox at `$WORK/containers/pytorch_2509_sbx` (19 G).
+- **Run convention:** `SINGULARITYENV_LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat/lib.real singularity exec --nv …`
+- **Build:** `singularity build --sandbox` with `TMPDIR`/`SINGULARITY_TMPDIR` forced onto GPFS WORK (default `TMPDIR=/scratch_local` is Lustre → xattr storm). Recipes: `sif_build/recipes/{README_vllm0202rc0_r3_leonardo_cu13.md, build_vllm0202rc0_r3_leonardo_cu13.sbatch}`; the torch-2.8 / NGC-25.06 / CUDA-12.9.1 recipe is retained as the documented fallback.
 
-**Max wall time**: 24 hours (`--time 23:59:00`). The boost_usr_prod partition has a 1-day limit.
+## HF Upload — use the sbatch-tunnel, NEVER the login node
+Leonardo login nodes SIGKILL any long-running user process after ~100s (process-agnostic — `nohup`, `tmux`, `systemd-run` all die ~100s, regardless of `hf` vs legacy `huggingface-cli`). The login node DOES have direct internet; the killer is the problem, not the network. **The reliable path is an sbatch job on a compute node with an SSH tunnel back to the login node.** Compute nodes have no direct internet, but `eval/leonardo/start_proxy_tunnel.sh` opens a SOCKS5 forward (compute→login05) and prints a `proxychains4 -q -f <config>` prefix wrapping any HF-bound command.
 
-## Leonardo HF Upload — Use sbatch, NOT the Login Node
-
-Leonardo's login nodes SIGKILL any long-running user process after ~100 seconds,
-regardless of how it's detached. We've verified this kills:
-- `nohup hf upload ... &` / `nohup huggingface-cli ... &` (~80s)
-- `tmux new-session -d -s ... "hf upload ..."` (~2 min)
-- `systemd-run --user --unit=... hf upload ...` (also SIGKILLed at ~100s)
-
-(Tested with both the legacy `huggingface-cli` and the current `hf` CLI;
-the killer is process-agnostic, not command-specific.)
-
-The login node DOES have direct internet (no proxychains needed there) — the
-problem is purely the process killer, not network.
-
-**The reliable path is an sbatch job on a compute node with an SSH tunnel back
-to the login node.** Compute nodes have no direct internet, but the existing
-`eval/leonardo/start_proxy_tunnel.sh` opens a SOCKS5 forward from the compute
-node to login05 and prints a `proxychains4 -q -f <config>` command prefix
-that wraps any HF-bound command.
-
-### Pre-flight (from your local Mac)
-
-The intra-cluster SSH cert expires every ~12h. Refresh if stale:
+### Pre-flight (from your local Mac) — refresh the ~12h intra-cluster cert
 ```bash
 step ssh certificate 'bfeuer00' --provisioner cineca-hpc \
   ~/.ssh/leonardo_daytona --no-password --insecure
@@ -92,25 +60,10 @@ rsync -avz -e 'ssh -i ~/.ssh/leonardo_daytona -o IdentitiesOnly=yes -o StrictHos
   ~/.ssh/leonardo_daytona ~/.ssh/leonardo_daytona.pub ~/.ssh/leonardo_daytona-cert.pub \
   bfeuer00@login.leonardo.cineca.it:~/.ssh/
 ```
-
-Verify with `ssh-keygen -L -f ~/.ssh/leonardo_daytona-cert.pub | grep Valid`. Key on Leonardo:
-`/leonardo/home/userexternal/bfeuer00/.ssh/leonardo_daytona`. The `start_proxy_tunnel.sh` script opens a
-SOCKS5 forward compute→login05 and returns the `proxychains4 -q -f <config>` prefix. (The auth-required
-HedgeDoc setup-instructions URL is in `.claude/secret.md` — untracked. The `leonardo_daytona` step-ca cert
-is for the Daytona/SOCKS proxy; the intra-cluster `ssh Leonardo` key is a separate credential.)
-
-### Cert expired → refresh it; do NOT route around the sbatch path
-The sbatch-tunnel path depends on the `~/.ssh/leonardo_daytona` step-ca cert, which **expires ~12h**. When
-it's expired the SOCKS tunnel gets `Permission denied (publickey)` and the `upload_*.sbatch` job dies in
-~19s — **when a Leonardo upload sbatch fails fast on a publickey error, suspect the expired cert first** and
-refresh it via the pre-flight above (needs interactive CINECA SSO 2FA in a browser; can't be done headless).
-**The sbatch-tunnel remains the upload path** — do NOT fall back to a detached login-node `nohup` upload:
-Leonardo's login killer takes down `nohup`/`disown`/tmux at ~100s (see `ops/all/hf_tmux.md`), so a
-login-node upload of anything non-trivial will be SIGKILLed and leave a partial. Refresh the cert and use
-the sbatch job.
+Verify: `ssh-keygen -L -f ~/.ssh/leonardo_daytona-cert.pub | grep Valid`. Key on Leonardo: `/leonardo/home/userexternal/bfeuer00/.ssh/leonardo_daytona`. (The `leonardo_daytona` step-ca cert is for the Daytona/SOCKS proxy; the intra-cluster `ssh Leonardo` key is a separate credential. The auth-required HedgeDoc setup-instructions URL is in `.claude/secret.md` — untracked.)
+**Cert expired?** The SOCKS tunnel gets `Permission denied (publickey)` and the `upload_*.sbatch` job dies in ~19s — when a Leonardo upload sbatch fails fast on a publickey error, suspect the expired cert first and refresh via the pre-flight above (needs interactive CINECA SSO 2FA in a browser; can't be done headless). Do NOT fall back to a detached login-node upload — it dies at ~100s and leaves a partial. Refresh the cert and use the sbatch job.
 
 ### sbatch template for HF upload
-
 ```bash
 cat > /leonardo_work/AIFAC_5C0_290/bfeuer00/upload_<job_name>.sbatch <<'EOF'
 #!/bin/bash
@@ -146,131 +99,42 @@ EOF
 cd /leonardo_work/AIFAC_5C0_290/bfeuer00
 sbatch upload_<job_name>.sbatch
 ```
-
 Then `squeue -j <jobid>` and `tail -f <workdir>/upload_logs/upload_sbatch.log`.
 
-### Numbers / sizing
+### Sizing
+- 131GB consolidated 32B → ~4 min wall through the tunnel.
+- 30 min wall fits `boost_qos_dbg` (debug QOS); longer jobs need a different QOS.
+- `hf upload` is sequential (no `--num-workers`); use `hf upload`, NOT `upload-large-folder` (deprecation stub AND deadlocks against HF Hub LFS rate limits).
+- Resume is automatic — `.cache/huggingface/` persists state; if requeued, `hf upload` picks up where it left off.
 
-- 131GB consolidated 32B → ~4 min wall through the tunnel (sbatch + tunnel pattern)
-- 30 min wall fits `boost_qos_dbg` (debug QOS); longer jobs need a different QOS
-- `hf upload` is sequential (no `--num-workers` knob) — slower than the legacy
-  `huggingface-cli upload-large-folder` looked on paper, but the latter is now
-  a deprecation stub AND deadlocks against HF Hub LFS rate limits in practice.
-  See "HF Uploads + Long-Running Login-Node Commands" near the RL Cleanup
-  section for the full story.
-- Resume is automatic — `.cache/huggingface/` persists state; if the job is
-  requeued, `hf upload` picks up where it left off
-
-### Why this matters for the SFT checklists
-
-Both the 8B (step 2) and 32B (step 3) cleanup checklists invoke `hf upload`
-(in a `tmux` session). On Jupiter / Perlmutter / NYU Torch that works
-straight from the login node (login has direct internet, no kill policy).
-On Leonardo the same one-liner WILL die at ~100 s and leave a partial
-upload — use the sbatch template above instead.
-
-## Agentic Harbor eval IS feasible on Leonardo compute (via the SOCKS5 proxy) — 2026-06-20
-
-**Agentic terminus-2 eval runs end-to-end on Leonardo *compute* nodes** (no native internet) through the
-existing `eval/leonardo/start_proxy_tunnel.sh` SOCKS5 forward (compute→login05 dynamic SSH `-D` +
-proxychains4). Verified 2026-06-20 with a real smoke (job 47436018, Qwen3-1.7B × tb2 subset → Supabase
-`sandbox_jobs` row `d9eef9e5-525b-476a-b4bd-f8937bf1588b` `Finished`, 9 trials, 0 errors, traces on HF,
-benchmark auto-registered).
-
-**Why eval works on Leonardo but agentic RL does NOT:** for terminus-2 the LLM call is made by the
-**orchestrator process on the compute node** to the locally-served vLLM (`api_base=http://$MASTER_ADDR:8000`);
-the Daytona sandbox only runs shell commands and never reaches the model. So the only outbound traffic is
-orchestrator→Daytona-API + →HF, both carried by the proxy — **no pinggy / served-model tunnel needed.** The
-older "Daytona infeasible on Leonardo" statement is **eval-vs-RL specific** (RL's heavier cross-node/Daytona
-coupling), not absolute.
-
-**Single cross-cluster entrypoint:** the canonical v6 listener `eval/unified_eval_listener.py` takes
-`--cluster-config eval/clusters/<cluster>.yaml` (each cluster-config carries its own `sbatch_script` + log-dir;
-the Leonardo config points `sbatch_script` at `eval/leonardo/eval_harbor.sbatch`).
-To launch a Leonardo agentic-eval campaign (in tmux on Leonardo, after the preamble):
+## Agentic Harbor eval (terminus-2) — feasible on compute via the SOCKS5 proxy
+Agentic terminus-2 eval runs end-to-end on Leonardo **compute** nodes (no native internet) through `eval/leonardo/start_proxy_tunnel.sh` (SOCKS5 compute→login05 + proxychains4). Verified 2026-06-20 (job 47436018, Qwen3-1.7B × tb2 subset → Supabase `sandbox_jobs` row `d9eef9e5-525b-476a-b4bd-f8937bf1588b` `Finished`, 9 trials, 0 errors, traces on HF, benchmark auto-registered).
+- For terminus-2 the LLM call is made by the **orchestrator on the compute node** to the locally-served vLLM (`api_base=http://$MASTER_ADDR:8000`); the Daytona sandbox only runs shell commands and never reaches the model. So the only outbound traffic is orchestrator→Daytona-API + →HF, both carried by the proxy — **no pinggy / served-model tunnel needed.** (Agentic RL, with its heavier cross-node/Daytona coupling, is NOT feasible on Leonardo; eval is.)
+- **Single cross-cluster entrypoint:** `eval/unified_eval_listener.py --cluster-config eval/clusters/<cluster>.yaml` (each cluster-config carries its own `sbatch_script` + log-dir; the Leonardo config points `sbatch_script` at `eval/leonardo/eval_harbor.sbatch`). Launch in tmux on Leonardo, after the preamble:
 ```bash
 python eval/unified_eval_listener.py --cluster-config eval/clusters/leonardo.yaml --preset <tb2|swebench|v2|...> \
   --require-priority-list --priority-file <list> --pre-download --once --verbose
 ```
-
-**Load-bearing gotcha:** `eval/leonardo/eval_harbor.sbatch` MUST pass `--jobs-dir "$EVAL_JOBS_DIR"`
-to harbor (fixed 2026-06-20, commit `b56f9c1c`) — without it harbor writes trials to the wrong dir and the
-Supabase auto-register silently no-ops. Eval auto-registration to Supabase is BY DESIGN (the
-`enable_db_registration:false` guardrail applies to RL/SFT *training* YAMLs, not evals). Depends on the
-`~/.ssh/leonardo_daytona` step-ca cert being fresh (~12h; refresh per the pre-flight above) — a stale cert
-makes the proxy fail `Permission denied (publickey)`.
-
-## vLLM 0.20.2rc0 cross-cluster twin — build decision (2026-06-16)
-
-Leonardo's analogue of Jupiter's prod `skyrl_megatron_vllm0202rc0_r3.sif` (vLLM fork
-`penfever/working @ 5d7319dd1`: 0.20.2rc0 + R3 capture + DCP GQA-LSE fp32 fix). Built as a
-**writable singularity sandbox dir** on `$WORK` (NOT a `.sif` — `mksquashfs` OOMs / `lustre.lov`
-xattr errors on the Lustre login node). Full runtime detail + recipe paths: `ENVIRONMENT_MAP.md` §2d.
-
-**The CUDA question (decided):** Leonardo A100 nodes load kernel driver `535.274.02` (native CUDA
-≤12.2); `singularity --nv` binds that host driver and a container can't replace it. The *toolkit*,
-however, can be CUDA-13 via **forward compatibility** — `cuda-compat-13` (bundled in NGC cu13 images
-at `/usr/local/cuda/compat`, with `LD_LIBRARY_PATH=/usr/local/cuda/compat` ahead of the `--nv` bind)
-provides a newer userspace `libcuda` that runs a cu13 toolkit on the older datacenter driver (A100 =
-datacenter, supported). This must be verified empirically (forward-compat has a per-version
-minimum-driver floor; confirm 535 is within cu13's floor by running a cu13 kernel on an A100).
-
-**Decision (user-approved):**
-1. **Prefer** the true **CUDA-13 / torch-2.9** twin (NGC 25.09 + `cuda-compat-13`, arch 8.0) for real
-   cross-cluster parity — gated on the forward-compat test passing on the 535 driver.
-2. **Fallback (sanctioned, "if we have no other option"):** the **torch-2.8 / NGC-25.06 / CUDA-12.9.1**
-   twin (recipe already written under `sif_build/recipes/`) — differs from Jupiter only in the
-   torch/CUDA floor; same fork commit, R3, DCP fix, SkyRL/Megatron/TE, arch 8.0.
-3. A CINECA driver upgrade (→≥580.65 for native CUDA-13) is **NOT** required; the fallback is acceptable.
-
-**✅ FORWARD-COMPAT GATE PASSED → taking path (1), the true cu13/torch-2.9 twin (2026-06-16).** Built
-the cu13 base as a writable sandbox (`$WORK/containers/pytorch_2509_sbx`, NGC `pytorch:25.09-py3`, 19 G)
-and ran a real CUDA-13 fp32 matmul on an A100 under the 535.274.02 driver: `torch 2.9.0a0+…nv25.09`,
-`cuda 13.0`, cap `(8,0)`, real result; `/proc/self/maps` confirms torch loaded the bundled
-`cuda-compat-13` `libcuda.so.580.82.07`, not a host 535 libcuda. So the 535 branch is within cu13's
-forward-compat floor — the fallback is **not** needed. A packed `.sif` pull FATAL'd at
-`while creating squashfs: create command failed: signal: killed` (login mksquashfs OOM/kill +
-`lustre.lov` xattr) → use `singularity build --sandbox` with `TMPDIR`/`SINGULARITY_TMPDIR` forced onto
-GPFS WORK (default `TMPDIR=/scratch_local` is Lustre → xattr storm). The cu13 build recipe is
-`sif_build/recipes/{README_vllm0202rc0_r3_leonardo_cu13.md, build_vllm0202rc0_r3_leonardo_cu13.sbatch}`;
-the torch-2.8 recipe is retained as the documented fallback. Run convention:
-`SINGULARITYENV_LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat/lib.real singularity exec --nv …`.
+- **Load-bearing gotcha:** `eval/leonardo/eval_harbor.sbatch` MUST pass `--jobs-dir "$EVAL_JOBS_DIR"` to harbor — without it harbor writes trials to the wrong dir and Supabase auto-register silently no-ops. Eval auto-registration to Supabase is BY DESIGN (the `enable_db_registration:false` guardrail applies to RL/SFT *training* YAMLs, not evals). Depends on the `~/.ssh/leonardo_daytona` step-ca cert being fresh (~12h; refresh per the pre-flight above).
 
 ## ptrace LOCKED DOWN cluster-wide (`ptrace_scope=2`) — software profilers/debuggers FAIL (CVE-2026-46333)
-**Since 2026-05-15** (CVE-2026-46333, a ptrace root-priv-escalation flaw), CINECA raised the kernel
-`kernel.yama.ptrace_scope` from `0` → **`2`** (only admin-privileged processes may ptrace). This is a
-**cluster-wide kernel setting** (broader than the SIF-only ptrace block on Jupiter — `ops/jupiter/ops.md`
-§Debugging tooling). **Consequence: any ptrace/software-sampling tool fails** — `py-spy dump`/`py-spy record`,
-`gdb -p`, and **software-sampling profilers**. Do NOT burn time trying them on a wedged Leonardo process.
-- **General rule:** use **hardware-based sampling (`perf`-backed)**, not software (ptrace) sampling. Check
-  whether a tool's collection method is configurable to hw before running.
-- **Intel VTune** (`vtune -collect <analysis_type>`) — verify hw-sampling support per analysis with
-  `vtune -help collect <analysis_type>`:
-  - **NOT affected (work as-is):** `performance-snapshot`, `uarch-exploration`, `hpc-performance`, `io`,
-    `system-overview`.
-  - **Affected (need the hw-sampling knob):** `hotspots`, `threading`, `memory-consumption`.
-  - **Tested-working mitigations:**
+Since 2026-05-15, CINECA raised `kernel.yama.ptrace_scope` from `0` → **`2`** (admin-only ptrace). Cluster-wide kernel setting (broader than the SIF-only ptrace block on Jupiter — `ops/jupiter/ops.md` §Debugging tooling). **Any ptrace/software-sampling tool fails** — `py-spy dump`/`py-spy record`, `gdb -p`, software-sampling profilers. Do NOT burn time on them against a wedged Leonardo process.
+- Use **hardware-based sampling** (`perf`-backed), not software (ptrace). Check whether a tool's collection method is configurable to hw before running.
+- **Intel VTune** (`vtune -collect <analysis_type>`) — verify hw-sampling support per analysis with `vtune -help collect <analysis_type>`:
+  - **NOT affected (work as-is):** `performance-snapshot`, `uarch-exploration`, `hpc-performance`, `io`, `system-overview`.
+  - **Affected (need the hw-sampling knob):** `hotspots`, `threading`.
     - `vtune -collect hotspots  -r vtune_hotspots  -knob sampling-mode=hw`
     - `vtune -collect threading -r vtune_threading -knob sampling-and-waits=hw`
   - ⚠ **`memory-consumption` has NO hw-sampling mode → unusable under `ptrace_scope=2`.**
-- **For our use (diagnosing wedged RL/inference):** the Jupiter playbook already applies — ptrace is out,
-  so rely on **NCCL trace + per-rank `opCount` alignment** + last-log-line-per-rank + `/proc/<pid>/{stack,environ}`
-  (readable without ptrace) to localize a hang. faulthandler/`SIGUSR1`-stack-dump is in-process (no ptrace)
-  and still works if instrumented at launch.
+- For wedged RL/inference: ptrace is out — rely on NCCL trace + per-rank `opCount` alignment + last-log-line-per-rank + `/proc/<pid>/{stack,environ}` (readable without ptrace). faulthandler/`SIGUSR1`-stack-dump is in-process (no ptrace) and still works if instrumented at launch.
+
 ---
 
 # SFT (Leonardo particulars for the `sft-launch` skill)
 
-Cluster-agnostic flow + backend/Delphi decisions: **`.claude/skills/sft-launch`**. This section is the
-Leonardo-specific procedural layer. A100-**64GB**, 4/node, **no internet on compute nodes**, **login-node process
-killer**, **24h max wall** — these three drive almost every quirk. Read the dsfs (multi-node) + canary-blocker
-subsections before launching anything large; they are the two ways a run silently wastes a 24h slot. Conda envs:
-**`otagent`** (dense Qwen3 / Llama-3-tokenizer, default) vs **`sft-qwen35`** (Qwen3.5 hybrid arch ONLY).
-Write paths: obey the **WRITE-PATH MANDATE** above (§ near top) — checkpoints/exports → `$WORK`/`$CHECKPOINTS_DIR`,
-NEVER `$SF`/`$SCRATCH_FAST` (over-quota → `Errno 122` mid-run). Authoritative launch template:
-`experiments/active/delphi/rl-scaling-laws-6279/SFT_LEONARDO_INSTRUCTIONS.md`.
+Cluster-agnostic flow + backend/Delphi decisions: **`.claude/skills/sft-launch`**. This section is the Leonardo-specific procedural layer. The cluster facts above (A100-64GB, 4/node, no-internet-on-compute, login-node killer, 24h max wall, conda envs, WRITE-PATH MANDATE) drive almost every SFT quirk. Read **dsfs** (multi-node) + **canary blockers** before launching anything large — they are the two ways a run silently wastes a 24h slot. Authoritative launch template: `experiments/active/delphi/rl-scaling-laws-6279/SFT_LEONARDO_INSTRUCTIONS.md`.
 
-## Preamble (login node, tmux)
+## SFT preamble (adds SFT submodule sync to the general preamble)
 ```bash
 ssh Leonardo   # step-ca cert; complete 2FA once, socket persists ~8h
 source /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/etc/profile.d/conda.sh && \
@@ -280,9 +144,6 @@ git submodule update --init --remote sft/llamafactory && \
 git submodule update --init sft/axolotl && \   # pinned; no --remote; only for --sft_backend axolotl
 source hpc/dotenv/leonardo.env && source ~/secrets.env
 ```
-Cluster facts: account `AIFAC_5C0_290`, partition `boost_usr_prod`, wall `23:59:00`. **Compilers come from conda**
-(GCC 15.2 / CUDA 13.2) — do NOT `module load gcc cuda`. Paths: code `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent`,
-`$HF_HUB_CACHE`/`$HF_HOME` `…/bfeuer00/data/hub`, experiments/`$CHECKPOINTS_DIR` `…/bfeuer00/experiments`.
 
 ## Launch template
 ```bash
@@ -294,62 +155,38 @@ DISABLE_VERSION_CHECK=1 python -m hpc.launch --job_type sft \
   [--mix_strategy interleave_under --interleave_probs 0.9,0.1] \
   --hub_model_id <hub_model_id> --internet_node --max_restarts 2
 ```
-Vary only `--model_path`/`--hub_model_id`/`--dataset` for a controlled set — configs bake template/cutoff/epochs/LR.
-**`--dry_run` the first cell** (confirm model, template, epochs, LR, role tags, `push_to_hub`). Multi-node SFT uses
-**`accelerate` (not torchrun)** — `training_launcher="accelerate"` in `hpc.py` (torchrun's c10d rendezvous fails on
-Leonardo inter-node TCP). `--num_nodes 4 --gpus_per_node 4` = 16 A100-64GB, ZeRO-3 handles ≤~9.7B full-FT.
+- Vary only `--model_path`/`--hub_model_id`/`--dataset` for a controlled set — configs bake template/cutoff/epochs/LR.
+- **`--dry_run` the first cell** (confirm model, template, epochs, LR, role tags, `push_to_hub`).
+- Multi-node SFT uses **`accelerate` (not torchrun)** — `training_launcher="accelerate"` in `hpc.py` (torchrun's c10d rendezvous fails on Leonardo inter-node TCP). `--num_nodes 4 --gpus_per_node 4` = 16 A100-64GB; ZeRO-3 handles ≤~9.7B full-FT.
 
 ## No-internet-on-compute handling (compute can't reach HF Hub)
-1. **Pre-download model + datasets on the login node first** (detached tmux, retry): `export HF_HUB_ENABLE_HF_TRANSFER=1;
-   hf download <base_model> --repo-type model; hf download <dataset_repo> --repo-type dataset` (monitor by
-   `$HF_HUB_CACHE` size growth).
-2. **`--internet_node`** — skips the launcher's own pre-download (`_materialize_dataset_and_model` does a
-   `snapshot_download` on a *registry name* → 404 → looks like a stall). Everything is already cached by step 1.
-3. **Offline dataset LOADING:** repoint each dataset in the registry `dataset_info.json` from `hf_hub_url` to a local
-   `file_name` parquet dir (LF `load_from=file`), and strip the ~6 global schema-tag keys the launcher injects (they
-   `KeyError` on heterogeneous mixes — let LF use the per-dataset registry tags).
-4. **`push_to_hub: false`** in the config (repo-create at train start hits the unreachable hub → `OfflineModeIsEnabled`
-   crash). Model saves to local disk; upload post-run via the sbatch-tunnel (see the **HF Upload** section above).
+1. **Pre-download model + datasets on the login node first** (detached tmux, retry): `export HF_HUB_ENABLE_HF_TRANSFER=1; hf download <base_model> --repo-type model; hf download <dataset_repo> --repo-type dataset` (monitor by `$HF_HUB_CACHE` size growth).
+2. **`--internet_node`** — skips the launcher's own pre-download (`_materialize_dataset_and_model` does a `snapshot_download` on a *registry name* → 404 → looks like a stall). Everything is already cached by step 1.
+3. **Offline dataset LOADING:** repoint each dataset in the registry `dataset_info.json` from `hf_hub_url` to a local `file_name` parquet dir (LF `load_from=file`), and strip the ~6 global schema-tag keys the launcher injects (they `KeyError` on heterogeneous mixes — let LF use the per-dataset registry tags).
+4. **`push_to_hub: false`** in the config (repo-create at train start hits the unreachable hub → `OfflineModeIsEnabled` crash). Model saves to local disk; upload post-run via the sbatch-tunnel.
 
 ## ⚠️ Multi-node dataset prep — the `data_shared_file_system` cache race (the REAL "24h timeout")
-A tiny model (e.g. 447M) multi-node SFT that idles to the 24h wall with `TIMEOUT`, never checkpointing, LOOKS like
-"24h tokenizing" but ISN'T (tokenizing the 555k/428k mixes takes ~65s with `preprocessing_num_workers: 16`). Real
-cause: with the default `data_shared_file_system: false`, LF's `main_process_first(local=…)` barrier is **per-node**,
-so each node's local-rank-0 runs `datasets.map` simultaneously against the same shared GPFS cache → race →
-`FileNotFoundError` on a parquet shard → collective hangs → NCCL watchdog SIGABRTs at 600s → the step never releases
-→ idle to the wall. Intermittent (timing-dependent). **Fix: `data_shared_file_system: true`** (global barrier;
-same tokens/loss — infra only) via a per-run config copy (e.g. `sft/lf_configs/delphi/4k_sft_dsfs.yaml`). Safe
-mid-grid. `--pretokenize`/`--pretokenize_bprod` is an OPTIONAL optimization, NOT this fix — reach for it only after
-confirming tokenization is actually the bottleneck (it usually isn't). Diagnose order: dsfs → schema-key `KeyError` → pretokenize.
+A tiny model (e.g. 447M) multi-node SFT that idles to the 24h wall with `TIMEOUT`, never checkpointing, LOOKS like "24h tokenizing" but ISN'T (tokenizing the 555k/428k mixes takes ~65s with `preprocessing_num_workers: 16`). Real cause: with default `data_shared_file_system: false`, LF's `main_process_first(local=…)` barrier is **per-node**, so each node's local-rank-0 runs `datasets.map` simultaneously against the same shared GPFS cache → race → `FileNotFoundError` on a parquet shard → collective hangs → NCCL watchdog SIGABRTs at 600s → the step never releases → idle to the wall. Intermittent (timing-dependent). **Fix: `data_shared_file_system: true`** (global barrier; same tokens/loss — infra only) via a per-run config copy (e.g. `sft/lf_configs/delphi/4k_sft_dsfs.yaml`). Safe mid-grid. `--pretokenize`/`--pretokenize_bprod` is an OPTIONAL optimization, NOT this fix — reach for it only after confirming tokenization is actually the bottleneck (it usually isn't). Diagnose order: dsfs → schema-key `KeyError` → pretokenize.
 
 ## MANDATORY sbatch post-patch (the launcher does NOT do this for Leonardo SFT)
-After `hpc.launch` generates the sbatch, BEFORE `sbatch`-ing, patch it. The newer launcher template no longer emits
-literal `WORKDIR="$PWD"`/`export DCFT="$WORKDIR"` lines (it resolves WORKDIR at runtime from `$DCFT`/`$DCFT_PRIVATE`
-via a dotenv loop; on the compute node neither is set → falls through to `$HOME` → `triton_cache.sh` "No such file"
-→ `set -e` exit 1 in ~22s). So **inject literal `export DCFT=<code path>` and `export DCFT_PRIVATE=<code path>`
-immediately before the `conda activate` line** in the generated sbatch (also add the conda activation — `otagent`,
-NOT `sft-qwen35`, for dense Qwen3). Then `grep` the spooled script (`scontrol write batch_script <jobid> -`) to
-confirm both exports + `conda activate otagent`, no `$DCFT//leonardo_work` doubling. **A fast (~20s) ExitCode-1 is
-almost always a missing/incorrect post-patch.** Slurm snapshots the script at submit — re-submit after editing.
+After `hpc.launch` generates the sbatch, BEFORE `sbatch`-ing, patch it. The newer launcher template no longer emits literal `WORKDIR="$PWD"`/`export DCFT="$WORKDIR"` lines (it resolves WORKDIR at runtime from `$DCFT`/`$DCFT_PRIVATE` via a dotenv loop; on the compute node neither is set → falls through to `$HOME` → `triton_cache.sh` "No such file" → `set -e` exit 1 in ~22s). **Inject literal `export DCFT=<code path>` and `export DCFT_PRIVATE=<code path>` immediately before the `conda activate` line** in the generated sbatch (also add the conda activation — `otagent`, NOT `sft-qwen35`, for dense Qwen3). Then `grep` the spooled script (`scontrol write batch_script <jobid> -`) to confirm both exports + `conda activate otagent`, no `$DCFT//leonardo_work` doubling. **A fast (~20s) ExitCode-1 is almost always a missing/incorrect post-patch.** Slurm snapshots the script at submit — re-submit after editing.
 
 ## 24h wall + `--max_restarts` resume
-`--max_restarts N` submits an N-deep `afterany` chain (auto-resume from latest ckpt; `save_total_limit: 1` keeps it).
-**MUTUALLY EXCLUSIVE with `--overwrite_output_dir`** (hard-errors: overwrite wipes the ckpt dir each restart). For a
-clean re-run, `rm -rf` the output dir first. Resume only helps if the job *checkpoints* — a job that TIMEOUTs in
-tokenization (dsfs) never saves → re-tokenizes forever. Fix dsfs first.
+- `--max_restarts N` submits an N-deep `afterany` chain (auto-resume from latest ckpt; `save_total_limit: 1` keeps it).
+- **MUTUALLY EXCLUSIVE with `--overwrite_output_dir`** (hard-errors: overwrite wipes the ckpt dir each restart). For a clean re-run, `rm -rf` the output dir first.
+- Resume only helps if the job *checkpoints* — a job that TIMEOUTs in tokenization (dsfs) never saves → re-tokenizes forever. Fix dsfs first.
 
 ## Canary-discovered blockers — apply to EVERY cell
-(From `SFT_LEONARDO_INSTRUCTIONS.md §9.) 1. HF pre-download stalls → pre-stage in detached tmux w/ retry. 2. `upath`
-missing in `otagent` → `pip install universal_pathlib`. 3. Launcher can't resolve REGISTERED names for pre-download →
-`--internet_node`. 4. Offline dataset loading → local `file_name` parquet + strip global schema tags. 5.
-`push_to_hub: true` crashes at repo-create offline → `false`, upload post-run. 6. **Template × tokenizer mismatch**
-(top silent ruin) — Llama-3-family (Delphi) → `delphi`/llama3 template, NEVER `qwen3`; `--dry_run` + eyeball the first
-rendered example of an instruction turn AND a `<think>` warmup example.
+(From `SFT_LEONARDO_INSTRUCTIONS.md §9.`)
+1. HF pre-download stalls → pre-stage in detached tmux w/ retry.
+2. `upath` missing in `otagent` → `pip install universal_pathlib`.
+3. Launcher can't resolve REGISTERED names for pre-download → `--internet_node`.
+4. Offline dataset loading → local `file_name` parquet + strip global schema tags.
+5. `push_to_hub: true` crashes at repo-create offline → `false`, upload post-run.
+6. **Template × tokenizer mismatch** (top silent ruin) — Llama-3-family (Delphi) → `delphi`/llama3 template, NEVER `qwen3`; `--dry_run` + eyeball the first rendered example of an instruction turn AND a `<think>` warmup example.
 
 ## Cleanup (recognition → skill §6; UPLOAD mechanics → the HF Upload section above)
-Recognition: `ls $CHECKPOINTS_DIR/<job>/ | grep -E 'safetensors|global_step'` — root `model-*.safetensors` → 8B path
-(also Qwen3.5-9B); `global_stepN/`+`zero_to_fp32.py` → 32B path (consolidate first via `--job_type consolidate` →
-upload from `final_repo/`). **Upload via the sbatch-tunnel (never a >100s login-node process); `hf upload`, never
-`upload-large-folder`** — full mechanics + cert refresh in **Leonardo HF Upload** above. DB register via
-`manual_db_push.py` (skip for HF-only series like Delphi #6279, `enable_db_registration: false`). `rm -rf` exp +
-(32B) workdir only after upload+register succeed.
+- Recognition: `ls $CHECKPOINTS_DIR/<job>/ | grep -E 'safetensors|global_step'` — root `model-*.safetensors` → 8B path (also Qwen3.5-9B); `global_stepN/`+`zero_to_fp32.py` → 32B path (consolidate first via `--job_type consolidate` → upload from `final_repo/`).
+- **Upload via the sbatch-tunnel (never a >100s login-node process); `hf upload`, never `upload-large-folder`** — full mechanics + cert refresh in the **HF Upload** section above.
+- DB register via `manual_db_push.py` (skip for HF-only series like Delphi #6279, `enable_db_registration: false`).
+- `rm -rf` exp + (32B) workdir only after upload+register succeed.
