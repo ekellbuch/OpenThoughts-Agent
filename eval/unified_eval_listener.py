@@ -2903,20 +2903,37 @@ def submit_eval(
             if model_row and bench_row:
                 existing = get_job_by_model_benchmark(model_row['id'], bench_row['id'])
                 if existing:
-                    old_name = existing.get('job_name', '?')
-                    old_status = existing.get('job_status', '?')
-                    db_job_id = str(existing['id'])
-                    # Update the existing entry: reset to Pending with new job_name
-                    update_sandbox_job(db_job_id, {
-                        "job_name": job_name,
-                        "job_status": "Pending",
-                        "slurm_job_id": "pending",
-                        "config": config,
-                        "submitted_at": datetime.now().isoformat(),
-                        "started_at": None,
-                    })
-                    log(f"  [v6] Reused DB entry {db_job_id}: {old_status} '{old_name}' → Pending '{job_name}'",
-                        verbose_only=True)
+                    # CROSS-USER SAFETY: a --force-reeval resume keys the existing
+                    # row by (model, benchmark) — NOT by submitter. If that row is
+                    # owned by a DIFFERENT user, overwriting it in place silently
+                    # corrupts their baseline (their slurm_job_id/score/traces get
+                    # replaced while username stays theirs). NEVER do that: leave the
+                    # other user's row untouched and fall through to the normal
+                    # create path (which creates a fresh row for the submitter, or —
+                    # if the cross-user row is Finished — refuses with a loud log).
+                    existing_owner = existing.get('username')
+                    submitter = upload_username or "listener"
+                    if existing_owner and existing_owner != submitter:
+                        log(f"  [v6] CROSS-USER SAFETY: existing DB entry {existing['id']} "
+                            f"for ({hf_model_name} × {bench_name}) is owned by "
+                            f"'{existing_owner}' != submitter '{submitter}' — NOT "
+                            f"overwriting it; creating/refusing a new row for the "
+                            f"submitter instead.")
+                    else:
+                        old_name = existing.get('job_name', '?')
+                        old_status = existing.get('job_status', '?')
+                        db_job_id = str(existing['id'])
+                        # Update the existing entry: reset to Pending with new job_name
+                        update_sandbox_job(db_job_id, {
+                            "job_name": job_name,
+                            "job_status": "Pending",
+                            "slurm_job_id": "pending",
+                            "config": config,
+                            "submitted_at": datetime.now().isoformat(),
+                            "started_at": None,
+                        })
+                        log(f"  [v6] Reused DB entry {db_job_id}: {old_status} '{old_name}' → Pending '{job_name}'",
+                            verbose_only=True)
 
         if not db_job_id:
             # Normal path: create new Pending entry
