@@ -148,10 +148,23 @@ training job, e.g. a Levanter midtrain), recovery differs from datagen:
 - **Liveness/wedge = ADVANCEMENT, not presence.** A training run can be `state 3
   RUNNING` with `iris job logs` showing a recent step yet be dead — the CLI/IAP
   log window freezes at a stale timestamp. Judge by **SAVED-CHECKPOINT step AND
-  its GCS mtime** advancing:
-  `gsutil ls -l <output_dir>/checkpoints/step-*/metadata.json | sort -k2 | tail`
-  — is a NEW step being written recently? Plus cgroup mem still moving. Frozen
-  checkpoint mtime for hours + healthy cgroup = progress WEDGE (not OOM/leak).
+  its GCS mtime** advancing — but **use the RIGHT checkpoint path:**
+  - **⚠ The PERMANENT path is COARSE (retains only sparse N×1500-step
+    checkpoints) — do NOT use it for wedge detection.** For delphi/levanter it
+    keeps only every-1500-steps (…3000, 4500, 6000, 7500…), so at ~76 s/step its
+    newest checkpoint can be **>1 DAY old on a perfectly healthy run** → a FALSE
+    "frozen/wedged" reading. (2026-07-08: permanent path stuck at step-6000 from
+    2 days prior while training was live at step ~7256.)
+    `gs://<bucket>/checkpoints/<run>/checkpoints/step-*/metadata.json`
+  - **✅ Use the fine-grained TEMP (TTL) rolling-checkpoint path — that is the
+    real liveness signal** (a fresh checkpoint every N steps, ~10-20 steps behind
+    live):
+    `gsutil ls -l 'gs://<bucket>/tmp/ttl=14d/checkpoints-temp/<bucket>/checkpoints/<run>/checkpoints/step-*/metadata.json' | sort -k2 | tail`
+    (e.g. delphi `b6607e`: temp step-7235 @ 17:33Z, ~20 steps behind live 7256 —
+    advancing = healthy.)
+  - Cross-check with `iris job logs` live-step advancement too. Frozen TEMP-path
+    checkpoint mtime for hours + frozen logs + healthy cgroup = progress WEDGE
+    (not OOM/leak). NEVER declare a wedge off the permanent path alone.
 - **Recover a confirmed wedge:**
   - **Option A (PRIMARY): stop the wedged CHILD only, NOT the coordinator.**
     `iris job stop <child_task_id>` forces the child terminal (KILLED) → the
