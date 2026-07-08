@@ -7,9 +7,10 @@ description: >-
   CANNOT build it — arm64 + linux/amd64-only). Covers WHY kaniko not buildkit (shared with the gpu-rl skill),
   the crane-export-over-ubuntu recipe, and — the load-bearing lesson this skill exists for — how to make a
   canonical fast-moving dep (Harbor, our `marin-community/harbor` fork on `penfever/working`) ACTUALLY reach
-  the worker instead of a STALE CACHED WHEEL: prefer a fresh-from-GitHub editable/source install, bust the
-  kaniko layer cache (bump `HARBOR_COMMIT` + `--force-reinstall`, or a version bump so `uv` re-resolves), and
-  VERIFY the fix by grepping the INSTALLED file inside the built image (never trust a build-log line). Also:
+  the worker: the RUNTIME gate is OT-Agent's `uv.lock` (the iris worker `uv sync --frozen --reinstall`s from
+  it, OVERWRITING the image bake) — so deploying a harbor change is a `uv lock --upgrade-package harbor` +
+  commit, NOT (only) an image rebuild; the Dockerfile `HARBOR_COMMIT` + `--force-reinstall` pin is a secondary
+  image-consistency measure. VERIFY by grepping the INSTALLED file (never trust a build-log line). Also:
   PINNED-first push (`:tpu-<gitsha>` immutable, promote floating `:tpu` via `crane tag` only after a live
   smoke), capturing the digest, monitoring, and WHEN a rebuild is required vs a runtime `/app` bundle sync.
   Use when asked to build / rebuild / push the `:tpu` image, or after bumping harbor / the [datagen-tpu]
@@ -82,19 +83,50 @@ Load-bearing flags (already in the script — recognize them):
   PAT** as `-e DOCKER_TOKEN "$(gh auth token)"` (user `penfever`, scope `write:packages`). The script's
   `DOCKER_TOKEN` env is what it base64s into the ghcr auth — so feed it the GH token, not the Docker Hub one.
 
-## 2. ⚑ THE CORE LESSON — a canonical dep must reach the worker FRESH, never as a stale cached wheel
+## 2. ⚑ THE CORE LESSON — the RUNTIME dep gate is OT-Agent's `uv.lock`, NOT the image bake
 
-This skill exists because a harbor fix (`c49064a8`, the `_maybe_init_existing_job` resume/export-push
-job-config-drift fix at `job.py:263`) **built green but never actually shipped** — the deployed image still
-ran the OLD raising code, and every ≥1-preempt datagen job kept dying at resume. Root cause: `c49064a8` did
-NOT bump harbor's version (still `0.8.0`), so kaniko's cached `uv pip install harbor` layer (keyed on the
-unchanged COPYed `pyproject.toml` + RUN string) was **reused**, baking a STALE pre-fix `0.8.0` wheel. The
-"Built harbor @ c49064a8" build-log line was misleading.
+> **⚠⚠ READ THIS FIRST — the image is NOT how a harbor (or any locked dep) version reaches an iris worker.**
+> The iris worker **bootstrap re-syncs the venv from the bundled OT-Agent `uv.lock`** at startup —
+> `hpc/iris/bootstrap.py:34` runs **`uv sync --frozen --reinstall --link-mode=copy`**, which **REINSTALLS
+> harbor from `uv.lock` and OVERWRITES whatever the image baked.** So if `uv.lock` pins the old harbor, the
+> worker runs the old harbor **no matter what `--task-image` you launch with.** Proven live 2026-07-08:
+> job `…070443-resume-095302`, launched on the freshly-built `:tpu-abd6dc86` (which bakes harbor 0.8.1),
+> **still died at `job.py:263 raise` = harbor 0.8.0** — because `uv.lock` still pinned `0.8.0` (`d9504d19`).
+>
+> **THE ACTUAL DEPLOY LEVER for a canonical locked dep (harbor):**
+> ```bash
+> cd /Users/benjaminfeuer/Documents/OpenThoughts-Agent
+> uv lock --upgrade-package harbor      # re-resolves harbor from penfever/working HEAD → rewrites uv.lock
+> git add uv.lock && git commit -m "chore(deps): re-lock harbor -> <ver> (<sha>)" && git push   # penfever/working
+> # verify: grep -A2 'name = "harbor"' uv.lock  → version + the intended rev
+> ```
+> Every future iris launch bundles the updated lock → the worker `uv sync --frozen` installs the new harbor at
+> runtime, **regardless of the image**. This is what actually shipped the fix (OT-Agent `1bac810f`:
+> `uv.lock` harbor `0.8.0 d9504d19` → `0.8.1 2dde0bbf`). **Rebuilding/promoting the image does NOT deploy a
+> harbor change to iris workers** — do the lock bump.
 
-**Principle (user directive, 2026-07-08): for our frequently-updated canonical repos, prefer installing FRESH
-FROM GITHUB (editable / from-source), not a cached wheel.** Harbor is exactly such a repo — our
-`marin-community/harbor` fork, canonical branch `penfever/working`, changed almost every campaign. It must be
-baked from source at the intended commit, with the cache guaranteed busted, every build.
+The rest of this section (the Dockerfile `HARBOR_COMMIT` pin + `--force-reinstall` cache-bust) is still worth
+keeping — it keeps the **image self-consistent** (a direct `docker run` of the image, or any consumer that does
+NOT re-sync from the lock, gets the right harbor) and keeps the worker's `uv sync` fast (image already at the
+locked version = fewer reinstalls). But it is a **secondary consistency measure, not the runtime gate.** Keep
+the two in lockstep: when you bump the lock, bump `HARBOR_COMMIT` to the same sha.
+
+This skill's build machinery matters because the image still bakes the base + the `[datagen-tpu]` resolve + the
+first-party code; just don't mistake a green image build (or a `crane` promote) for a deployed dep change.
+
+---
+
+### Historical footnote — why the image ALSO looked stale (the cached-wheel layer)
+Before the lock finding, the image itself was baking a stale harbor: `c49064a8` did NOT bump harbor's version
+(still `0.8.0`), so kaniko's cached `uv pip install harbor` layer (keyed on the unchanged COPYed
+`pyproject.toml` + RUN string) was **reused**, baking a stale `0.8.0` wheel — the "Built harbor @ c49064a8"
+log line was misleading. That's now fixed in the Dockerfile (below), but it was only HALF the problem; the
+runtime lock-sync above was the other half and the decisive one.
+
+**Principle (user directive, 2026-07-08): for our frequently-updated canonical repos, install FRESH FROM
+GITHUB (from-source at the intended commit), never a stale cached wheel** — and, decisively for iris,
+**keep the SAME commit in `uv.lock`** (the runtime authority). Harbor is exactly such a repo — our
+`marin-community/harbor` fork, canonical branch `penfever/working`, changed almost every campaign.
 
 **Two mechanisms that guarantee freshness (the Dockerfile now does BOTH for harbor):**
 1. **Pin `ENV HARBOR_COMMIT=<sha>` and bump it every harbor change.** Changing the env line changes THIS
@@ -120,10 +152,11 @@ baked from source at the intended commit, with the cache guaranteed busted, ever
 
 > **Applying the principle beyond harbor.** For any other canonical fast-moving repo baked into this image,
 > mirror this shape: a pinned `ENV <REPO>_COMMIT` on the canonical branch + `--force-reinstall` from
-> `git+https://…@${COMMIT}`, or an editable clone the runtime resyncs. Never let such a dep ride a cached
-> wheel keyed on an unchanged `pyproject.toml`. (First-party OT-Agent code is already editable `-e` + synced
-> to `/app` at launch — it is never stale; this lesson is specifically for *third-party-installed* canonical
-> deps like harbor.)
+> `git+https://…@${COMMIT}` for image self-consistency — **AND bump `uv.lock` to the same commit
+> (`uv lock --upgrade-package <name>`), because the iris worker's `uv sync --frozen` installs from the lock at
+> runtime (§2).** Never let such a dep ride a cached wheel keyed on an unchanged `pyproject.toml`, and never
+> assume the image bake wins over the lock. (First-party OT-Agent code is already editable `-e` + synced to
+> `/app` at launch — never stale; this lesson is for *third-party-installed* canonical deps like harbor.)
 
 ## 3. The launch command (verbatim shape)
 
@@ -228,18 +261,24 @@ $IRIS --cluster=cw-us-east-02a job summary /benjaminfeuer/tpu-kaniko-<gitsha> --
 
 ## 7. WHEN a rebuild is actually required (vs a runtime `/app` bundle sync)
 
-Rebuild the `:tpu` image ONLY for a change to something the image **BAKES into the venv**:
-- **harbor** (the `HARBOR_COMMIT` pin — third-party, installed into the venv, NOT synced from `/app`). ⇒ the
-  common case; follow §2's freshness recipe.
-- **the `[datagen-tpu,cloud]` resolve** (vLLM-TPU / tpu-inference / jax/libtpu / transformers pin in
-  `pyproject.toml`).
-- **base-layer changes** (apt packages, the python base, `uv` venv layout).
+> **⚠ For iris datagen/eval workers, a rebuild rarely deploys anything — the worker `uv sync --frozen
+> --reinstall`s from the bundled `uv.lock` (§2), so DEPS come from the lock and first-party CODE comes from the
+> `/app` bundle. Both bypass the image bake.** So the honest list of "must rebuild the image" cases is SHORT.
 
-Do **NOT** rebuild for a **first-party OT-Agent source change** (`hpc/`, `data/`, `scripts/`, `eval/`, the
-launchers, the RecordProxy/correlator). Those are editable `-e` and the iris worker **syncs the local
-working-tree to `/app` at launch**, overriding the image-baked copy — so a code edit ships on the NEXT launch
-with no rebuild. (This is why datagen fixes usually don't need an image build; harbor is the exception because
-it's a third-party install, not first-party `/app` code.)
+Rebuild the `:tpu` image ONLY for something neither the lock-sync nor the `/app` bundle can carry:
+- **base-layer changes** — apt packages, the python base image, the `uv` venv layout / bootstrap assumptions.
+- **first-serve latency** — you want the image already AT the locked dep set so the worker's `uv sync` is a
+  fast no-op instead of a big reinstall. (Optimization, not correctness.)
+
+Do **NOT** rebuild the image to deploy:
+- **A harbor (or any locked third-party dep) change** → that's a **`uv.lock` bump** (§2:
+  `uv lock --upgrade-package harbor` + commit). The image bake is overwritten at runtime by the lock-sync.
+  Keep `HARBOR_COMMIT` in step with the lock for image self-consistency, but the lock is what ships it.
+- **A `[datagen-tpu,cloud]` resolve change** (vLLM-TPU / tpu-inference / jax/libtpu / transformers) → same:
+  update `pyproject.toml` + `uv lock`, and the worker installs it from the lock. (Rebuild only to keep the
+  image current for fast sync.)
+- **A first-party OT-Agent source change** (`hpc/`, `data/`, `scripts/`, `eval/`, the launchers, the
+  RecordProxy/correlator) → editable `-e`; the worker syncs the local working-tree at launch. Ships next launch.
 
 ## 8. Standing constraints
 
