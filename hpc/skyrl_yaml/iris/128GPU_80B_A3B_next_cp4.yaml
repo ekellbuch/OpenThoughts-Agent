@@ -1,0 +1,328 @@
+# =============================================================================
+# 80B NAIVE-MAP CP4 — Qwen3-Next-80B-A3B-Thinking @131k — EP8×FSDP2×CP4
+# CoreWeave/Iris. ⛔ AUTHORED-BUT-DO-NOT-LAUNCH — PREDICTED GDN+CP HARD-CRASH.
+# =============================================================================
+# AUTHORED FOR: ~/Documents/experiments/active/qwen3_next_80b_naive_map_131k.
+# This is the naive map of the CP4/IB 30B geometry (30B-C = EP8×FSDP1×CP4,
+#   hpc/skyrl_yaml/iris/grid_30b_EP8_FSDP1_CP4.yaml) onto Qwen3-Next-80B-A3B-Thinking.
+#   It is the CP half of the naive-map test — authored for completeness + as the
+#   known-boundary confirmation, but *** NOT LAUNCHED THIS PASS *** (capacity + it
+#   is the PREDICTED-crash control). Launch the CP1 sibling instead
+#   (128GPU_80B_A3B_next_cp1.yaml).
+#
+# ⛔⛔ CRASH PREDICTION — GDN + CP>1 HARD-CRASHES (this WILL die at the first forward):
+#   Qwen3-Next-80B is HYBRID GatedDeltaNet (36/48 layers are GDN linear-attention).
+#   There is NO CP-aware GDN kernel. CP>1 shards the SEQUENCE dim, but the GDN
+#   attention-mask / chunked-scan path is NOT CP-aware, so the seq-shard doubling
+#   produces a SHAPE MISMATCH at the GDN mask. PROVEN on the same-family 35B
+#   (cell 35B-B, EP8×FSDP2×CP2): step-1 forward `fwd_logprobs_values_reward` →
+#   `FSDPPolicyWorkerBase.forward()` died with
+#     `RuntimeError: expanded size of the tensor (33784) must match the existing
+#      size (16892) at dim 3`   (33784 = 2 × 16892 = the CP=2 seq-shard doubling
+#      on the GatedDeltaNet attention mask; wandb state=crashed, 0 steps).
+#   At CP=4 the same failure recurs (a 4× seq-shard mismatch) at the GDN mask.
+#   This is a HARD SHAPE CRASH, not an OOM and not numerically-wrong-but-running.
+#   ⇒ CP is OFF-LIMITS for the GDN 80B until a CP-aware GDN kernel exists. The
+#   feasibility path for the 80B @131k is CP1 + (if it OOMs) context reduction.
+#
+# WHY AUTHOR IT AT ALL: it is the CP arm of "naive-map the two best 30B geometries";
+#   documenting the config + the crash prediction closes the grid cell and makes the
+#   boundary explicit for whoever later tries CP once a GDN-CP kernel lands.
+#
+# -----------------------------------------------------------------------------
+# MODEL / MEMORY / GENERATION / HPARAMS / CONTAINER-ENV: IDENTICAL to the CP1 sibling
+#   (128GPU_80B_A3B_next_cp1.yaml) — read that file's header for the full arch,
+#   memory math, divisibility, and hard-won bring-up notes. The ONLY deltas here are
+#   the policy/ref MESH (FSDP 8→2, CP 1→4) + the CP>1-mandatory trainer attn backend.
+#
+# GEOMETRY (16 CoreWeave nodes = 128 H100, colocate_all: false, disaggregated):
+#   NAIVE MAP of 30B-C: hold EP×FSDP×CP product = 64 (as the CP1 sibling does, 8×8×1),
+#   but trade FSDP for CP the way the 30B grid did (30B-A FSDP4×CP1 ↔ 30B-C FSDP1×CP4):
+#     Policy/Ref mesh: EP=8 × FSDP=2 × CP=4 = 64 policy GPU = 8 nodes.
+#     Generation:      16 engines × TP=4      = 64 gen GPU = 8 nodes (identical to CP1).
+#   Total = 128 = 16 nodes. (Would need --num-nodes 16 IF it were launched.)
+#   DIVISIBILITY (all pass — the config is VALID; it's the GDN KERNEL that crashes):
+#     * (num_experts//ep)%fsdp: 512/8=64; 64 % FSDP2 = 0 → 32 experts/GPU. VALID.
+#     * EP × FSDP × CP = 8 × 2 × 4 = 64 = policy GPU. VALID.
+#     * CP G4: padded seq_len % (2×CP=8) == 0; 131072 % 8 == 0. OK.
+#   So the SHAPE crash is NOT a divisibility bug — it is the GDN-mask CP-unawareness.
+#
+# =============================================================================
+# ⛔ NO LAUNCH COMMAND — DO NOT LAUNCH. If a CP-aware GDN kernel ever lands, this is
+#    the config to try (mirror the CP1 launch command with --num-nodes 16,
+#    --rl_config .../128GPU_80B_A3B_next_cp4.yaml, rendezvous .../80b-naive-map/cp4).
+# =============================================================================
+
+entrypoint: examples.terminal_bench.entrypoints.main_tbench
+
+config_groups:
+  terminal_bench_config: terminal_bench
+
+terminal_bench:
+  trials_dir: s3://marin-us-east-02a/iris/80b-next-cp4/trace_jobs
+
+  harbor:
+    name: terminus-2
+    max_episodes: 999999
+    enable_summarize: false
+    store_all_messages: true
+    trajectory_config:
+      raw_content: true
+    enable_episode_logging: false
+    record_terminal_session: false
+    enable_pane_logging: false
+
+    strict_json_parser: true
+
+    interleaved_thinking: true
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: true
+    override_timeout_sec: 1800
+
+    override_cpus: 1
+    override_memory_mb: 2048
+    override_storage_mb: 2048
+
+    auto_snapshot: true
+
+    verifier_override_timeout_sec: 300
+
+    max_retries: 3
+    min_wait_sec: 60.0
+    max_wait_sec: 600.0
+    wait_multiplier: 2.0
+
+    exclude_exceptions:
+      - VerifierTimeoutError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - VerifierOutputParseError
+      - VerifierRuntimeError
+
+    n_concurrent_trials: 32
+
+    log_level: INFO
+
+    enable_reward_shaping: false
+
+    collect_rollout_details: true
+
+    enable_error_classification: true
+    mask_exceptions:
+      - VerifierTimeoutError
+      - DaytonaError
+      - EnvironmentStartTimeoutError
+      - NetworkError
+      - ConnectionError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - AgentEnvironmentTimeoutError
+    default_error_treatment: zero
+    passthrough_exceptions:
+      - AgentTimeoutError
+      - ContextLengthExceededError
+
+  model_info:
+    max_input_tokens: 130000
+    max_output_tokens: 16384
+
+  archiving:
+    enabled: false
+
+  trace_upload:
+    enabled: true
+    repo_org: DCAgent
+    episodes: last
+    dataset_type: SFT
+    cleanup: true
+
+# =============================================================================
+# Trainer configuration
+# =============================================================================
+trainer:
+  strategy: fsdp2
+  # CP>1 REQUIRES torch-native ring-SDPA (rejects flash-attn varlen). This pins the
+  # TRAINER forward for the 12 full-attn layers; the vLLM GENERATION engine keeps
+  # FLASH_ATTN via env. (The 36 GDN layers are where CP>1 CRASHES — see header.)
+  attn_backend: sdpa
+  flash_attn: false
+  use_sample_packing: false
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+  algorithm:
+    advantage_estimator: rloo_n
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    eps_clip_low: 0.2
+    eps_clip_high: 0.05
+    loss_reduction: seq_mean_token_sum_norm_global
+    use_tis: true
+    tis_imp_ratio_cap: 2.0
+
+  epochs: 2
+  max_steps: 80
+  update_epochs_per_batch: 1
+
+  train_batch_size: 64
+  policy_mini_batch_size: 64
+  eval_batch_size: 64
+
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+
+  max_prompt_length: 131072
+
+  eval_interval: 999999
+  eval_before_train: false
+  ckpt_interval: 1
+  resume_mode: latest
+  hf_save_interval: 5
+  hf_hub_repo_id: null
+  hf_hub_private: false
+  hf_hub_revision: main
+
+  enable_db_registration: false
+
+  project_name: OpenThoughts-Agent
+  log_level: INFO
+  tracker_commit_each_step: true
+  logger: wandb
+
+  run_name: null
+  ckpt_path: null
+  export_path: null
+
+  policy:
+    optimizer_config:
+      lr: 8e-6
+      weight_decay: 0.0
+      adam_betas: [0.9, 0.999]
+      max_grad_norm: 0.9
+    fsdp_config:
+      cpu_offload: true
+      reshard_after_forward: true
+      # MESH (CP4 map): EP8 × FSDP2 × CP4 = 64 policy GPU = 8 nodes.
+      # (num_experts//ep)%fsdp: 512/8=64; 64 % 2 = 0 → 32 experts/GPU. VALID.
+      # FSDP2 leaves more dense state per rank than the CP1 map's FSDP8 (higher host-RAM),
+      # activations maximally CP-sharded — BUT the GDN forward CRASHES before any of this matters.
+      fsdp_size: 2
+      expert_model_parallel_size: 8
+      # CP=4: torch-native ring-SDPA over the 131k sequence. ⛔ GDN layers are NOT CP-aware → crash.
+      context_parallel_size: 4
+      cp_style: ring_sdpa
+      cp_rotate_method: allgather
+      moe_router_replay: true
+      moe_grouped_gemm: true
+      ep_comm_backend: torch
+  ref:
+    model:
+      path: Qwen/Qwen3-Next-80B-A3B-Thinking
+    fsdp_config:
+      cpu_offload: true
+      reshard_after_forward: true
+      fsdp_size: 2
+      expert_model_parallel_size: 8
+      context_parallel_size: 4
+      cp_style: ring_sdpa
+      cp_rotate_method: allgather
+      moe_router_replay: true
+      moe_grouped_gemm: true
+      ep_comm_backend: torch
+
+  placement:
+    colocate_all: false
+    policy_num_nodes: 8
+    ref_num_nodes: 8
+    policy_num_gpus_per_node: 8
+    ref_num_gpus_per_node: 8
+    policy_strict_spread_pg: true
+    policy_per_gpu_bundles: true
+    policy_force_cvd_mask: true
+
+  fully_async:
+    max_staleness_steps: 16
+    num_parallel_generation_workers: 900
+
+# =============================================================================
+# Generator configuration (vLLM) — IDENTICAL to the CP1 sibling (CP is training-only).
+# =============================================================================
+generator:
+  backend: vllm
+  timeout_multiplier: 1.0
+  model_dtype: bfloat16
+
+  enforce_eager: false
+
+  inference_engine_tensor_parallel_size: 4
+  num_inference_engines: 16
+  inference_engine_expert_parallel_size: 1
+  inference_engine_decode_context_parallel_size: 1
+  inference_engine_mp_backend: false
+
+  n_samples_per_prompt: 8
+  eval_n_samples_per_prompt: 8
+
+  gpu_memory_utilization: 0.85
+  max_num_seqs: 12
+  max_num_batched_tokens: 16384
+
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  enable_http_endpoint: true
+  enable_ray_prometheus_stats: false
+  vllm_stats_interval: 1
+  append_eos_token_after_stop_str_in_multi_turn: true
+  max_turns: 999999
+
+  sampling_params:
+    max_generate_length: 16384
+    temperature: 0.7
+    top_p: 0.95
+    top_k: 20
+
+  engine_init_kwargs:
+    max_model_len: 131072
+    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
+    disable_custom_all_reduce: true
+    enable_return_routed_experts: true
+    async_scheduling: false
+
+data:
+  train_data: []
+  val_data: []
+
+rollout:
+  fanout:
+    enabled: true
+    num_coordinators: 4
+    cpus_per_coordinator: 8
+
+# =============================================================================
+# Runtime env — IDENTICAL to the CP1 sibling.
+# =============================================================================
+extra_env:
+  SKYRL_GDN_MASK_FLA: "1"
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  SKYRL_TIS_SERVED_ID_SPLICE: "1"
+  VLLM_USE_FLASHINFER_SAMPLER: "0"
+  VLLM_ATTENTION_BACKEND: FLASH_ATTN
+  LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib
+  NCCL_DEBUG: WARN
+  NCCL_SOCKET_IFNAME: enp157s0np0
+  NCCL_SOCKET_FAMILY: AF_INET
+  SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "1800"
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "1800"
+  TORCH_NCCL_ENABLE_MONITORING: "1"
+  TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+  TORCH_FR_BUFFER_SIZE: "2000"
+  TORCH_NCCL_TRACE_CPP_STACK: "1"
+  TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /tmp/nccl_fr_rank
+  VLLM_MQ_MAX_CHUNK_BYTES_MB: "160"
+  VLLM_ROUTED_EXPERTS_SIDE_TIMEOUT_SECONDS: "1200"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "900"
