@@ -1,28 +1,20 @@
 # =============================================================================
-# Qwen3-30B-A3B-Thinking-2507 — RL config for Jupiter (GH200 96GB, 4 GPU/node)
+# Qwen3-30B-A3B-Thinking-2507 — RL config for Jupiter (GH200 96GB, 4 GPU/node).
 # =============================================================================
-# Target: Qwen/Qwen3-30B-A3B-Thinking-2507
-#   30B total / ~3B activated params. STANDARD Qwen3 MoE (qwen3_moe /
-#   Qwen3MoeForCausalLM) — NOT Qwen3-Next: plain full attention on EVERY layer,
-#   NO GatedDeltaNet / linear-attention, NO FlashQLA concerns.
-#   48 layers, hidden_size=2048, 32 attn heads / 4 KV heads (GQA), head_dim=128,
-#   128 experts top-8, moe_intermediate_size=768, vocab=151936,
-#   max_position_embeddings=262144, rope_theta=1e7, no sliding window, bf16.
+# Target: Qwen/Qwen3-30B-A3B-Thinking-2507. STANDARD Qwen3 MoE (qwen3_moe /
+# Qwen3MoeForCausalLM) — NOT Qwen3-Next: plain full attention on EVERY layer, no GDN.
+#   48 layers, hidden 2048, 32 attn / 4 KV heads (GQA), head_dim 128,
+#   128 experts top-8, moe_intermediate 768, vocab 151936,
+#   max_position_embeddings 262144, rope_theta 1e7, bf16.
 #
-# THINKING variant of the sibling 24GPU_qwen3_coder_30b_a3b.yaml (now under
-# jupiter/extra/). Qwen3-30B-A3B-Thinking-2507 is the SAME qwen3_moe arch + dims
-# as the coder-instruct (48 layers / 128 experts top-8 / 32 attn / 4 KV heads), so
-# ALL the EP=4×FSDP=4 / TP=2 sharding, container, and NCCL wiring below are UNCHANGED.
-# It differs only in: (1) model = Qwen/Qwen3-30B-A3B-Thinking-2507 (native always-on
-# thinking, vs the instruct which force-enables it); (2) sampling temperature 0.6
-# (Qwen3-Thinking-2507 recommendation, was 0.7); (3) more generation room
-# (max_output 8192 vs 4096) since reasoning traces are long — kept within the proven
-# max_model_len 32768 by trimming max_input to 24576 (24576 + 8192 = 32768; if CoT
-# truncates, bump max_model_len — native 262144, no YaRN — as a follow-up).
-# a3-hparam-matched (RLOO-N + binary reward + token_mean, lr 8e-6, max_grad_norm 0.9).
+# THINKING variant of jupiter/extra/24GPU_qwen3_coder_30b_a3b.yaml — SAME qwen3_moe
+# arch + dims, so ALL the EP=4xFSDP=4 / TP=2 sharding, container, and NCCL wiring below
+# are UNCHANGED. Diffs only: (1) model = Thinking-2507 (native always-on thinking);
+# (2) sampling temp 0.6 (Qwen3-Thinking-2507 rec, was 0.7); (3) max_output 8192 (long
+# reasoning traces) kept within max_model_len 32768 by trimming max_input to 24576
+# (24576 + 8192 = 32768; if CoT truncates, bump max_model_len — native 262144, no YaRN).
 #
-# Launch via the standard path:
-#
+# Launch:
 #   python -m hpc.launch \
 #     --job_type rl \
 #     --rl_config ./hpc/skyrl_yaml/jupiter/24GPU_qwen3_30b_a3b_thinking.yaml \
@@ -34,36 +26,21 @@
 #     --experiments_dir /e/data1/datasets/playground/ot-baf
 #
 # -----------------------------------------------------------------------------
-# GPU / NODE SIZING (6 nodes × 4 GH200 = 24 GPUs)  [colocate_all: false]
+# GPU / NODE SIZING (6 nodes x 4 GH200 = 24 GPUs)  [colocate_all: false]
 # -----------------------------------------------------------------------------
-# Generation (vLLM):  4 engines × TP=2            = 8 GPUs  =  2 nodes
-# Policy/Ref FSDP  :  4 nodes × 4 (EP=4 × FSDP=4) = 16 GPUs =  4 nodes
-#                                                   -------    --------
-#                                          TOTAL =  24 GPUs    6 nodes
+# Generation (vLLM):  4 engines x TP=2              =  8 GPUs = 2 nodes
+# Policy/Ref FSDP  :  4 nodes x 4 (EP=4 x FSDP=4)   = 16 GPUs = 4 nodes
+#                                          TOTAL    = 24 GPUs   6 nodes
 #
-# DIVISIBILITY CHECKS (all hard constraints — verified):
-#   * MoE expert sharding: 128 experts / EP=4 = 32 experts/EP-rank;
-#     FSDP=4 must divide 32 → 32/4 = 8 experts/FSDP-rank ✓
-#   * EP × FSDP = 4 × 4 = 16 = policy GPUs ✓
-#   * vLLM TP=2 divides 32 attn heads (16/GPU) AND 4 KV heads (2 KV/rank → valid
-#     GQA) AND 128 experts (64/GPU) ✓
+# DIVISIBILITY (verified): MoE 128 experts / EP=4 = 32/EP-rank; FSDP=4 | 32 (8/FSDP-rank).
+#   EP x FSDP = 16 = policy GPUs. vLLM TP=2 | 32 attn heads (16/GPU) AND 4 KV heads
+#   (2 KV/rank, valid GQA) AND 128 experts (64/GPU).
 #
-# FSDP memory arithmetic (30B, full-fidelity Adam, bf16-mixed):
-#   bf16 weights  : 30e9 × 2 B = 60 GB
-#   fp32 grads    : 30e9 × 4 B = 120 GB
-#   Adam m,v      : 30e9 × 8 B = 240 GB
-#   fp32 master   : 30e9 × 4 B = 120 GB
-#                          TOTAL ≈ 540 GB sharded state.
-#   Sharded over 16 GPUs → ~34 GB/GPU. cpu_offload: true (kept from the 80B)
-#   moves params+optimizer into the GH200 node's coherent LPDDR (480 GB/node,
-#   NVLink-C2C), leaving HBM for the active shard + activations → 32k-context
-#   training fits comfortably with room to spare on this small MoE.
-#
-# vLLM memory (per TP=2 engine, 2 GPUs):
-#   30 GB bf16 weights / 2 = 15 GB/GPU. At gpu_memory_utilization 0.85 on 94 GB
-#   that leaves ample KV headroom. Unlike the Qwen3-Next 80B, ALL 48 layers are
-#   full attention here, so KV grows with length on every layer — but 30B is
-#   tiny and max_model_len 32768 at TP=2 is well within budget.
+# MEMORY: FSDP state ~540 GB sharded over 16 GPUs → ~34 GB/GPU; cpu_offload:true moves
+#   params+optimizer into the GH200 coherent LPDDR (480 GB/node, NVLink-C2C), leaving
+#   HBM for the active shard + activations → 32k training fits comfortably. vLLM: 30 GB
+#   bf16 weights / TP2 = 15 GB/GPU; at 0.85 util on 94 GB, ample KV headroom (all 48
+#   layers are full-attention so KV grows/layer, but 30B is tiny at TP=2 / 32768).
 # =============================================================================
 
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
@@ -93,9 +70,8 @@ terminal_bench:
     extra_body:
       chat_template_kwargs:
         enable_thinking: true
-    # 1800s agent timeout (matches the 80B / agentic baseline). The 30B is far
-    # faster per step than the 80B, but the long ceiling lets boundary samples
-    # finish rather than truncating. AgentTimeoutError stays PASSTHROUGH.
+    # 1800s agent timeout; long ceiling lets boundary samples finish. AgentTimeoutError
+    # stays PASSTHROUGH.
     override_timeout_sec: 1800
 
     override_cpus: 1
@@ -118,20 +94,17 @@ terminal_bench:
       - VerifierOutputParseError
       - VerifierRuntimeError
 
-    # 300 concurrent trials — the no-R3-capture value. The 80B dropped to 150 ONLY
-    # because R3 routed_experts capture inflated per-trial host-RAM footprint; this
-    # run has R3 OFF (no routed_experts arrays held resident), so the original 300
-    # is safe and keeps the async buffer full across the 4 TP=2 engines.
+    # 300 — the no-R3 value (R3 is OFF here; routed_experts capture would inflate
+    # per-trial host-RAM, which is why the 80B dropped to 150). 300 keeps the async
+    # buffer full across the 4 TP=2 engines.
     n_concurrent_trials: 300
 
     log_level: INFO
 
     enable_reward_shaping: false
 
-    # collect_rollout_details=true → Harbor requests + stores per-token rollout
-    # logprops from vLLM (OpenAI choices[].logprobs). REQUIRED for use_tis below
-    # (trainer asserts non-null rollout_logprobs when use_tis=true). TIS alone
-    # corrects the vLLM↔FSDP rollout-vs-train gap here; R3 router-replay is OFF.
+    # REQUIRED for use_tis below (trainer asserts non-null rollout_logprobs). TIS alone
+    # corrects the vLLM↔FSDP rollout-vs-train gap; R3 router-replay is OFF.
     collect_rollout_details: true
 
     enable_error_classification: true
@@ -149,8 +122,7 @@ terminal_bench:
       - AgentTimeoutError
       - ContextLengthExceededError
 
-  # Thinking model: give reasoning traces room (8192 out) within the proven 32768
-  # window by trimming input to 24576 (24576 + 8192 = 32768). Coder used 32767/4096.
+  # 24576 + 8192 = 32768 (reasoning room within max_model_len; coder used 32767/4096).
   model_info:
     max_input_tokens: 24576
     max_output_tokens: 8192
@@ -170,9 +142,7 @@ terminal_bench:
 # =============================================================================
 trainer:
   strategy: fsdp2
-  # Gradient checkpointing ON at 32k context (kept from the 80B; cheap insurance
-  # on the activation peak even for a 30B). use_reentrant=false is the
-  # recompute-safe variant.
+  # Gradient checkpointing ON at 32k (use_reentrant=false = recompute-safe).
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
   algorithm:
@@ -181,29 +151,27 @@ trainer:
     kl_loss_coef: 0.0
     eps_clip_low: 0.2
     eps_clip_high: 0.05
-    # seqnorm baseline (2026-06-12): inherited from 56GPU_seqnorm_tis.yaml — global
-    # length-unbiased + grad-accum-correct + dead-group-dilution-free. (TIS already on below.)
+    # seqnorm: global length-unbiased + grad-accum-correct + dead-group-dilution-free
+    # (inherited from 56GPU_seqnorm_tis.yaml). TIS already on below.
     loss_reduction: seq_mean_token_sum_norm_global
-    # Truncated Importance Sampling ON. Bounds the off-policy ratio between the
-    # vLLM rollout distribution and the FSDP train-recompute (clamp(exp(old_lp -
-    # rollout_lp), max=cap)). cap=2.0 = the standard truncation. REQUIRES
-    # collect_rollout_details=true (above). This is the rollout-vs-train
-    # correction lever for this run (R3 router-replay is OFF — see fsdp_config).
+    # Truncated Importance Sampling: clamps the off-policy ratio between vLLM rollout
+    # and FSDP train-recompute (clamp(exp(old_lp - rollout_lp), max=cap)). cap=2.0.
+    # REQUIRES collect_rollout_details=true (above). R3 router-replay is OFF (see
+    # fsdp_config) — TIS is the rollout-vs-train correction lever for this run.
     use_tis: true
     tis_imp_ratio_cap: 2.0
 
-  # Training loop settings
   epochs: 2
   max_steps: 80
   update_epochs_per_batch: 1
 
-  # Batch sizes — production 64 (train == mini), matches the 80B / a3.
+  # Batch sizes — production 64 (train == mini).
   train_batch_size: 64
   policy_mini_batch_size: 64
   eval_batch_size: 64
 
-  # micro_forward 4 (forward-only logprob pass, no optimizer state resident),
-  # micro_train 1 (backward through the MoE expert FFNs is the spiky path).
+  # micro_forward 4 (forward-only logprob pass), micro_train 1 (MoE expert FFN backward
+  # is the spiky path).
   micro_forward_batch_size_per_gpu: 4
   micro_train_batch_size_per_gpu: 1
 
@@ -211,9 +179,8 @@ trainer:
 
   eval_interval: 999999
   eval_before_train: false
-  # ckpt_interval=5: 30B steps are FAST (vs the 80B's ~4.5h/step, where every-1
-  # was mandatory). Every-5 banks a checkpoint without spending step-time on
-  # huge writes. hf_save_interval=5 aligns.
+  # ckpt_interval=5: 30B steps are fast (vs the 80B's ~4.5h/step where every-1 was
+  # mandatory). hf_save_interval=5 aligns.
   ckpt_interval: 5
   resume_mode: latest
   hf_save_interval: 5
@@ -240,81 +207,59 @@ trainer:
       adam_betas: [0.9, 0.999]
       max_grad_norm: 0.9
     fsdp_config:
-      # Offload params + optimizer to the GH200 coherent LPDDR. Kept from the
-      # 80B — gives the 30B HBM almost entirely for the active shard +
-      # activations at 32k context.
+      # Offload params + optimizer to the GH200 coherent LPDDR → HBM for the active
+      # shard + activations at 32k.
       cpu_offload: true
       reshard_after_forward: true
-      # EP=4 × FSDP=4 = 16 policy GPUs (4 nodes). 128 experts / EP=4 = 32
-      # experts/EP-rank; FSDP=4 divides 32 (8 experts/FSDP-rank) → optimizer
-      # dim-0 is clean (no 10≠9 uneven-shard crash). moe_grouped_gemm = fused
-      # grouped-GEMM expert FFN. ep_comm_backend=torch = stock torch all-to-all.
-      # GROUPED-GEMM ON. Grouped-GEMM must stay ON because only the grouped
-      # weight-sync path (_remap_grouped_state_dict / _extract_weights_streamed)
-      # produces the per-expert vLLM-loadable names; the ungrouped path raised
-      # KeyError: 'layers.0.mlp.experts.gate_up_proj' at weight-sync (job 849258).
-      # The qwen3_moe train-forward TypeError (job 848097) is now fixed in the
-      # shim itself: GroupedMoEShim returns a BARE TENSOR for Qwen3MoeSparseMoeBlock
-      # (matches the stock decoder's residual + self.mlp(h)) and the 2-tuple only
-      # for Qwen3-Next (MarinSkyRL penfever/working 2ce0a32).
+      # EP=4 x FSDP=4 = 16 policy GPUs (4 nodes). 128/EP4=32; FSDP4|32 (8/FSDP-rank) →
+      # clean dim-0 shard. grouped-GEMM must stay ON — only the grouped weight-sync path
+      # produces per-expert vLLM-loadable names (the ungrouped path raised KeyError at
+      # weight-sync). ep_comm_backend=torch = stock torch all-to-all.
       fsdp_size: 4
       expert_model_parallel_size: 4
       moe_router_replay: false
       moe_grouped_gemm: true
       ep_comm_backend: torch
   ref:
-    # INERT (use_kl_loss=false → SkyRL builds no RefWorker, path never loaded).
-    # Present for config completeness / EP-mesh consistency with the policy.
+    # INERT (use_kl_loss=false → no RefWorker built); kept config-consistent with policy.
     model:
       path: Qwen/Qwen3-30B-A3B-Thinking-2507
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
-      # Mirror the policy: grouped-GEMM ON + EP=4 + FSDP=4 (see policy
-      # fsdp_config). Ref is INERT (use_kl_loss=false) but kept config-consistent.
+      # Mirror policy: EP=4 + FSDP=4 + grouped-GEMM (inert here, kept consistent).
       fsdp_size: 4
       expert_model_parallel_size: 4
       moe_router_replay: false
       moe_grouped_gemm: true
       ep_comm_backend: torch
 
-  # Model placement (async training, disaggregated).
-  # Policy+Ref SHARE 4 nodes / 16 GPUs (FSDP-sharded, time-share devices). The 2
-  # generation nodes (4 TP=2 engines) are allocated separately.
-  # NOTE: these hardcoded values OVERRIDE the launcher's num_nodes-based
-  # derivation (rl_config_utils derives placement only when the YAML leaves it
-  # null). --num_nodes 6 must still be passed for the SLURM allocation, but the
-  # policy footprint is fixed here at 4 nodes.
+  # Disaggregated placement. Policy+Ref share 4 nodes/16 GPUs; the 2 generation nodes
+  # (4 TP=2 engines) are allocated separately. NOTE: these hardcoded values OVERRIDE the
+  # launcher's num_nodes-based derivation (rl_config_utils derives placement only when
+  # null). --num_nodes 6 is still required for the SLURM allocation, but the policy
+  # footprint is fixed here at 4 nodes.
   placement:
     colocate_all: false
     policy_num_nodes: 4
     ref_num_nodes: 4
     policy_num_gpus_per_node: 4
     ref_num_gpus_per_node: 4
-    # Reserve the 4 policy nodes (STRICT_SPREAD) BEFORE the vLLM inference
-    # placement group is created, so policy claims its 4 dedicated nodes first
-    # and the 4 TP=2 engines are forced onto the disjoint remaining 2 nodes.
-    # Prevents the two PACK placement groups racing → a policy FSDP worker
-    # landing on a vLLM-occupied GPU → init-OOM. Safe because use_kl_loss/
-    # use_kl_in_reward are both false (policy-only placement group).
+    # Reserve the 4 policy nodes (STRICT_SPREAD) BEFORE the vLLM PG is created → policy
+    # claims its nodes first, the 4 TP=2 engines land on the disjoint 2 nodes (prevents
+    # a policy FSDP worker landing on a vLLM GPU → init-OOM). Safe: use_kl_loss/
+    # use_kl_in_reward both false (policy-only placement group).
     policy_strict_spread_pg: true
-    # One {GPU:1,CPU:1} bundle PER policy GPU (4 nodes × 4 = 16 bundles ==
-    # world_size) instead of one whole-node {GPU:4} bundle. len(bundles)==
-    # world_size engages get_reordered_bundle_indices() so each policy actor
-    # pins to its distinct physical GPU → no GPU-0-stacking init-OOM in the EP
-    # layout.
+    # Per-GPU bundles (16 == world_size) engage get_reordered_bundle_indices() → each
+    # policy actor pins a distinct physical GPU (no GPU-0-stacking init-OOM in EP layout).
     policy_per_gpu_bundles: true
-    # Each policy actor MASKS CUDA_VISIBLE_DEVICES to its single Ray-assigned
-    # physical GPU + forces CUDA_DEVICE_ORDER=PCI_BUS_ID before any CUDA / EP-mesh
-    # init, so EP=4×FSDP=4 ranks cannot stack on a shared GPU.
+    # Each policy actor MASKS CUDA_VISIBLE_DEVICES + forces CUDA_DEVICE_ORDER=
+    # PCI_BUS_ID before CUDA/EP-mesh init → EP=4xFSDP=4 ranks cannot stack on a GPU.
     policy_force_cvd_mask: true
 
-  # Fully async generation.
   fully_async:
     max_staleness_steps: 16
-    # 256 generation workers — over-subscribes the 4 TP=2 engines ~64× so the
-    # trainer never starves while staying well under the host-RAM ceiling
-    # (no R3 capture inflating per-worker footprint here).
+    # 256 — over-subscribes the 4 TP=2 engines ~64x; no R3 footprint inflation here.
     num_parallel_generation_workers: 256
 
 # =============================================================================
@@ -325,32 +270,24 @@ generator:
   timeout_multiplier: 1.0
   model_dtype: bfloat16
 
-  # TP=2 per engine: 32 attn heads / 2 = 16/GPU; 4 KV heads / 2 = 2 KV/rank
-  # (valid GQA); 128 experts / 2 = 64/GPU. 4 engines × TP=2 = 8 GPUs = 2 nodes.
+  # TP=2: 32 attn heads/2=16/GPU; 4 KV heads/2=2 KV/rank (valid GQA); 128 experts/2=
+  # 64/GPU. 4 engines x TP=2 = 8 GPUs = 2 nodes.
   inference_engine_tensor_parallel_size: 2
-  # 4 TP=2 engines = 8 inference GPUs = 2 inference nodes. Set EXPLICITLY (not
-  # null) so the launcher does NOT derive it: build_skyrl_hydra_args derives
-  # num_inference_engines = (num_nodes * gpus_per_node) // tp only when None, and
-  # that would give 6*4//2 = 12 — WRONG here because 4 of the 6 nodes are
-  # policy-only. 4 is the correct disaggregated value.
+  # 4 TP=2 engines = 8 inference GPUs = 2 nodes. Set EXPLICITLY so the launcher does NOT
+  # derive it: build_skyrl_hydra_args derives (num_nodes*gpus_per_node)//tp = 6*4//2 = 12
+  # when None — WRONG (4 of 6 nodes are policy-only). 4 is the disaggregated value.
   num_inference_engines: 4
 
-  # Expert parallelism left at 1 (default): with TP=2 the experts are already
-  # 64/GPU on a 3B-active MoE — plenty. EP+TP interaction in vLLM is unneeded
-  # at this scale.
+  # EP=1 (default): with TP=2 experts are already 64/GPU on a 3B-active MoE — plenty.
   inference_engine_expert_parallel_size: 1
 
-  # mp (multiprocessing) executor backend — no Ray Compiled-DAG. Kept from the
-  # 80B for robustness; harmless for plain qwen3_moe (the DAG-deadlock it
-  # originally fixed was the Qwen3-Next R3 capture path, which is OFF here).
-  # Requires colocate_all=false (set above).
+  # mp (multiprocessing) executor backend — no Ray Compiled-DAG. Requires
+  # colocate_all=false (set above).
   inference_engine_mp_backend: true
 
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
 
-  # 0.85 — matches the 80B / a3. Plain-attention 30B at 32k TP=2 has ample KV
-  # headroom at this utilization.
   gpu_memory_utilization: 0.85
 
   max_num_seqs: 24
@@ -369,7 +306,7 @@ generator:
   append_eos_token_after_stop_str_in_multi_turn: true
   max_turns: 999999
 
-  # Qwen3-30B-A3B-Thinking-2507 recommended sampling: temp 0.6, top_p 0.95, top_k 20.
+  # Qwen3-Thinking-2507 recommended sampling: temp 0.6, top_p 0.95, top_k 20.
   # max_generate_length 8192 (thinking room) — matches model_info.max_output_tokens.
   sampling_params:
     max_generate_length: 8192
@@ -378,17 +315,14 @@ generator:
     top_k: 20
 
   engine_init_kwargs:
-    # 32768 — well within the model's native 262144 context. No YaRN needed.
+    # 32768 — within native 262144; no YaRN needed.
     max_model_len: 32768
-    # qwen3_thinking_acc jinja2 — the thinking template (same as the Qwen3-8B a3
-    # production runs). This IS the dedicated Qwen3 thinking model → native fit.
-    # Leading ./ is load-bearing (forces file-path classification → resolves to
-    # an absolute PROJECT_ROOT path under the bind-mounted /e/scratch).
+    # Leading ./ is load-bearing (forces file-path classification → resolves to an
+    # absolute PROJECT_ROOT path under the bind-mounted /e/scratch).
     custom_chat_template_chat_completion_path: ./chat_templates/qwen3_thinking_acc.jinja2
-    # R3 routed_experts capture OFF (paired with fsdp_config.moe_router_replay=
-    # false). qwen3_moe capture over the vLLM overlay is unverified; TIS handles
-    # the rollout-vs-train correction. Flip BOTH to true together to enable R3
-    # as a follow-up after validating qwen3_moe capture.
+    # R3 OFF (paired with fsdp_config.moe_router_replay=false). qwen3_moe capture over
+    # the vLLM overlay is unverified; TIS handles the rollout-vs-train correction. Flip
+    # BOTH to true together to enable R3 after validating qwen3_moe capture.
     enable_return_routed_experts: false
 
 # Data paths
@@ -396,8 +330,7 @@ data:
   train_data: []
   val_data: []
 
-# K-actor rollout fan-out — ON (SkyRL default; breaks the single-event-loop GIL
-# ceiling). libuv asyncio-policy fix is already in coordinator __init__.
+# K-actor rollout fan-out — ON (breaks the single-event-loop GIL ceiling).
 rollout:
   fanout:
     enabled: true
@@ -407,39 +340,23 @@ rollout:
 # =============================================================================
 # Apptainer runtime container
 # =============================================================================
-# torch-2.11 / vLLM-0.20.2rc0 SIF + torchtitan-0.2.2 overlay (2026-06-13).
-# CORRECTED RUNTIME: commit cdacec7 ("align EP grouped-mm with torchtitan 0.2.2
-# API") rewrote the EP forward (moe.py::_run_experts_grouped_mm) to delegate
-# token dispatch to torchtitan 0.2.2's ExpertParallel._token_dispatch. That API
-# requires torch>=2.10 (torchtitan 0.2.2's __init__ imports
-# torch.nn.attention.varlen, absent on the torch-2.9 baked SIF). Running this on
-# skyrl_megatron_vllm_r3baked.sif (torch 2.9 / torchtitan 0.1.0) produced the
-# `matrix batch sizes have to match` grouped-mm crash on the policy forward, and
-# installing torchtitan 0.2.2 onto the 2.9 SIF GATE-FAILED at import (varlen).
-#   FIX = the existing torch-2.11 SIF, where torchtitan 0.2.2 imports cleanly:
-#     * sif: skyrl_megatron_vllm0202rc0_r3.sif  (vLLM 0.20.2rc0, torch 2.11.0)
-#     * overlays: skyrl_titan_overlay.img       (provides torchtitan 0.2.2)
-#   Probed + confirmed 2026-06-13: with this SIF+overlay (and the sif_pydeps
-#   0.1.0 torchtitan moved aside so PYTHONPATH falls through to the overlay's
-#   0.2.2), `import torchtitan`==0.2.2 + `from torchtitan.distributed.
-#   expert_parallel import ExpertParallel` succeed; torch==2.11.0+cu130.
+# torch-2.11 / vLLM-0.20.2rc0 SIF + torchtitan-0.2.2 overlay. torchtitan 0.2.2 needs
+# torch>=2.10 (imports torch.nn.attention.varlen, absent on the torch-2.9 baked SIF), so
+# this run uses the torch-2.11 SIF where torchtitan 0.2.2 imports cleanly.
+#   * sif:     skyrl_megatron_vllm0202rc0_r3.sif  (vLLM 0.20.2rc0, torch 2.11.0)
+#   * overlay: skyrl_titan_overlay.img             (provides torchtitan 0.2.2)
 #
-# Runtime wiring mirrors the Mixtral-8x7B run (#216), the first MoE multi-node
-# run on this SIF — the three torch-2.11 multi-node fixes (reference_new_sif_
-# torch211_multinode_fixes) live in extra_env below:
-#   * VLLM_USE_FLASHINFER_SAMPLER=0  — this SIF ships no flashinfer; vLLM
-#     0.20.2rc0 defaults the sampler ON and top-imports FlashInferBackend → crash
-#     before fallback. (ENVIRONMENT_MAP §2d gotcha.)
-#   * VLLM_ATTENTION_BACKEND=FLASH_ATTN + TRITON_LIBCUDA_PATH=/.singularity.d/libs
-#     — Triton JIT linker stub dir on GH200/aarch64. (§2d gotcha.)
-#   * NCCL_P2P_DISABLE=1 (+ collnet/nvls off) — cross-node scatter/all_reduce on
-#     this SIF's NCCL 2.28.9 IB P2P path fails Error 3 without it.
-# The vLLM-bind-removal (gmr_fix/capturer_fix DROPPED): on this SIF vLLM lives at
-# /opt/vllm_build/vllm/ (NOT dist-packages/vllm); binding into the non-existent
-# dist-packages path makes apptainer create an empty namespace dir that SHADOWS
-# the real vLLM → `cannot import name SamplingParams`. R3 capture is OFF here
-# anyway (enable_return_routed_experts=false, moe_router_replay=false), so these
-# patches are inert — drop them.
+# SIF env fixes (REQUIRED on this SIF, not model-specific) — see ENVIRONMENT_MAP §2d:
+#   * VLLM_USE_FLASHINFER_SAMPLER=0  — this SIF ships no flashinfer; vLLM 0.20.2rc0
+#     defaults the sampler ON and top-imports FlashInferBackend → crash before fallback.
+#   * VLLM_ATTENTION_BACKEND=FLASH_ATTN + TRITON_LIBCUDA_PATH=/.singularity.d/libs —
+#     Triton JIT linker stub dir on GH200/aarch64.
+#   * NCCL_P2P_DISABLE=1 (+ collnet/nvls off) — this SIF's NCCL 2.28.9 IB P2P path fails
+#     Error 3 on cross-node scatter/all_reduce without it.
+# The gmr_fix/capturer_fix R3-capture binds are DELIBERATELY OMITTED: on this SIF vLLM
+# lives at /opt/vllm_build/vllm/ (not dist-packages); binding into the non-existent
+# dist-packages path makes apptainer create a namespace dir that SHADOWS the real vLLM
+# → `cannot import name SamplingParams`. R3 capture is OFF here anyway, so inert.
 container:
   sif: /e/scratch/jureap59/feuer1/containers/skyrl_megatron_vllm0202rc0_r3.sif
   overlays:
@@ -447,24 +364,22 @@ container:
   binds:
     - /e/scratch
     - /e/data1
-    # gmr_fix / capturer_fix R3-capture single-file binds DELIBERATELY OMITTED on
-    # this SIF (would shadow /opt/vllm_build/vllm → import failure; see header).
+    # gmr_fix/capturer_fix binds DELIBERATELY OMITTED on this SIF (would shadow
+    # /opt/vllm_build/vllm → import failure; see header).
   pydeps: /e/scratch/jureap59/feuer1/sif_pydeps
   extra_env:
     SKYRL_GDN_MASK_FLA: 1
     PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
     APPTAINERENV_PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
-    # --- vLLM 0.20.2rc0 SIF env fixes (REQUIRED on this SIF, not model-specific) ---
+    # --- vLLM 0.20.2rc0 SIF env fixes (this SIF only) ---
     VLLM_USE_FLASHINFER_SAMPLER: 0
     VLLM_ATTENTION_BACKEND: FLASH_ATTN
     TRITON_LIBCUDA_PATH: /.singularity.d/libs
     APPTAINERENV_VLLM_USE_FLASHINFER_SAMPLER: 0
     APPTAINERENV_VLLM_ATTENTION_BACKEND: FLASH_ATTN
     APPTAINERENV_TRITON_LIBCUDA_PATH: /.singularity.d/libs
-    # --- Cross-node NCCL fix for the 0.20.2rc0 SIF (NCCL 2.28.9 IB P2P path:
-    # cross-node scatter/all_reduce FAIL Error 3 without P2P_DISABLE; root-caused
-    # on the Mixtral run, jobs 852358/368/369). Keep SHARP/NVLS disables
-    # (harmless) + DEBUG=INFO. Correctness-safe; config-local (this SIF only). ---
+    # --- Cross-node NCCL fix for this SIF (NCCL 2.28.9 IB P2P path fails without
+    #     P2P_DISABLE; keep SHARP/NVLS disables harmless + DEBUG=INFO) ---
     NCCL_COLLNET_ENABLE: 0
     NCCL_NVLS_ENABLE: 0
     NCCL_P2P_DISABLE: 1

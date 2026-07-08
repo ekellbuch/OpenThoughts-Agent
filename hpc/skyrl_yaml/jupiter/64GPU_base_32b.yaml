@@ -6,12 +6,9 @@ config_groups:
 
 # Terminal bench / agentic environment settings
 terminal_bench:
-  # trials_dir: Directory for Harbor trial artifacts (derived from experiments_dir if null)
   trials_dir: null
 
-  # Harbor configuration - schema-driven mapping to TrialConfig
   harbor:
-    # Agent settings
     name: terminus-2
     max_episodes: 999999
     enable_summarize: false
@@ -22,31 +19,23 @@ terminal_bench:
     record_terminal_session: false
     enable_pane_logging: false
 
-    # Strict JSON parser
     strict_json_parser: true
 
-    # Interleaved Thinking Settings
     interleaved_thinking: true
     extra_body:
       chat_template_kwargs:
         enable_thinking: true
-    # Long timeout for thinking models
+    # Long timeout for thinking models.
     override_timeout_sec: 1800
 
-    # Environment settings
     override_cpus: 1
     override_memory_mb: 2048
     override_storage_mb: 2048
 
-    # ==========================================================================
-    # AUTO SNAPSHOT: Reduce Daytona rate limits with hash-based snapshot caching
-    # ==========================================================================
     auto_snapshot: true
 
-    # Verifier settings
     verifier_override_timeout_sec: 120
 
-    # Retry settings
     max_retries: 3
     min_wait_sec: 60.0
     max_wait_sec: 600.0
@@ -61,18 +50,13 @@ terminal_bench:
 
     n_concurrent_trials: 300
 
-    # Logging settings
     log_level: INFO
 
-    # Reward shaping (disabled - binary rewards)
     enable_reward_shaping: false
 
-    # TIS (2026-06-12 baseline): request + store per-token rollout logprobs from
-    # vLLM. REQUIRED for trainer.algorithm.use_tis (trainer asserts non-null
-    # rollout_logprobs when use_tis=true). Inherited from 56GPU_seqnorm_tis.yaml.
+    # REQUIRED for trainer.algorithm.use_tis (asserts non-null rollout_logprobs).
     collect_rollout_details: true
 
-    # RLOO-N error classification
     enable_error_classification: true
     mask_exceptions:
       - DaytonaError
@@ -87,16 +71,13 @@ terminal_bench:
       - AgentTimeoutError
       - ContextLengthExceededError
 
-  # Model info for Harbor's hosted_vllm validation
   model_info:
     max_input_tokens: 32767
     max_output_tokens: 4096
 
   archiving:
-    # Enable trial archiving callback
     enabled: false
 
-  # Post-training trace upload to HuggingFace
   trace_upload:
     enabled: true
     repo_org: DCAgent
@@ -113,53 +94,44 @@ trainer:
     kl_loss_coef: 0.0
     eps_clip_low: 0.2
     eps_clip_high: 0.05
-    # seqnorm + TIS baseline (2026-06-12): inherited from 56GPU_seqnorm_tis.yaml,
-    # the more-stable default. Global-normed loss = length-unbiased,
-    # grad-accum-correct, and dead-group-dilution-free; TIS bounds the off-policy
-    # rollout-vs-train ratio. Requires collect_rollout_details: true (harbor block).
+    # seqnorm + TIS baseline (inherited from 56GPU_seqnorm_tis.yaml): global-normed loss
+    # is length-unbiased / grad-accum-correct / dead-group-dilution-free; TIS bounds the
+    # off-policy rollout-vs-train ratio. Requires collect_rollout_details: true.
     loss_reduction: seq_mean_token_sum_norm_global
     use_tis: true
     tis_imp_ratio_cap: 2.0
 
-  # Training loop settings
   epochs: 2
   max_steps: 60
   update_epochs_per_batch: 1
 
-  # Batch sizes
   train_batch_size: 64
   policy_mini_batch_size: 64
   eval_batch_size: 64
 
-  # Micro batch sizes — reduced for 32B memory
+  # Micro batch reduced for 32B memory.
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
 
   max_prompt_length: 999999
 
-  # Evaluation and checkpointing
   eval_interval: 999999
   eval_before_train: false
-  # Resumable checkpointing
   ckpt_interval: 1
   resume_mode: latest
-  # HF upload-ready checkpoints
   hf_save_interval: 5
-  # HuggingFace Hub upload (set via CLI: trainer.hf_hub_repo_id=org/repo)
+  # Set via CLI: trainer.hf_hub_repo_id=org/repo
   hf_hub_repo_id: null
   hf_hub_private: false
   hf_hub_revision: main
 
-  # Database registration (auto-registers trained model to Supabase)
   enable_db_registration: false
 
-  # Logging
   project_name: OpenThoughts-Agent
   log_level: INFO
   tracker_commit_each_step: true
   logger: console
 
-  # Paths
   run_name: null
   ckpt_path: null
   export_path: null
@@ -180,7 +152,7 @@ trainer:
       reshard_after_forward: true
       fsdp_size: 4
 
-  # Model placement (async training) - 16 shared GPUs for policy/ref
+  # 16 shared GPUs for policy/ref (4 nodes x 4).
   placement:
     colocate_all: false
     policy_num_nodes: 4
@@ -205,8 +177,8 @@ generator:
 
   gpu_memory_utilization: 0.85
 
-  # 512 workers / 24 engines = ~21.3 workers per engine.
-  # max_num_seqs must exceed this to avoid request queuing.
+  # 512 workers / 24 engines = ~21.3 workers/engine. max_num_seqs must exceed this to
+  # avoid request queuing.
   max_num_seqs: 24
   max_num_batched_tokens: 16384
 
@@ -231,20 +203,16 @@ generator:
 
   engine_init_kwargs:
     max_model_len: 32768
-    # Interleaved thinking chat template: preserves <think> blocks on ALL
-    # historical assistant turns (stock Qwen3 template strips them).
+    # Preserves <think> blocks on ALL turns (stock template strips them).
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
 
 data:
   train_data: []
   val_data: ["open-thoughts/OpenThoughts-TB-dev"]
 
-# K-actor rollout fan-out (default OFF — behavior-identical to today when off).
-# To enable for the smoke test set rollout.fanout.enabled: true (K=4 below).
-# Per-coordinator derived values at K=4 with n_concurrent_trials: 300:
-#   n_concurrent_trials // 4 = 75 per coordinator
-#   connection_pool_maxsize // 4 (only if environment.kwargs sets it; unset here)
-# cpus_per_coordinator: 8 is comfortable on Jupiter's 288-core GH200 nodes.
+# K-actor rollout fan-out — OFF (behavior-identical to today when off). To enable for a
+# smoke test set enabled: true (K=4: n_concurrent_trials//4 = 75/coordinator).
+# cpus_per_coordinator 8 is comfortable on Jupiter's 288-core GH200 nodes.
 rollout:
   fanout:
     enabled: false

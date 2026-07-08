@@ -2,11 +2,14 @@
 name: docs-deslop
 description: >-
   Condense and clarify an operational/research doc (SKILL.md, ops.md, tracker, README,
-  agent_log) by an editor-subagent dispatched with fresh context and a list of file paths
-  to review. The editor MOVES information to a concept-ordered taxonomy with functional
-  subsections, then cuts paragraph-by-paragraph: stale gotchas + their corrections,
-  deprecated features, rationalizations/justifications for actions (docs say WHAT to do,
-  not WHY), partially-redundant sections, and flowery language. CONDENSE AND CLARIFY ONLY
+  agent_log) OR the COMMENTS of a launch/config YAML (.yaml/.yml) by an editor-subagent
+  dispatched with fresh context and a list of file paths to review. The editor MOVES
+  information to a concept-ordered taxonomy with functional subsections, then cuts
+  paragraph-by-paragraph: stale gotchas + their corrections, deprecated features,
+  rationalizations/justifications for actions (docs say WHAT to do, not WHY),
+  partially-redundant sections, and flowery language. For YAML files: edit ONLY the `#`
+  comment lines — every key, value, flag, list element, and the structural whitespace must
+  stay byte-identical (the config is re-parsed as-is at launch). CONDENSE AND CLARIFY ONLY
   — never add or elaborate. Backs up every doc to ~/Documents/slop_docs/ before editing
   (dated + original filename), then leans toward OVER-condensing (backups exist). Returns
   a per-doc percent-shortened count + a brief overview of what was compressed for the
@@ -39,8 +42,10 @@ From the dispatching supervisor you receive:
 | **List of doc paths** to edit | yes | absolute or repo-relative; one or many |
 | Scope constraints (optional) | no | e.g. "only the Guardrails section", "leave the worked example" — if none given, the whole doc is in scope |
 
-If a path does not exist or is not a doc (`.md`/`.txt`), report it back unchanged with a
-note — do not guess or create files.
+Accepted file types: `.md`/`.txt` (free-form docs — edit the body), and `.yaml`/`.yml`
+(config/launch files — edit ONLY the `#` comments, never the keys/values; see §2). If a
+path does not exist or is none of these, report it back unchanged with a note — do not
+guess or create files.
 
 ---
 
@@ -70,6 +75,12 @@ errors loudly — no silent skip).
 Read the whole doc end to end first. Then **move** existing content into a concept-ordered
 structure. The goal is a document a reader can **scan and reference** — find the right
 section fast, read only what they need.
+
+> **For YAML files this pass is mostly a no-op:** a YAML's section order is fixed by the
+> SkyRL/Hydra schema, so you cannot reorder keys/blocks. Skip to §2 (condense). The one
+> reorganize action available is **promoting** a buried load-bearing comment up to sit
+> next to the key it governs (e.g. a divisibility note hoisted to the top of a comment
+> block above its `fsdp_size:` line).
 
 **Order by CONCEPT, not chronology.** Most docs accrete in the order things were learned
 ("first we hit X, then Y, then the fix for X…"). That serves the author, not the reader.
@@ -117,6 +128,14 @@ un-edit, while one that comes back too loose wastes the whole pass.
 | **Flowery language** | Hedging ("it might be worth considering whether…"), throat-clearing intros/conclusions, emphatic adverbs, metaphor, rhetorical questions | Replace with the direct statement. The reader wants the rule, not the mood. |
 
 **Condensing rules:**
+- **For YAML files: edit ONLY the `#` comment lines.** Every key name, value, flag, list
+  item, inline value, and the indentation/structural whitespace must remain byte-identical
+  to the backup — the config is re-parsed verbatim at launch. You cut/tighten prose in
+  comments; you never touch the YAML data. (This is the YAML-specific license: it lets you
+  be aggressive on comments with zero risk to the experiment.) Keep any comment that is
+  load-bearing — a non-obvious flag rationale a reader will violate, a divisibility/memory
+  check that justifies a value, a gotcha naming a real failure mode and its fix — and cut
+  the rest (history, reverted experiments, dead job numbers, "we do X because" essays).
 - **Preserve every load-bearing technical fact:** exact commands, flag names, paths,
   thresholds, IDs, version numbers, the literal strings to grep for. These are the point
   of the doc. Condense the prose *around* them, never the facts themselves.
@@ -179,6 +198,10 @@ review — aggressive cuts warrant a second look.
   author's narrative.
 - **Preserve load-bearing facts.** Commands, flags, paths, thresholds, IDs, literal grep
   strings, version pins — these are non-negotiable. Condense prose, never facts.
+- **For YAML: comments only, config byte-identical.** Edit `#` comment lines; never change
+  a key, value, flag, list element, or structural whitespace. The parsed config must match
+  the backup exactly. Verify by re-parsing both after the edit (e.g. `python -c "import
+  yaml,sys; yaml.safe_load(open(sys.argv[1]))"` on each) and by diffing the keys/values.
 - **One doc at a time.** Back up → reorganize → condense → report, then move to the next.
   Don't batch edits across docs (a half-edited doc is hard to reason about).
 - **Don't touch frontmatter or the repo's structural conventions** (`---` YAML, `# <name>`
