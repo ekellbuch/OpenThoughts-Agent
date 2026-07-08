@@ -74,7 +74,7 @@ status substring: confirm you're matching the agent's output, not the system/use
 Local, otagent python, HF token sourced; full-dataset tokenization of ~10k multi-turn traces is a
 few minutes → background it:
 ```bash
-source "$DC_AGENT_SECRET_ENV"
+source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
 /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python scripts/analysis/<script>.py   # run_in_background
 ```
 First run downloads + caches the parquet (~hundreds of MB). A benign `'NoneType' has no attribute

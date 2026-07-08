@@ -91,7 +91,7 @@ Run the standard Leonardo preamble (ops.md), then pre-stage offline data:
 ```bash
 ssh Leonardo                              # step-ca cert; 2FA once, socket ~8h (ops.md)
 # preamble: conda activate otagent; cd $WORK/code/OpenThoughts-Agent; git pull;
-#           source hpc/dotenv/leonardo.env && source ~/secrets.env  (ops.md)
+#           source hpc/dotenv/leonardo.env && source "$DC_AGENT_SECRET_ENV"  (ops.md)
 cd /leonardo_work/AIFAC_5C0_290/bfeuer00/code/MarinSkyRL && GIT_TERMINAL_PROMPT=0 git pull
 # Pre-stage on the LOGIN node (compute has no internet):
 hf download Qwen/Qwen2.5-1.5B-Instruct    # → $WORK/data/hub  (the model the cell uses)

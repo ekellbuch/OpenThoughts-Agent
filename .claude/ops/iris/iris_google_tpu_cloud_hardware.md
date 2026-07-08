@@ -3,16 +3,14 @@
 ## v5p-32
 
 v5p-32 slice composition (from iris workers table):
-- 4 workers (= 4 hosts), each with total_tpu_count=4 chips, chips_per_host_bounds=2,2,1
-- 16 chips total per slice (confirms the [v5p_naming_cores_not_chips] memory: v5p-N = N cores = N/2 chips)
-- Per-host DRAM: 464.7 GB; per-host CPU: 207 cores
+- 4 workers (= 4 hosts), each total_tpu_count=4 chips, chips_per_host_bounds=2,2,1 → **16 chips/slice**
+  (confirms [v5p_naming_cores_not_chips]: v5p-N = N cores = N/2 chips)
+- Per-host: 464.7 GB DRAM, 207 CPU cores
 
-Per-chip v5p spec (Google public datasheet):
+Per-chip v5p spec (Google datasheet):
 - 95 GiB HBM2e, 2765 GB/s bandwidth
-- 459 TFLOPs/s bf16
-- 918 TOPS int8
-- (No native FP8 — that's a v6e thing. Our Qwen122B-FP8 weights get dequantized to bf16 before matmul on v5p, so the
-relevant compute number is the bf16 one.)
+- 459 TFLOPs/s bf16 · 918 TOPS int8
+- No native FP8 (a v6e feature). Qwen122B-FP8 weights dequantize to bf16 before matmul on v5p, so bf16 is the relevant compute number.
 
 v5p-32 slice totals:
 
@@ -32,11 +30,10 @@ v5p-32 slice totals:
 
 ## v6e-8
 
-Per-chip v6e (Trillium) spec from Google's public datasheet:
+Per-chip v6e (Trillium) spec (Google datasheet):
 - 32 GiB HBM3, 1640 GB/s bandwidth
-- 918 TFLOPs/s bf16 
-- 1836 TOPS int8
-- Native FP8 support at 1836 TFLOPs/s (this is where v6e beats v5p — v5p has no native FP8, must dequantize to bf16)
+- 918 TFLOPs/s bf16 · 1836 TOPS int8
+- Native FP8 at 1836 TFLOPs/s — v6e's edge over v5p (which must dequant FP8 to bf16)
 
 v6e-8 slice totals (8 chips, single host):
 
@@ -72,6 +69,17 @@ v6e-8 vs v5p-32 — same nominal bf16 throughput, very different memory:
 │ host DRAM     │ 1,410 GiB               │ 1,859 GiB (across 4)          │
 └───────────────┴─────────────────────────┴───────────────────────────────┘
 
-This is exactly why 122B-FP8 fits on v5p-32 but not v6e-8 (per memory [v6e8_cannot_fit_122b_fp8]): 122B weights × 1
-byte ≈ 122 GiB > the 256 GiB v6e-8 budget once you subtract activations, MoE fixed footprint, and compile-time peaks.
-v5p-32 gives you 6× the HBM at the cost of multi-host coordination, no FP8 native, and ~3× the per-chip HBM bandwidth.
+This is why 122B-FP8 fits on v5p-32 but not v6e-8 [memory: v6e8_cannot_fit_122b_fp8]: 122B weights × 1
+byte ≈ 122 GiB > the 256 GiB v6e-8 budget once activations, MoE fixed footprint, and compile-time peaks
+are subtracted. v5p-32 gives 6× the HBM at the cost of multi-host coordination, no native FP8, and ~3×
+lower per-chip HBM bandwidth.
+
+## Serving gotcha — prefer single-host DP=1 (marin#6136 multi-host decode bug)
+
+⚠️ **Multi-host TPU serving hits a decode bug (marin#6136)** that forces `max_num_seqs` down (e.g.
+seqs=2), crippling throughput. **Single-host `DP=1` dodges it entirely.** For 122B-FP8 @131k the
+validated operating point is **v5p-8 A2: TP=4 / DP=1 / EP-on / max_num_seqs=32, fp8 kv**,
+`--load-format runai_streamer`, `MODEL_IMPL_TYPE=vllm` — ~600 mean / 794 peak gen tok/s, **199
+tok/s per chip** (best per-chip efficiency), decode-CLEAN. For aggregate throughput run keep-N
+single-host jobs in parallel rather than one multi-host slice. (`v5p-8` = 4 chips, so TP=4 is the
+per-chip ceiling — see the CORES-not-chips note in `iris_job_lifecycle.md` §1.)

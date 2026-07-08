@@ -2,34 +2,31 @@
 
 Hardware datasheet for the CoreWeave GPU cluster reached via iris (the x86/H100 analogue of
 `iris_google_tpu_cloud_hardware.md`). **Ops/access/scheduling live in `coreweave_gpu_ops.md`** — this
-file is the chip/node hardware reference (specs that inform RL geometry: per-GPU HBM, bandwidth, FLOPs,
-NVLink/IB topology). Cluster-observed facts are marked `[obs]`; the rest is the NVIDIA H100-SXM5 datasheet.
+file is the chip/node hardware reference. Cluster-observed facts are marked `[obs]`; the rest is the NVIDIA H100-SXM5 datasheet.
 
 ## H100x8 (the only node shape here)
 
-`cw-us-east-02a` is homogeneous: **one node shape, requested whole-node-exclusive** (`H100x8`, one iris
+`cw-us-east-02a` is homogeneous: **one node shape, whole-node-exclusive** (`H100x8`, one iris
 task per node, no co-tenants). `[obs]`
 
-Node composition `[obs]` (from `coreweave_gpu_ops.md` + launch experience):
-- **8× NVIDIA H100-80GB SXM5** per node, **x86_64** host (NOT aarch64/GH200 — contrast Jupiter).
-- **~128 CPU cores/node**, but **~64–68 are persistent system/daemonset overhead** → only ~48–60 free
-  (this is why `--cpu 48` admits a multi-node gang and `--cpu 64` does not).
-- **~2 TB host DRAM/node** allocatable (the `--disk 512GB` / 512 GB-RAM-class requests fit easily).
-- **NVLink (NVSwitch) intra-node + InfiniBand inter-node.** A TP=8 vLLM engine places **intra-node on one
-  8-GPU node** over NVLink (no cross-node TP) — the placement Jupiter's 4-GPU GH200 nodes could never give
-  the MoE DCP=2 arm.
-- **~36 H100 nodes total** in the cluster `[obs]` → a hard ceiling of ~4 simultaneous 8-node gangs (minus
-  other tenants).
+Node composition `[obs]`:
+- **8× NVIDIA H100-80GB SXM5** per node, **x86_64** host (NOT aarch64/GH200).
+- **~128 CPU cores/node**; **~64–68 are system/daemonset overhead** → ~48–60 free (why
+  `--cpu 48` admits a multi-node gang and `--cpu 64` does not).
+- **~2 TB host DRAM/node** allocatable.
+- **NVLink (NVSwitch) intra-node + InfiniBand inter-node.** A TP=8 vLLM engine places
+  intra-node on one 8-GPU node (no cross-node TP).
+- **~36 H100 nodes total** `[obs]` → ceiling ~4 simultaneous 8-node gangs (minus other tenants).
 
-Per-chip **H100-80GB SXM5** spec (NVIDIA public datasheet; compute = **dense**, the regime our matmuls use —
-we don't run 2:4 structured sparsity, so the sparsity-doubled figures are not the relevant ones):
+Per-chip **H100-80GB SXM5** spec (NVIDIA datasheet; dense regime — we don't run 2:4 sparsity, so
+sparsity-doubled figures don't apply):
 - **80 GiB HBM3, 3.35 TB/s** bandwidth
 - **bf16 / fp16 tensor: ~989 TFLOPs/s** dense (1979 w/ sparsity)
-- **FP8 tensor: ~1979 TFLOPs/s** dense (3958 w/ sparsity) — Hopper has native FP8 (Transformer Engine)
+- **FP8 tensor: ~1979 TFLOPs/s** dense (3958 w/ sparsity) — native FP8 (Transformer Engine)
 - **int8 tensor: ~1979 TOPS** dense
 - **TF32 tensor: ~495 TFLOPs/s** dense · **FP64 tensor: ~67 TFLOPs/s**
-- **NVLink: 900 GB/s** per GPU (4th-gen, bidirectional, full all-to-all via NVSwitch on-node)
-- 700 W TDP · **compute capability sm_90** (Hopper → `TORCH_CUDA_ARCH_LIST="9.0"` for from-source builds)
+- **NVLink: 900 GB/s** per GPU (4th-gen, full all-to-all via NVSwitch on-node)
+- 700 W TDP · **sm_90** (Hopper → `TORCH_CUDA_ARCH_LIST="9.0"` for from-source builds)
 
 H100x8 node totals:
 
@@ -55,34 +52,30 @@ H100x8 node totals:
 
 ## Interconnect (what shapes the parallelism)
 
-- **Intra-node = NVLink/NVSwitch, 900 GB/s/GPU, full all-to-all.** This is why TP=8 (and TP=8 + DCP=2)
-  belongs ON ONE NODE: the decode/EP all-reduce + all-to-all ride NVLink, not the slower fabric. **Use NCCL
-  defaults** — the GH200/SIF disables (`NCCL_P2P_DISABLE` / `NVLS=0` / `COLLNET=0`) would cripple this
-  on-node path. *(The 2026-06-27 doubt that these disables were the MoE-salad cause was FALSIFIED by A/B r9.
-  The salad was RESOLVED as the FusedMoE `w13` gate/up swap not re-applied on the disaggregated RL weight
-  update — fixed by `SKYRL_W13_RELOAD_BRACKET` (MarinSkyRL `2bb70a88`), NOT an NCCL knob. See
-  `agent_logs/2026-06-27_coreweave_moe_ep_garbage_debug_cycle.md`.)*
-- **Inter-node = InfiniBand**, gang-scheduled within a single IB leaf fabric (Kueue `topology 'infiniband'`,
-  all-or-nothing — see `coreweave_gpu_ops.md` Scheduling). Typical CoreWeave H100 config is **8× 400 Gb/s
-  NDR** (one NIC/GPU, GPUDirect RDMA) ≈ 3.2 Tb/s/node — *not independently re-measured on `cw-us-east-02a`,
-  treat the exact NDR rate as datasheet-typical until confirmed.* Cross-node collectives (FSDP all-gather/
-  reduce-scatter on the policy mesh, inter-engine) go over IB → keep TP intra-node and shard the *slower*
-  axes (FSDP/CP) across nodes.
+- **Intra-node = NVLink/NVSwitch, 900 GB/s/GPU, full all-to-all.** TP=8 (and TP=8 + DCP=2)
+  belongs ON ONE NODE: decode/EP all-reduce + all-to-all ride NVLink, not the slower fabric.
+  **Use NCCL defaults** — the GH200/SIF disables (`NCCL_P2P_DISABLE` / `NVLS=0` / `COLLNET=0`)
+  would cripple this on-node path.
+- **Inter-node = InfiniBand**, gang-scheduled in one IB leaf fabric (Kueue `topology 'infiniband'`,
+  all-or-nothing — see `coreweave_gpu_ops.md`). Typical CoreWeave H100 config is **8× 400 Gb/s
+  NDR** (one NIC/GPU, GPUDirect RDMA) ≈ 3.2 Tb/s/node — *datasheet-typical, not re-measured on
+  `cw-us-east-02a`.* Cross-node collectives (FSDP all-gather/reduce-scatter on the policy mesh,
+  inter-engine) go over IB → keep TP intra-node, shard the slower axes (FSDP/CP) across nodes.
 
 ## How this informs RL geometry (the practical upshot)
 
-- **640 GiB HBM/node** comfortably hosts a TP=8 vLLM engine for a 30B–35B-class MoE at long context: e.g. the
-  131k MoE arm runs **4 engines × TP=8 / DCP=2** (32 inference GPU = 4 nodes) — each engine = one node, KV +
-  weights well under 640 GiB at `gpu_memory_utilization 0.80`. (Contrast Jupiter's 4-GPU/96 GiB GH200 nodes,
-  which forced DCP=1 and made TP=8 unplaceable.)
-- **H100-80GB < GH200-96GB HBM** → when porting a GH200 config, the per-GPU memory budget tightens: drop
-  `gpu_memory_utilization` (0.80→0.75) / `max_num_seqs` first on a KV-bind OOM (config-authoring detail in
-  the launch skill §4).
-- The **~2 TB host DRAM** is generous for `cpu_offload` — but note host-RAM OOM at FSDP weight-load on the
-  policy nodes is still possible at 131k + EP8 + offload (observed on a 30B run); reduce `n_concurrent` /
-  the rollout-worker count if it recurs.
-- **sm_90** everywhere → any from-source build (vLLM fork, flash-attn) targets `TORCH_CUDA_ARCH_LIST="9.0"`
-  (the gpu-rl image bakes this; see `build-gpu-rl-image-iris`).
+- **640 GiB HBM/node** hosts a TP=8 vLLM engine for a 30B–35B-class MoE at long context: the
+  131k MoE arm runs **4 engines × TP=8 / DCP=2** (32 inference GPU = 4 nodes) — each engine one
+  node, KV + weights under 640 GiB at `gpu_memory_utilization 0.80`. (Contrast Jupiter's
+  4-GPU/96 GiB GH200 nodes, which forced DCP=1 and made TP=8 unplaceable.)
+- **H100-80GB < GH200-96GB HBM** → porting a GH200 config, the per-GPU budget tightens: drop
+  `gpu_memory_utilization` (0.80→0.75) / `max_num_seqs` first on a KV-bind OOM (config-authoring
+  detail in the launch skill §4).
+- **~2 TB host DRAM** is generous for `cpu_offload`, but host-RAM OOM at FSDP weight-load on the
+  policy nodes is still possible at 131k + EP8 + offload (observed on a 30B run); reduce
+  `n_concurrent` / the rollout-worker count if it recurs.
+- **sm_90** everywhere → from-source builds (vLLM fork, flash-attn) target
+  `TORCH_CUDA_ARCH_LIST="9.0"` (baked in the gpu-rl image; see `build-gpu-rl-image-iris`).
 
 ## Cross-reference
 - **Access / scheduling / KUBECONFIG / build / monitoring** → `coreweave_gpu_ops.md`.

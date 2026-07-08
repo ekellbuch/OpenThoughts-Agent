@@ -171,7 +171,7 @@ defaults to **daytona** (the only sandbox backend that works on iris workers).
 ```bash
 cd /Users/benjaminfeuer/Documents/OpenThoughts-Agent
 source /Users/benjaminfeuer/miniconda3/etc/profile.d/conda.sh && conda activate otagent
-source "$DC_AGENT_SECRET_ENV"
+source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
 TS=$(date +%Y%m%d-%H%M%S)
 python eval/cloud/launch_eval_iris.py \
   --preset <name> \                                  # e.g. swebench, tb2 — seeds dataset + concurrency + parser

@@ -1,6 +1,5 @@
-Node composition: 4× NVIDIA GH200 Grace-Hopper superchips, all coupled within a single chassis. Each superchip = 1×
-Hopper H100 GPU + 1× NVIDIA Grace CPU joined by NVLink-C2C. Single OS image (one Linux node), so a node-local job sees
-4 GPUs on one host.
+Node composition: 4× NVIDIA GH200 Grace-Hopper superchips in a single chassis. Each superchip = 1× Hopper H100 GPU +
+1× NVIDIA Grace CPU joined by NVLink-C2C. Single OS image — a node-local job sees all 4 GPUs on one host.
 
 Per-superchip (one of four in a node):
 - H100 GPU: 96 GB HBM3 @ 4 TB/s
@@ -15,6 +14,10 @@ Per-chip H100 compute (NVIDIA H100 SXM5 datasheet, dense — no sparsity):
 - INT8: 1979 TOPS
 - TF32: 495 TFLOPs/s
 - FP32 (CUDA cores): 67 TFLOPs/s
+
+Native FP8 compute means weights run at 1979 TFLOPs/s/GPU (vs v5p having to dequant to
+989-equivalent bf16). In compute-bound regimes (high `max_num_seqs`), Jupiter should beat
+v5p-32 outright per chip and roughly tie per node — but with the bonus of no multi-host ICI cost.
 
 Whole-node totals (× 4 superchips):
 
@@ -41,10 +44,6 @@ Whole-node totals (× 4 superchips):
 Intra-node interconnect:
 - GPU↔GPU (NVLink 4): 300 GB/s bidirectional between any pair, all-to-all
 - CPU↔CPU (cNVLink): 200 GB/s bidirectional
-- CPU↔GPU (NVLink-C2C, intra-superchip): 900 GB/s — note this is the "superchip" win, ~7× a PCIe Gen5 x16 link
+- CPU↔GPU (NVLink-C2C, intra-superchip): 900 GB/s — ~7× a PCIe Gen5 x16 link
 
-- Native FP8 compute means weights run at 1979 TFLOPs/s/GPU (vs v5p having to dequant to 989-equivalent bf16). In
-compute-bound regimes (high max_num_seqs), Jupiter should beat v5p-32 outright per chip and roughly tie per node — but
-with the bonus of no multi-host ICI cost.
-- Grace LPDDR5X is unified-addressable from the GPU (HMM), so for streaming-large-weights scenarios you can in
-principle fault-in across the 900 GB/s C2C link — relevant for the larger MoE checkpoints you can't fit purely in HBM.
+- Grace LPDDR5X is unified-addressable from the GPU (HMM) — large MoE checkpoints that exceed HBM can fault-in across the 900 GB/s C2C link.

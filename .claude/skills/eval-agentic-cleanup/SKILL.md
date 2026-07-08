@@ -186,7 +186,7 @@ Pass the **`trace_jobs/<RUN_TAG>`** path (where Harbor writes the `<task>__<id>`
 `eval_jobs/<RUN_TAG>` (that only has `meta.env`). The script auto-resolves nested trial subdirs and
 auto-detects agent/model/benchmark from job metadata.
 ```bash
-source ~/secrets.env   # needs SUPABASE_URL, SUPABASE_ANON_KEY, HF_TOKEN
+set -a; source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"; set +a   # needs SUPABASE_URL, SUPABASE_ANON_KEY, HF_TOKEN
 cd <OpenThoughts-Agent>
 python scripts/database/manual_db_eval_push.py --job-dir trace_jobs/<RUN_TAG> --verbose
 #   --hf-repo DCAgent2/<RUN_TAG>-traces   # explicit HF repo

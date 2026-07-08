@@ -18,7 +18,7 @@ cluster), and **filter by your own username for any write** (see Guardrails).
 
 ```bash
 cd /Users/benjaminfeuer/Documents
-set -a; source secrets.env; set +a      # SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (+ ANON_KEY, HF_TOKEN)
+set -a; source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"; set +a   # SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (+ ANON_KEY, HF_TOKEN)
 /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python - <<'PY'
 import os
 from supabase import create_client
@@ -414,4 +414,4 @@ but `stats` does NOT have per-task timeouts or turns.
 ## Operating notes (folded from memory 2026-06-14)
 
 - **Always filter bulk sandbox_jobs deletes/updates by username** — `.eq("username", "bfeuer00")`. NEVER delete all rows matching a status without the username filter (once deleted 95 Pending/Started rows across ALL users). Never assume a shared table's rows all belong to one user.
-- **Run Supabase queries on the LOCAL Mac, not via `ssh Leonardo`** (~10s/query SSH round-trip saved): `source "$DC_AGENT_SECRET_ENV"` for `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`, run with the `supabase` client (fall back to `/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python` if not installed locally). Only use the cluster when the data lives there.
+- **Run Supabase queries on the LOCAL Mac, not via `ssh Leonardo`** (~10s/query SSH round-trip saved): `source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV first}"` for `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`, run with the `supabase` client (fall back to `/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python` if not installed locally). Only use the cluster when the data lives there.

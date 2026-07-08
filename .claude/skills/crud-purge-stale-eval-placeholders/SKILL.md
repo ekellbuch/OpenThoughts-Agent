@@ -33,7 +33,7 @@ Run from the Mac with the `otagent` env; source the local secrets (sets `SUPABAS
 
 ```bash
 cd /Users/benjaminfeuer/Documents
-set -a; source secrets.env; set +a
+set -a; source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"; set +a
 /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python - <<'PY'
 import os
 from supabase import create_client

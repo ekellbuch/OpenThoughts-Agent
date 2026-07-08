@@ -128,7 +128,7 @@ baked from source at the intended commit, with the cache guaranteed busted, ever
 ## 3. The launch command (verbatim shape)
 
 ```bash
-source "$DC_AGENT_SECRET_ENV"                                     # or /Users/benjaminfeuer/Documents/secrets.env
+source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
 export KUBECONFIG=~/.kube/coreweave-iris-gpu                      # HARD prereq (see ops doc)
 IRIS=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris        # the cw-capable (otagent-env) iris binary
 GHCR_TOKEN=$(gh auth token)                                       # GitHub PAT, NOT the Docker Hub DOCKER_TOKEN
@@ -248,7 +248,7 @@ it's a third-party install, not first-party `/app` code.)
   clean on `penfever/working` (datagen rescues depend on it).
 - **PINNED-first, promote-after-smoke.** Never push straight to floating `:tpu`; other users' live datagen/eval
   jobs pull it.
-- **`source /Users/benjaminfeuer/Documents/secrets.env`** (or `$DC_AGENT_SECRET_ENV`); NEVER echo secret
+- **`source "$DC_AGENT_SECRET_ENV"`**; NEVER echo secret
   values. ghcr = `gh auth token`, not Docker Hub `DOCKER_TOKEN`.
 - **Never `iris cluster restart`/stop/bounce** (kills every running job). The build job is its own iris job;
   `iris job kill /benjaminfeuer/tpu-kaniko-<gitsha>` is job-scoped (with permission).

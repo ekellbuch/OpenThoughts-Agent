@@ -67,7 +67,7 @@ You need, from the dispatching supervisor (ask only if genuinely missing — mos
 
 **Environment (CoreWeave example — adapt per `ops/<cluster>`):**
 ```bash
-source "$DC_AGENT_SECRET_ENV"          # HF/WANDB/DAYTONA (+ R2 creds injected pod-side)
+source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"   # HF/WANDB/DAYTONA (+ R2 creds injected pod-side)
 export KUBECONFIG=~/.kube/coreweave-iris-gpu                # HARD prereq — Mac default points at the WRONG cluster
 PY=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python  # otagent env (symlinks fail in the sandbox)
 IRIS=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris  # NOT the marin .venv iris (broken kubernetes import)

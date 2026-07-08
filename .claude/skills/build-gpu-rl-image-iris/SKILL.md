@@ -113,7 +113,7 @@ The build job uses **kaniko** (`gcr.io/kaniko-project/executor`), NOT buildkit/`
 ## 3. The launch command (verbatim shape)
 
 ```bash
-source "$DC_AGENT_SECRET_ENV"
+source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
 export KUBECONFIG=~/.kube/coreweave-iris-gpu                       # HARD prereq (see ops doc)
 IRIS=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris        # the cw-capable (otagent-env) iris binary
 GHCR_TOKEN=$(gh auth token)                                       # GitHub PAT, NOT the Docker Hub DOCKER_TOKEN

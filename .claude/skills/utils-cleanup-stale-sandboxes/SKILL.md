@@ -30,9 +30,9 @@ Delete stale Daytona sandboxes across all three orgs in a single pass.
 | **DataCompData** | `DAYTONA_DATA_API_KEY` | Datagen (trace-generation rollouts) |
 | **DataCompRL** | `DAYTONA_RL_API_KEY` | RL (SkyRL/GRPO agentic rollouts) |
 
-All three env vars are set by sourcing `secrets.env` (locally at
-`~/Documents/secrets.env`; on clusters at `$SCRATCH/keys.env` or equivalent —
-see `.claude/secret.md`). The script's `--api-key-env` flag tells it which env
+All three env vars are set by sourcing `$DC_AGENT_SECRET_ENV` (locally on the Mac;
+on clusters at `$SCRATCH/keys.env` or equivalent — see `.claude/secret.md`). The
+script's `--api-key-env` flag tells it which env
 var to read, so each invocation queries + deletes in the correct org.
 
 ## How to invoke
@@ -40,7 +40,7 @@ var to read, so each invocation queries + deletes in the correct org.
 **Locally (Mac)** — uses the otagent conda env's Python:
 
 ```bash
-source ~/Documents/secrets.env
+set -a; source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"; set +a
 
 PY=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python
 SCRIPT=scripts/daytona/cleanup_stale_sandboxes.py
@@ -80,7 +80,7 @@ THRESHOLD=120
 
 ## Gotchas
 
-- **Must source `secrets.env` first** — all three `DAYTONA_*` env vars must be
+- **Must source `$DC_AGENT_SECRET_ENV` first** — all three `DAYTONA_*` env vars must be
   set before running the loop, or the script will exit with
   `ERROR: ... not set in environment`.
 - **Run from the otagent env** — the `daytona` SDK must be installed (it is in

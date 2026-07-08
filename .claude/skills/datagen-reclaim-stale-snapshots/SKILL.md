@@ -54,7 +54,7 @@ Always **audit (read-only) first**, then delete.
 ```bash
 cd /Users/benjaminfeuer/Documents/OpenThoughts-Agent
 source /Users/benjaminfeuer/miniconda3/etc/profile.d/conda.sh && conda activate otagent
-source "$DC_AGENT_SECRET_ENV"
+source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
 PY=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python
 SCRIPT=scripts/daytona/daytona_snapshot_manager.py
 
@@ -84,7 +84,7 @@ completed jobs. Raise it if you want to be more conservative.
 
 ## Gotchas
 
-- **Source `secrets.env` + otagent env** — the `daytona` SDK lives in the otagent
+- **Source `$DC_AGENT_SECRET_ENV` + otagent env** — the `daytona` SDK lives in the otagent
   conda env; use the full interpreter path.
 - **Never pass `--name-prefix ''`** with `--delete-stale` — that would make base
   images deletable. The tool is safe only with the `harbor__` default.

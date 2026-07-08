@@ -44,7 +44,7 @@ For **eval** jobs use the **eval-agentic-launch-iris** skill instead.
 ```bash
 cd /Users/benjaminfeuer/Documents/OpenThoughts-Agent
 source /Users/benjaminfeuer/miniconda3/etc/profile.d/conda.sh && conda activate otagent
-source "$DC_AGENT_SECRET_ENV"
+source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
 TS=$(date +%Y%m%d-%H%M%S)
 python data/cloud/launch_tracegen_iris.py \
   --harbor_config hpc/harbor_yaml/datagen/ctx32k_verified.yaml \
@@ -122,7 +122,7 @@ exists before rescuing:
 **Rescue banked traces** (any terminal job whose repo did NOT auto-create — e.g.
 killed, OOM, or pre-`ae085bc8` image). Rsync the GCS job dir local, then push:
 ```bash
-source "$DC_AGENT_SECRET_ENV"
+source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
 gsutil -m rsync -r gs://marin-models-us/ot-agent/<job>/<job>/ /tmp/<job>_traces/
 /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python \
   /Users/benjaminfeuer/Documents/OpenThoughts-Agent/scripts/harbor/make_and_upload_trace_dataset.py \
@@ -136,7 +136,7 @@ gsutil -m rsync -r gs://marin-models-us/ot-agent/<job>/<job>/ /tmp/<job>_traces/
 shared `cli` org, delete ONLY broken (`MISSING`-state) `harbor__*` snapshots
 (never `ACTIVE` ones — those may belong to running jobs, yours or a teammate's):
 ```bash
-source "$DC_AGENT_SECRET_ENV"
+source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
 /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python - <<'PY'
 import os
 from hpc.snapshot_manager import _parse_org_arg, _SnapshotManager, list_snapshots
@@ -151,6 +151,12 @@ PY
 Do NOT run the broad `cleanup_unused_snapshots` against the shared `cli` org — it
 deletes by your task set and would remove teammates' ACTIVE snapshots.
 
+When the org is at cap with **0 MISSING** (all ACTIVE) but many `harbor__` are idle
+leftovers of completed jobs, use the idle-gated reclaim (safe; spares live/teammate +
+base snapshots) via the **datagen-reclaim-stale-snapshots** skill:
+`daytona_snapshot_manager.py --name-prefix harbor__ --stale-days 0.0833 --delete-stale`
+(~2h idle gate; the 3-hourly cron routinely reclaims 15–34/tick on the shared `cli` org).
+
 **Stuck PENDING** (no v5p-8 capacity): report it and relaunch UNPINNED (the
 `--gcs-output-dir gs://marin-models-us/ot-agent` flag above). Kill the stuck
 submission first only with user permission.
@@ -159,8 +165,11 @@ submission first only with user permission.
 
 The live campaign (`qwen3.5-122b-131k-opencode`) runs a different operating point + hard-won
 guards. Campaign specifics (dataset order, keep-3 state, per-arm status) live in the tracker:
-`/Users/benjaminfeuer/Documents/experiments/active/datagen/qwen3.5-122b-131k-opencode/tracker.md`.
+`/Users/benjaminfeuer/Documents/experiments/active/qwen3.5-122b-131k-datagen-opencode-iris/tracker.md`.
+Dated chronology (bringup + every ops tick, 2026-07-02→08):
+`~/Documents/agent_logs/2026-07-08_qwen3.5-122b-131k-datagen-opencode-iris_history.md`.
 Literal-trace decode/rescue reference: `.claude/projects/harbor/harbor.md` (§ Literal-token trace datasets).
+Ingress topology (native `/proxy/t/*` capability-URL, token TTL, pinggy rollback): `.claude/ops/iris/iris_ingress.md`.
 
 **Recipe deltas from the Launch block above:**
 - `--datagen_config hpc/datagen_yaml/extra/qwen3_5_122b_a10b_fp8_runai_v5p8_131k_dp1_tp4_ep1_s32.yaml` (A2: TP4/DP1/EP-on/seqs32/131k), `--n_concurrent 32`.
@@ -175,8 +184,28 @@ Literal-trace decode/rescue reference: `.claude/projects/harbor/harbor.md` (§ L
 
 **Liveness / wedge check — a RUNNING job can be silently DEAD (verify FRESHNESS, not just "activity present").** A datagen job can sit `state 3 RUNNING` with vLLM logs full of `running agent` lines yet be wedged — the engine cliff-died and every "activity" line is stamped at the SAME frozen timestamp (the §4b frozen-spinner trap). Do NOT judge liveness by the presence of `running agent`/serving lines; judge by whether things are ADVANCING over a short live window: (1) OUTER-dir GCS **trial-dir count grows** (sample, wait ~4–5 min, re-count); (2) harbor **`<done>/<total>` completed advances** / `result.json updated_at` is fresh (not hours stale); (3) vLLM emits **fresh** `chat/completions` `200 OK` + nonzero-and-moving `Running: N` (check the newest log TIMESTAMP is recent, not frozen). Frozen on all three with an engine that served-then-stopped = a confirmed wedge → kill+rescue+relaunch (standing kill authority). Carve-out: a job mid harbor GCS-`jobs_dir` **resume scan** after a preempt can be legitimately progress-frozen for up to ~6h WITH a *recent* engine-ready marker and NO prior serving on this attempt (monitor-restore-iris §4c) — that's NOT a wedge; don't kill. (History 2026-07-07: #18b `135552` sat "healthy" for ~6h across 3 ticks on frozen `19:59:40` spinner logs before a freshness check caught it dead.)
 
+**Rescue vs RESUME policy (RESUME by default for sub-60% jobs):** when a job goes terminal
+(FAILED/KILLED) short of completion, the default is to **RESUME** (relaunch the same arm → same
+baked `--job_name`/gs:// job dir → harbor continues the remaining tasks), NOT to harvest a partial
+banked slice into HF. **Rescue (banked-GCS → HF) ONLY when ≥60% complete** (`<done>/<total>` from
+the harbor `Mean:` line, or productive-trial dirs / total); below 60%, resume — a rescue that far
+short just publishes a stub and burns the arm's identity.
+
+**⚠️ The harbor resume/export-push fix is NOT deployed in any current `:tpu` image.** `c49064a8`
+(the `_maybe_init_existing_job` config-drift fix) did NOT bump the harbor version (still `0.8.0`),
+so the image build's `uv pip install ".[datagen-tpu]"` resolved a **cached pre-fix `harbor==0.8.0`
+wheel** — both `:tpu-de98374e` and the prior `:tpu-7951edcd` lack the fix (validated live 2026-07-08:
+#18c died at `job.py:263` on preempt-resume). Consequence: **every preemptible datagen job still
+dies on its first preempt-resume export-push → banked-GCS rescue is the reliable harvester.** Real
+remedy (⚑ user decision): a corrected image rebuild that busts the harbor wheel cache (bump the
+harbor version / `HARBOR_COMMIT` + `--force-reinstall`, or a fresh-from-GitHub source install),
+then VERIFY by grepping the installed `harbor/job.py` INSIDE the built image — see the
+**`build-tpu-image-iris`** skill (this exact stale-cached-wheel lesson is its reason to exist).
+Rolling `:tpu` back to `879ebaba` is a no-op (it also predates the fix). **Fixing harbor code
+requires busting the cached wheel to take effect in an image rebuild** — the general lesson.
+
 **Terminal-job triage — rescue vs BLOCKED (precheck before rescuing):**
-- Worker in-job auto-upload lands **TEXT-ONLY** (the pinned `:tpu` predates the schema-pin fix) OR fails at **export-push** (harbor `FileExistsError` on preempt-resume) — both leave banked GCS trials + `logs/*_literal.jsonl` intact → **RESCUE** from GCS (see Manual cleanup) with `--served_model Qwen/Qwen3.5-122B-A10B-FP8`, verify `count_populated_literal_rows` ≈ correlation yield. "SUCCEEDED"/"repo exists" is NEVER proof of trainable literals — always check the true count.
+- Worker in-job auto-upload lands **TEXT-ONLY** (the pinned `:tpu` predates the schema-pin fix) OR fails at **export-push** (harbor `FileExistsError` on preempt-resume — see caveat above) — both leave banked GCS trials + `logs/*_literal.jsonl` intact → **RESCUE** from GCS (see Manual cleanup) with `--served_model Qwen/Qwen3.5-122B-A10B-FP8`, verify `count_populated_literal_rows` ≈ correlation yield. "SUCCEEDED"/"repo exists" is NEVER proof of trainable literals — always check the true count.
 - A job with **0 valid traces** (100% `steps:0` / `NonZeroAgentExitCodeError exit 127` = agent binary absent in the sandbox) is GARBAGE → mark **BLOCKED**, NOT rescuable, needs a full re-run after the sandbox-install fix. Spot-check a few trials' `result.json`/`exception.txt` before rescuing.
 
 **Harbor editable guard:** the uploader imports harbor from `/Users/benjaminfeuer/Documents/harbor` — it MUST be on `penfever/working` (verify + `git checkout penfever/working` if drifted) before any rescue, or the export crashes.

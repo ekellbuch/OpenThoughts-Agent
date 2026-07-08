@@ -39,11 +39,11 @@ shrinking task count, or a crash-restart loop is a **red flag** → read the chi
 The run logs to W&B project **`delphi-midtraining`** (entity **`nyu-dice-lab`**); the **run name is the
 GCS output-path hash** — the last path segment of `gs://marin-us-east5/checkpoints/<run>-<hash>` (e.g.
 `delphi-1e23-p33m67-k0p20-lr0.67-b6607e` → run `delphi-1e23-p33m67-k0p20-lr0.67-b6607e`). Per-step history
-is **NOT** mirrored by mum — query the W&B API directly (needs `WANDB_API_KEY` from `secrets.env`; use the
+is **NOT** mirrored by mum — query the W&B API directly (needs `WANDB_API_KEY` from `$DC_AGENT_SECRET_ENV`; use the
 otagent python which has `wandb`):
 
 ```bash
-source "$DC_AGENT_SECRET_ENV"
+source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
 /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python - <<'PY'
 import wandb
 ENTITY, PROJECT, RUN = "nyu-dice-lab", "delphi-midtraining", "<run-hash>"   # <-- the ...-b6607e hash

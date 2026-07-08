@@ -51,7 +51,7 @@ launch HOW-TO (flag set, config-authoring rules, bring-up checklist). The TPU-ce
 
 Launch from the local Mac, **otagent py3.12 conda env**:
 ```bash
-source "$DC_AGENT_SECRET_ENV"     # HF_TOKEN, WANDB_*, DAYTONA_* (forwarded into the pod)
+source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"   # HF_TOKEN, WANDB_*, DAYTONA_* (forwarded into the pod)
 export KUBECONFIG=~/.kube/coreweave-iris-gpu           # the CoreWeave GPU cluster kubeconfig (see ops doc)
 # otagent python = /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python (symlinks fail in the sandbox)
 ```
@@ -69,7 +69,7 @@ export KUBECONFIG=~/.kube/coreweave-iris-gpu           # the CoreWeave GPU clust
 
 Lifted from the validated config headers (each iris config's header carries its own ready-to-run command):
 ```bash
-source "$DC_AGENT_SECRET_ENV"
+source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
 python -m rl.cloud.launch_rl_iris \
   --rl_config hpc/skyrl_yaml/iris/<cfg>.yaml \
   --model_path <hf-id> \

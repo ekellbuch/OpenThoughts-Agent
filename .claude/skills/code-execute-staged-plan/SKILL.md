@@ -39,7 +39,7 @@ execution half of `code-create-staged-plan`.
 - This log is ALSO the per-change failure/remediation record the cron sweep references for genuine FAILED jobs.
 
 ## Subagents (for parallel stages / deep investigations)
-Dispatch with the rules baked in: edit local → commit/push → sync (never patch the cluster); secrets via env vars only (`source secrets.env`, reference by name); reconfirm anchors; run the gate and report numbers; STOP + report if a gate fails or scope is ambiguous rather than forcing a pass. **Verify the subagent's gate claim yourself** before flipping a stage to DONE.
+Dispatch with the rules baked in: edit local → commit/push → sync (never patch the cluster); secrets via env vars only (`source "$DC_AGENT_SECRET_ENV"`, reference by name); reconfirm anchors; run the gate and report numbers; STOP + report if a gate fails or scope is ambiguous rather than forcing a pass. **Verify the subagent's gate claim yourself** before flipping a stage to DONE.
 
 ## On completion
 When the final stage is green: update the parent plan status to DONE (with the commit range + the headline gate result), make sure the change is committed+pushed on the canonical branch (merge the feature branch if that's the convention — e.g. SkyRL `feuer/<slug>` → `penfever/working`), confirm the clusters are synced/rebuilt, and write the closing `agent_logs/` entry. If it spawned follow-ups, note them (and `/schedule` only if there's a concrete dated obligation).

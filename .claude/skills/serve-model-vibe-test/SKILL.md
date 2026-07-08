@@ -35,7 +35,7 @@ pair, and tear it down when done.
   'optional-dependencies' table` and the job dies before vLLM starts. `serve_public.py` resolves its
   own repo root via `parents[2]` for the `hpc` import, so invoke it by **absolute path** from the marin CWD.
 - Iris controller access (the laptop's step-ca/GCP creds — same as `iris` CLI).
-- `secrets.env` sourced (Pinggy uses your `~/.ssh` identity; SSH to `pro.pinggy.io:443`).
+- `$DC_AGENT_SECRET_ENV` sourced (Pinggy uses your `~/.ssh` identity; SSH to `pro.pinggy.io:443`).
 - Pinggy bank at `~/Documents/notes/ot-agent/pinggy_bank.md` (override `--pinggy-bank` / `PINGGY_BANK`).
 - **Single-host TPU slices only** (`v6e-8`, `v6e-4`, `v5litepod-8`, …); multi-host is rejected.
 
@@ -52,7 +52,7 @@ Use a pair that shows `down`/`502`/`503` (free). Pass it as `--pair N`.
 ## Launch (the one-liner)
 ```bash
 cd ~/Documents/marin                               # MUST be the marin repo — see Prerequisites
-source ~/Documents/secrets.env
+set -a; source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"; set +a
 python -u ~/Documents/OpenThoughts-Agent/scripts/inference/serve_public.py <MODEL> --tpu <SLICE> [--region <R>] \
     [--chat-template <FILE-or-URL>] --pair <N> --timeout-hours 6
 ```
@@ -69,7 +69,7 @@ When running it unattended (e.g. as an agent), launch it **detached** so it surv
 instantly with `nohup: setsid: No such file or directory`):
 ```bash
 tmux new-session -d -s serve-public \
-  "source ~/Documents/secrets.env && cd ~/Documents/marin && \
+  "source \"${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV first}\" && cd ~/Documents/marin && \
    python -u ~/Documents/OpenThoughts-Agent/scripts/inference/serve_public.py <MODEL> ... 2>&1 | tee /tmp/serve_public.log"
 # then poll /tmp/serve_public.log (or `tmux attach -t serve-public`) for the "OpenAI :" line
 ```
@@ -80,7 +80,7 @@ It needs its **own chat template** (the repo ships a plain Llama-3 one); use `de
 marin-serve auto-derives the 4k context (malformed RoPE) and TP=2 (30 heads on a 4-chip slice).
 ```bash
 # run from ~/Documents/marin (the bundled workspace); script is invoked by absolute path
-cd ~/Documents/marin && source ~/Documents/secrets.env
+cd ~/Documents/marin && source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV first}"
 python -u ~/Documents/OpenThoughts-Agent/scripts/inference/serve_public.py \
     laion/delphi-1e22-p33m67-32p07b-lr0_67-54770ae7-wc386k_lr1e5-sft \
     --tpu v6e-4 --region europe-west4 \

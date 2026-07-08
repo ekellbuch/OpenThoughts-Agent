@@ -5,11 +5,20 @@ subdirectory here**, and each subdirectory typically holds **its own tracker(s)*
 state for that experiment (queue, status table, per-row results, skipped items, plots, reports).
 
 > **active/ vs complete/ split (2026-06):** experiments are now bucketed one level down —
-> in-flight series live under **`active/`** (e.g. `active/delphi/`, `active/datagen/`,
+> in-flight series live under **`active/`** (e.g. `active/delphi/`,
 > `active/ablation_exploration_in_rl/`) and finished series under **`complete/`**
 > (e.g. `complete/a1/`, `complete/a3/`, `complete/gsm8k_grid_leonardo/`, …). So an experiment's
 > subdir is `experiments/active/<name>/` or `experiments/complete/<name>/`. New / running work goes
 > under `active/`; move a series to `complete/` once it concludes.
+
+> **FLAT datagen layout (2026-07-08):** datagen experiments are **NO LONGER nested under an
+> `active/datagen/` parent** — each is its own FLAT sibling directory named descriptively
+> `<model>-<ctx>-datagen-<taskset>-<cluster>`, e.g. `active/qwen3.5-122b-131k-datagen-opencode-iris/`,
+> `active/minimax-m2.7-datagen-terminus2-jupiter/`. (Datagen is managed by a **different agent** — the
+> supervisor does not drive it; see the datagen descope in `supervisor-init` / `monitor-restore-iris`.)
+> Durable, reusable knowledge from a datagen experiment's docs does NOT live in the tracker: **ops/cluster
+> facts → `.claude/ops/<cluster>/`, launch/monitor how-to → the `datagen-launch-*` skill, dated
+> history → `~/Documents/agent_logs/`**; the experiment dir keeps only live campaign status.
 
 > Distinct from other local dirs: this is **per-experiment working state + trackers**.
 > `notes/` is the broader knowledge base; `agent_logs/` is dated failure/remediation logs; the cluster-side
@@ -17,7 +26,7 @@ state for that experiment (queue, status table, per-row results, skipped items, 
 > (`logs/`, `configs/`, `sbatch/`, `checkpoints/`). This Mac dir is where the human-readable trackers live.
 
 ## Convention
-- **One subdirectory per experiment or series**, named for the experiment (e.g. `a3/`, `ablation_exploration_in_rl/`, `gsm8k_grid_leonardo/`, `iris_capacity/`, `delphi/`, `datagen/`, `chat_templating/`, `cluster_timing_comparison/`, `flawed_summ_evals/`).
+- **One subdirectory per experiment or series**, named for the experiment (e.g. `a3/`, `ablation_exploration_in_rl/`, `gsm8k_grid_leonardo/`, `iris_capacity/`, `delphi/`, `chat_templating/`, `cluster_timing_comparison/`, `flawed_summ_evals/`). Datagen experiments follow the FLAT `<model>-<ctx>-datagen-<taskset>-<cluster>` naming above (no `datagen/` parent).
   - `flawed_summ_evals/` → the **SummarizationTimeoutError-deflated re-eval campaign (a1-`<benchmark>` models)**: `reeval_tracker.md` (source of truth — has the per-sweep blocks + the "🚦 CAMPAIGN DRIVER" section) + `affected_evals.md` (the deflated-eval universe). Driver = harvest terminal legs + refill the next Section-A ⏳ rows to **the in-flight target `reeval_tracker.md` records** (its "🚦 CAMPAIGN DRIVER" / latest-sweep "Target =" line — the number is a property of THIS series and changes by directive; the monitor skills must NOT hardcode it, they look it up there each sweep). Subject to the HARD Daytona snapshot cap of 60 — clean stale sandboxes, never raise the cap; the binding watch is concurrent SANDBOXES, not snapshots. Referenced by `monitor-cron-sweep` / `monitor-restore`.
 - **Trackers live inside the subdir**, usually `*.md` — and a series often has several: a queue/plan, a status/results tracker, a skipped-list, a report, plus subfolders for plots/per-run dirs. Examples seen in the tree:
   - `a3/` → `a3_rl_tracker.md` (status), `a3_rl_experiments.md` (launch log), `a3_skipped_datasets.md`, `reward_plots/`, a PDF report.
@@ -27,7 +36,7 @@ state for that experiment (queue, status table, per-row results, skipped items, 
 - **Tracker naming is not rigid** — `*_tracker.md` / `grid.md` / `notes.md` / `DESIGN.md` / `*_log.md` all appear. When working an experiment, **read the subdir's `*.md` files first** to find its tracker; treat the one the user points at (or the most status-like) as source of truth.
 
 ## How to use it
-- **Starting a new experiment:** create `experiments/active/<name>/` and a tracker inside it; record the queue/plan and update status as runs land. (Some series keep their canonical tracker elsewhere — e.g. the MiniMax datagen tracker lives under `experiments/active/datagen/...` per `.claude/projects/daytona` / the datagen skills — follow the pointer the experiment itself gives.)
+- **Starting a new experiment:** create `experiments/active/<name>/` and a tracker inside it; record the queue/plan and update status as runs land. (Some series keep their canonical tracker elsewhere — follow the pointer the experiment itself gives. Datagen trackers live in their own FLAT `active/<model>-...-datagen-...-<cluster>/` dir, per `.claude/projects/daytona` / the `datagen-launch-*` skills.)
 - **During a cron sweep / cleanup:** when a run for an experiment completes or changes state, update that experiment's tracker here (status table, results, reward plots) in addition to the global experiment log (`notes/claude/claude_experiments.md`).
 - **This is local working state** — not git-tracked in the OT-Agent repo; don't pull large artifacts/checkpoints here (keep those on cluster scratch). Trackers + small plots/reports only.
 

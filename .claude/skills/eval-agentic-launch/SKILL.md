@@ -36,7 +36,7 @@ ops notes first.
 > paths, whether `--pre-download` is needed (no-internet clusters), and the **Daytona eval-org key**
 > (SWE-bench presets need the eval key, not the RL-org default — see ops/CLAUDE.md). Read it before launching.
 
-> **⚠ SECRETS COME FROM `secrets.env`, NEVER HARDCODED IN AN SBATCH/SCRIPT.** The eval `eval_harbor.sbatch`
+> **⚠ SECRETS COME FROM `$DC_AGENT_SECRET_ENV`, NEVER HARDCODED IN AN SBATCH/SCRIPT.** The eval `eval_harbor.sbatch`
 > (leonardo/tacc/jupiter) sources the secrets env (`$DC_AGENT_SECRET_ENV`, default `~/secrets.env` / TACC
 > `$SCRATCH/keys.env`) and reads the two Daytona eval-org keys from it: **`DAYTONA_API_KEY` (org1) +
 > `DAYTONA_DATA_API_KEY` (org2)**, 3:1-weighted (3/4 org2). The script fails loudly (`:?`) if either is unset —

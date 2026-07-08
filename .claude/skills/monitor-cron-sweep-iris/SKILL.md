@@ -110,7 +110,7 @@ job_id prefix:
   (the OUTER `<job>/` — carries the trial dirs AND the sibling `logs/<slug>_literal.jsonl`; do NOT rsync only the
   inner `<job>/<job>/`, which drops `logs/` and silently loses the literals for a `--record_literal` job),
   then `make_and_upload_trace_dataset.py --job_dir /tmp/<job>_traces --repo_id penfever/<slug>-qwen3.5-122b-32k-traces
-  --episodes last --filter none --skip_register` (source `secrets.env` first). Literals AUTO-INCLUDE when a
+  --episodes last --filter none --skip_register` (source `$DC_AGENT_SECRET_ENV` first). Literals AUTO-INCLUDE when a
   `logs/*_literal.jsonl` is present (`--no_literal_tokens` to force text-only; FAILS LOUD on a present-literal /
   0-bind). Report row count AND the `Literal yield: X/Y` line (X>0 for a `--record_literal` job); update the tracker.
   (Full launch/rescue detail: **datagen-launch-iris**.)

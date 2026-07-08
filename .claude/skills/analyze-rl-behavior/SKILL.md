@@ -24,7 +24,7 @@ questions, each writing into `--output-dir/<step>/`:
 Before running, verify the model's artifacts are all present — a missing one silently downgrades the run (skipped Q2/Q3) or wastes a full pass. For `laion/<MODEL>`:
 
 ```bash
-source "$DC_AGENT_SECRET_ENV"
+source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
 # (a) model repo exists + has weights + training_logs + README
 curl -s -H "Authorization: Bearer $HF_TOKEN" "https://huggingface.co/api/models/laion/<MODEL>" \
  | python3 -c "import sys,json;d=json.load(sys.stdin);s=[x['rfilename'] for x in d.get('siblings',[])] if 'error' not in d else None;print('MISSING/404') if s is None else print('files',len(s),'| safetensors',sum(f.endswith('.safetensors') for f in s),'| training_logs',sum(f.startswith('training_logs/') for f in s),'| README','README.md' in s)"
@@ -43,7 +43,7 @@ Only proceed to the run once 1 is satisfied; 2–3 determine which `--rl-traces`
 Run from the repo root `/Users/benjaminfeuer/Documents/OpenThoughts-Agent`, otagent env, secrets sourced:
 
 ```bash
-source "$DC_AGENT_SECRET_ENV"
+source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
 
 # 0. Preview what auto-resolve will pick (exits without running, no API spend):
 /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python -m scripts.analysis.analyze_rl_behavior \
