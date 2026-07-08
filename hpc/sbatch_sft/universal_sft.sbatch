@@ -170,21 +170,29 @@ else
   _TMPROOT="{experiments_dir}/tmp/${SLURM_JOB_ID:-$$}"
   _CACHE_NODE_LOCAL=0
 fi
+# TMPDIR MUST be a path slurmstepd can create with a SINGLE mkdir at EVERY step's init on
+# EVERY node. Use _TMPROOT ITSELF (node-local: parent /tmp exists on every node; shared: parent
+# {experiments_dir}/tmp is pre-created at line ~146). A DEEPER TMPDIR (_TMPROOT/tmp) breaks the
+# node-local regime: slurmstepd single-mkdirs it per-node but the parent _TMPROOT does not exist
+# yet, so the step dies BEFORE the process starts -- "slurmstepd: error: Unable to create TMPDIR
+# [/tmp/otsft_<jid>/tmp]: No such file or directory" on all 16 nodes (job 816129).
+export TMPDIR="$_TMPROOT"
+export TMP="$TMPDIR"
+export TEMP="$TMPDIR"
 export TRITON_CACHE_DIR="$_TMPROOT/triton_cache"
 export TORCHINDUCTOR_CACHE_DIR="$_TMPROOT/inductor_cache"
 export RAY_TMPDIR="$_TMPROOT/ray"
-export TMPDIR="$_TMPROOT/tmp"
-export TMP="$TMPDIR"
-export TEMP="$TMPDIR"
 export XDG_CACHE_HOME="$_TMPROOT/xdg_cache"
 export HF_DATASETS_CACHE="$_TMPROOT/hf_datasets_cache"
-_CACHE_DIRS="$TRITON_CACHE_DIR $TORCHINDUCTOR_CACHE_DIR $RAY_TMPDIR $TMPDIR $XDG_CACHE_HOME $HF_DATASETS_CACHE"
 if [ "$_CACHE_NODE_LOCAL" = "1" ]; then
-  # node-local /tmp differs per node -> create the dirs on EVERY node (batch-node mkdir
-  # alone is insufficient; the inherited env points each rank at its OWN node's /tmp).
-  srun --nodes="$NUM_NODES" --ntasks-per-node=1 mkdir -p $_CACHE_DIRS
+  # node-local: slurmstepd creates TMPDIR (=_TMPROOT) per-node at step-init (parent /tmp exists).
+  # The cache SUBDIRS are created on demand by their consumers (HF-datasets / Triton / TorchInductor
+  # all mkdir(exist_ok=True)); a separate pre-mkdir step is NOT used -- it would itself die at the
+  # same slurmstepd TMPDIR check, and per-step TMPDIR cleanup could wipe pre-created subdirs anyway.
+  :
 else
-  mkdir -p $_CACHE_DIRS
+  # shared FS: pre-create the whole tree from the batch node (visible to all nodes).
+  mkdir -p "$TMPDIR" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR" "$RAY_TMPDIR" "$XDG_CACHE_HOME" "$HF_DATASETS_CACHE"
 fi
 echo "[tmpfix] node_local=$_CACHE_NODE_LOCAL _TMPROOT=$_TMPROOT HF_DATASETS_CACHE=$HF_DATASETS_CACHE TMPDIR=$TMPDIR"
 # --- end write-cache location guard ---
