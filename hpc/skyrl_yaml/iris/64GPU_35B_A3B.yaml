@@ -1,0 +1,356 @@
+# =============================================================================
+# CANONICAL 35B RL CONFIG — grid cell 35B-E4 — Qwen3.6-35B-A3B @ 131k, EP4×FSDP8×CP1.
+# seqnorm + TIS + R3 (router-replay). NO CP / NO DCP / NO YaRN. Accepted 2026-07-07
+# (cleared init + first-training-step backward + sync_weights).
+#
+# Geometry (8 nodes = 64 H100, disaggregated): policy/ref EP4×FSDP8×CP1 = 32 GPU (4 nodes)
+#   + 8 engines × TP4 = 32 gen GPU (4 nodes). LAUNCH --num-nodes 8.
+# HYBRID MoE: 40 layers (10 full-attn + 30 GatedDeltaNet linear-attn) → 131k KV cheap,
+#   fits w/o CP/DCP. TEXT backbone only (multimodal/MTP heads dropped).
+#
+# Full arch spec + memory budget (A/B/C) + divisibility + load-bearing knobs + GDN caveats
+#   → experiments/active/moe_sharding_grid_131k/config_notes.md (tracker: 35B-E4 row).
+# Cluster/NCCL/SIF/placement/rendezvous → .claude/ops/iris/coreweave_gpu_ops.md
+#   + rl-agentic-launch-iris skill. Bring-up debug (wrap_policy v1-v5, GDN+CP crash,
+#   torchtitan prereq, R2→CW) → agent_logs/2026-07-08_iris-rl-config-comment-migration.md.
+# Companion plan: notes/ot-agent/qwen3_6_35b_a3b_rl_plan.md.
+# ⚠ WATCH: GDN chunked-scan peak at the first 131k training step (a first-step OOM is the
+#   GDN scan, not KV) → fall back per config_notes.md MEMORY (C).
+# =============================================================================
+
+entrypoint: examples.terminal_bench.entrypoints.main_tbench
+
+# Hydra config groups (+ prefix in CLI)
+config_groups:
+  terminal_bench_config: terminal_bench
+
+# Terminal bench / agentic environment settings
+terminal_bench:
+  # R2 (s3://) so rollouts survive pod GC/preempt; cw pods inject R2 creds.
+  # null = ephemeral pod-local. --trials-dir auto overrides per-job.
+  trials_dir: s3://marin-us-east-02a/iris/rl-8node-qwen3-6-35b-a3b-baseline-seqnorm-tis/trace_jobs
+
+  harbor:
+    name: terminus-2
+    max_episodes: 999999
+    enable_summarize: false
+    store_all_messages: true
+    trajectory_config:
+      raw_content: true
+    enable_episode_logging: false
+    record_terminal_session: false
+    enable_pane_logging: false
+
+    strict_json_parser: true
+
+    interleaved_thinking: true
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: true
+    # 1800s — the 35B is slower per agent step than the 8B; longer ceiling lets boundary
+    # samples finish rather than truncate. AgentTimeoutError stays PASSTHROUGH.
+    override_timeout_sec: 1800
+
+    override_cpus: 1
+    override_memory_mb: 2048
+    override_storage_mb: 2048
+
+    auto_snapshot: true
+
+    verifier_override_timeout_sec: 300
+
+    max_retries: 3
+    min_wait_sec: 60.0
+    max_wait_sec: 600.0
+    wait_multiplier: 2.0
+
+    exclude_exceptions:
+      - VerifierTimeoutError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - VerifierOutputParseError
+      - VerifierRuntimeError
+
+    # 96 = 35B canonical concurrency (tracker Stage-0 knee). Drop toward 64 on a host-RAM OOM.
+    n_concurrent_trials: 96
+
+    log_level: INFO
+
+    enable_reward_shaping: false
+
+    # REQUIRED for trainer.algorithm.use_tis (asserts non-null rollout_logprobs).
+    collect_rollout_details: true
+
+    enable_error_classification: true
+    mask_exceptions:
+      - VerifierTimeoutError
+      - DaytonaError
+      - EnvironmentStartTimeoutError
+      - NetworkError
+      - ConnectionError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - AgentEnvironmentTimeoutError
+    default_error_treatment: zero
+    passthrough_exceptions:
+      - AgentTimeoutError
+      - ContextLengthExceededError
+
+  # 131k: input 130000 (+1072 below max_model_len 131072) + 16384 out.
+  model_info:
+    max_input_tokens: 130000
+    max_output_tokens: 16384
+
+  archiving:
+    enabled: false
+
+  trace_upload:
+    enabled: true
+    repo_org: DCAgent
+    episodes: last
+    dataset_type: SFT
+    cleanup: true
+
+# =============================================================================
+# Trainer configuration
+# =============================================================================
+trainer:
+  strategy: fsdp2
+  # MUST be false: GDN carries state across packed-seq boundaries → wrong logprobs (config_notes.md).
+  use_sample_packing: false
+  # REQUIRED at 131k (config_notes.md MEMORY B).
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+  algorithm:
+    advantage_estimator: rloo_n
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    eps_clip_low: 0.2
+    eps_clip_high: 0.05
+    # seqnorm: global length-unbiased sequence-level normalizer.
+    loss_reduction: seq_mean_token_sum_norm_global
+    # TIS clamps the residual gen-vs-recompute bf16 gap; on a MoE it REQUIRES R3
+    # (moe_router_replay below) + collect_rollout_details (above). Rationale: config_notes.md.
+    use_tis: true
+    tis_imp_ratio_cap: 2.0
+
+  epochs: 2
+  max_steps: 80
+  update_epochs_per_batch: 1
+
+  # bs 64 == mini (fully-async assert). E4 = accepted canonical 35B config (config_notes.md).
+  train_batch_size: 64
+  policy_mini_batch_size: 64
+  eval_batch_size: 64
+
+  # micro 1/1 at 131k (one seq/rank; raise micro_forward to 2 only w/ HBM headroom — config_notes.md).
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+
+  # 131072: prompts may use the full context (no internal truncation).
+  max_prompt_length: 131072
+
+  eval_interval: 999999
+  eval_before_train: false
+  # ckpt_interval=1: 131k 35B steps are slow; bank step-1 so a transient kill never resumes from 0.
+  ckpt_interval: 1
+  resume_mode: latest
+  hf_save_interval: 5
+  hf_hub_repo_id: null
+  hf_hub_private: false
+  hf_hub_revision: main
+
+  enable_db_registration: false
+
+  project_name: OpenThoughts-Agent
+  log_level: INFO
+  tracker_commit_each_step: true
+  logger: wandb  # CoreWeave has egress -> log to dogml/OpenThoughts-Agent (entity via WANDB_ENTITY, defaulted by launcher)
+
+  run_name: null
+  ckpt_path: null
+  export_path: null
+
+  # Policy optimizer — production hparams (lr 8e-6, max_grad_norm 0.9 collapse guard).
+  policy:
+    optimizer_config:
+      lr: 8e-6
+      weight_decay: 0.0
+      adam_betas: [0.9, 0.999]
+      max_grad_norm: 0.9
+    fsdp_config:
+      # REQUIRED at 131k: 35B optimizer state → node RAM, HBM for activations (config_notes.md B).
+      cpu_offload: true
+      reshard_after_forward: true
+      wrap_policy:
+        # MUST be a LIST (bare string iterates char-by-char; autodetect fails on text backbone).
+        # Killed v1-v5 — see agent_log 2026-07-08.
+        transformer_layer_cls_to_wrap: ["Qwen3_5MoeDecoderLayer"]
+      # MESH (35B-E4): EP4 x FSDP8 x CP1 = 32 policy GPU = 4 nodes (divisibility → config_notes.md).
+      fsdp_size: 8
+      expert_model_parallel_size: 4
+      # R3: moe_router_replay + grouped_gemm (train replays rollout routing so TIS ratios stay sane).
+      moe_router_replay: true
+      moe_grouped_gemm: true
+      ep_comm_backend: torch
+  ref:
+    # INERT (use_kl_loss=false → no RefWorker built). Mirrors policy for consistency.
+    model:
+      path: Qwen/Qwen3.6-35B-A3B
+    fsdp_config:
+      cpu_offload: true
+      reshard_after_forward: true
+      # Mirror policy wrap (LIST form) — inert here, kept consistent.
+      wrap_policy:
+        transformer_layer_cls_to_wrap: ["Qwen3_5MoeDecoderLayer"]
+      # MESH mirror: EP=4 x FSDP=8 x CP=1. Inert (no RefWorker).
+      fsdp_size: 8
+      expert_model_parallel_size: 4
+      moe_router_replay: true
+      moe_grouped_gemm: true
+      ep_comm_backend: torch
+
+  # Disaggregated: policy/ref = 4 nodes (FSDP), gen engines on the disjoint 4 nodes.
+  # strict_spread/per_gpu_bundles prevent EP-layout init OOM (rationale → ops doc + skill §4).
+  placement:
+    colocate_all: false
+    policy_num_nodes: 4
+    ref_num_nodes: 4
+    policy_num_gpus_per_node: 8
+    ref_num_gpus_per_node: 8
+    policy_strict_spread_pg: true
+    policy_per_gpu_bundles: true
+    policy_force_cvd_mask: true
+
+  fully_async:
+    max_staleness_steps: 16
+    num_parallel_generation_workers: 900
+
+# =============================================================================
+# Generator configuration (vLLM)
+# =============================================================================
+generator:
+  backend: vllm
+  timeout_multiplier: 1.0
+  model_dtype: bfloat16
+
+  # CUDA graphs ON — safe under R3 (config_notes.md).
+  enforce_eager: false
+
+  # TP=4 (16 attn heads → 4/GPU, 256 experts → 64/GPU, 2 KV heads REPLICATED).
+  inference_engine_tensor_parallel_size: 4
+  # 8 engines x TP4 = 32 gen GPU. Set EXPLICITLY — launcher derives 16 (WRONG; counts policy nodes).
+  num_inference_engines: 8
+
+  # EP=4 (= TP): experts sharded across the 4 engine GPUs.
+  inference_engine_expert_parallel_size: 4
+
+  # DCP=1 (hybrid low KV needs no sharding).
+  inference_engine_decode_context_parallel_size: 1
+
+  # RAY executor — R3-MANDATORY (mp executor can't emit per-token routing). Rationale → skill §4.
+  inference_engine_mp_backend: false
+
+  n_samples_per_prompt: 8
+  eval_n_samples_per_prompt: 8
+
+  # 0.85 — hybrid arch, low KV pressure (config_notes.md A). Drop 0.85→0.80→0.75 on a KV-bind OOM (C).
+  gpu_memory_utilization: 0.85
+
+  # 16 — under the ~20 KV ceiling (config_notes.md A). Drop to 12 if vLLM max-concurrency comes in low.
+  max_num_seqs: 16
+  max_num_batched_tokens: 16384
+
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  enable_http_endpoint: true
+  enable_ray_prometheus_stats: false
+  vllm_stats_interval: 1
+  append_eos_token_after_stop_str_in_multi_turn: true
+  max_turns: 999999
+
+  sampling_params:
+    # 131k: 16384 max generation (matches the 30B 131k arm).
+    max_generate_length: 16384
+    temperature: 0.7
+    top_p: 0.95
+    top_k: 20
+
+  engine_init_kwargs:
+    # 131072 — within native 262144 → NO YaRN rope_scaling/hf_overrides (do NOT add).
+    max_model_len: 131072
+    # Interleaved-thinking template; relative path resolves against /app (synced repo).
+    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
+    # Disable vLLM custom CUDA all-reduce (safe vs the NCCL weight-sync deadlock class).
+    disable_custom_all_reduce: true
+    # R3: emit per-token expert routing (consumed by the FSDP2 router-replay hook).
+    enable_return_routed_experts: true
+    # MUST be false under the RAY executor (trips vLLM's R3 guard otherwise).
+    async_scheduling: false
+    # DCP=1 → VLLM_ALLOW_ROUTED_EXPERTS_DCP is NOT needed (that guard-lift is DCP>1 only).
+
+# Data paths (set via CLI --train_data / --val_data)
+data:
+  train_data: []
+  val_data: []
+
+# K-actor rollout fan-out — ON (breaks the single-event-loop GIL ceiling).
+rollout:
+  fanout:
+    enabled: true
+    num_coordinators: 4
+    cpus_per_coordinator: 8
+
+# =============================================================================
+# Runtime env — TOP-LEVEL extra_env: is LOAD-BEARING (Iris has no container: block, so
+# without this the env is SILENTLY DROPPED). No SIF/GH200-NCCL-disable/HF-OFFLINE vars
+# (ops doc). Flag rationale + which are load-bearing → config_notes.md.
+# =============================================================================
+extra_env:
+  # Force pure-torch GDN (fla wheel broken). LOAD-BEARING for any GDN-arch run.
+  SKYRL_GDN_MASK_FLA: "1"
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  # TIS Fix A (skyrl 3caeb79f) — served completion_token_ids for exact TIS alignment. Needs --skyrl-ref >= 3caeb79f.
+  SKYRL_TIS_SERVED_ID_SPLICE: "1"
+  # --- vLLM serve flags ---
+  VLLM_USE_FLASHINFER_SAMPLER: "0"
+  VLLM_ATTENTION_BACKEND: FLASH_ATTN
+  # gpu-rl RL conda env prefix — literal (NOT $CONDA_PREFIX/lib): k8s does NOT shell-expand.
+  LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib
+  # --- NCCL: H100+IB DEFAULTS (do NOT disable P2P). Observability + raised timeouts. ---
+  NCCL_DEBUG: WARN
+  SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "1800"
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "1800"
+  TORCH_NCCL_ENABLE_MONITORING: "1"
+  TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+  TORCH_FR_BUFFER_SIZE: "2000"
+  TORCH_NCCL_TRACE_CPP_STACK: "1"
+  TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /tmp/nccl_fr_rank
+  # --- R3 (router-replay) transport env — sized for the worst-case per-step routing
+  #     payload at 131k ---
+  VLLM_MQ_MAX_CHUNK_BYTES_MB: "160"          # widen shm chunk above the R3 routed_experts worst case
+  VLLM_ROUTED_EXPERTS_SIDE_TIMEOUT_SECONDS: "1200"  # dequeue the deferred R3 side-message
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "900"  # per-step model-execute RPC (long 131k first-prefill)
+  # NOTE: VLLM_ALLOW_ROUTED_EXPERTS_DCP intentionally absent (DCP=1 only).
+
+# =============================================================================
+# LAUNCH COMMAND (35B-E4) — dry-run verified 2026-07-04. Respect Daytona <=6 RUNNING
+# RL/cluster + <=2 concurrent 8-node gangs; check free-node count first (ops doc).
+# =============================================================================
+#   set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
+#   export KUBECONFIG=~/.kube/coreweave-iris-gpu
+#   python -m rl.cloud.launch_rl_iris \
+#     --rl_config hpc/skyrl_yaml/iris/64GPU_35B_A3B.yaml \
+#     --model_path Qwen/Qwen3.6-35B-A3B \
+#     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
+#     --num-nodes 8 --gpus_per_node 8 --cpu 48 --max-retries 1 --memory 1700GB \
+#     --skyrl-ref 272bf011 \
+#     --rendezvous-dir s3://marin-us-east-02a/iris/grid/35B-E4/x \
+#     --job-name grid-35b-e4 --priority interactive --no-wait
+#   (append --dry-run instead of --no-wait to validate.)
+# =============================================================================
