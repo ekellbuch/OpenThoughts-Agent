@@ -77,14 +77,17 @@ datasets:
 # Plain ChatML == LF qwen3 encode_multiturn training format (see header). NOT qwen3.jinja.
 chat_template: chatml
 
-# NODE-LOCAL prepared-dataset path (TACC gh nodes: /tmp = node-local XFS, 261GB, NOT shared
-# Lustre). Each node tokenizes its own copy under its own /tmp -> the axolotl FileLockLoader's
-# datasets_prep.lock is per-node + uncontended. Job 815251 died at ~1h26m because the DEFAULT
-# ./last_run_prepared lands on shared Lustre $SCRATCH, so all 16 nodes serialized on ONE lock
-# held across a multi-minute tokenize+save -> Lustre ENOLCK ("No locks available") + filelock
-# Deadlock. Node-local eliminates the cross-node contention entirely. (Passed through by the
-# launcher translator: hpc/axolotl_config_utils.py same-name passthroughs.)
-dataset_prepared_path: /tmp/axolotl_prep_qwen3_32b_ot_sft_10k
+# SHARED prepared-dataset path (single pre-tokenized copy all ranks LOAD, mirroring how LF
+# survives 16-node on the same Lustre). PRE-TOKENIZE once via `axolotl preprocess` -> this
+# writes the tokenized arrow + the `.axolotl_prepared_complete` sentinel here; the 16-node
+# job then hits axolotl FileLockLoader's LOCK-FREE fast-path (sentinel present -> load_from_disk
+# concurrently, NO shared-FS FileLock). axolotl loads datasets BEFORE dist-init so it can't use
+# a torch barrier like LF's main_process_first; the sentinel fast-path is the equivalent.
+# Why NOT node-local /tmp: per-rank builds desync + DEADLOCK at multi-node dataset gen (job
+# 815590 hung 1h10m at "Generating train split 17%"). Why NOT the default shared lock: all 16
+# ranks serialize on one Lustre flock held across a multi-min build -> ENOLCK/ESTALE (815251/
+# 815508/815530). $SCRATCH is expanded by the launcher translator (hpc/axolotl_config_utils.py).
+dataset_prepared_path: $SCRATCH/axolotl_prepared/qwen3_32b_ot_sft_10k
 
 attn_implementation: sdpa
 sample_packing: false

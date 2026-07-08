@@ -156,6 +156,11 @@ def translate_lf_to_axolotl(base_config: dict, exp_args: dict, dataset_paths, mo
         if key in base_config and base_config[key] is not None:
             ax[key] = base_config[key]
 
+    # dataset_prepared_path may reference env vars (e.g. $SCRATCH) so a shared prepared
+    # dir is cluster-portable; axolotl reads it literally, so expand here.
+    if ax.get("dataset_prepared_path"):
+        ax["dataset_prepared_path"] = os.path.expandvars(ax["dataset_prepared_path"])
+
     # --- optimizer ---
     ax["optimizer"] = _map_optimizer(base_config.get("optim") or base_config.get("optimizer"))
 

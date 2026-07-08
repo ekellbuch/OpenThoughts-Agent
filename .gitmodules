@@ -5,4 +5,4 @@
 [submodule "sft/axolotl"]
 	path = sft/axolotl
 	url = https://github.com/marin-community/axolotl.git
-	branch = feuer/marin-fork-3feature-port
+	branch = feuer/lockfree-prepared-sentinel
