@@ -1,0 +1,114 @@
+# axolotl SFT — Qwen3-32B, FUNCTIONAL-LEARNING-EQUIVALENT of the canonical LLaMA-Factory
+# config  sft/lf_configs/qwen3/extra/32k_base_32b_bs96.yaml  (bs=96 variant).
+#
+# Goal: reproduce the LF Qwen3-32B learning setup (same effective batch, LR + schedule,
+# epochs, seq-len, loss masking, chat format, no packing) via the axolotl backend, on the
+# open-thoughts/OpenThoughts-Agent-SFT-10K set. Launched through
+# `python -m hpc.launch --job_type sft --sft_backend axolotl` (translator:
+# hpc/axolotl_config_utils.py). Only translator-recognized keys survive translation, so
+# LF-named keys are used where the axolotl passthrough does not cover them
+# (lr_scheduler_type -> lr_scheduler; optim -> optimizer).
+#
+# LF -> axolotl learning-parity map (all LEARNING-affecting knobs matched):
+#   model            Qwen/Qwen3-32B                         -> base_model (resolved to local path at launch)
+#   effective batch  global_batch_size: 96                  -> global_batch_size: 96 (micro=1; grad_accum derived per geometry)
+#   LR               4.0e-5                                 -> learning_rate: 4.0e-5
+#   schedule         cosine, warmup_ratio 0.1               -> lr_scheduler_type: cosine + warmup_ratio: 0.1
+#   epochs           7.0                                    -> num_epochs: 7.0
+#   seq-len          cutoff_len 32768                       -> sequence_len: 32768
+#   grad clip        max_grad_norm 1.0e-4                   -> max_grad_norm: 1.0e-4  (LF's aggressive clip; matched exactly)
+#   optimizer        adamw_torch_fused (betas 0.9/0.999)    -> optim: adamw_torch_fused (betas defaulted, as LF)
+#   weight decay     (LF default 0.0)                       -> weight_decay: 0.0
+#   precision        bf16: true, pure_bf16: false           -> bf16: auto (mixed bf16, fp32 master in optimizer) == LF
+#   grad ckpt        gradient_checkpointing: true           -> gradient_checkpointing: true
+#   packing          (LF default: OFF)                      -> sample_packing: false
+#   sharding         DeepSpeed ZeRO-3 (offloaded)           -> DeepSpeed ZeRO-3 no-offload (learning-identical; see deviations)
+#
+# CHAT-TEMPLATE / MASKING — the load-bearing parity decision:
+#   LF `template: qwen3` is a ReasoningTemplate. Its SFT (training) path is
+#   encode_multiturn with the LF defaults mask_history=False + enable_thinking=True, which
+#   emits plain ChatML (`<|im_start|>{role}\n{content}<|im_end|>\n`) and TRAINS EVERY
+#   assistant turn with its inline <think>...</think> KEPT (NO historical-think stripping);
+#   user/system turns masked. The axolotl `qwen3.jinja` is the *serving* Qwen3 template,
+#   which STRIPS <think> from all but the post-last-query assistant turns -> it would train
+#   on far fewer reasoning tokens and DIVERGE from LF. The axolotl `chatml` template emits
+#   `<|im_start|>{role}\n{content}<|im_end|>\n` verbatim (inline <think> preserved on ALL
+#   turns), which is the EXACT learning match to LF qwen3's encode_multiturn. Hence
+#   chat_template: chatml (NOT qwen3). split_thinking:false (set by the launcher's
+#   _build_datasets) keeps <think> inline so chatml never splits it out.
+#
+# NOTED DEVIATIONS (learning-neutral; matched where it matters, noted where it can't be identical):
+#   1. DeepSpeed offload: LF uses ds_z3_offload (optimizer states on CPU). aarch64 TACC
+#      cannot use CPU-offload with axolotl (DeepSpeedCPUAdam JIT -> GCC rejects armv9 flags;
+#      axolotl.md gotcha #2), so we use zero3_bf16.json (no offload). ZeRO-3 sharding is
+#      numerically transparent -> identical learned function; only GPU-memory footprint
+#      differs (this drove the 16-node choice).
+#   2. Attention: LF fa2 vs axolotl sdpa (no flash-attn-2 wheel for torch 2.11+cu128 on
+#      aarch64; ops/tacc/ops.md). Both are exact attention -> learning-neutral.
+#   3. Liger kernel: LF enable_liger_kernel:true; omitted here (unvalidated in sft-axolotl,
+#      learning-neutral fused kernels). The extra un-fused LM-head logit memory is absorbed
+#      by the 16-way ZeRO-3 shard.
+#
+# aarch64 TACC Vista (GH200 96GB, 1 GPU/node): SDPA + packing off (packing needs a varlen
+# flash backend). PRE-LAUNCH env prereq (axolotl.md gotcha #4): `pip install --no-deps
+# torchao==0.17.0` into sft-axolotl (already present per the validated env).
+
+base_model: Qwen/Qwen3-32B
+trust_remote_code: true
+
+# ZeRO-3, NO CPU offload (aarch64). Translator maps a truthy `deepspeed` ->
+# sft/axolotl/deepspeed_configs/zero3_bf16.json.
+deepspeed: sft/axolotl/deepspeed_configs/zero3_bf16.json
+
+# NOTE: the launcher REBUILDS this datasets block from --dataset + --role_tag/--content_tag
+# at launch (hpc/axolotl_config_utils.py::_build_datasets). This block is honored ONLY by a
+# direct `axolotl.cli.preprocess`. Schema below matches OpenThoughts-Agent-SFT-10K
+# (field `conversations`; role under `role` (user/assistant); content under `content`;
+# inline <think> in assistant content).
+datasets:
+  - path: open-thoughts/OpenThoughts-Agent-SFT-10K
+    type: chat_template
+    field_messages: conversations
+    message_property_mappings:
+      role: role
+      content: content
+    split_thinking: false
+
+# Plain ChatML == LF qwen3 encode_multiturn training format (see header). NOT qwen3.jinja.
+chat_template: chatml
+
+attn_implementation: sdpa
+sample_packing: false
+
+sequence_len: 32768
+val_set_size: 0.0
+# aarch64/TACC AF_UNIX-path-too-long on multiproc dataset tokenization (see smoke.yaml).
+dataset_num_proc: 1
+
+# Effective batch = 96 (operator-specified). micro=1, gpus_per_node=1 ->
+# grad_accum = 96 / num_nodes. The translator derives gradient_accumulation_steps from
+# global_batch_size + (num_nodes * gpus_per_node) at launch. At --num_nodes 16 -> accum 6.
+global_batch_size: 96
+micro_batch_size: 1
+
+num_epochs: 7.0
+learning_rate: 4.0e-5
+lr_scheduler_type: cosine   # translator renames -> lr_scheduler
+warmup_ratio: 0.1
+max_grad_norm: 1.0e-4
+optim: adamw_torch_fused    # translator maps -> optimizer
+weight_decay: 0.0
+
+bf16: true                  # translator -> bf16: auto (mixed bf16 + fp32 master)
+tf32: false
+gradient_checkpointing: true
+
+logging_steps: 5
+save_steps: 100
+save_total_limit: 1
+
+# no DB row, no MFU noise (learning-neutral).
+supabase_register: false
+mfu: false
+
+output_dir: ./outputs/qwen3-32b-ot-sft-10k
