@@ -514,7 +514,7 @@ extra_env:
 #     --model_path Qwen/Qwen3-Coder-30B-A3B-Instruct \
 #     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
 #     --num-nodes 8 --gpus_per_node 8 --cpu 48 --max-retries 1 --memory 1700GB \
-#     --skyrl-ref fcf09ede \
+#     --skyrl-ref 272bf011 \
 #     --rendezvous-dir s3://marin-us-east-02a/iris/grid/30B-E16-B/x \
 #     --job-name grid-30b-e16b --priority interactive --no-wait
 # (For the dry-run validation, append --dry-run instead of --no-wait.)
