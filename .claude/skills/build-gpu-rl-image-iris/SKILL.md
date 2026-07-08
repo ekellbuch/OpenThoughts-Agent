@@ -204,6 +204,23 @@ reintroduces one:
    the freeze captured an internally-inconsistent aiobotocore/botocore pair a single solve rejects; see the
    file header. It's NCCL-irrelevant.)
 
+5. **IB VERBS USERSPACE for NET/IB (the `Could not find libnccl-net.so` red herring, 2026-07-08).** Symptom:
+   cross-node NCCL rides **`NET/Socket : Using [0]enp157s0np0:…`** (slow TCP-over-ethernet) instead of
+   **`NET/IB … GPU Direct RDMA`**, and the log shows `NET/Plugin: Could not find libnccl-net.so`. **That
+   `libnccl-net.so` line is BENIGN and a RED HERRING** — on CoreWeave's Mellanox IB, NCCL's *built-in* IB
+   transport needs NO external OFI/`libnccl-net.so` plugin (that plugin is an EFA/AWS thing). **Real root
+   cause:** NCCL's built-in IB `dlopen`s **`libibverbs.so.1` + the `libmlx5` provider at runtime**; if the IB
+   verbs userspace is absent from the image, NCCL **silently disables IB** and falls back to NET/Socket — no
+   error, just the socket line. The CoreWeave pods DO expose the IB devices (`/dev/infiniband/*`,
+   `/sys/class/infiniband/mlx5_0..8`, ports `ACTIVE` 100 Gb/s 4X EDR) — the gap is purely the missing userspace,
+   NOT pod/config (no `rdma/*` resource or hostNetwork change needed) and NOT `NCCL_IB_DISABLE`/`NCCL_IB_HCA`
+   (leave both UNSET). **Diagnose in-pod:** `ibv_devices` → "command not found" + `ldconfig -p | grep libibverbs`
+   empty = the gap confirmed. **FIX (baked as of gpu-rl-7d15b25a):** the rl-stage apt-get installs
+   **`rdma-core ibverbs-providers libibverbs1 librdmacm1 ibverbs-utils`**. (The `NCCL_SOCKET_IFNAME=enp157s0np0`
+   / `AF_INET` pin in the grid configs governs only the socket + bootstrap channel — it is COMPLEMENTARY to IB,
+   does not force socket; keep it.) Expected post-fix signal (`NCCL_DEBUG=INFO`): `NET/IB : Using [0]mlx5_0:1/IB`
+   + `GPU Direct RDMA Enabled`.
+
 ## 6. Build-asserts ARE the validation (a successful build = a working EP>1 stack)
 
 The `rl` stage RUNs hard import asserts at build time. Because kaniko fails the build if any RUN exits non-zero,
