@@ -285,7 +285,7 @@ driver), `eval/clusters/tacc_baseline_model_configs.yaml` (per-model serve overr
   `--partition gh-dev --time 02:00:00` on the sbatch (keep `tacc.yaml` default = `gh` for production).
 - **Secrets**: `$SCRATCH/keys.env` (= `DC_AGENT_SECRET_ENV`) must exist with `SUPABASE_URL` /
   `SUPABASE_ANON_KEY` (the listener's model-discovery query is FATAL without Supabase) + `HF_TOKEN` +
-  `DAYTONA_API_KEY`. It is the local `/Users/benjaminfeuer/Documents/secrets.env` synced over. `HF_TOKEN`
+  `DAYTONA_API_KEY`. It is the local secrets env synced over (see `.claude/secret.md`). `HF_TOKEN`
   is also set in `~/.bashrc`. The Daytona org keys are also hardcoded in the sbatch (same bank as Leonardo).
 - **Benign serve noise**: terminus-2 hits the vLLM `/tokenize` endpoint for token-counting, and the fork
   wheel's Qwen3 chat-template renderer raises `IndexError: list index out of range` there (`hf.py:682

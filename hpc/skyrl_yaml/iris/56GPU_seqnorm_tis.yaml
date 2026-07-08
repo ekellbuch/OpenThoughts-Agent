@@ -49,7 +49,7 @@
 #     it belongs in this YAML, which is cluster-agnostic SkyRL/Hydra config.
 #
 # Launch:
-#   source /Users/benjaminfeuer/Documents/secrets.env
+#   set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
 #   python -m rl.cloud.launch_rl_iris \
 #     --rl_config hpc/skyrl_yaml/iris/56GPU_seqnorm_tis.yaml \
 #     --model_path Qwen/Qwen3-8B \

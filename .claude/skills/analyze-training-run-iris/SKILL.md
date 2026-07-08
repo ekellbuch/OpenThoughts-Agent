@@ -43,7 +43,7 @@ is **NOT** mirrored by mum — query the W&B API directly (needs `WANDB_API_KEY`
 otagent python which has `wandb`):
 
 ```bash
-source /Users/benjaminfeuer/Documents/secrets.env
+source "$DC_AGENT_SECRET_ENV"
 /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python - <<'PY'
 import wandb
 ENTITY, PROJECT, RUN = "nyu-dice-lab", "delphi-midtraining", "<run-hash>"   # <-- the ...-b6607e hash

@@ -43,7 +43,7 @@ whole operation organized, and guard the secrets. Run this checklist to assume t
 3. **Take custody of secrets** (see the dedicated section — do this before dispatching anything that touches credentials).
 
 4. **Survey what's in flight.**
-   - **Experiments:** scan `~/Documents/experiments/active/*/` (and `~/Documents/experiments/complete/*/` for concluded series) trackers + tail `notes/claude/claude_experiments.md` for the recent launch history.
+   - **Experiments:** **read `.claude/ops/experiments/ops.md` first** (the workspace convention + the active→complete migration procedure), then scan `~/Documents/experiments/active/*/` (and `~/Documents/experiments/complete/*/` for concluded series) trackers + tail `notes/claude/claude_experiments.md` for the recent launch history. Any `active/` experiment that has actually concluded gets migrated to `complete/` per that ops doc's migration section (move + retire its autonomous rule + drop `CLOSED.md`).
    - **Crons/loops:** `CronList` — is the 3-hour sweep present? (and the Iris cron, if Iris is active).
    - **Subagents/tasks:** `TaskList` — any background agents still running from a prior session? Adopt or clean them.
    - **Cluster jobs:** a quick `squeue`/`sacct` per active cluster (validate against false-drain — `.claude/ops/jupiter/ops.md`).
@@ -79,7 +79,7 @@ Cluster clones are **derived replicas, never sources**: Jupiter `/e/scratch/jure
 - Subagents that touch code get the same rule in their prompt: edit local, commit/push, pull on cluster; never patch the cluster.
 
 ## Secrets — you are the keeper (non-delegable)
-- **Custody:** `secrets.env` (`/Users/benjaminfeuer/Documents/secrets.env` locally; `~/secrets.env` on clusters) holds the credential **values**; `.claude/secret.md` (untracked, gitignored) holds privileged non-env values (pinggy bank, etc.) pulled out of committable docs.
+- **Custody:** the secrets env holds the credential **values** — path + full key inventory + load snippet live in `.claude/secret.md` (set `$DC_AGENT_SECRET_ENV` to point at it). `.claude/secret.md` (untracked, gitignored) also holds privileged non-env values (pinggy bank, etc.) pulled out of committable docs.
 - **The rule: no subagent or skill ever receives a raw secret.** Credentials flow only through **environment variables** — a subagent's prompt tells it to `source <secrets.env>` (which sets `HF_TOKEN`, `DAYTONA_*`, `SUPABASE_*`, `OPENAI_API_KEY`, `WANDB_API_KEY`, …) and to reference them **by variable name**. Never paste a token/key/passphrase value into a subagent prompt, a skill, a committed file, an `agent_logs`/tracker entry, or a chat message.
 - **Before any commit or shared artifact:** confirm no secret leaked into a git-trackable file (skills/ops/projects). If something privileged must be recorded, put it in `.claude/secret.md` and reference it by name (the established convention). `CLAUDE.md` and `.claude/secret.md` stay out of git via `.gitignore`.
 - When a credential is invalid/expired (e.g. an OpenAI key 401, a Leonardo step-ca cert expiry), you fix the env/secret plumbing — subagents never see the value, only the resulting working env.

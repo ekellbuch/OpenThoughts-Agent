@@ -32,7 +32,7 @@ launch immediately — no push-then-pull, there is no Iris clone to pull).
 
 **Pre-launch preamble:**
 ```bash
-source /Users/benjaminfeuer/Documents/secrets.env   # HF_TOKEN, WANDB_*, DAYTONA_* — forwarded into the pod
+source "$DC_AGENT_SECRET_ENV"   # HF_TOKEN, WANDB_*, DAYTONA_* — forwarded into the pod
 export KUBECONFIG=~/.kube/coreweave-iris-gpu         # REQUIRED — the CoreWeave GPU cluster kubeconfig
 ```
 - **`export KUBECONFIG=~/.kube/coreweave-iris-gpu` is a HARD PREREQUISITE for every

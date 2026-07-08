@@ -240,7 +240,7 @@ Adds `train: bool` per message (True only for assistant), drops upstream metadat
 
 Run locally (reads `HF_TOKEN` from env):
 ```bash
-source /Users/benjaminfeuer/Documents/secrets.env
+source "$DC_AGENT_SECRET_ENV"
 cd /Users/benjaminfeuer/Documents/scripts_dataset_build
 python subset_sera_v4.py
 ```

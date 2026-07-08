@@ -32,7 +32,7 @@ Local notes dir: `/Users/benjaminfeuer/Documents/experiments/active/delphi/rl-sc
 A cell is ready to eval when its **SFT model has been uploaded to HF `laion/<basename>`** (Delphi SFT
 is HF-only; an uploaded repo = a finished cell). The work = the SCORES.md rows still **⏳ pending**
 whose `laion/<basename>` repo now **exists + is non-empty** (check via `huggingface_hub` / `hf` —
-penfever is authenticated, `HF_TOKEN` in `/Users/benjaminfeuer/Documents/secrets.env`). Rows whose
+penfever is authenticated, `HF_TOKEN` from your secrets env — see `.claude/secret.md`). Rows whose
 model isn't uploaded yet (e.g. most large `1e21`/`1e22` cells mid-training) are SKIPPED until done.
 
 ## 2. The launch (per cell)

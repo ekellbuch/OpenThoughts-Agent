@@ -44,7 +44,7 @@
 #   - tracker_commit_each_step true + logger console (frequent step logging).
 #
 # Launch — 1 node (8 H100), no rendezvous needed:
-#   source /Users/benjaminfeuer/Documents/secrets.env
+#   set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
 #   python -m rl.cloud.launch_rl_iris \
 #     --rl_config hpc/skyrl_yaml/iris/smoke_seqnorm_tis.yaml \
 #     --model_path Qwen/Qwen3-8B \

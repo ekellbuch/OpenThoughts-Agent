@@ -101,7 +101,7 @@ Requirements + knobs:
   every other row in the chunk → under-populated literal yield + whole shards with no token columns (and
   `load_dataset` `CastError`); `--chunk_size` larger made it worse. Datasets uploaded before `7c978b78` are
   degraded — **re-rescue them to recover full yield.** Full reference (decoding, tokenizer provenance,
-  re-rescue procedure, literals→SFT): **`.claude/ops/data/literal_trace_datasets.md`**.
+  re-rescue procedure, literals→SFT): **`.claude/projects/harbor/harbor.md`** (§ Literal-token trace datasets).
 
 ## 4. Verify the HF dataset is non-empty
 The repo may exist as a 0-row shell (a prior failed/partial upload, or Harbor pre-creating it); an existing

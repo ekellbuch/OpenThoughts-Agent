@@ -114,7 +114,7 @@
 #   first-launch OOM), max_num_seqs 16 (drop to 12 on OOM). Watch the vLLM KV-cache bind.
 #
 # Launch:
-#   source /Users/benjaminfeuer/Documents/secrets.env
+#   set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
 #   python -m rl.cloud.launch_rl_iris \
 #     --rl_config hpc/skyrl_yaml/iris/8node_qwen3_30b_a3b_131k_cp_dcp2_r3.yaml \
 #     --model_path Qwen/Qwen3-Coder-30B-A3B-Instruct \

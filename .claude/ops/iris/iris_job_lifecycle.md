@@ -7,7 +7,7 @@ the operational lifecycle + pitfalls. Canonical upstream ops: `marin:lib/iris/OP
 
 Conventions used below: `IRIS = /Users/benjaminfeuer/Documents/marin/.venv/bin/iris`
 (or `conda activate marin && uv run iris`); launch from the **otagent py3.12
-conda env**; `source /Users/benjaminfeuer/Documents/secrets.env` first.
+conda env**; `source "$DC_AGENT_SECRET_ENV"` first.
 
 ---
 

@@ -7,7 +7,7 @@ Harbor task-binary parquet, reusing the existing framework at:
 
 ## Environment (use exactly this)
 - Python: `/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python` (call it `$PY`)
-- Always `source /Users/benjaminfeuer/Documents/secrets.env` first (sets HF_TOKEN).
+- Always `source "$DC_AGENT_SECRET_ENV"` first (sets HF_TOKEN).
 - Run the converter AS A MODULE from the repo root:
       cd /Users/benjaminfeuer/Documents/OpenThoughts-Agent
       $PY -m data.nemotron_gym.run --dataset <repo> --output <out.parquet> [--split S] [--limit N] [--smoke]

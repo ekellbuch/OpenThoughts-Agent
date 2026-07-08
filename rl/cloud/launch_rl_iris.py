@@ -43,7 +43,7 @@ SkyRL/MarinSkyRL driver (``run_rl.py --num_nodes N``) attached to that cluster.
 
 Usage
 -----
-    source /Users/benjaminfeuer/Documents/secrets.env
+    set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
 
     python -m rl.cloud.launch_rl_iris \
         --rl_config hpc/skyrl_yaml/iris/<config>.yaml \

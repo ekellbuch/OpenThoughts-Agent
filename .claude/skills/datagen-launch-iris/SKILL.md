@@ -31,7 +31,7 @@ For **eval** jobs use the **eval-agentic-launch-iris** skill instead.
   `sys.version_info` into the worker's `uv sync --python`. Use the otagent conda
   env: `source /Users/benjaminfeuer/miniconda3/etc/profile.d/conda.sh && conda activate otagent`
   (or call `/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python` directly).
-- **Secrets**: `source /Users/benjaminfeuer/Documents/secrets.env` (provides
+- **Secrets**: `source "$DC_AGENT_SECRET_ENV"` (provides
   `DAYTONA_API_KEY` for the host-side snapshot pre-build, `HF_TOKEN` for upload,
   `MARIN_HMAC_*` for runai_streamer). Also pass `--secrets-env <path>` so they
   reach the worker. Do not echo secret values.
@@ -44,7 +44,7 @@ For **eval** jobs use the **eval-agentic-launch-iris** skill instead.
 ```bash
 cd /Users/benjaminfeuer/Documents/OpenThoughts-Agent
 source /Users/benjaminfeuer/miniconda3/etc/profile.d/conda.sh && conda activate otagent
-source /Users/benjaminfeuer/Documents/secrets.env
+source "$DC_AGENT_SECRET_ENV"
 TS=$(date +%Y%m%d-%H%M%S)
 python data/cloud/launch_tracegen_iris.py \
   --harbor_config hpc/harbor_yaml/datagen/ctx32k_verified.yaml \
@@ -53,7 +53,7 @@ python data/cloud/launch_tracegen_iris.py \
   --tpu v5p-8 --preemptible \
   --n_concurrent 64 --n_attempts 1 --health_max_attempts 600 \
   --job_name "qwen3.5-122b-32k-<slug>-${TS}" \
-  --secrets-env /Users/benjaminfeuer/Documents/secrets.env \
+  --secrets-env "$DC_AGENT_SECRET_ENV" \
   --gcs-output-dir gs://marin-models-us/ot-agent \
   --upload_hf_repo penfever/<slug>-qwen3.5-122b-32k-traces \
   --no-wait
@@ -122,7 +122,7 @@ exists before rescuing:
 **Rescue banked traces** (any terminal job whose repo did NOT auto-create — e.g.
 killed, OOM, or pre-`ae085bc8` image). Rsync the GCS job dir local, then push:
 ```bash
-source /Users/benjaminfeuer/Documents/secrets.env
+source "$DC_AGENT_SECRET_ENV"
 gsutil -m rsync -r gs://marin-models-us/ot-agent/<job>/<job>/ /tmp/<job>_traces/
 /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python \
   /Users/benjaminfeuer/Documents/OpenThoughts-Agent/scripts/harbor/make_and_upload_trace_dataset.py \
@@ -136,7 +136,7 @@ gsutil -m rsync -r gs://marin-models-us/ot-agent/<job>/<job>/ /tmp/<job>_traces/
 shared `cli` org, delete ONLY broken (`MISSING`-state) `harbor__*` snapshots
 (never `ACTIVE` ones — those may belong to running jobs, yours or a teammate's):
 ```bash
-source /Users/benjaminfeuer/Documents/secrets.env
+source "$DC_AGENT_SECRET_ENV"
 /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python - <<'PY'
 import os
 from hpc.snapshot_manager import _parse_org_arg, _SnapshotManager, list_snapshots
@@ -160,7 +160,7 @@ submission first only with user permission.
 The live campaign (`qwen3.5-122b-131k-opencode`) runs a different operating point + hard-won
 guards. Campaign specifics (dataset order, keep-3 state, per-arm status) live in the tracker:
 `/Users/benjaminfeuer/Documents/experiments/active/datagen/qwen3.5-122b-131k-opencode/tracker.md`.
-Literal-trace decode/rescue reference: `.claude/ops/data/literal_trace_datasets.md`.
+Literal-trace decode/rescue reference: `.claude/projects/harbor/harbor.md` (§ Literal-token trace datasets).
 
 **Recipe deltas from the Launch block above:**
 - `--datagen_config hpc/datagen_yaml/extra/qwen3_5_122b_a10b_fp8_runai_v5p8_131k_dp1_tp4_ep1_s32.yaml` (A2: TP4/DP1/EP-on/seqs32/131k), `--n_concurrent 32`.

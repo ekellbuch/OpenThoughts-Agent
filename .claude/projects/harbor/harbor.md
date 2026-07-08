@@ -53,14 +53,51 @@ asciinema recorder). Load-bearing behaviors:
 - **`trajectory.json`** (per episode): ATIF `steps[]` with `source`/`message`/`tool_calls`; subagent (summarization) trajectories are separate files. `raw_content` dumps the raw LLM response instead of parsed tool_calls.
 - **Per-trial footprint is large** — terminus-2 writes ~70–120 files/trial (3 per episode + subagent dirs); a 30k-trial job ≈ 2–3M FS entries. This is why trace export must prune (see below) and why GPFS hygiene matters.
 
-### opencode literal tokens — capture + correlation, and why "literal yield" varies by arm
+---
+
+## Literal-token trace datasets (opencode datagen)
+
+Canonical reference for the `--record_literal` opencode trace datasets and their downstream SFT use. Applies to the opencode-131k campaign (`penfever/<task>-qwen3.5-122b-131k-opencode-traces`) and any future literal datagen.
+
+### What the literal columns are
+
+`make_and_upload_trace_dataset` on a `--record_literal` job emits three parallel columns alongside the text `conversations`:
+
+- `prompt_token_ids`, `completion_token_ids` — **list-of-lists**, one inner list per agent step (turn). The verbatim tokens the serving engine emitted (RecordProxy capture, correlated by `literal_correlator.py`).
+- `logprobs` — list-of-lists of floats, same shape as `completion_token_ids`.
+
+A row is "literal-populated" when `prompt_token_ids` is non-empty (`count_populated_literal_rows` checks exactly this).
+
+### Capture + correlation — and why "literal yield" varies by arm
 
 For **installed agents like `opencode`** the LLM calls happen INSIDE the Daytona sandbox (via ai-sdk), so Harbor's `RolloutDetail` never sees the token IDs — the trajectory steps carry only token *counts*. A co-located `harbor.literal.proxy.RecordProxy` on the iris worker captures the real `prompt_token_ids`/`completion_token_ids`/`logprobs` into one job-global `literal.jsonl` (interleaving all ~N concurrent trials). ai-sdk strips the upstream vLLM completion id, so there is **no join key**; OT-Agent's `scripts/harbor/literal_correlator.py` reconstructs attribution from content, verify-or-skip (omit rather than mis-attribute). A trial's tokens must clear **two gates** to land in the exported dataset:
 
 - **Gate 1 — capture.** The proxy only logs `status==200` responses carrying a `completion_token_ids` block. A trial that makes few successful LLM calls contributes few/zero records. This is the dominant yield driver and it is **task-shaped**: short/fast or early-failing interactions (e.g. `llm-verifier`, `methods2test`) leave almost no records, while long multi-turn debugging loops (code/bug-fix arms) capture richly.
 - **Gate 2 — unique binding.** Records are grouped into per-trial chains by exact message-**prefix** extension (opencode replays full history each turn), then a chain binds to a trajectory only if their per-step `(prompt_tokens, completion_tokens)` **count sequences match exactly and uniquely**. Fails when: duplicate/templated task prompts make a record extend two chains (**ambiguous → skipped**), or a **short trajectory** yields a non-distinctive count signature that collides across trials (long trajectories are effectively fingerprints).
 
-**So low "literal yield" (populated-rows / total-trials) is usually a Gate-1 capture ceiling, not corruption or a binding bug.** Measured on the qwen3.5-122b-131k-opencode campaign: code/bug arms ~77–95% (nl2bash 90%, nemotron 95%, stack-junit 77%); verifier/test arms ~6–10% (llm-verifier 510/8965=5.7%, methods2test 108/1039=10.4%). For llm-verifier the log held only ~678 chains for 8965 trials (capture ceiling ~7.6%), and binding then succeeded on ~75% of *captured* chains — i.e. the low headline is few-records-captured, not can't-bind. The literals that *are* captured are correct (verify-or-skip guarantees omission over mis-join). Full ops reference (decode, tokenizer provenance, export schema-pin, rescue): `.claude/ops/data/literal_trace_datasets.md`.
+**So low "literal yield" (populated-rows / total-trials) is usually a Gate-1 capture ceiling, not corruption or a binding bug.** Measured on the qwen3.5-122b-131k-opencode campaign: code/bug arms ~77–95% (nl2bash 90%, nemotron 95%, stack-junit 77%); verifier/test arms ~6–10% (llm-verifier 510/8965=5.7%, methods2test 108/1039=10.4%). For llm-verifier the log held only ~678 chains for 8965 trials (capture ceiling ~7.6%), and binding then succeeded on ~75% of *captured* chains — i.e. the low headline is few-records-captured, not can't-bind. The literals that *are* captured are correct (verify-or-skip guarantees omission over mis-join).
+
+### Decoding the token IDs → text
+
+The IDs only decode with the **EXACT tokenizer the engine served with**. For the 131k campaign that is **`Qwen/Qwen3.5-122B-A10B-FP8`** (a `qwen3_5_moe`, `Qwen2Tokenizer`, **vocab 248044**, specials at 248044–248076). A stock Qwen3 tokenizer (~152k vocab) shares only the low-id digit/whitespace/structure tokens, so word tokens decode to **garbage**.
+
+- GCS mirror (guaranteed source; the HF repo may be gated): `gs://marin-models-us/ot-agent/models/Qwen/Qwen3.5-122B-A10B-FP8/` — pull just `tokenizer.json`/`tokenizer_config.json`/`vocab.json`/`merges.txt` (~22 MB, no weights).
+- Which tokenizer produced a dataset is recorded in its **`tokenizer_provenance.json`** (+ a README decode recipe), written by `make_and_upload_trace_dataset` when you pass `--served_model`. **Always pass `--served_model Qwen/Qwen3.5-122B-A10B-FP8` on any literal upload/rescue** — omitting it still uploads the columns but stamps only the engine-reported served-name.
+- Decode per-turn (list-of-lists) with `skip_special_tokens=False` to keep `<|im_end|>`/`<tool_call>`/`<think>` markers.
+
+### Every terminal job must be rescued from GCS
+
+The worker's end-of-job HF upload cannot be trusted for these preemptible (`v5p + --max-retries`) jobs — "SUCCEEDED" or "repo exists" is never proof of trainable data. In-job export lands text-only (the pinned `:tpu` worker image predates the literal-column fix), and preempt-resumed runs fail export outright. So **every terminal job is rescued from banked GCS by the 3-hourly ops cron**. (`FAILED at export-push` and `landed text-only` both mean "rescue from GCS.")
+
+**Precheck before rescuing — is there anything to rescue?** A third terminal mode is a job that produced **zero valid traces**: every trial errored with `steps: 0` / no LLM calls (e.g. `NonZeroAgentExitCodeError` exit **127**: the `opencode` binary/nvm/node absent in the Daytona sandbox — a task-env provisioning failure, dataset-specific). These have no literal.jsonl AND no usable text — NOT rescuable; they need a **full RE-RUN after the sandbox issue is fixed**, not a GCS rescue. Before rescuing a FAILED job, spot-check a few trials' `result.json`/`exception.txt`: if 100% errored with 0 steps, mark BLOCKED + flag for re-run.
+
+**Rescue procedure:** rsync the OUTER `gs://marin-models-{us,eu}/ot-agent/<job>/` (so sibling `logs/*_literal.jsonl` rides along), clear the target repo's partial `data/` (keep README + `tokenizer_provenance.json`), then re-run the uploader with `--served_model` from the otagent env. Verify with `count_populated_literal_rows` that the literal count ≈ the correlation yield.
+
+### Literal traces → SFT
+
+`scripts/harbor/literal_traces_to_sft.py` converts a literal trace dataset into an SFT dataset whose **assistant turns are decoded verbatim from the literal completion tokens** (real `<think>` + native tool calls). It emits `conversations` (ShareGPT) + a reasoning-preserving `text` string, and **auto-resolves the tokenizer from the source's `tokenizer_provenance.json`** (override with `--tokenizer`). Rows without literals, or whose assistant-turn count ≠ literal step count, are dropped. `--validate N` dry-runs.
+
+**LAION upload gotcha:** the `laion` org's PRIVATE storage quota is full — push SFT datasets there **public** (public storage isn't quota-capped). A private push succeeds but 403s on readback (`Private repository storage limit reached`).
 
 ---
 

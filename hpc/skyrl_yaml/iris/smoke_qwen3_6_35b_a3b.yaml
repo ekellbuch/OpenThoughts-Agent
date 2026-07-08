@@ -50,7 +50,7 @@
 #   (no saves); n_concurrent_trials 16; trace_upload off; logger console per-step.
 #
 # Launch — 2 nodes (16 H100), REQUIRES an s3://(R2) rendezvous dir:
-#   source /Users/benjaminfeuer/Documents/secrets.env
+#   set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
 #   python -m rl.cloud.launch_rl_iris \
 #     --rl_config hpc/skyrl_yaml/iris/smoke_qwen3_6_35b_a3b.yaml \
 #     --model_path Qwen/Qwen3.6-35B-A3B \

@@ -54,7 +54,7 @@ Always **audit (read-only) first**, then delete.
 ```bash
 cd /Users/benjaminfeuer/Documents/OpenThoughts-Agent
 source /Users/benjaminfeuer/miniconda3/etc/profile.d/conda.sh && conda activate otagent
-source /Users/benjaminfeuer/Documents/secrets.env
+source "$DC_AGENT_SECRET_ENV"
 PY=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python
 SCRIPT=scripts/daytona/daytona_snapshot_manager.py
 

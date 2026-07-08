@@ -189,7 +189,7 @@
 # =============================================================================
 #
 # Launch (UNLAUNCHED — supervisor pushes + launches after Rung-0 + remaining OPEN DECISIONS):
-#   source /Users/benjaminfeuer/Documents/secrets.env
+#   set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
 #   python -m rl.cloud.launch_rl_iris \
 #     --rl_config hpc/skyrl_yaml/iris/8node_qwen3_6_35b_a3b_baseline_seqnorm_tis.yaml \
 #     --model_path Qwen/Qwen3.6-35B-A3B \
@@ -657,7 +657,7 @@ extra_env:
 # <=2 concurrent 8-node gangs (=16 nodes); check free-node count first
 # (.claude/ops/iris/coreweave_gpu_ops.md "Are nodes actually free?").
 # =============================================================================
-#   source /Users/benjaminfeuer/Documents/secrets.env
+#   set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
 #   export KUBECONFIG=~/.kube/coreweave-iris-gpu
 #   python -m rl.cloud.launch_rl_iris \
 #     --rl_config hpc/skyrl_yaml/iris/grid_35b_EP4_FSDP8_CP1.yaml \

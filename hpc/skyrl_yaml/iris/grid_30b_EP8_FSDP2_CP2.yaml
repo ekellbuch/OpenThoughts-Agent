@@ -63,7 +63,7 @@
 # MEMORY (H100-80GB < GH200-96GB): cpu_offload true + gradient_checkpointing true kept.
 #
 # Launch:
-#   source /Users/benjaminfeuer/Documents/secrets.env
+#   set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
 #   export KUBECONFIG=~/.kube/coreweave-iris-gpu
 #   python -m rl.cloud.launch_rl_iris \
 #     --rl_config hpc/skyrl_yaml/iris/grid_30b_EP8_FSDP2_CP2.yaml \
@@ -453,7 +453,7 @@ extra_env:
 # <=2 concurrent 8-node gangs (=16 nodes); check free-node count first
 # (.claude/ops/iris/coreweave_gpu_ops.md "Are nodes actually free?").
 # =============================================================================
-#   source /Users/benjaminfeuer/Documents/secrets.env
+#   set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
 #   export KUBECONFIG=~/.kube/coreweave-iris-gpu
 #   python -m rl.cloud.launch_rl_iris \
 #     --rl_config hpc/skyrl_yaml/iris/grid_30b_EP8_FSDP2_CP2.yaml \

@@ -162,7 +162,7 @@ needed for eval, and there is nothing to prune on a shared snapshot org.
 ## Prerequisites
 
 Same as datagen: launch from the **py3.12 otagent conda env**, `source
-/Users/benjaminfeuer/Documents/secrets.env` (and pass `--secrets-env`), and
+"$DC_AGENT_SECRET_ENV"` (see `.claude/secret.md`; pass `--secrets-env`), and
 `git pull` the marin checkout if the iris client is reported too old. Harbor env
 defaults to **daytona** (the only sandbox backend that works on iris workers).
 
@@ -171,7 +171,7 @@ defaults to **daytona** (the only sandbox backend that works on iris workers).
 ```bash
 cd /Users/benjaminfeuer/Documents/OpenThoughts-Agent
 source /Users/benjaminfeuer/miniconda3/etc/profile.d/conda.sh && conda activate otagent
-source /Users/benjaminfeuer/Documents/secrets.env
+source "$DC_AGENT_SECRET_ENV"
 TS=$(date +%Y%m%d-%H%M%S)
 python eval/cloud/launch_eval_iris.py \
   --preset <name> \                                  # e.g. swebench, tb2 — seeds dataset + concurrency + parser
@@ -179,7 +179,7 @@ python eval/cloud/launch_eval_iris.py \
   --model <hf-or-gcs-model-id> \
   --tpu v6e-4 --preemptible \
   --job_name "eval-<model-slug>-<bench>-${TS}" \
-  --secrets-env /Users/benjaminfeuer/Documents/secrets.env \
+  --secrets-env "$DC_AGENT_SECRET_ENV" \
   --upload_to_database \
   --no-wait
 # Custom benchmark (no preset): drop --preset and pass --dataset <harbor-slug>
@@ -204,7 +204,7 @@ python eval/cloud/launch_eval_iris.py \
   --n_concurrent 3 --n_attempts 1 \
   --harbor_extra_arg=--n-tasks=3 --harbor_extra_arg=--max-retries=0 \  # small subset for fast iteration
   --job_name "eval-<slug>-cw-gpu-${TS}" \
-  --secrets-env /Users/benjaminfeuer/Documents/secrets.env \
+  --secrets-env "$DC_AGENT_SECRET_ENV" \
   --upload_to_database --no-wait
 ```
 

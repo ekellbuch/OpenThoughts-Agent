@@ -76,7 +76,7 @@ API key resolution order:
     1. --api-key VALUE
     2. environment variable named by --api-key-env (default DAYTONA_DATA_API_KEY)
     3. that same variable read from a secrets file
-       (--secrets-file, default /Users/benjaminfeuer/Documents/secrets.env)
+       (--secrets-file, default $DC_AGENT_SECRET_ENV; see .claude/secret.md)
 
 Exit codes
 ----------
@@ -100,7 +100,7 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------------------
 HARD_CAP = 60  # org-wide snapshot hard limit (never raised by this tool)
 DEFAULT_STALE_DAYS = 14
-DEFAULT_SECRETS_FILE = "/Users/benjaminfeuer/Documents/secrets.env"
+DEFAULT_SECRETS_FILE = os.environ.get("DC_AGENT_SECRET_ENV", "")
 PAGE_LIMIT = 100  # snapshots per page when paging through the org
 
 # Snapshot states that must never be flagged or deleted: in-flight / transitional.

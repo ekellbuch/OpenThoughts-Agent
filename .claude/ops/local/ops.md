@@ -41,13 +41,14 @@ All editable-installed into the relevant conda env; **edit here, commit, push, t
 - **`/Users/benjaminfeuer/Documents/agent_logs/`** — dated investigation/post-mortem logs, `YYYY-MM-DD_<topic>.md` (~109 files). Write a dated entry here when diagnosing a genuine FAILED job (per the cron-sweep skill). **Absolute path, always** — NOT the repo's `OpenThoughts-Agent/agent_logs/`.
 - **`experiments/`** — per-experiment working state: one subdir per experiment/series, each with its own tracker(s). See `.claude/ops/experiments/ops.md`.
 - **`notes/`** — the private knowledge base (~17 subdirs: `RL/`, `marin/`, `harbor/`, `llama-factory/`, `vllm/`, `ot-agent/`, `jsc/`, `nvidia/`, `scaling_laws_papers/`, … + many single-file notes). Canonical source-of-truth for several things the `.claude/` docs mirror (e.g. the MiniMax datagen tracker, the pinggy bank). Per-cluster notes: `notes/leonardo.md`, `notes/jsc/`, `notes/perlmutter` (in `ot-agent/`).
-- **`secrets.env`** → **`/Users/benjaminfeuer/Documents/secrets.env`** (NOT `~/secrets.env` — that's the *cluster* convention). 48 lines. Load so a subprocess inherits the vars:
+- **`secrets.env`** → the runtime secrets file. Path + key inventory + load snippet live in `.claude/secret.md` (set `$DC_AGENT_SECRET_ENV` to point at it; `~/secrets.env` on clusters). Load so a subprocess inherits the vars:
   ```bash
-  set -a; source /Users/benjaminfeuer/Documents/secrets.env; set +a
+  set -a; source "$DC_AGENT_SECRET_ENV"; set +a
   ```
 - **`.claude/secret.md`** (untracked, gitignored) — privileged values pulled out of the committable skills/ops docs (pinggy URL+token bank, Leonardo HedgeDoc URL). Referenced by name from those docs.
 
-### secrets.env — key NAMES only (values never leave the file)
+### Secrets
+
 Provides credentials for: HuggingFace (`HF_TOKEN`), **Daytona** (`DAYTONA_API_KEY`, `DAYTONA_B_KEY`,
 `DAYTONA_DATA_API_KEY`, `DAYTONA_RL_API_KEY` — datagen uses `DAYTONA_DATA_API_KEY`), **Supabase**
 (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`), W&B (`WANDB_API_KEY`), OpenAI

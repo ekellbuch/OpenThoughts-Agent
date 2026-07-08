@@ -39,7 +39,7 @@
 # enable_db_registration: false (canary — never DB-registered).
 #
 # Launch (the SUPERVISOR pushes the fix + launches — see the journal):
-#   source /Users/benjaminfeuer/Documents/secrets.env
+#   set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
 #   python -m rl.cloud.launch_rl_iris \
 #     --rl_config hpc/skyrl_yaml/iris/canary_moe_dispatchfix_8k.yaml \
 #     --model_path Qwen/Qwen3-Coder-30B-A3B-Instruct \

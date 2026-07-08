@@ -20,7 +20,7 @@ every pod's /opt/skyrl checkout before running, then rank 0 runs the diag as the
 driver attached to the cross-node cluster.
 
 Usage:
-    source /Users/benjaminfeuer/Documents/secrets.env
+    set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
     export KUBECONFIG=~/.kube/coreweave-iris-gpu
     python scripts/iris/submit_ep8_disk_ref_diag.py [--dry-run] [--num-nodes 4] [--gpus-per-node 4]
 """

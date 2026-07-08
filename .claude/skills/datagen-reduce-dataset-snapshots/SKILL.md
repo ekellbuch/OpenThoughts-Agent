@@ -190,7 +190,7 @@ for RL/datagen (the reward signal is broken). Snapshots-green + oracle-red is a
   (these are task datasets, not models).
 - On the Mac, run everything with the `otagent` python
   (`/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python`); `source
-  /Users/benjaminfeuer/Documents/secrets.env` for HF + Daytona keys.
+  "$DC_AGENT_SECRET_ENV"` first (see `.claude/secret.md`).
 
 ## Worked example — swegym (#31, 906 → 5 snapshots, but the cautionary part)
 `laion/swegym-tasks-patched-validated-v2`: 989 tasks → **906** unique envs (≈1:1).

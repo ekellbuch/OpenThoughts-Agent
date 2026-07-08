@@ -83,7 +83,7 @@ def main() -> int:
     p.add_argument("--disk", default="256GB")
     p.add_argument("--priority", default="interactive")
     p.add_argument("--max-retries", dest="max_retries", type=int, default=1)
-    p.add_argument("--secrets-env", dest="secrets_env", default="/Users/benjaminfeuer/Documents/secrets.env")
+    p.add_argument("--secrets-env", dest="secrets_env", default=os.environ.get("DC_AGENT_SECRET_ENV"))
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 

@@ -30,3 +30,19 @@ state for that experiment (queue, status table, per-row results, skipped items, 
 - **Starting a new experiment:** create `experiments/active/<name>/` and a tracker inside it; record the queue/plan and update status as runs land. (Some series keep their canonical tracker elsewhere — e.g. the MiniMax datagen tracker lives under `experiments/active/datagen/...` per `.claude/projects/daytona` / the datagen skills — follow the pointer the experiment itself gives.)
 - **During a cron sweep / cleanup:** when a run for an experiment completes or changes state, update that experiment's tracker here (status table, results, reward plots) in addition to the global experiment log (`notes/claude/claude_experiments.md`).
 - **This is local working state** — not git-tracked in the OT-Agent repo; don't pull large artifacts/checkpoints here (keep those on cluster scratch). Trackers + small plots/reports only.
+
+## Migrating an experiment to `complete/`
+
+An experiment lives under `active/` only while it is genuinely in flight. **When a series concludes** — all
+runs terminal, results captured, the operator says it's closed, or it's otherwise done — migrate it. This is
+a real state transition with side effects, not just a `mv`; do all of it in one pass so a future session
+doesn't re-drive a closed campaign:
+
+1. **Move the dir:** `git mv`/`mv experiments/active/<name>/ experiments/complete/<name>/` (it's not OT-Agent-git-tracked, so a plain `mv` is fine). Fix any tracker cross-references that hardcode the `active/` path.
+2. **Retire every autonomous rule that fed it.** This is the load-bearing step. If the experiment was driven by a keep-N auto-launch, a refill loop, a cron step, or a monitor keep-full target, **remove that rule from the live cron AND from the canonical skill** (`monitor-restore` / `monitor-restore-iris`, and any `monitor-cron-sweep` reference) in the SAME pass. A `complete/` experiment is CLOSED: its autonomous rules are RETIRED — do not keep-N, refill, or re-drive it. Leaving the rule live is how a concluded campaign silently re-launches after a compaction.
+3. **Drop a dated `CLOSED.md`** in the moved dir stating: the conclusion date, the final result/verdict (or where it's recorded), and **exactly which autonomous rules were retired** (cron step, keep-N line, refill loop) so the retirement is auditable.
+4. **Update the global log** (`notes/claude/claude_experiments.md`) to reflect the closure.
+
+Examples: the 32k `qwen3.5-122b-tt` datagen **keep-2** line was closed + moved to `complete/` on 2026-07-07 with its keep-2 auto-launch retired; the `a3/` series concluded and lives under `complete/a3/`.
+
+**Reverse rarely:** only move `complete/ → active/` if the operator explicitly re-opens a series — and then re-establish its autonomous rule deliberately, don't assume the old one is still wired.
