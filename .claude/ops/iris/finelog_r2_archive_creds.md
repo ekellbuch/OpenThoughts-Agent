@@ -7,6 +7,12 @@
 > analyzer against `--cluster cw-us-east-02a`. Without it the run crashes
 > `FileNotFoundError: The specified bucket does not exist` (s3fs silently falls back to **real AWS S3**, where
 > `marin-na` does not exist).
+>
+> **⚠ This doc is NOT affected by the 2026-07-05 R2→CW storage switch (marin `c7caecc95a`).** That switch moved the
+> RL/eval **WRITE-path** (Ray rendezvous + trials) R2 `s3://marin-na` → CW `s3://marin-us-east-02a`. The **finelog
+> archive** here is a SEPARATE, marin-controlled location that genuinely **stays on R2** (`s3://marin-na/finelog/…`),
+> and it's read **Mac-side with these R2 creds**, not from the CW pods — so this doc + its R2 creds remain correct and
+> required. (Don't "repoint" the finelog archive to CW.)
 
 ## Why this bites (the failure mode)
 

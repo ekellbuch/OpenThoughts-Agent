@@ -13,7 +13,7 @@ particulars, skill = procedure.
 > (the `marin` cluster: datagen/eval via `data/cloud/launch_tracegen_iris.py` /
 > `eval/cloud/launch_eval_iris.py`, regional `gs://` buckets, preemptible v5p/v6e
 > slices). THIS doc is a DIFFERENT physical cluster — CoreWeave H100 GPUs, the
-> `cw-us-east-02a` cluster, R2/`s3://` rendezvous, gang/Kueue admission — reached
+> `cw-us-east-02a` cluster, CW-object-store/`s3://` rendezvous (store moved R2→CW 2026-07-05), gang/Kueue admission — reached
 > through the same `iris` SDK but with none of the TPU regional-egress / XLA-cache /
 > 100 GB-node-disk mechanics. Don't cross-apply the TPU doc's region/disk/preemption
 > rules here. (Named `coreweave_gpu_ops.md` rather than `ops.md` precisely so it does
@@ -169,7 +169,7 @@ in the cluster.
   under-requesting is wasted capacity AND a footgun). Node allocatable ≈ **128 CPU / ~2014 GiB
   mem / 8 GPU**. The launcher defaults (`launch_rl_iris.py`) now request the full node: **`--cpu 48`**
   (the max-admittable — >~60 fails the IB gang), **`--memory 1800GB`** (≈ the full ~2 TB, leaving
-  daemonset headroom), **`--gpus_per_node 8`**, `--disk 512GB` (rendezvous/ckpts go to R2, not
+  daemonset headroom), **`--gpus_per_node 8`**, `--disk 512GB` (rendezvous/ckpts go to the CW object store `s3://marin-us-east-02a`, not
   node-local). ⚠ The old **`--memory 512GB`** default was a CGROUP-OOM footgun: the FSDP weight-load
   on an EP=8 + `cpu_offload` policy rank peaks above 512 GB while the NODE sits <200 GB used → the
   *container* OOM-killer fires though the node has ~1.8 TB free. Always request ~the full node.
@@ -195,8 +195,8 @@ in the cluster.
   do NOT set `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE` (contrast Leonardo/Jupiter compute
   nodes, which have none). The cost is the transient HF-weight-resolution flake below.
 - **Storage/scratch:** ephemeral per-node disk via the `--disk` request (default `512GB`);
-  multi-node Ray rendezvous + any banked traces go through the R2/`s3://` rendezvous
-  bucket (below), not node-local disk. There is no shared persistent POSIX scratch like
+  multi-node Ray rendezvous + any banked traces go through the CW `s3://` object-store rendezvous
+  bucket (`s3://marin-us-east-02a`; store moved R2→CW 2026-07-05, below), not node-local disk. There is no shared persistent POSIX scratch like
   Leonardo's `$WORK` — checkpoints/exports go to HF / the object store.
 
 ---

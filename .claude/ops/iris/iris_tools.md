@@ -72,7 +72,7 @@ trials finished".
 - **Subcommands:** `<pod-substr>` (summary: started + completed + breakdown) · `ls [glob]` ·
   `cat <trial-dir>` (dump a trial's json) · `grep <pattern>` · `cp <trial-dir> [dest]` ·
   `pull [out-base]` (FULL CAPTURE → date-stamped dir: finelog + per-rank pod logs + all `trace_jobs`
-  synced from R2 + `MANIFEST.md`).
+  synced from the CW object store `s3://marin-us-east-02a` [store moved R2→CW 2026-07-05] + `MANIFEST.md`).
 - **`<substr>` matches the POD name** (`iris-benjaminfeuer-<name>-<rank>-<hash>-0`), which can differ
   from the iris job_id display name; no match → lists candidate RL pods.
 - **Env:** `PEEK_KUBECONFIG` (default `~/.kube/coreweave-iris-gpu`), `NS`/`CONTAINER`,
@@ -91,7 +91,7 @@ waits for all nodes to join → `exec`s the MarinSkyRL driver with `RAY_ADDRESS`
 read the head IP from the rendezvous, `ray start --address=…`, contribute their 8 H100s, and block
 until rank 0 writes the `done` marker.
 - **Rendezvous:** `ray_head.json` / `ray_head.done` under `--rendezvous-dir`
-  (`OT_AGENT_IRIS_RENDEZVOUS_DIR`); opened via `fsspec` so `gs://` / `s3://` (CoreWeave R2) / NFS all
+  (`OT_AGENT_IRIS_RENDEZVOUS_DIR`); opened via `fsspec` so `gs://` / `s3://` (CoreWeave CW object store `marin-us-east-02a`; store moved R2→CW 2026-07-05) / NFS all
   work. Pins ALL Ray agent ports outside the worker range (the `beda7a7f` nondeterministic-collision fix).
 - **Invoked by** `python -m rl.cloud.launch_rl_iris` — you never type it directly; edit it locally
   (rides the `/app` upload, no image rebuild).
