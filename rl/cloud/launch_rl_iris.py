@@ -188,8 +188,21 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # 613e225d, so this ADDS one commit and preserves everything baked in gpu-rl-1a32669c. wheels + harbor
     # + rl_env_constraints UNCHANGED (skyrl-only, prebuilt-wheelhouse). Pull-verified: 48 layers, max 3.46
     # GB, 22.6 GB total. Build asserts green (skyrl_train/vllm/flash_attn/torchtitan.ExpertParallel import).
-    "@sha256:74d6d3e2d05b62cb9c9a8262a171eaa7abf31810ec2dc4f2d4ae544ef907747c"  # noqa: E501  (gpu-rl-cf1ecea6, PULLABLE; SKYRL 822221a0 engine-readiness gate)
-    # (prev: gpu-rl-1a32669c @sha256:9a96ad1f SKYRL 613e225d loop-abort+non-fatal drain; gpu-rl-addb348e @sha256:2f7a4f7a drain-v1; gpu-rl-f9806065 @sha256:37cdc3e6 UN-PULLABLE)
+    # gpu-rl-7d15b25a (built 2026-07-08, kaniko gpurl-kaniko-7d15b25a, SINGLE_SNAPSHOT=0 pullable): the
+    # InfiniBand ENABLE image. Adds `rdma-core ibverbs-providers libibverbs1 librdmacm1 ibverbs-utils` to the
+    # rl-stage apt-get so NCCL's built-in IB transport can DLOPEN libibverbs.so.1 + the libmlx5 provider at
+    # runtime — WITHOUT it (all prior images) NCCL silently disabled IB and fell back to NET/Socket (TCP over
+    # enp157s0np0), the cross-node throughput bottleneck. Diagnosed in a live grid-30b-c-cp4-timing-v5 pod:
+    # CoreWeave exposes the RDMA devices (/dev/infiniband/{uverbs0..8,rdma_cm}, 9x mlx5 ports ACTIVE @ 100Gb/s
+    # EDR) but the image shipped NO verbs userspace (`find / -name libibverbs*` empty, `ibv_devices` not found).
+    # NO external libnccl-net.so/OFI plugin is needed on Mellanox IB. Also SKYRL_COMMIT 822221a0->272bf011
+    # (penfever/working HEAD, direct child: CP>1 _C::rms_norm Meta-kernel fix) so --skyrl-ref 272bf011 is a
+    # no-op safety belt. wheels + harbor d58043c3 + rl_env_constraints UNCHANGED (fast prebuilt-wheelhouse,
+    # NO nvcc). Pull-verified: 48 layers, max 3.46 GB, 22.66 GB total. Build asserts green (flash_attn_2_cuda /
+    # skyrl_train / vllm / torchtitan.ExpertParallel; baked MarinSkyRL HEAD == 272bf011; harbor 0.8.0). Expected
+    # next-launch signal (NCCL_DEBUG=INFO): `NET/IB : Using [0]mlx5_0:1/IB` + `GPU Direct RDMA Enabled`.
+    "@sha256:17a46200af64fbcb05540ebedb70df9c1f32282130bffe20acc7b985cf72245e"  # noqa: E501  (gpu-rl-7d15b25a, PULLABLE; IB userspace enabled + SKYRL 272bf011)
+    # (prev: gpu-rl-cf1ecea6 @sha256:74d6d3e2 SKYRL 822221a0 engine-readiness gate; gpu-rl-1a32669c @sha256:9a96ad1f SKYRL 613e225d loop-abort+non-fatal drain; gpu-rl-f9806065 @sha256:37cdc3e6 UN-PULLABLE)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump

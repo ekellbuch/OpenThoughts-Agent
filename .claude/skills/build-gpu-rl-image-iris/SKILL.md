@@ -251,9 +251,13 @@ crane manifest --platform linux/amd64 ghcr.io/open-thoughts/openthoughts-agent:g
 Then **bump `DEFAULT_RL_DOCKER_IMAGE` in `rl/cloud/launch_rl_iris.py`** to the new
 `ghcr.io/open-thoughts/openthoughts-agent@sha256:<digest>` and update the provenance comment. **Pin the DIGEST,
 never the floating `:gpu-rl` tag** (it stale-caches under `imagePullPolicy: IfNotPresent`). Last known-good
-digest: `sha256:9581f8d27be6da18d690b779d1bda67aed505c1aa92b6dd7ccd142cfea1f90bf` (gpu-rl-b3f498ee,
-2026-06-29 — rl env PINNED to the 81045a29 freeze via `docker/rl_env_constraints.txt` + harbor f7f51f13; the
-NCCL-regression fix). Commit the launcher bump locally.
+digest: `sha256:17a46200af64fbcb05540ebedb70df9c1f32282130bffe20acc7b985cf72245e` (gpu-rl-7d15b25a,
+2026-07-08 — **the InfiniBand ENABLE image**: adds `rdma-core ibverbs-providers libibverbs1 librdmacm1
+ibverbs-utils` to the rl-stage apt-get so NCCL's built-in IB transport dlopens libibverbs.so.1 + the libmlx5
+provider → cross-node NCCL rides NET/IB GPUDirect-RDMA instead of the NET/Socket TCP fallback; also SKYRL
+272bf011; wheels + harbor d58043c3 + rl_env_constraints UNCHANGED; 48 layers, max 3.46 GB). Prior known-good:
+`sha256:9581f8d2…` (gpu-rl-b3f498ee, 2026-06-29 — rl env PINNED to the 81045a29 freeze via
+`docker/rl_env_constraints.txt`; the NCCL-regression fix). Commit the launcher bump locally.
 
 ## 9. WHEN a rebuild is actually required (vs a runtime checkout)
 
