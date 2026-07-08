@@ -77,6 +77,15 @@ DEFAULT_CLUSTER_JOIN_TIMEOUT = 1800
 POLL_INTERVAL = 5
 # Tolerates clock skew between nodes and the time rank-0 needs to start Ray.
 RENDEZVOUS_FRESHNESS_SLACK = 60
+# Bound the rank-0 rendezvous PutObject: an unbounded fsspec/s3fs put can wedge the
+# head forever (no connect/read timeout), invisibly, until every worker times out at
+# the 1800s rendezvous deadline. Each attempt runs under a hard futures timeout with
+# bounded retries + backoff; final failure raises LOUD so the gang fails fast.
+RENDEZVOUS_WRITE_ATTEMPTS = 5
+RENDEZVOUS_WRITE_TIMEOUT = 30  # seconds per attempt
+# Bound `ray start --head` so a hung Ray CLI fails loud (TimeoutExpired) instead of
+# silently stalling bring-up until the worker rendezvous deadline.
+RAY_START_HEAD_TIMEOUT = 300  # seconds
 
 
 def _log(msg: str) -> None:
@@ -174,7 +183,16 @@ def _done_uri(rendezvous_dir: str) -> str:
     return f"{rendezvous_dir.rstrip('/')}/{DONE_FILENAME}"
 
 
+def _write_rendezvous_once(fs, path: str, payload: dict) -> None:
+    """Single blocking PutObject of the rendezvous payload (the caller runs this
+    under a bounded futures timeout so a stalled put cannot wedge the head)."""
+    with fs.open(path, "w") as f:
+        json.dump(payload, f)
+
+
 def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
+    import concurrent.futures
+
     uri = _rendezvous_uri(rendezvous_dir)
     payload = {
         "head_ip": head_ip,
@@ -183,9 +201,55 @@ def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
         "written_at": time.time(),
     }
     fs, path = _fs_and_path(uri)
-    with fs.open(path, "w") as f:
-        json.dump(payload, f)
-    _log(f"Wrote rendezvous {uri}: head_ip={head_ip} port={ray_port}")
+    # Bound the object-store PutObject with a hard per-attempt futures timeout +
+    # bounded retries/backoff. WHY: an unbounded s3fs/fsspec put here deterministically
+    # hangs the head (no connect/read timeout on the underlying client), and because it
+    # is invisible, every worker only discovers it at the 1800s rendezvous deadline.
+    # NOTE: a fresh executor per attempt + shutdown(wait=False) so a stalled put thread
+    # never blocks us on __exit__ (ThreadPoolExecutor's context-manager exit would wait
+    # on the wedged worker, defeating the timeout).
+    last_exc: BaseException | None = None
+    for attempt in range(1, RENDEZVOUS_WRITE_ATTEMPTS + 1):
+        t0 = time.time()
+        _log(
+            f"Writing rendezvous {uri} (attempt {attempt}/{RENDEZVOUS_WRITE_ATTEMPTS}, "
+            f"per-attempt timeout {RENDEZVOUS_WRITE_TIMEOUT}s)..."
+        )
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            ex.submit(_write_rendezvous_once, fs, path, payload).result(
+                timeout=RENDEZVOUS_WRITE_TIMEOUT
+            )
+            _log(
+                f"Wrote rendezvous {uri}: head_ip={head_ip} port={ray_port} "
+                f"(attempt {attempt}, {time.time() - t0:.1f}s)"
+            )
+            return
+        except concurrent.futures.TimeoutError as exc:
+            last_exc = exc
+            _log(
+                f"Rendezvous write STALLED — timed out after {time.time() - t0:.1f}s "
+                f"(attempt {attempt}/{RENDEZVOUS_WRITE_ATTEMPTS}); object-store PutObject "
+                f"to {uri} is not completing."
+            )
+        except Exception as exc:  # noqa: BLE001 - transient object-store error
+            last_exc = exc
+            _log(
+                f"Rendezvous write FAILED after {time.time() - t0:.1f}s "
+                f"(attempt {attempt}/{RENDEZVOUS_WRITE_ATTEMPTS}): {exc!r}"
+            )
+        finally:
+            ex.shutdown(wait=False)  # never block on a wedged put thread
+        if attempt < RENDEZVOUS_WRITE_ATTEMPTS:
+            backoff = min(2 ** (attempt - 1), 10)
+            _log(f"Retrying rendezvous write in {backoff}s...")
+            time.sleep(backoff)
+    raise RuntimeError(
+        f"Rank-0 failed to publish the rendezvous to {uri} after "
+        f"{RENDEZVOUS_WRITE_ATTEMPTS} attempts (last error: {last_exc!r}). Failing "
+        f"fast so the gang aborts with a clear cause instead of hanging to the worker "
+        f"rendezvous deadline."
+    ) from last_exc
 
 
 def poll_rendezvous(rendezvous_dir: str, timeout: int, min_written_at: float | None = None) -> dict:
@@ -447,7 +511,9 @@ def ray_start_head(head_ip: str, ray_port: int, spill_uri: str | None = None) ->
     if spill_uri:
         _log(f"Ray object spilling -> R2 prefix {spill_uri} (no local /tmp spill)")
     _log(f"Starting Ray HEAD: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
+    t0 = time.time()
+    subprocess.run(cmd, check=True, timeout=RAY_START_HEAD_TIMEOUT)
+    _log(f"Ray HEAD subprocess returned (exit 0) in {time.time() - t0:.1f}s")
 
 
 def ray_start_worker(head_ip: str, ray_port: int, node_ip: str, spill_uri: str | None = None) -> None:
@@ -576,12 +642,42 @@ def run_head(args: argparse.Namespace, train_argv: list[str]) -> int:
     ray_address = f"{head_ip}:{ray_port}"
     _log(f"ROLE=head rank=0/{num_tasks} head_ip={head_ip} ray_port={ray_port}")
 
+    # Install the SIGTERM/SIGINT handler + termination-artifact capture at the TOP of
+    # bring-up (BEFORE clear_rendezvous / ray_start_head / rendezvous write), so a reap
+    # ANYWHERE in bring-up produces the py-spy/stack/term artifact instead of dying
+    # silently. `process` is None during bring-up; the handler skips the driver kill
+    # until the training driver is launched below (closure reads the current value).
+    process = None
+
+    def _shutdown(signum, _frame) -> None:
+        _log(f"Received signal {signum}; terminating training driver and stopping Ray...")
+        # Capture FIRST (before teardown mutates disk/GPU state) — a SIGTERM here is
+        # often a k8s eviction / OOM whose cause survives nowhere else.
+        capture_termination_artifacts(args.rendezvous_dir, f"signal {signum} (head rank 0)")
+        if process is not None:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                process.wait(timeout=60)
+            except (subprocess.TimeoutExpired, ProcessLookupError):
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        if args.rendezvous_dir and num_tasks > 1:
+            _set_marker(args.rendezvous_dir, DONE_FILENAME)
+        ray_stop()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
     # On iris task retry, a rendezvous file from a previous attempt still points
     # at a now-dead head. Purge before starting the new head.
     if num_tasks > 1 and args.rendezvous_dir:
         clear_rendezvous(args.rendezvous_dir)
 
     ray_start_head(head_ip, ray_port, spill_uri=_ray_spill_uri(args.rendezvous_dir))
+    _log("Ray head bootstrap complete; entering rendezvous / cluster-join phase.")
 
     if num_tasks > 1:
         if not args.rendezvous_dir:
@@ -589,6 +685,10 @@ def run_head(args: argparse.Namespace, train_argv: list[str]) -> int:
                 "Multi-node iris slice (IRIS_NUM_TASKS>1) requires --rendezvous-dir "
                 "(or OT_AGENT_IRIS_RENDEZVOUS_DIR) so worker ranks can find the head IP."
             )
+        _log(
+            "[start_rl_iris_controller] Ray head subprocess returned; writing rendezvous "
+            f"-> {_rendezvous_uri(args.rendezvous_dir)}"
+        )
         write_rendezvous(args.rendezvous_dir, head_ip, ray_port)
         # Re-publish the rendezvous each poll so a late cold-node worker never sees it
         # as "stale" (see wait_for_nodes docstring — prevents the freshness deadlock).
@@ -608,28 +708,9 @@ def run_head(args: argparse.Namespace, train_argv: list[str]) -> int:
     sys.stdout.flush()
     sys.stderr.flush()
 
+    # The SIGTERM/SIGINT handler is already installed at the top of run_head; assigning
+    # `process` here arms its driver-teardown path (the closure reads this value).
     process = subprocess.Popen(train_argv, env=env, start_new_session=True)
-
-    def _shutdown(signum, _frame) -> None:
-        _log(f"Received signal {signum}; terminating training driver and stopping Ray...")
-        # Capture FIRST (before teardown mutates disk/GPU state) — a SIGTERM here is
-        # often a k8s eviction / OOM whose cause survives nowhere else.
-        capture_termination_artifacts(args.rendezvous_dir, f"signal {signum} (head rank 0)")
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            process.wait(timeout=60)
-        except (subprocess.TimeoutExpired, ProcessLookupError):
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        if args.rendezvous_dir and num_tasks > 1:
-            _set_marker(args.rendezvous_dir, DONE_FILENAME)
-        ray_stop()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
 
     exit_code = process.wait()
     if exit_code != 0:
