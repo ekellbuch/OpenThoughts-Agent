@@ -151,6 +151,28 @@ success — verify the repo exists before any manual rescue.
   `--gcs-output-dir gs://marin-models-us/ot-agent` so iris places on any free US
   worker. Kill the stuck submission first only with user permission.
 
+### Wedged / stalled TRAINING run (executor coordinator + child) — checkpoint-resume recovery
+For executor-dispatched training runs — a CPU **coordinator** submits a v5p **child** training job (e.g. a
+Levanter midtrain) — recovery differs from datagen:
+- **`--max-retries` auto-resumes ORGANIC failures only.** Child FAILED(5)/preempted → the coordinator
+  relaunches a fresh child that resumes from the latest checkpoint in the output dir. It does NOT catch a
+  WEDGE (child still `state 3` but frozen) — the child never FAILED, so no retry fires. It also **reuses the
+  launch-time bundle**, so a CODE fix reaches the worker only on a FRESH relaunch, never an in-place retry.
+- **Stopping the COORDINATOR is TERMINAL** — `iris job stop <coordinator>` kills its children AND does NOT
+  relaunch (it's the *abandon* path). Do NOT stop the coordinator expecting `--max-retries` to bring it back.
+- **Liveness/wedge = ADVANCEMENT, not presence.** A training run can be `state 3 RUNNING` with `iris job logs`
+  showing a recent-looking step yet be dead — the CLI/IAP log window freezes at a stale timestamp (the training
+  analog of the datagen frozen-spinner trap). Judge by the **SAVED-CHECKPOINT step AND its GCS mtime** advancing
+  (`gsutil ls -l <output_dir>/checkpoints/step-*/metadata.json | sort -k2 | tail` — is a NEW step being written,
+  recently?), plus cgroup mem still moving. Frozen checkpoint mtime for hours + healthy cgroup = a progress
+  WEDGE (not OOM/leak). (Reading a *frozen* checkpoint step as "fresh" once masked an ~11.5h stall.)
+- **Recover a confirmed wedge: stop-coordinator → RELAUNCH-FRESH on the SAME output dir.** Levanter/the executor
+  auto-resumes from the latest checkpoint there. CONFIRM the new child loads that step (step-N), NOT step 0 —
+  a step-0 restart = wrong output dir = would lose ALL training progress → stop and re-check the output-dir tag.
+  (Same move used to deploy a code fix to a running train run: stop + relaunch-fresh resumes from checkpoint.)
+- **Standing authority (user, 2026-07-08):** a CONFIRMED-wedged training run (frozen checkpoint mtime + frozen
+  logs for hours, cgroup healthy) may be auto-bounced (stop-coordinator + relaunch-fresh) autonomously.
+
 ### Daytona snapshot cap
 Launches build a per-env Daytona snapshot; the shared `cli` org caps at 60. On
 `SnapshotCapExceeded`, delete **only `MISSING`-state `harbor__*` snapshots**
