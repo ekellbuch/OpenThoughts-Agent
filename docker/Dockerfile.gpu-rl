@@ -243,6 +243,22 @@ ARG RAY_VERSION
 ARG TORCH_CUDA_ARCH_LIST
 
 ENV DEBIAN_FRONTEND=noninteractive
+# InfiniBand / RDMA userspace (rdma-core) — REQUIRED for NCCL's built-in IB
+# transport to come up on CoreWeave `cw-us-east-02a` (9x Mellanox mlx5 HCAs @
+# 100 Gb/s EDR are exposed into the pod at /dev/infiniband/{uverbs*,rdma_cm} with
+# all ports ACTIVE — the pod/config side is already correct). NCCL DLOPENS
+# `libibverbs.so.1` + the `libmlx5` provider at runtime; if they are ABSENT it
+# SILENTLY disables the IB transport and falls back to `NET/Socket` (TCP over the
+# routable ethernet enp157s0np0) — exactly the cross-node bottleneck observed on
+# grid-30b-c-cp4-timing-v5 (2026-07-08). The base nvidia/cuda image ships NONE of
+# this userspace (verified: `find / -name libibverbs*` empty, `ibv_devices` not
+# found), so NCCL never saw an IB device. Installing rdma-core (pulls libibverbs1
+# + ibverbs-providers[libmlx5] + librdmacm1) makes NCCL's IB transport dlopen
+# succeed → cross-node collectives ride GPUDirect-RDMA IB instead of TCP.
+# `ibverbs-utils` adds ibv_devices/ibv_devinfo/ibstat for in-pod IB diagnostics.
+# NOTE: NCCL's built-in IB transport needs NO external libnccl-net.so / OFI plugin
+# on Mellanox IB — the "Could not find libnccl-net.so" health-probe line is BENIGN;
+# the real gap was purely this missing verbs userspace.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
@@ -253,6 +269,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-venv \
+    rdma-core \
+    ibverbs-providers \
+    libibverbs1 \
+    librdmacm1 \
+    ibverbs-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv for fast package management
@@ -336,7 +357,13 @@ ENV SKYRL_BRANCH=penfever/working
 #     so future RL launches get it by default. Parent is exactly 613e225d, so this ADDS
 #     one commit and preserves everything baked above; another SKYRL_COMMIT-only bump
 #     (wheels + harbor + rl_env_constraints unchanged) (2026-07-07).
-ENV SKYRL_COMMIT=822221a054341f1068995308110394a6ecbd6d9e
+#   - 272bf011 "fix(cp-rl): register _C::rms_norm + fused_add_rms_norm Meta/fake kernels
+#     for CP>1 weight-sync" — penfever/working HEAD; DIRECT child of 822221a0 (adds ONE
+#     commit, preserves everything baked above). Baking HEAD makes the grid launch-block
+#     `--skyrl-ref 272bf011` a no-op safety belt. Another SKYRL_COMMIT-only bump (wheels
+#     + harbor + rl_env_constraints unchanged); the substantive change this rebuild is FOR
+#     is the rdma-core IB userspace in the apt-get above (2026-07-08).
+ENV SKYRL_COMMIT=272bf011cfe96d3f9ad6b771761c2f2ded4ae443
 
 RUN git clone --branch $SKYRL_BRANCH https://github.com/marin-community/MarinSkyRL.git $SKYRL_HOME && \
     git -C $SKYRL_HOME checkout $SKYRL_COMMIT
