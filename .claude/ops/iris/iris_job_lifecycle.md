@@ -166,10 +166,17 @@ Levanter midtrain) — recovery differs from datagen:
   (`gsutil ls -l <output_dir>/checkpoints/step-*/metadata.json | sort -k2 | tail` — is a NEW step being written,
   recently?), plus cgroup mem still moving. Frozen checkpoint mtime for hours + healthy cgroup = a progress
   WEDGE (not OOM/leak). (Reading a *frozen* checkpoint step as "fresh" once masked an ~11.5h stall.)
-- **Recover a confirmed wedge: stop-coordinator → RELAUNCH-FRESH on the SAME output dir.** Levanter/the executor
-  auto-resumes from the latest checkpoint there. CONFIRM the new child loads that step (step-N), NOT step 0 —
-  a step-0 restart = wrong output dir = would lose ALL training progress → stop and re-check the output-dir tag.
-  (Same move used to deploy a code fix to a running train run: stop + relaunch-fresh resumes from checkpoint.)
+- **Recover a confirmed wedge — Option A (PRIMARY): stop the wedged CHILD only, NOT the coordinator.**
+  `iris job stop <child_task_id>` forces the child terminal (KILLED), which triggers the coordinator's own
+  executor respawn loop to spawn a FRESH child that auto-resumes from the latest checkpoint on the pinned
+  output dir. This is the run's *proven* recovery (a FAILED/KILLED child → respawn) and it PRESERVES the
+  healthy coordinator, `--max-retries` durability, and the W&B run identity — strictly better than killing the
+  parent. Step-0 risk is ~nil (executor reuses the pinned output dir), but CONFIRM the new child loads step-N
+  (tqdm `Nk/29.9k` / cgroup callback), not step 0.
+  - **Option B (FALLBACK): stop-coordinator → relaunch-FRESH on the SAME output dir.** Use ONLY if the
+    coordinator itself is dead / won't respawn, OR to deploy a CODE fix (a child-only bounce reuses the old
+    launch bundle; a code fix needs a fresh launch → a full parent relaunch). Both resume from the checkpoint;
+    verify the relaunch targets the SAME output-dir tag (a step-0 start = wrong dir = lost progress).
 - **Standing authority (user, 2026-07-08):** a CONFIRMED-wedged training run (frozen checkpoint mtime + frozen
   logs for hours, cgroup healthy) may be auto-bounced (stop-coordinator + relaunch-fresh) autonomously.
 
