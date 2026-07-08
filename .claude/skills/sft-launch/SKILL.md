@@ -142,6 +142,25 @@ Live status: tail the `.out` for `{'loss':…, 'grad_norm':…}` step lines (tra
   tokenization (~65s). Fix: a config with `data_shared_file_system: true` (global barrier; same tokens/loss). Diagnose
   in order: dsfs → schema-key `KeyError` → only then suspect genuinely-slow tokenization (`--pretokenize`). Details in
   `ops/leonardo/ops.md §SFT` (where it bites hardest).
+- **axolotl multi-node bring-up dies with `OSError [Errno 37] No locks available` (ENOLCK) / `[Errno 116] Stale
+  file handle` (ESTALE) during dataset load** (masquerades as a `C10d RendezvousConnectionError` in the log tail —
+  that's teardown noise; the real error is upstream, `datasets/builder.py:821` FileLock and/or the axolotl
+  `FileLockLoader` at `utils/data/lock.py`). **Root cause — LF gets multi-node dataset loading free, axolotl does
+  NOT:** LF tokenizes inside the Trainer where the process group is up, so it coordinates with
+  `main_process_first()` (a torch.distributed BARRIER) → only rank-0 writes the shared cache, safe on shared FS.
+  **axolotl loads data in `do_train`→`load_datasets()` BEFORE accelerate/dist init** (`cli/train.py` L48 vs L141),
+  so it has NO process group and falls back to shared-FS advisory FileLocks (the `FileLockLoader` lock keyed by
+  `dataset_prepared_path`, AND the HF `datasets` builder lock keyed by `HF_DATASETS_CACHE`). On **Lustre under
+  N-way (16-node) concurrency BOTH flocks ENOLCK/ESTALE** (single-client flock is fine; concurrency breaks it).
+  `data_shared_file_system:true` does NOT save axolotl (it's the LF barrier mechanism; axolotl's lock.py never
+  reads it and ALWAYS locks). **Interim fix (big-node-local-/tmp clusters, e.g. TACC Vista gh=261G): route ALL
+  per-rank WRITE caches node-local** — `export SFT_KEEP_TMPDIR_LOCAL=1` (the sbatch write-cache guard then points
+  `HF_DATASETS_CACHE`/`TRITON_CACHE_DIR`/`TORCHINDUCTOR`/`RAY`/`TMPDIR`/`XDG` at `/tmp/otsft_$JOBID`, per-node) +
+  set `dataset_prepared_path: /tmp/...` in the axolotl config; keep `HF_HUB_CACHE` shared+populated (pre-download
+  once) so node-local arrow builds read cached parquet, no re-download. Each rank builds uncontended (16x redundant
+  tokenize is trivial). **Durable fix (portable, incl. small-/tmp clusters): pretokenize-once into a SHARED
+  `dataset_prepared_path` + a lock-free persistent-sentinel fast-path in axolotl `lock.py`** (mirrors LF's
+  pretok-once pattern). Full saga: `agent_logs/2026-07-08_sft-815251-c10d-rendezvous-fail.md`.
 - **Template × tokenizer mismatch** — §3; the top silent ruin for delphi/Llama-3-family models.
 
 ## 8. Per-cluster particulars — READ before launching
