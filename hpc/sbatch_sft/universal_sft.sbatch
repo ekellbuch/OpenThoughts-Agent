@@ -145,30 +145,49 @@ mkdir -p "{experiments_dir}"
 mkdir -p "{experiments_dir}/logs"
 mkdir -p "{experiments_dir}/tmp"
 
-# --- /tmp-exhaustion guard: redirect scratch/cache dirs OFF node-local /tmp ---
-# Some compute nodes ship a tiny node-local /tmp (Leonardo: ~9.6G LV). HF-datasets
-# arrow_writer spill (TMPDIR), Triton/TorchInductor caches, and Ray all default
-# there and can blow it out with OSError [Errno 28] during dataset.map (observed
-# on Leonardo, job 46313225). Redirect them onto the (large) work area under the
-# per-job experiment tmp dir. DSFS (data_shared_file_system=true) serializes the
-# dataset-cache writes to rank-0, so the NFS arrow-cache race noted in
-# jupiter.env is not a concern. Opt out with SFT_KEEP_TMPDIR_LOCAL=1 if a cluster
-# specifically needs node-local TMPDIR.
-_TMPROOT="{experiments_dir}/tmp/${SLURM_JOB_ID:-$$}"
+# --- write-cache location guard (two regimes) ---
+# EVERY per-rank WRITE cache (HF-datasets arrow build+lock, Triton/TorchInductor
+# autotune, Ray, TMPDIR spill, XDG) must live on a filesystem that is (a) large enough
+# and (b) does not break flock under N-way concurrency. Two regimes:
+#
+#   * SHARED (default): redirect off a TINY node-local /tmp (Leonardo ~9.6G LV, which
+#     OSError [Errno 28]s during dataset.map — job 46313225) onto the per-job experiment
+#     work area on the shared FS. Relies on the axolotl FileLockLoader's SHARED lock
+#     (keyed by dataset_prepared_path) to serialize the dataset build to one rank.
+#
+#   * NODE-LOCAL (SFT_KEEP_TMPDIR_LOCAL=1): put every write cache on node-local /tmp.
+#     Use on LARGE-/tmp clusters (TACC Vista gh = 261G XFS) whose SHARED Lustre flock
+#     BREAKS under 16-way concurrency (ENOLCK "No locks available" + ESTALE "Stale file
+#     handle" — killed SFT 815251/815508/815530: both the FileLockLoader lock AND the HF
+#     `datasets` builder lock at builder.py:821 race on Lustre). Each rank builds its OWN
+#     caches uncontended; the shared FS stays READ-ONLY (model + HF_HUB_CACHE raw data +
+#     dataset). HF_HUB_CACHE stays shared+populated so node-local arrow builds read the
+#     cached raw files (NO 16x re-download).
+if [ "${SFT_KEEP_TMPDIR_LOCAL:-0}" = "1" ]; then
+  _TMPROOT="/tmp/otsft_${SLURM_JOB_ID:-$$}"
+  _CACHE_NODE_LOCAL=1
+else
+  _TMPROOT="{experiments_dir}/tmp/${SLURM_JOB_ID:-$$}"
+  _CACHE_NODE_LOCAL=0
+fi
 export TRITON_CACHE_DIR="$_TMPROOT/triton_cache"
 export TORCHINDUCTOR_CACHE_DIR="$_TMPROOT/inductor_cache"
 export RAY_TMPDIR="$_TMPROOT/ray"
-mkdir -p "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR" "$RAY_TMPDIR"
-if [ "${SFT_KEEP_TMPDIR_LOCAL:-0}" != "1" ]; then
-  export TMPDIR="$_TMPROOT/tmp"
-  export TMP="$TMPDIR"
-  export TEMP="$TMPDIR"
-  export XDG_CACHE_HOME="$_TMPROOT/xdg_cache"
-  export HF_DATASETS_CACHE="$_TMPROOT/hf_datasets_cache"
-  mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$HF_DATASETS_CACHE"
+export TMPDIR="$_TMPROOT/tmp"
+export TMP="$TMPDIR"
+export TEMP="$TMPDIR"
+export XDG_CACHE_HOME="$_TMPROOT/xdg_cache"
+export HF_DATASETS_CACHE="$_TMPROOT/hf_datasets_cache"
+_CACHE_DIRS="$TRITON_CACHE_DIR $TORCHINDUCTOR_CACHE_DIR $RAY_TMPDIR $TMPDIR $XDG_CACHE_HOME $HF_DATASETS_CACHE"
+if [ "$_CACHE_NODE_LOCAL" = "1" ]; then
+  # node-local /tmp differs per node -> create the dirs on EVERY node (batch-node mkdir
+  # alone is insufficient; the inherited env points each rank at its OWN node's /tmp).
+  srun --nodes="$NUM_NODES" --ntasks-per-node=1 mkdir -p $_CACHE_DIRS
+else
+  mkdir -p $_CACHE_DIRS
 fi
-echo "[tmpfix] TMPDIR=${TMPDIR:-<node-local>} TRITON_CACHE_DIR=$TRITON_CACHE_DIR RAY_TMPDIR=$RAY_TMPDIR"
-# --- end /tmp-exhaustion guard ---
+echo "[tmpfix] node_local=$_CACHE_NODE_LOCAL _TMPROOT=$_TMPROOT HF_DATASETS_CACHE=$HF_DATASETS_CACHE TMPDIR=$TMPDIR"
+# --- end write-cache location guard ---
 
 # --- Supabase environment variables for DB registration ---
 for _supabase_var in SUPABASE_URL SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY; do
