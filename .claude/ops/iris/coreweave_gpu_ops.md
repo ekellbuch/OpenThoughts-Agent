@@ -377,7 +377,7 @@ monitor/harvest cron catch them at its >1200-count trigger).
   fix-OFF must FAIL and fix-ON must PASS; one arm alone proves nothing. Do NOT build
   reduced/faster "canary" configs (smaller ctx/batch/steps) to debug a bug you have NOT
   proven they reproduce — a green result with no failing control is INCONCLUSIVE
-  (`canary_moe_dispatchfix_8k` "validated" a MoE-wedge fix by completing 2 steps but was
+  (`canary_moe_dispatchfix_8k` [config retired 2026-07-08] "validated" a MoE-wedge fix by completing 2 steps but was
   never run WITHOUT the fix → never proved the 8k config reproduces the 131k wedge). A
   slower GUARANTEED repro beats a fast UNCERTAIN one; reduced configs are for SPEED of
   a *proven* repro only.

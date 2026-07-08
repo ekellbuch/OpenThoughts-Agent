@@ -144,12 +144,17 @@ NOT swap** → the same skip is harmless there (the likely Jupiter-GH200-OK reco
 - **Bring-up check:** confirm the bracket engaged — engine log shows `initialize_layerwise_reload` /
   `finish_weight_reload`. Full account: `agent_logs/2026-06-27_coreweave_moe_ep_garbage_debug_cycle.md`.
 
+## MarinSkyRL runtime env flags — GDN + TIS
+- **`SKYRL_GDN_MASK_FLA=1`** — force the proven pure-torch GatedDeltaNet (GDN) path (the `fla` wheel is broken). REQUIRED for the linear-attention layers on ANY GDN-arch run (e.g. Qwen3.6-35B-A3B's 30 GDN layers). Absent → the broken `fla` path.
+- **`SKYRL_TIS_SERVED_ID_SPLICE=1`** — TIS Fix A (skyrl `3caeb79f`): use vLLM's raw served `completion_token_ids` as the generated region so TIS tier-1 exact-by-id alignment holds (closes the residual off-by-1..4 think-block re-tokenization divergence). Requires `--skyrl-ref ≥ 3caeb79f`.
+
 ---
 
 ## MoE-RL 131k first-step forward wedge → `SKYRL_R3_RESIDENT` (FIXED `ac4b3806`)
 
 The long-standing MoE agentic-RL **wedge at the first training-step policy forward** (Qwen3-Coder-30B-A3B,
-131k ctx, CoreWeave `8node_qwen3_30b_a3b_131k_cp_dcp2_r3.yaml`) is **FIXED** — validated end-to-end 2026-07-01
+131k ctx, CoreWeave `8node_qwen3_30b_a3b_131k_cp_dcp2_r3.yaml` — config retired 2026-07-08 in the reorg;
+surviving equivalent `grid_30b_EP8_FSDP2_CP2.yaml`) is **FIXED** — validated end-to-end 2026-07-01
 (a full gs-1 completed with healthy metrics: entropy 0.15, tis_ratio ~0.98, no collapse; ckpt saved).
 
 - **Root cause:** `rollout_routed_experts` `[B,seq,L=48,K=8]` was shipped BY VALUE through every per-forward

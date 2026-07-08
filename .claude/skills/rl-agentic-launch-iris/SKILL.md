@@ -142,13 +142,14 @@ terminates the job). Flag glossary:
 
 | Config (`hpc/skyrl_yaml/iris/…`) | Model | Layout | GPUs → `--num-nodes` |
 |---|---|---|---|
-| `smoke_seqnorm_tis.yaml` | Qwen3-8B (smoke) | colocated, all-null (derives) | 8 → **1** (or 16 → **2**) |
 | `56GPU_seqnorm_tis.yaml` | dense 8B (seqnorm + TIS) | disaggregated: 1 node policy/ref + 48×TP1 engines | 56 → **7** |
-| `8node_qwen3_30b_a3b_131k_cp_dcp2_r3.yaml` | **Qwen3-Coder-30B-A3B (MoE)** | disaggregated: 4 nodes policy (EP8×FSDP2×CP2=32) + 4×TP8/DCP2 engines | 64 → **8** |
+| `grid_30b_EP8_FSDP2_CP2.yaml` | **Qwen3-Coder-30B-A3B (MoE)** | disaggregated: 4 nodes policy (EP8×FSDP2×CP2=32) + 4×TP8/DCP2 engines | 64 → **8** |
+| `64GPU_35B_A3B.yaml` | **Qwen3.6-35B-A3B (MoE)** — CANONICAL 35B | disaggregated: 4 nodes policy (EP4×FSDP8×CP1=32) + 8×TP4/EP4 engines | 64 → **8** |
 
-- **Smoke first.** `smoke_seqnorm_tis.yaml` is the launcher-validation smoke (same seqnorm+TIS code path,
-  toy scale, ≥2 steps in minutes); it runs unchanged at `--num-nodes 1` (no rendezvous needed) OR `2` (needs
-  a rendezvous-dir). Use it to validate the launcher / a new image digest end-to-end before a real arm.
+- **Smoke first.** The dedicated launcher-validation smoke `smoke_seqnorm_tis.yaml` (toy-scale 8B, same
+  seqnorm+TIS code path, ≥2 steps in minutes at `--num-nodes 1`) was **retired in the 2026-07-08 config
+  reorg** — no dedicated toy smoke config currently survives. Until one is re-added, validate the launcher /
+  a new image digest via `--dry-run` (confirm the resolved hydra args) plus a short real arm before a full run.
 - The dense-8B model is typically `Qwen/Qwen3-8B` (or a `laion/…` 8B); the MoE arm is
   `Qwen/Qwen3-Coder-30B-A3B-Instruct`. Common train sets: `DCAgent/exp_rpt_pymethods2test-large`, etc.
 - These iris configs are **ports of the Jupiter prod configs** (same experiment) — the header of each iris
