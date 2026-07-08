@@ -6,7 +6,9 @@ ssh Leonardo    # complete 2FA once; socket persists 8h
 ```
 > **Host keys ROTATE (benign — NOT an anomaly).** Round-robin login nodes rotate host keys, so a fresh connection (esp. `-o ControlPath=none` / `-o ControlMaster=no`) can hit `REMOTE HOST IDENTIFICATION HAS CHANGED` / a `known_hosts` mismatch. Use the standard `ssh Leonardo` (ControlMaster socket). Do NOT flag it as a failure or block on a `known_hosts` refresh.
 
-**Cluster facts**: A100 64GB GPUs, 4/node, 3456 nodes, SLURM scheduler. User `bfeuer00`, account `AIFAC_5C0_290`, partition `boost_usr_prod`. Max wall 24h (`--time 23:59:00`; `boost_usr_prod` has a 1-day limit). **No internet on compute nodes** (use the SOCKS5 proxy / SSH tunnel). Compilers come from conda (GCC 15.2, CUDA 13.2) — do NOT `module load gcc cuda` (too old). Leonardo is in use; cron covers Jupiter + Leonardo.
+**Cluster facts**: A100 64GB GPUs, 4/node, 3456 nodes, SLURM scheduler. User `bfeuer00`, account `AIFAC_5C0_290` (**valid to 2026-08-02, ~71% budget used as of 2026-07-08**), partition `boost_usr_prod`. Max wall 24h (`--time 23:59:00`; `boost_usr_prod` has a 1-day limit). **No internet on compute nodes** (use the SOCKS5 proxy / SSH tunnel). Compilers come from conda (GCC 15.2, CUDA 13.2) — do NOT `module load gcc cuda` (too old). Leonardo is in use; cron covers Jupiter + Leonardo.
+
+> **⚠ MAINTENANCE-vs-account gotcha (2026-07-08).** During a CINECA maintenance reservation the `boost_usr_prod` partition is drained and **`sbatch` fails with `Batch job submission failed: Invalid account or account/partition combination specified`** — even a trivial 1-min test job, and identically with or without an explicit QOS. **This is the MAINTENANCE signature, NOT an account revocation or budget exhaustion** (AIFAC_5C0_290 is valid + funded — see above). Do NOT chase a "restore the account with CINECA" red herring: check for a scheduled maintenance window and **retry after it clears** (typical window ~1 day). E.g. 2026-07-08: all 8 flawed_summ re-fires failed this way → Leonardo was in a 1-day maintenance, not an account problem; retried the next day.
 
 ## Pre-launch preamble
 ```bash
