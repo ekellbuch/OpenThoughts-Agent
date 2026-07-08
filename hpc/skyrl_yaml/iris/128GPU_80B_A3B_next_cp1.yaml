@@ -48,7 +48,9 @@
 #       the hybrid 80B's KV is cheap (12/48 full-attn) so DCP is UNNEEDED, and GDN+DCP
 #       is UNVALIDATED (GDN has no CP/DCP-aware kernel → keep decode simple = DCP1).
 #     - DCP=1 ⇒ VLLM_ALLOW_ROUTED_EXPERTS_DCP is NOT needed (that guard-lift is DCP>1 only).
-#     - engine-EP=1 + RAY executor + R3 is PROVEN on CoreWeave (the 30B cells run it).
+#     - engine-EP=1 + R3 is PROVEN on CoreWeave (the 30B cells run it). NOTE: those 30B cells
+#       use the RAY executor, but qwen3_next needs the mp executor (Ray-DAG deadlock — see the
+#       generator block + v1's KILL); mp is the 80B-jupiter-proven path for this arch.
 #
 #   DIVISIBILITY / CEILING CHECKS (hard constraints — all pass):
 #     * EP divides experts: 512 % EP8 = 0 → 64 experts/EP-rank.
@@ -100,7 +102,7 @@
 #   eps_clip 0.2/0.05, epochs 2 / max_steps 80, batch 64 (train==mini==eval),
 #   lr 8e-6, max_grad_norm 0.9, ckpt_interval 1, hf_save_interval 5, staleness 16.
 #   micro 1/1 (one 131k seq/rank; raise micro_forward to 2 only with HBM headroom).
-#   R3 (moe_router_replay + grouped_gemm + RAY executor + async_scheduling false) — on a
+#   R3 (moe_router_replay + grouped_gemm + mp executor + async_scheduling false) — on a
 #   MoE, TIS REQUIRES R3 (else the train recompute uses native routing ≠ rollout routing →
 #   the importance ratio explodes). GDN handling from the 35B/80B refs: SKYRL_GDN_MASK_FLA=1.
 #
@@ -370,13 +372,20 @@ generator:
   # GDN+DCP is unvalidated. DCP=1 ⇒ VLLM_ALLOW_ROUTED_EXPERTS_DCP is NOT needed.
   inference_engine_decode_context_parallel_size: 1
 
-  # RAY executor — R3-MANDATORY (the mp executor can't emit per-token routing on this path).
-  # ⚠ WATCH: the 80B jupiter (vLLM 0.16) needed the mp executor because Qwen3-Next + R3
-  # deadlocked the Ray Compiled-DAG. The CoreWeave gpu-rl fork is NEWER and the 35B (hybrid
-  # GDN) runs R3 on RAY cleanly — but qwen3_next specifically is UNVALIDATED on RAY here. If
-  # engine init hangs (rank-0 stuck in a DAG channel read at 0% GPU), that is the deadlock →
-  # would need the mp executor. Reported as the #2 bring-up risk in the tracker.
-  inference_engine_mp_backend: false
+  # mp (multiprocessing) EXECUTOR — REQUIRED for qwen3_next + R3 (risk #2a CONFIRMED HIT on
+  # v1, 2026-07-08). The Qwen3-Next hybrid arch (GatedDeltaNet + 512-expert MoE) with R3
+  # capture ON (enable_return_routed_experts=true) DEADLOCKS vLLM's Ray Compiled-DAG: the
+  # engine handshake never returns — driver blocked in ray.get → create_ray_wrapped_inference_
+  # engines, `RuntimeWarning: coroutine 'AsyncLLM.collective_rpc' was never awaited`, all 128
+  # GPUs at 0% util, policy mesh never loaded (v1 wedged 16 nodes ~72 min, KILLED). The mp
+  # executor has NO Compiled-DAG → runs capture-ON cleanly at full cudagraph speed. This is
+  # the EXACT fix the 80B-jupiter ref used for this arch (jupiter/extra/128GPU_qwen3_next_80b_
+  # a3b.yaml, inference_engine_mp_backend: true, with R3+TIS intact — mp DOES emit per-token
+  # routing here, the newer gpu-rl vLLM fork bakes the routed_experts serialization). The
+  # earlier "mp can't emit routing / RAY is R3-mandatory" claim was WRONG for qwen3_next.
+  # REQUIRES colocate_all=false (set above, disaggregated). NO VLLM_ENABLE_V1_MULTIPROCESSING
+  # env is needed — this single field toggles distributed_executor_backend=mp.
+  inference_engine_mp_backend: true
 
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
@@ -418,7 +427,8 @@ generator:
     disable_custom_all_reduce: true
     # R3: emit per-token expert routing (consumed by the FSDP2 router-replay hook).
     enable_return_routed_experts: true
-    # MUST be false under the RAY executor (trips vLLM's R3 guard otherwise).
+    # MUST be false whenever R3 routed-experts capture is ON (the vLLM R3 guard requires it) —
+    # independent of the executor. Stays false under the mp executor.
     async_scheduling: false
 
 # Data paths (set via CLI --train_data / --val_data)

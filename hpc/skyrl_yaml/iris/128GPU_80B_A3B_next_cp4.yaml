@@ -258,7 +258,10 @@ generator:
   num_inference_engines: 16
   inference_engine_expert_parallel_size: 1
   inference_engine_decode_context_parallel_size: 1
-  inference_engine_mp_backend: false
+  # mp executor — REQUIRED for qwen3_next + R3 (Ray Compiled-DAG collective_rpc handshake
+  # deadlocks this arch; the 80B-jupiter-proven fix). Identical to the CP1 sibling; see its
+  # generator block for the full rationale. Requires colocate_all=false (set above).
+  inference_engine_mp_backend: true
 
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
