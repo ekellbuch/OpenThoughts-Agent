@@ -1,76 +1,26 @@
-# axolotl SFT — Qwen3-32B, FUNCTIONAL-LEARNING-EQUIVALENT of the canonical LLaMA-Factory
-# config  sft/lf_configs/qwen3/extra/32k_base_32b_bs96.yaml  (bs=96 variant).
+# axolotl SFT — Qwen3-32B, learning-parity port of LLaMA-Factory
+# sft/lf_configs/qwen3/32k_base_32b.yaml (bs=96). Launched via
+# `python -m hpc.launch --job_type sft --sft_backend axolotl`.
 #
-# Goal: reproduce the LF Qwen3-32B learning setup (same effective batch, LR + schedule,
-# epochs, seq-len, loss masking, chat format, no packing) via the axolotl backend, on the
-# open-thoughts/OpenThoughts-Agent-SFT-10K set. Launched through
-# `python -m hpc.launch --job_type sft --sft_backend axolotl` (translator:
-# hpc/axolotl_config_utils.py). Only translator-recognized keys survive translation, so
-# LF-named keys are used where the axolotl passthrough does not cover them
-# (lr_scheduler_type -> lr_scheduler; optim -> optimizer).
-#
-# LF -> axolotl learning-parity map (all LEARNING-affecting knobs matched):
-#   model            Qwen/Qwen3-32B                         -> base_model (resolved to local path at launch)
-#   effective batch  global_batch_size: 96                  -> global_batch_size: 96 (micro=1; grad_accum derived per geometry)
-#   LR               4.0e-5                                 -> learning_rate: 4.0e-5
-#   schedule         cosine, warmup_ratio 0.1               -> lr_scheduler_type: cosine + warmup_ratio: 0.1
-#   epochs           7.0                                    -> num_epochs: 7.0
-#   seq-len          cutoff_len 32768                       -> sequence_len: 32768
-#   grad clip        max_grad_norm 1.0e-4                   -> max_grad_norm: 1.0e-4  (LF's aggressive clip; matched exactly)
-#   optimizer        adamw_torch_fused (betas 0.9/0.999)    -> optim: adamw_torch_fused (betas defaulted, as LF)
-#   weight decay     (LF default 0.0)                       -> weight_decay: 0.0
-#   precision        bf16: true, pure_bf16: false           -> bf16: auto (mixed bf16, fp32 master in optimizer) == LF
-#   grad ckpt        gradient_checkpointing: true           -> gradient_checkpointing: true
-#   packing          (LF default: OFF)                      -> sample_packing: false
-#   sharding         DeepSpeed ZeRO-3 (offloaded)           -> DeepSpeed ZeRO-3 no-offload (learning-identical; see deviations)
-#
-# CHAT-TEMPLATE / MASKING — the load-bearing parity decision:
-#   LF `template: qwen3` is a ReasoningTemplate. Its SFT (training) path is
-#   encode_multiturn with the LF defaults mask_history=False + enable_thinking=True, which
-#   emits plain ChatML (`<|im_start|>{role}\n{content}<|im_end|>\n`) and TRAINS EVERY
-#   assistant turn with its inline <think>...</think> KEPT (NO historical-think stripping);
-#   user/system turns masked. The axolotl `qwen3.jinja` is the *serving* Qwen3 template,
-#   which STRIPS <think> from all but the post-last-query assistant turns -> it would train
-#   on far fewer reasoning tokens and DIVERGE from LF. The axolotl `chatml` template emits
-#   `<|im_start|>{role}\n{content}<|im_end|>\n` verbatim (inline <think> preserved on ALL
-#   turns), which is the EXACT learning match to LF qwen3's encode_multiturn. Hence
-#   chat_template: chatml (NOT qwen3). split_thinking:false (set by the launcher's
-#   _build_datasets) keeps <think> inline so chatml never splits it out.
-#
-# NOTED DEVIATIONS (learning-neutral; matched where it matters, noted where it can't be identical):
-#   1. DeepSpeed offload: LF uses ds_z3_offload (optimizer states on CPU). aarch64 TACC
-#      cannot use CPU-offload with axolotl (DeepSpeedCPUAdam JIT fails to build on aarch64 —
-#      RE-CONFIRMED 2026-07-08 job 817101: CPUAdamBuilder().load() -> RuntimeError, nvc++/g++
-#      incompatible; axolotl.md gotcha #2), so we use zero3_bf16.json (no offload). ZeRO-3
-#      sharding is numerically transparent -> identical learned function; only GPU-memory
-#      footprint differs. Because offload is off, the fp32 optimizer states (~12B/param) live
-#      in HBM -> at 16 nodes that + the 32768-seqlen backward activations OOM'd the 96GB GH200
-#      (job 816487, Cuda OOM in the first backward). LAUNCH AT **32 nodes** (--num_nodes 32,
-#      grad_accum 96/32=3): halves the ZeRO-3 shard (opt states ~24->12GB/GPU) for OOM headroom.
-#      Learning-parity intact (global batch 96 fixed; 32-node no-offload == LF's 16-node offloaded
-#      ZeRO-3, numerically). 96%32=0 clean.
-#   2. Attention: LF fa2 vs axolotl sdpa (no flash-attn-2 wheel for torch 2.11+cu128 on
-#      aarch64; ops/tacc/ops.md). Both are exact attention -> learning-neutral.
-#   3. Liger kernel: LF enable_liger_kernel:true; omitted here (unvalidated in sft-axolotl,
-#      learning-neutral fused kernels). The extra un-fused LM-head logit memory is absorbed
-#      by the 16-way ZeRO-3 shard.
-#
-# aarch64 TACC Vista (GH200 96GB, 1 GPU/node): SDPA + packing off (packing needs a varlen
-# flash backend). PRE-LAUNCH env prereq (axolotl.md gotcha #4): `pip install --no-deps
-# torchao==0.17.0` into sft-axolotl (already present per the validated env).
+# ⚠ DESIGN RATIONALE LIVES IN THE OPS DOC, NOT HERE — see
+# .claude/projects/axolotl/axolotl.md § "Qwen3-32B LF-parity SFT config":
+# the LF→axolotl learning-parity map, the chatml-vs-qwen3 chat-template/masking
+# decision, the sdpa/liger/offload deviations, the 32B OOM diagnosis (config gap:
+# liger-off + offload-off — NOT a capacity ceiling), and the shared-$SCRATCH
+# dataset-prep sentinel fast-path. Do NOT re-embed knowledge in these comments;
+# update the ops doc instead.
 
 base_model: Qwen/Qwen3-32B
 trust_remote_code: true
 
-# ZeRO-3, NO CPU offload (aarch64). Translator maps a truthy `deepspeed` ->
-# sft/axolotl/deepspeed_configs/zero3_bf16.json.
+# ZeRO-3. Offload currently OFF pending the cpu_adam toolchain fix (axolotl.md gotcha #2 —
+# offload IS achievable on this aarch64 GH200; LF does it on Jupiter). Translator maps a
+# truthy `deepspeed` -> sft/axolotl/deepspeed_configs/zero3_bf16.json.
 deepspeed: sft/axolotl/deepspeed_configs/zero3_bf16.json
 
 # NOTE: the launcher REBUILDS this datasets block from --dataset + --role_tag/--content_tag
-# at launch (hpc/axolotl_config_utils.py::_build_datasets). This block is honored ONLY by a
-# direct `axolotl.cli.preprocess`. Schema below matches OpenThoughts-Agent-SFT-10K
-# (field `conversations`; role under `role` (user/assistant); content under `content`;
-# inline <think> in assistant content).
+# at launch (hpc/axolotl_config_utils.py::_build_datasets); this in-config block is honored
+# ONLY by a direct `axolotl.cli.preprocess`.
 datasets:
   - path: open-thoughts/OpenThoughts-Agent-SFT-10K
     type: chat_template
@@ -80,44 +30,43 @@ datasets:
       content: content
     split_thinking: false
 
-# Plain ChatML == LF qwen3 encode_multiturn training format (see header). NOT qwen3.jinja.
+# chatml == LF qwen3 encode_multiturn training format (NOT qwen3.jinja — see ops doc).
 chat_template: chatml
 
-# SHARED prepared-dataset path (single pre-tokenized copy all ranks LOAD, mirroring how LF
-# survives 16-node on the same Lustre). PRE-TOKENIZE once via `axolotl preprocess` -> this
-# writes the tokenized arrow + the `.axolotl_prepared_complete` sentinel here; the 16-node
-# job then hits axolotl FileLockLoader's LOCK-FREE fast-path (sentinel present -> load_from_disk
-# concurrently, NO shared-FS FileLock). axolotl loads datasets BEFORE dist-init so it can't use
-# a torch barrier like LF's main_process_first; the sentinel fast-path is the equivalent.
-# Why NOT node-local /tmp: per-rank builds desync + DEADLOCK at multi-node dataset gen (job
-# 815590 hung 1h10m at "Generating train split 17%"). Why NOT the default shared lock: all 16
-# ranks serialize on one Lustre flock held across a multi-min build -> ENOLCK/ESTALE (815251/
-# 815508/815530). $SCRATCH is expanded by the launcher translator (hpc/axolotl_config_utils.py).
+# Shared pre-tokenized path: pre-tokenize once via `axolotl preprocess` -> sentinel fast-path
+# for concurrent multi-node load_from_disk (rationale in ops doc). $SCRATCH expanded by translator.
 dataset_prepared_path: $SCRATCH/axolotl_prepared/qwen3_32b_ot_sft_10k
 
 attn_implementation: sdpa
 sample_packing: false
 
+# Liger fused kernels (LF parity: `enable_liger_kernel: true`). The load-bearing
+# memory lever for the 32B@32k OOM — LigerFusedLinearCrossEntropy fuses the LM head
+# + cross-entropy so the ~18 GB logit tensor (seq 32768 × vocab ~152k × bf16) never
+# materializes (the exact allocation that OOM'd in the ZeRO-3 backward). The
+# translator (hpc/axolotl_config_utils.py) turns this into the LigerPlugin +
+# liger_rope/liger_rms_norm/liger_glu_activation/liger_fused_linear_cross_entropy.
+# CPU offload stays OFF for this relaunch — liger alone should fit per the OOM
+# diagnosis (axolotl.md §Qwen3-32B); offload is the next lever if needed.
+enable_liger_kernel: true
+
 sequence_len: 32768
 val_set_size: 0.0
-# aarch64/TACC AF_UNIX-path-too-long on multiproc dataset tokenization (see smoke.yaml).
-dataset_num_proc: 1
+dataset_num_proc: 1          # aarch64/TACC AF_UNIX-path-too-long on multiproc tokenization
 
-# Effective batch = 96 (operator-specified). micro=1, gpus_per_node=1 ->
-# grad_accum = 96 / num_nodes. The translator derives gradient_accumulation_steps from
-# global_batch_size + (num_nodes * gpus_per_node) at launch. At --num_nodes 16 -> accum 6.
+# Effective batch 96; micro=1, gpus_per_node=1 -> grad_accum = 96 / num_nodes (translator-derived).
 global_batch_size: 96
 micro_batch_size: 1
 
 num_epochs: 7.0
 learning_rate: 4.0e-5
-lr_scheduler_type: cosine   # translator renames -> lr_scheduler
+lr_scheduler_type: cosine    # translator -> lr_scheduler
 warmup_ratio: 0.1
 max_grad_norm: 1.0e-4
-optim: adamw_torch_fused    # translator maps -> optimizer
+optim: adamw_torch_fused     # translator -> optimizer
 weight_decay: 0.0
 
-bf16: true                  # translator -> bf16: auto (mixed bf16 + fp32 master)
+bf16: true                   # translator -> bf16: auto (mixed bf16 + fp32 master)
 tf32: false
 gradient_checkpointing: true
 

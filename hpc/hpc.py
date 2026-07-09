@@ -1283,6 +1283,14 @@ vista = HPC(
     library_paths={
         "TRITON_CC": "/home1/apps/gcc/15.1.0/bin/gcc",
         "LD_PRELOAD": "/home1/apps/gcc/15.1.0/lib64/libstdc++.so.6",
+        # Export CC/CXX so any native JIT build (notably DeepSpeed's CPUAdamBuilder
+        # for ZeRO CPU-offload) picks the module-loaded gcc/g++ 15.1.0 — the same
+        # compiler TRITON_CC already uses — instead of TACC's default nvc++, which
+        # rejects the armv9 flags DeepSpeed emits (the "cpu_adam unbuildable"
+        # artifact; see .claude/projects/axolotl/axolotl.md gotcha #2). Harmless for
+        # the liger-only relaunch; unblocks CPU offload as the next memory lever.
+        "CC": "/home1/apps/gcc/15.1.0/bin/gcc",
+        "CXX": "/home1/apps/gcc/15.1.0/bin/g++",
     },
     # NCCL/networking settings for SFT training (EFA networking)
     nccl_settings={

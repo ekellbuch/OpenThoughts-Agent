@@ -22,6 +22,7 @@ import os
 _PLUGIN_TEMPLATE_INTEGRITY = "axolotl.integrations.template_integrity.TemplateIntegrityPlugin"
 _PLUGIN_MFU = "axolotl.integrations.mfu.MFUPlugin"
 _PLUGIN_SUPABASE = "axolotl.integrations.supabase_registry.SupabaseRegistryPlugin"
+_PLUGIN_LIGER = "axolotl.integrations.liger.LigerPlugin"
 
 # LF-YAML / launcher keys that have NO axolotl equivalent. Dropped with a warning
 # so a translated config never carries a silently-ignored LF knob. (README §map:
@@ -122,6 +123,14 @@ def _assemble_plugins(base_config: dict) -> list:
         plugins.append(_PLUGIN_MFU)
     if base_config.get("supabase_register"):
         plugins.append(_PLUGIN_SUPABASE)
+    # Liger fused kernels (the load-bearing memory lever for the 32B@32k OOM):
+    # LigerFusedLinearCrossEntropy fuses the LM head + cross-entropy so the full
+    # ~18 GB logit tensor (seq 32768 × vocab ~152k × bf16) never materializes —
+    # the exact allocation that OOM'd in the ZeRO-3 backward. Mirrors LF's
+    # `enable_liger_kernel: true`. See .claude/projects/axolotl/axolotl.md
+    # §Qwen3-32B + agent_logs/2026-07-09_sft_32b_axolotl_oom_config_gap.md.
+    if base_config.get("enable_liger_kernel"):
+        plugins.append(_PLUGIN_LIGER)
     return plugins
 
 
@@ -225,6 +234,17 @@ def translate_lf_to_axolotl(base_config: dict, exp_args: dict, dataset_paths, mo
     # Supabase fork key (opt-in, default OFF). Creds via env NAME only — never here.
     if base_config.get("supabase_register"):
         ax["supabase_register"] = True
+
+    # Liger fused kernels. `enable_liger_kernel: true` -> register LigerPlugin
+    # (in _assemble_plugins) AND turn on the individual fused ops. The load-bearing
+    # one is `liger_fused_linear_cross_entropy` (kills the ~18 GB LM-head logit
+    # tensor that OOM'd); rope/rms_norm/glu are the standard companion fusions and
+    # match LF's liger enablement. Learning-neutral, memory-saving.
+    if base_config.get("enable_liger_kernel"):
+        ax["liger_rope"] = True
+        ax["liger_rms_norm"] = True
+        ax["liger_glu_activation"] = True
+        ax["liger_fused_linear_cross_entropy"] = True
 
     # --- datasets ---
     ax["datasets"] = _build_datasets(base_config, exp_args, dataset_paths)
