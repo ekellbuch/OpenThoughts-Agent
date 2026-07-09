@@ -20,6 +20,19 @@ See `levanter` (the engine it usually drives) and `mum` (finding run records).
 >   SFT). **Workaround: bypass `StepRunner` and call the Levanter entrypoint (`train_lm.main`) directly in every
 >   rank** (we env-gate it `DELPHI_DIRECT_RUN=1`), so all ranks form the mesh. rjpower's fix is logging/examples,
 >   not auto-detection. Migrating a training path off the executor = rebuild on `ArtifactStep`/`remote(...)`.
+> - **⚠ The direct-entrypoint path is NOT a hack — it's Marin/Levanter's SANCTIONED SLURM launch (validated 2026-07-09).**
+>   There is deliberately **no "SLURM Fray backend"**: `remote(fn, resources=…)`→Fray is the *Iris/CW/Ray/TPU* dispatch
+>   layer only. On SLURM the *scheduler itself* is the placement backend. `levanter/distributed.py`
+>   `DistributedConfig.initialize()` (run by `train_lm.main` on every process) branches by cluster: Iris job context
+>   (`get_job_info() is not None`) → `initialize_iris_jax()`; else auto-detect → **`LevanterSlurmCluster`** (a
+>   `jax._src.clusters.SlurmCluster` subclass) reads `SLURM_*` directly (nodelist→coordinator addr, `SLURM_NTASKS`→
+>   process count, `SLURM_PROCID`→id, `CUDA_VISIBLE_DEVICES`→local devices) and calls `jax.distributed.initialize()`
+>   on every rank. So **the recommended multi-node-SLURM run = `srun` (1 task/proc) launching Levanter directly**,
+>   which is precisely the `DELPHI_DIRECT_RUN` path. **Two decoupled layers:** *identity/graph* = `ArtifactStep`
+>   (name@version, typed artifacts — cluster-agnostic, use it on Leonardo too); *execution/mesh* = cluster-specific
+>   (`remote()`→Fray→`initialize_iris_jax` on Iris/CW; `srun`→`LevanterSlurmCluster` on SLURM). The `StepRunner` lock
+>   only deadlocks because it inserts a single-winner dedup *in front of* an SPMD collective — skipping it on SLURM is
+>   correct by design, not a compromise.
 > - **The GCS artifact layout below (`.executor_info` etc.) still applies to OLD executor-launched runs** (Delphi
 >   1e21/1e22 midtrains); `mum` + `gsutil cat .executor_info` still recover their configs. New `ArtifactStep`
 >   runs use the `name@version` address + typed `Artifact.record`.
