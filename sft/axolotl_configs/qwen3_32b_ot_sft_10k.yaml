@@ -73,6 +73,11 @@ gradient_checkpointing: true
 logging_steps: 5
 save_steps: 100
 save_total_limit: 1
+# Resume from the latest output_dir checkpoint on relaunch — makes `--max_restarts` / an
+# afterany chain leg RESUME (not restart from step 0) for the axolotl backend. Needs the
+# translator passthrough (hpc/axolotl_config_utils.py). Fresh runs (empty output_dir) start
+# clean; 7-epoch/704-step runs exceed the 48h TACC wall and need this to finish.
+auto_resume_from_checkpoints: true
 
 # no DB row, no MFU noise (learning-neutral).
 supabase_register: false

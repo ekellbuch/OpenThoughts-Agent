@@ -161,6 +161,11 @@ def translate_lf_to_axolotl(base_config: dict, exp_args: dict, dataset_paths, mo
         "seed", "output_dir", "save_steps", "save_total_limit", "num_epochs", "max_steps",
         "sequence_len", "sample_packing", "val_set_size", "adam_beta1", "adam_beta2",
         "special_tokens", "dataset_num_proc", "dataset_prepared_path",
+        # resume-from-checkpoint (so --max_restarts / an afterany chain leg RESUMES for the
+        # axolotl backend instead of restarting from step 0 — axolotl only auto-resumes when
+        # auto_resume_from_checkpoints/resume_from_checkpoint is set; HF-Trainer's implicit
+        # auto-resume that the LF path relies on does NOT apply here).
+        "auto_resume_from_checkpoints", "resume_from_checkpoint",
     ):
         if key in base_config and base_config[key] is not None:
             ax[key] = base_config[key]
