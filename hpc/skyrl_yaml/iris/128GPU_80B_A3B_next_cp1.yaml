@@ -466,8 +466,13 @@ extra_env:
   NCCL_DEBUG: WARN
   NCCL_SOCKET_IFNAME: enp157s0np0
   NCCL_SOCKET_FAMILY: AF_INET
-  SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "1800"
-  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "1800"
+  # 3600s (60 min): the 80B rank-0 full-CPU-state-dict materialization before the
+  # FIRST fsdp2_load_full_state_dict broadcast (lazy policy-PG NCCL comm-init) took
+  # >20 min → v3 died on store->get(ncclUniqueId) at the old 1200s cap. Now HONORED
+  # by MarinSkyRL utils.py (was unconditionally clobbered to 1200). Heartbeat raised
+  # to match so the NCCL monitor doesn't SIGABRT mid-load before the store timeout.
+  SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "3600"
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "3600"
   TORCH_NCCL_ENABLE_MONITORING: "1"
   TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
   TORCH_FR_BUFFER_SIZE: "2000"
