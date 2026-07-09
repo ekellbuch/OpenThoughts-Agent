@@ -1,7 +1,5 @@
 # =============================================================================
 # Qwen3-30B-A3B-Thinking-2507 — RL config for Jupiter (GH200 96GB, 4 GPU/node).
-# canonical recipe: sequence_mean loss + TIS + temperature 1.2 (promoted from ablation
-#   winners seqmean-arm0-tis + temp1.2, 2026-07-09).
 # =============================================================================
 # Target: Qwen/Qwen3-30B-A3B-Thinking-2507. STANDARD Qwen3 MoE (qwen3_moe /
 # Qwen3MoeForCausalLM) — NOT Qwen3-Next: plain full attention on EVERY layer, no GDN.
@@ -154,8 +152,8 @@ trainer:
     eps_clip_low: 0.2
     eps_clip_high: 0.05
     # seqnorm: global length-unbiased + grad-accum-correct + dead-group-dilution-free
-    # (inherited from 56GPU_qwen3_8b.yaml). TIS already on below.
-    loss_reduction: sequence_mean
+    # (inherited from 56GPU_seqnorm_tis.yaml). TIS already on below.
+    loss_reduction: seq_mean_token_sum_norm_global
     # Truncated Importance Sampling: clamps the off-policy ratio between vLLM rollout
     # and FSDP train-recompute (clamp(exp(old_lp - rollout_lp), max=cap)). cap=2.0.
     # REQUIRES collect_rollout_details=true (above). R3 router-replay is OFF (see
@@ -312,7 +310,7 @@ generator:
   # max_generate_length 8192 (thinking room) — matches model_info.max_output_tokens.
   sampling_params:
     max_generate_length: 8192
-    temperature: 1.2
+    temperature: 0.6
     top_p: 0.95
     top_k: 20
 

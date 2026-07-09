@@ -1,0 +1,247 @@
+# CANONICAL FILE: 56GPU_qwen3_8b.yaml (was 56GPU_seqnorm_tis.yaml). Jupiter dense-8B (Qwen3-8B).
+# canonical recipe: sequence_mean loss + TIS + temperature 1.2 (promoted from ablation
+#   winners seqmean-arm0-tis + temp1.2, 2026-07-09).
+entrypoint: examples.terminal_bench.entrypoints.main_tbench
+
+# Hydra config groups (+ prefix in CLI)
+config_groups:
+  terminal_bench_config: terminal_bench
+
+# Terminal bench / agentic environment settings
+terminal_bench:
+  trials_dir: null
+
+  harbor:
+    name: terminus-2
+    max_episodes: 999999
+    enable_summarize: false
+    store_all_messages: true
+    trajectory_config:
+      raw_content: true
+    enable_episode_logging: false
+    record_terminal_session: false
+    enable_pane_logging: false
+
+    strict_json_parser: true
+
+    interleaved_thinking: true
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: true
+    # 900s (was 1800): boundary-hugging a3 datasets (stack-junit, nemotron, methods2test)
+    # hit the timeout wall on ~70-95% of trials → groups waited ~1800s for the slowest
+    # sample → chains never reached step 1. Halving to 900 ~2x valid-group yield (cost:
+    # lower solve-rate on the hardest tasks; fast-task chains unaffected). AgentTimeoutError
+    # stays PASSTHROUGH.
+    override_timeout_sec: 900
+
+    override_cpus: 1
+    override_memory_mb: 2048
+    override_storage_mb: 2048
+
+    # Hash-based Daytona snapshot caching.
+    auto_snapshot: true
+
+    verifier_override_timeout_sec: 120
+
+    max_retries: 3
+    min_wait_sec: 60.0
+    max_wait_sec: 600.0
+    wait_multiplier: 2.0
+
+    exclude_exceptions:
+      - VerifierTimeoutError
+      - VerifierRuntimeError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - VerifierOutputParseError
+
+    # Per-job sandbox concurrency (RUNNING-RL job cap is separate). 675 (was 900): cut
+    # -25% to reduce driver host-memory pressure on hard-dataset a3 chains (suspected
+    # resident-state OOM, NOT FD exhaustion). Paired with num_parallel_generation_workers.
+    n_concurrent_trials: 675
+
+    log_level: INFO
+
+    enable_reward_shaping: false
+
+    # REQUIRED for trainer.algorithm.use_tis (asserts non-null rollout_logprobs).
+    collect_rollout_details: true
+
+    enable_error_classification: true
+    mask_exceptions:
+      - DaytonaError
+      - EnvironmentStartTimeoutError
+      - NetworkError
+      - ConnectionError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - AgentEnvironmentTimeoutError
+      - ContextLengthExceededError
+    default_error_treatment: zero
+    # ContextLengthExceededError is in mask_exceptions (excluded from the RLOO-N baseline
+    # — GLM-4_7-swesmith ~32k prompts overflow routinely; hard zeros would drag it).
+    # AgentTimeoutError stays PASSTHROUGH (partial signal meaningful; infrequent so low
+    # refcount risk). NOTE: passthrough keeps a soft-limit trial's dangling vLLM ObjectRefs
+    # alive → Ray refcount race → SIGABRT, which is why these take mask+zero (EARLY-RETURN
+    # path, no dangling refs).
+    passthrough_exceptions:
+      - AgentTimeoutError
+    zero_exceptions: []
+
+  model_info:
+    # 32000 (768-token buffer below max_model_len 32768): harbor's litellm token counter
+    # is +2 below vLLM's BPE count on near-budget prompts, so a 32767-capped prompt
+    # tokenizes to 32769 at vLLM → rejected → litellm retries the deterministically
+    # over-budget request → open sockets exhaust the actor's FDs → SIGABRT before step 1.
+    max_input_tokens: 32000
+    max_output_tokens: 4096
+
+  archiving:
+    enabled: false
+
+  trace_upload:
+    enabled: true
+    repo_org: DCAgent
+    episodes: last
+    dataset_type: SFT
+    cleanup: true
+
+# Trainer configuration
+trainer:
+  strategy: fsdp2
+  algorithm:
+    advantage_estimator: rloo_n
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    eps_clip_low: 0.2
+    # eps_clip_high=0.05: midpoint between 0.2 default and 0.01 tight. Engages on
+    # collapse-onset ratios without over-clamping healthy updates (asymmetric upper bound).
+    eps_clip_high: 0.05
+    # seqnorm: global length-unbiased normalizer (Z = global_num_seqs * max_seq_len, set
+    # programmatically in the driver; the yaml only carries the selector).
+    loss_reduction: sequence_mean
+    # TIS: bounds the off-policy ratio clamp(exp(old_log_probs - rollout_logprobs),
+    # max=cap). cap=2.0. REQUIRES collect_rollout_details=true (harbor block).
+    use_tis: true
+    tis_imp_ratio_cap: 2.0
+
+  epochs: 2
+  max_steps: 80
+  update_epochs_per_batch: 1
+
+  train_batch_size: 64
+  policy_mini_batch_size: 64
+  eval_batch_size: 64
+
+  # Micro batch (micro1x4 variant).
+  micro_forward_batch_size_per_gpu: 4
+  micro_train_batch_size_per_gpu: 1
+
+  max_prompt_length: 999999
+
+  eval_interval: 999999
+  eval_before_train: false
+  ckpt_interval: 2
+  resume_mode: latest
+  hf_save_interval: 5
+  # Set via CLI: trainer.hf_hub_repo_id=org/repo
+  hf_hub_repo_id: null
+  hf_hub_private: false
+  hf_hub_revision: main
+
+  # Supabase auto-registration OFF (manual register only).
+  enable_db_registration: false
+
+  project_name: OpenThoughts-Agent
+  log_level: INFO
+  tracker_commit_each_step: true
+  logger: console
+
+  run_name: null
+  ckpt_path: null
+  export_path: null
+
+  # max_grad_norm=0.9: guardrail vs grad-norm spikes entering correlation-mode-collapse
+  # territory (>1.0); just above the natural healthy peak (~0.81) on this dataset+base.
+  policy:
+    optimizer_config:
+      lr: 8e-6
+      weight_decay: 0.0
+      adam_betas: [0.9, 0.999]
+      max_grad_norm: 0.9
+    fsdp_config:
+      cpu_offload: false
+      reshard_after_forward: true
+      fsdp_size: 4
+  ref:
+    fsdp_config:
+      cpu_offload: false
+      reshard_after_forward: true
+      fsdp_size: 4
+
+  # 8 shared GPUs for policy/ref (2 nodes x 4).
+  placement:
+    colocate_all: false
+    policy_num_nodes: 2
+    ref_num_nodes: 2
+    policy_num_gpus_per_node: 4
+    ref_num_gpus_per_node: 4
+
+  fully_async:
+    max_staleness_steps: 16
+    # ~1/2 of total concurrency (338 paired with n_concurrent_trials 675).
+    num_parallel_generation_workers: 338
+
+# Generator configuration
+generator:
+  backend: vllm
+  timeout_multiplier: 1.0
+  model_dtype: bfloat16
+
+  inference_engine_tensor_parallel_size: 1
+  # 48 engines x TP=1 + 8 GPUs policy/ref = 56 GPUs = 14 nodes. Tripling engines (3x base)
+  # builds a completed-group surplus so the trainer never waits on gen.
+  num_inference_engines: 48
+
+  n_samples_per_prompt: 8
+  eval_n_samples_per_prompt: 8
+
+  # Jupiter-specific 0.75 (vs ALCC's 0.85): Jupiter runs hosted_vllm in the same Ray
+  # cluster as the engines; kept at 0.75 across all jupiter yamls for fragmentation
+  # safety. Bump to 0.85 only if KV-cache pressure justifies it.
+  gpu_memory_utilization: 0.75
+
+  max_num_seqs: 24
+  # Jupiter-specific 65536 (vs ALCC's 16384): larger batched-token budget keeps the engine
+  # fed when many concurrent requests arrive in bursts.
+  max_num_batched_tokens: 65536
+
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  enable_http_endpoint: true
+  enable_ray_prometheus_stats: false
+  vllm_stats_interval: 1
+  append_eos_token_after_stop_str_in_multi_turn: true
+  max_turns: 999999
+
+  sampling_params:
+    max_generate_length: 4096
+    temperature: 1.2
+    top_p: 0.95
+    top_k: 20
+
+  engine_init_kwargs:
+    max_model_len: 32768
+    # Preserves <think> blocks on ALL turns (stock template strips them).
+    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
+
+# Data paths
+data:
+  train_data: []
+  val_data: []
