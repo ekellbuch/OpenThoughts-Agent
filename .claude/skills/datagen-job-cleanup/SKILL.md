@@ -93,7 +93,9 @@ Requirements + knobs:
   tokenizer the engine served with (a same-family tokenizer decodes word tokens to garbage), so the uploader
   stamps the model ref into `tokenizer_provenance.json` + the dataset-card README. For the opencode-131k
   campaign that is `--served_model Qwen/Qwen3.5-122B-A10B-FP8` (or the gs:// mirror
-  `gs://marin-models-us/ot-agent/models/Qwen/Qwen3.5-122B-A10B-FP8/`). Omitting it still uploads the columns
+  `gs://marin-models-us/ot-agent/models/Qwen/Qwen3.5-122B-A10B-FP8/` — the storage root resolves via
+  `marin_prefix()`; see `.claude/ops/iris/coreweave_gpu_ops.md` §rendezvous, don't hardcode the region bucket).
+  Omitting it still uploads the columns
   but only stamps the engine-reported served-name (a warning prints) — always pass the real ref so consumers
   can pull the tokenizer.
 - **Schema-pin (fixed OT-Agent `7c978b78`):** the exporter now pins the literal token columns to an explicit

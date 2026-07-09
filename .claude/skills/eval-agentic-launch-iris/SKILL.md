@@ -214,7 +214,9 @@ python eval/cloud/launch_eval_iris.py \
   registration path TPU/SLURM use). `--upload_to_database` IS supported on the
   GPU path. For a durable copy of the raw Harbor artifacts, add
   `--output-mode s3 --s3-output-dir s3://marin-us-east-02a/tmp/ttl=7d/ot-agent/evals/<user>`
-  (CW object store under the cluster's `marin-us-east-02a` bucket). **⚠ Store moved R2
+  (CW object store under the cluster's `marin-us-east-02a` bucket). **⚠ PREFER setting the output dir off
+  `marin_prefix()` (`rigging.filesystem` — auto-resolves the storage root; don't hardcode the region bucket);
+  the literal here is a fallback. See `.claude/ops/iris/coreweave_gpu_ops.md` §rendezvous.** **⚠ Store moved R2
   (`s3://marin-na`) → CW (`s3://marin-us-east-02a`) on 2026-07-05 (marin `c7caecc95a`); pods
   can no longer reach `s3://marin-na` (R2), so never use it here.)
 - **Storage creds (GPU)**: the launcher WITHHOLDS the launch host's

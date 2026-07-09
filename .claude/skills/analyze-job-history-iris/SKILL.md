@@ -58,7 +58,8 @@ datagen job. So:
 - **Cluster.** Default **marin/TPU**. For CoreWeave pass `--cluster cw-us-east-02a` (the finelog config name
   == the cluster name; it resolves `cw-us-east-02a` automatically). Still run under the **marin venv** python.
   **⚠ CoreWeave needs R2 archive creds, NOT IAP.** On cw the live half uses a k8s tunnel (no `marin-login`),
-  but the archive half reads `s3://marin-na/finelog/cw-us-east-02a` (R2) — creds the Mac lacks, so the run
+  but the archive half reads `s3://marin-na/finelog/cw-us-east-02a` (R2 — this literal is the historical store;
+  the resolved root comes from `marin_prefix()`, see `.claude/ops/iris/coreweave_gpu_ops.md` §rendezvous) — creds the Mac lacks, so the run
   crashes `FileNotFoundError: The specified bucket does not exist` unless you first source them from the
   `iris`-ns secret. **Procedure: `.claude/ops/iris/finelog_r2_archive_creds.md`.**
   **Also:** GPU-RL jobs have **no harbor trial sidecars**, so §2 is empty and most of the value is gone — for

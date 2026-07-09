@@ -68,6 +68,9 @@ Flag notes:
   chip count; harbor_config CLI-required). **Precedence: explicit CLI / `--datagen_config` values always
   win** over `model_config/`; a model with no entry launches byte-unchanged (logged). Edit the source
   file `model_config/<org>/<slug>.yaml`, never the generated `eval/configs/model_configs.yaml`.
+- **⚠ PREFER building `--gcs-output-dir` (and the model-mirror path) off `marin_prefix()`
+  (`rigging.filesystem` — auto-resolves the active cluster's storage root; don't hardcode the region
+  bucket); the literal below is a fallback. See `.claude/ops/iris/coreweave_gpu_ops.md` §rendezvous.**
 - **`--gcs-output-dir gs://marin-models-us/ot-agent` opts OUT of the region
   pin** (the launcher would otherwise auto-pin to the region with the most v5p-8
   capacity). Use it to avoid the stuck-PENDING trap when a single region's v5p-8

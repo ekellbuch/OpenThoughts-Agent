@@ -119,7 +119,8 @@ job_id prefix:
 If active datagen (`qwen3.5-122b-32k-%`, state 1/2/3) < 2, auto-launch the next `pending` dataset from
 `/Users/benjaminfeuer/Documents/experiments/active/datagen/qwen3.5-122b-tt/tracker.md` via the datagen launch
 template (S1, `ctx32k_verified.yaml`, `--tpu v5p-8 --preemptible`, `--gcs-output-dir gs://marin-models-us/ot-agent`
-unpinned, repo `penfever/<slug>-qwen3.5-122b-32k-traces`) — see **datagen-launch-iris**. Flip its tracker row to
+unpinned — prefer building this off `marin_prefix()` (auto-resolves the storage root; don't hardcode the region
+bucket), see `.claude/ops/iris/coreweave_gpu_ops.md` §rendezvous, repo `penfever/<slug>-qwen3.5-122b-32k-traces`) — see **datagen-launch-iris**. Flip its tracker row to
 RUNNING. Eval jobs do NOT count toward the 2 and are never auto-launched.
 
 **Snapshot-cap hygiene (every tick):** audit the cli-org (`DAYTONA_API_KEY`) snapshot count. If a datagen refill

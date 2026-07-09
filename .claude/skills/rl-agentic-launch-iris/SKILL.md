@@ -99,7 +99,10 @@ terminates the job). Flag glossary:
 - **`--num-nodes N`** — number of **WHOLE H100 nodes** requested EXCLUSIVELY, gang/leafgroup-coscheduled (one
   iris task per node, all 8 GPUs each). `--num_nodes` underscore alias also works. (See §3 + §5.)
 - **`--rendezvous-dir`** — **REQUIRED for `--num-nodes>1`** (the launcher hard-errors otherwise). The shared
-  store the multi-node Ray head/workers rendezvous through. On cw-us-east-02a use an **`s3://` (R2) URI under
+  store the multi-node Ray head/workers rendezvous through. **⚠ PREFER building this off `marin_prefix()`
+  (`rigging.filesystem` — auto-resolves the active cluster's storage root, so a store migration is followed
+  automatically; don't hardcode the region bucket); the literal below is an illustrative fallback. See
+  `.claude/ops/iris/coreweave_gpu_ops.md` §rendezvous.** On cw-us-east-02a use an **`s3://` (R2) URI under
   the cluster's `marin-us-east-02a` bucket** (e.g. `s3://marin-us-east-02a/iris/rl-<slug>/<run>`); the cluster injects working
   creds into every task pod (the `iris-task-env` Secret), so **no external creds** are needed and you must
   **NOT forward `AWS_*`/`R2_*`** (it would clobber the pod's injected creds and silently target real AWS S3). Use a

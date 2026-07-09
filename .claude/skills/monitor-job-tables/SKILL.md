@@ -105,7 +105,8 @@ disk, so they're lost when the pod is GC'd on terminal OR replaced on a preempt/
 The helper therefore only works on a **live pod**; a transient empty/low read usually means the pod was
 recently (re)started or the current rollout batch hasn't been written yet — re-check during active
 generation, it's not a fault. Durable path: launch with `launch_rl_iris.py
---trials-dir auto` (default) → `s3://marin-us-east-02a/iris/<job>/trace_jobs` (R2, NOT gs://), then inspect post-hoc
+--trials-dir auto` (default) → `s3://marin-us-east-02a/iris/<job>/trace_jobs` (R2, NOT gs://; the storage root
+resolves via `marin_prefix()` — see `.claude/ops/iris/coreweave_gpu_ops.md` §rendezvous, don't hardcode the region bucket), then inspect post-hoc
 with `aws s3 --endpoint-url <R2>` + the harbor trace tooling (no pod exec). The helper forces the coreweave
 kubeconfig itself — don't rely on the shell's `$KUBECONFIG` (login default `~/.kube/lambdaconfig` is the wrong
 cluster); `<pod-name-substr>` matches the POD name, which can differ from the iris job_id display name.

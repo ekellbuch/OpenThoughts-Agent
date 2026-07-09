@@ -130,7 +130,15 @@ exclusive** (`H100x8`, one iris task per node, no co-tenants). ~**36 H100 nodes*
 - **Multi-node Ray rendezvous via an `s3://` object-store bucket.** `--num-nodes>1`
   REQUIRES `--rendezvous-dir` (the launcher hard-errors otherwise). Use an `s3://` URI
   under the cluster's default bucket (`marin-us-east-02a`), e.g.
-  `s3://marin-us-east-02a/iris/rl-<slug>/<run>`. **⚠ Store moved R2 (`s3://marin-na`) →
+  `s3://marin-us-east-02a/iris/rl-<slug>/<run>`.
+  **✅ DURABLE PATTERN (prefer this) — DON'T hardcode the region bucket; derive the storage root
+  from `marin_prefix()` (`rigging.filesystem`, returns `data_config().resolved_root()`), which
+  AUTO-RESOLVES to the active cluster's correct bucket for your job.** Build `--rendezvous-dir` /
+  `--s3-output-dir` / `--gcs-output-dir` (and read paths) off `marin_prefix()` and a launch follows
+  a store migration automatically — future-proofing against exactly the R2→CW break below. Region
+  helpers: `marin_prefix_for_region(region)` (`marin.rl.placement`), `marin_region()`. Hardcode the
+  `s3://marin-us-east-02a` / `gs://marin-models-us` literal only as a fallback when you can't call it.
+  **⚠ Store moved R2 (`s3://marin-na`) →
   CW (`s3://marin-us-east-02a`) on 2026-07-05 (marin `c7caecc95a`):** pods now inject CW
   creds + `AWS_ENDPOINT_URL=cwlota.com` and can NO LONGER reach `s3://marin-na` (R2) —
   a `marin-na` rendezvous PUT resolves to the nonexistent `marin-na.cwlota.com` and

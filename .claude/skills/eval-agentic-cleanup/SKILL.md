@@ -299,7 +299,9 @@ register rule + the same cross-user FK safety); only the DATA SOURCE and the res
   no `-S <date>` filter; the job_id timestamp suffix (or a `created_at` column) bounds "since June 3". EXEMPT the
   `DCAgent2/*` grid/throughput/OOM measurement runs (§0 pre-gate) same as SLURM.
 - **Results live in GCS, NOT on a filesystem.** The aggregate is
-  `gs://<bucket>/ot-agent/<job>/<job>/result.json`. **⚠ CHECK BOTH BUCKETS: `gs://marin-models-us` (us-east5, the
+  `gs://<bucket>/ot-agent/<job>/<job>/result.json`. (The storage root resolves via `marin_prefix()` — see
+  `.claude/ops/iris/coreweave_gpu_ops.md` §rendezvous; the literal buckets below are the historical fallbacks.)
+  **⚠ CHECK BOTH BUCKETS: `gs://marin-models-us` (us-east5, the
   intended region) AND `gs://marin-eu-west4`.** A launch-host region-discovery fallback (the marin `iris` CLI not
   on PATH → the launcher can't discover the region → it silently writes to the static `gs://marin-eu-west4`
   default). Verified 2026-07-07: a whole class of legs (all the flawed-summ `-rf` re-fires) landed in eu-west4 —
