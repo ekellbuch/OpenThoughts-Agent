@@ -1,6 +1,12 @@
 # =============================================================================
-# 80B NAIVE-MAP CP1 — Qwen3-Next-80B-A3B-Thinking @131k — EP8×FSDP8×CP1
+# 80B NAIVE-MAP CP1 — Qwen3-Next-80B-A3B-Thinking @98304 — EP8×FSDP8×CP1
 # CoreWeave/Iris (cw-us-east-02a, 8x H100-80GB + IB per node). PRIMARY feasibility test.
+# LADDER RUNG 2 (v5): context 131072 → 98304, after v4 @131k host-RAM-OOM'd on the POLICY
+#   node during the training-side GDN chunked-scan forward (global_step never left 0; see
+#   ~/Documents/agent_logs/2026-07-09_80b-next-cp1_failure_diagnosis.md). ONLY context changed
+#   vs v4 (geometry EP8×FSDP8×CP1, model, memory-block structure all UNCHANGED). The MEMORY MATH
+#   below is written @131072 (v4, the worst case) — at 98304 the GDN-scan/activation peak is
+#   strictly lower; the derivation stands, only the operating context rung stepped down.
 # =============================================================================
 # AUTHORED FOR: ~/Documents/experiments/active/qwen3_next_80b_naive_map_131k.
 # GOAL: naive-map the throughput-champ 30B RL geometry (30B-A = EP8×FSDP4×CP1,
@@ -94,6 +100,7 @@
 #   FALLBACK LADDER on a first-training-step OOM (ONE knob per rung; CP is NOT an option here):
 #     TRAINING (GDN-scan): walk CONTEXT down 131072 → 98304 → 65536 (keep max_model_len +
 #       max_generate_length + max_input_tokens consistent); re-confirm the first step at each rung.
+#       *** RUNG 1 (131072, v4) TAKEN + host-OOM'd → NOW AT RUNG 2 (98304, v5). Next rung: 65536. ***
 #     GENERATION (KV bind): gpu_memory_utilization 0.85 → 0.80 → 0.75, then max_num_seqs 12 → 8.
 #
 # -----------------------------------------------------------------------------
@@ -211,9 +218,10 @@ terminal_bench:
       - AgentTimeoutError
       - ContextLengthExceededError
 
-  # 131k: input 130000 (+1072 below max_model_len 131072) + 16384 out.
+  # LADDER RUNG 2: 98304 (v5, after v4 131k host-OOM'd at the GDN training forward).
+  # input 97232 (+1072 below max_model_len 98304) + 16384 out.
   model_info:
-    max_input_tokens: 130000
+    max_input_tokens: 97232
     max_output_tokens: 16384
 
   archiving:
@@ -266,8 +274,8 @@ trainer:
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
 
-  # 131072: prompts may use the full context (no internal truncation).
-  max_prompt_length: 131072
+  # 98304 (LADDER RUNG 2, v5): prompts may use the full context (no internal truncation).
+  max_prompt_length: 98304
 
   eval_interval: 999999
   eval_before_train: false
@@ -419,8 +427,8 @@ generator:
     top_k: 20
 
   engine_init_kwargs:
-    # 131072 — within native 262144 → NO YaRN rope_scaling/hf_overrides (do NOT add).
-    max_model_len: 131072
+    # 98304 (LADDER RUNG 2, v5) — within native 262144 → NO YaRN rope_scaling/hf_overrides (do NOT add).
+    max_model_len: 98304
     # Interleaved-thinking template (the -Thinking variant); relative path resolves against /app.
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
     # Disable vLLM custom CUDA all-reduce (safe vs the NCCL weight-sync deadlock class).
@@ -448,6 +456,13 @@ rollout:
 # without this the env is SILENTLY DROPPED). No SIF/GH200-NCCL-disable/HF-OFFLINE vars.
 # =============================================================================
 extra_env:
+  # CoreWeave object store (marin-us-east-02a) REQUIRES virtual-hosted (hostname-based) S3
+  # addressing — path-style CreateMultipartUpload/PutObject are rejected with
+  # PathStyleRequestNotAllowed (v4 storm on the trace_jobs uploads, 2026-07-09). s3fs defaults
+  # to path-style for a custom endpoint_url, so pin the botocore addressing_style via fsspec's
+  # env-config. This covers the EXTERNAL Harbor/terminal_bench trace writer (fsspec/upath→s3fs);
+  # our own rendezvous writer is pinned in scripts/iris/start_rl_iris_controller.py (_fs_and_path).
+  FSSPEC_S3_CONFIG_KWARGS: '{"s3": {"addressing_style": "virtual"}}'
   # Force the pure-torch GDN path (the fla wheel is broken). LOAD-BEARING for ANY GDN-arch run.
   SKYRL_GDN_MASK_FLA: "1"
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

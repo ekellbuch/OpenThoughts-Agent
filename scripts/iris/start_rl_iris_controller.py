@@ -168,10 +168,22 @@ def _own_ip() -> str:
 
 def _fs_and_path(uri: str):
     """Return (fsspec filesystem, path) for ``uri``. Uses default credential
-    discovery for the scheme (workload identity / instance creds / env keys)."""
+    discovery for the scheme (workload identity / instance creds / env keys).
+
+    For ``s3://`` the CoreWeave object store (marin-us-east-02a) REQUIRES
+    virtual-hosted (hostname-based) addressing — path-style PutObject/
+    CreateMultipartUpload get rejected with ``PathStyleRequestNotAllowed``
+    (observed on the 80b-next-cp1 rendezvous + trace uploads, 2026-07-09). s3fs
+    otherwise defaults to path-style for a custom endpoint_url, so pin the
+    botocore ``addressing_style`` explicitly. The ``OT_AGENT_S3_ADDRESSING_STYLE``
+    env (default ``virtual``) allows an override for a path-only store (e.g. GCS)."""
     import fsspec
 
-    fs, _, paths = fsspec.get_fs_token_paths(uri)
+    storage_options = None
+    if uri.startswith("s3://") or uri.startswith("s3a://"):
+        style = os.environ.get("OT_AGENT_S3_ADDRESSING_STYLE", "virtual")
+        storage_options = {"config_kwargs": {"s3": {"addressing_style": style}}}
+    fs, _, paths = fsspec.get_fs_token_paths(uri, storage_options=storage_options)
     return fs, paths[0]
 
 
