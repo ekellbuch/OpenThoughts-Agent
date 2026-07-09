@@ -130,9 +130,23 @@ verify the repo exists before any manual rescue.
   (`.rsplit('/',1)[-1].split(':',1)[0]`) or it crashes on retry.
 - **Stuck PENDING** = no capacity for that TPU type in the pinned region
   (preemptible pool can scale to zero). A finished job does NOT free its snapshot
-  or instantly free capacity. Fix: relaunch **unpinned** with
+  or instantly free capacity. For a fresh DATAGEN launch that won't place, the
+  documented remedy is to relaunch **unpinned** with
   `--gcs-output-dir gs://marin-models-us/ot-agent` (iris places on any free US
   worker). Kill the stuck submission only with user permission.
+- **⚑ PREEMPTIBLE JOBS STAY ON PREEMPTIBLE — a capacity-pending wait is NOT an
+  escalation (operator, 2026-07-09).** When a `--preemptible` job (datagen OR a
+  training child respawned by its coordinator) sits PENDING for hours on
+  "no workers match constraints" = pure preemptible-pool scarcity, that is the
+  EXPECTED steady state, not a fault. **Do NOT** propose/repin to a
+  non-preemptible / on-demand slice, **do NOT** probe other zones to "rescue" it,
+  and **do NOT** surface it to the user as a decision — the operator's standing
+  answer is "jobs on preemptible stay there." Just report the pending status and
+  let it self-place; a durable parent (`--max-retries`) or coordinator guarantees
+  resume the moment a slice frees. (This overrides the earlier "escalate a long
+  capacity stall" reflex. The unpinned-relaunch remedy above is still fine for a
+  *fresh* datagen launch that never placed — that's a region-pin fix, not an
+  on-demand upsell.)
 
 ### Wedged / stalled TRAINING run (coordinator + child) — checkpoint-resume
 For executor-dispatched training (a CPU **coordinator** submits a v5p **child**
