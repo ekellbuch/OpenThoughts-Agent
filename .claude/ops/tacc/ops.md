@@ -240,6 +240,16 @@ source /scratch/10635/penfever/miniconda3/etc/profile.d/conda.sh
 - Default loaded modules: `TACC`, `cmake/4.1.1`, `gcc/15.1.0`, `nvidia/24.7`, `openmpi/5.0.5`, `nvpl/24.5`, `ucx/1.18.1`.
 - GH200 unified memory: GPU memory is used as filesystem cache and **cannot always be reclaimed** after
   an application exits → occasional hung nodes requiring reboot. Avoid relying on clean memory reclamation.
+- **Native JIT / C-extension builds need a real gcc MODULE — the default nvc++/system compiler rejects the
+  armv9 flags.** This bites any runtime-compiled op: Triton (`TRITON_CC`), and **`DeepSpeedCPUAdam` (the ZeRO
+  offload optimizer).** Recipe: `module load gcc/13.2.0` (matches the cu128 torch toolchain; `gcc/15.1.0` also
+  works) + `export CC=$(which gcc) CXX=$(which g++)` (+ `TRITON_CC=$(which gcc)`), prepend the module's
+  `lib64` to `LD_LIBRARY_PATH`, and prebuild on a `-p gg` node (`DS_BUILD_CPU_ADAM=1`). **⚠ "cpu_adam /
+  CPU-offload is unbuildable on aarch64" is FALSE** — it's a wrong-compiler artifact. Proof: LLaMA-Factory
+  builds+runs `liger-kernel` + `deepspeed` (incl. `ds_z3_offload` CPU-offloaded Adam) on THIS aarch64 via
+  `.[liger-kernel,deepspeed]` and fits Qwen3-32B@32k. So both the offload lever AND the liger fused-CE lever
+  are available on Vista. (Context: the 32B axolotl OOM = liger-off + offload-off, not a capacity wall —
+  `.claude/projects/axolotl/axolotl.md` gotcha #2 + §Qwen3-32B; `agent_logs/2026-07-09_sft_32b_axolotl_oom_config_gap.md`.)
 
 ## Syncing eval traces to local (via AWS S3)
 
