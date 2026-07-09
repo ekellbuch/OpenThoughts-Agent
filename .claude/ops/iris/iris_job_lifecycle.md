@@ -147,6 +147,15 @@ verify the repo exists before any manual rescue.
   capacity stall" reflex. The unpinned-relaunch remedy above is still fine for a
   *fresh* datagen launch that never placed — that's a region-pin fix, not an
   on-demand upsell.)
+- **⚑ DON'T GATE keep-N REFILLS ON A CAPACITY GUESS — let iris's scheduler place
+  them (operator, 2026-07-09).** When keep-N is below target, SUBMIT the refill(s)
+  and let the iris queue manager decide placement; a submitted job that sits PENDING
+  behind a full pool is fine (it places when a slice frees). **Do NOT withhold or
+  defer a refill because you eyeballed "0 free TPUs" / a long pending queue** — that
+  is the scheduler's job, not yours, and guessing just starves the campaign. Submit
+  to keep-N every tick; only skip on a HARD blocker you can act on (Daytona snapshot
+  cap with nothing reclaimable → note + move on). A pending refill is not an
+  escalation (see the preemptible rule above).
 
 ### Wedged / stalled TRAINING run (coordinator + child) — checkpoint-resume
 For executor-dispatched training (a CPU **coordinator** submits a v5p **child**
