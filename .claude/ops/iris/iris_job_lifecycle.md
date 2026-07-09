@@ -13,6 +13,13 @@ conda env**; `source "$DC_AGENT_SECRET_ENV"` first.
 
 ## 1. Launch
 
+> **ℹ NEW federated submission `iris.oa.dev` (2026-07-09) — see `coreweave_gpu_ops.md` §iris.oa.dev.** An
+> easier path is coming: submit to `iris.oa.dev` (needs `iris login` w/ the openathena.ai gmail); an **H100
+> request auto-routes to a CW cluster via a meta-scheduler**, `--target-cluster` pins one. It will become the
+> default as bugs settle; **our existing paths (this doc's `--cluster=marin` TPU submission + the CW
+> controller-tunnel launcher) still work** and are NOT the rejected "old-style SSH tunnel" (validated
+> 2026-07-09). On the new path always pass an explicit cluster (no-target ⇒ random dispatch).
+
 Two entrypoints (both submit `--no-wait`; a launchd fetch daemon mirrors outputs
 back — see §2):
 - **datagen / tracegen** → `data/cloud/launch_tracegen_iris.py`
@@ -158,6 +165,14 @@ verify the repo exists before any manual rescue.
   escalation (see the preemptible rule above).
 
 ### Wedged / stalled TRAINING run (coordinator + child) — checkpoint-resume
+> **⚠ The Executor + `ExecutorStep` are RETIRED (marin PR #6649, 2026-07-09) → lazy `ArtifactStep`
+> (`marin.execution.lazy`, `remote(fn,…)`, `name@version`). See `.claude/projects/marin-executor/`.** The
+> coordinator/child + `.executor_info` model below still describes OLD executor-launched runs (Delphi
+> midtrains) — read them the same way — but NEW Levanter training uses `ArtifactStep`. `StepRunner` + its
+> per-step distributed lock survive and **DEADLOCK an SPMD (srun N-rank GPU) launch** (one rank wins the lock,
+> the rest spin, the JAX mesh never forms — issue #7080); the workaround is to call the Levanter entrypoint
+> directly in every rank (bypass `StepRunner`). Full detail in the marin-executor project doc.
+
 For executor-dispatched training (a CPU **coordinator** submits a v5p **child**
 training job, e.g. a Levanter midtrain), recovery differs from datagen:
 - **`--max-retries` auto-resumes ORGANIC failures only.** Child FAILED(5)/preempted

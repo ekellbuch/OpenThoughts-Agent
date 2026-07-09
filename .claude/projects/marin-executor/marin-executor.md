@@ -4,6 +4,26 @@ Marin's pipeline/experiment system: single-file Python specs that build a DAG of
 engines (Levanter, eval, tokenize, upload, …). Learned 2026-06-29 recovering Delphi midtraining configs.
 See `levanter` (the engine it usually drives) and `mum` (finding run records).
 
+> ## ⚠ RETIRED 2026-07-09 — the Executor + `ExecutorStep` are GONE (marin PR #6649; rjpower confirmed on our #7080)
+> Marin **replaced the eager import-time content-addressed Executor with lazy typed `ArtifactStep`s** and
+> **deleted the Executor** (`marin.execution.lazy`): experiments now build the step graph at *run* time from
+> plain functions, addressed by explicit **`name@version`** (CALVER) instead of an md5-of-the-config-tree, with
+> typed `Artifact` outputs (`LevanterCheckpoint`, `TokenizedCache`, …). Identity (`build_config(ctx)`, pure over
+> a `StepContext` — literals bear identity, `ctx.output_path`/`prefix`/`region` don't) is separated from
+> execution (compute rides the fn via `remote(fn, resources=…)`, never the graph node). So the whole "§Model /
+> `ExecutorStep(...)`/`versioned(...)`/`this_output_path()`" section below is **HISTORICAL** for reading old
+> runs; new work uses `ArtifactStep`.
+> - **`StepRunner` + its per-step distributed lock SURVIVE** (`marin.execution.step_status` — `Acquired lock` /
+>   `Lost lock race, retrying`, `rigging.distributed_lock`). **⚠ It DEADLOCKS an SPMD (srun N-rank GPU) step:**
+>   one rank wins the lock and enters `jax.distributed.initialize()`+barrier while the other N−1 spin on the
+>   lock forever and never join → hang at the N-process barrier (**issue #7080**; hit on the 4×4-A100 Delphi
+>   SFT). **Workaround: bypass `StepRunner` and call the Levanter entrypoint (`train_lm.main`) directly in every
+>   rank** (we env-gate it `DELPHI_DIRECT_RUN=1`), so all ranks form the mesh. rjpower's fix is logging/examples,
+>   not auto-detection. Migrating a training path off the executor = rebuild on `ArtifactStep`/`remote(...)`.
+> - **The GCS artifact layout below (`.executor_info` etc.) still applies to OLD executor-launched runs** (Delphi
+>   1e21/1e22 midtrains); `mum` + `gsutil cat .executor_info` still recover their configs. New `ArtifactStep`
+>   runs use the `name@version` address + typed `Artifact.record`.
+
 ---
 
 ## Model
