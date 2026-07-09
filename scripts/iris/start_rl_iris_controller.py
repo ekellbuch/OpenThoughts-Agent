@@ -46,6 +46,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -185,6 +186,55 @@ def _fs_and_path(uri: str):
         storage_options = {"config_kwargs": {"s3": {"addressing_style": style}}}
     fs, _, paths = fsspec.get_fs_token_paths(uri, storage_options=storage_options)
     return fs, paths[0]
+
+
+def _pin_boto3_s3_addressing_style() -> None:
+    """Pin virtual-hosted (hostname-based) S3 addressing for the boto3 code path,
+    cluster-wide, via an AWS config file + ``AWS_CONFIG_FILE``.
+
+    WHY (boto3 companion to the fsspec/s3fs ``FSSPEC_S3_CONFIG_KWARGS`` + the
+    ``_fs_and_path`` rendezvous pin): the CoreWeave object store
+    (marin-us-east-02a / R2) REJECTS path-style S3 requests with
+    ``PathStyleRequestNotAllowed`` and requires virtual-hosted addressing.
+    Ray's object-spill IO workers (``ray._private.external_storage``
+    ``ExternalStorageSmartOpenImpl``) call a bare ``boto3.resource("s3")`` — with
+    NO botocore ``Config`` — in child processes WE never construct, so we cannot
+    pass ``addressing_style`` in code. botocore also has NO environment variable
+    for ``addressing_style`` (it is resolved ONLY from the shared-config file's
+    ``s3`` section; see botocore ``configprovider.py``). So we WRITE a minimal AWS
+    config file that sets ``s3.addressing_style`` and point ``AWS_CONFIG_FILE`` at
+    it. Because this runs before ``ray start`` (head + every worker) and mutates
+    ``os.environ``, every Ray subprocess / raylet IO worker / the training driver
+    inherits it and its ``boto3.resource("s3")`` picks up virtual addressing.
+
+    R2 credentials/region/endpoint come from env vars (``AWS_*_KEY`` /
+    ``AWS_REGION`` / ``AWS_ENDPOINT_URL``) INDEPENDENTLY of the config file, so a
+    minimal ``[default]`` profile with only the ``s3`` section does not disturb
+    credential discovery. Env-overridable via ``OT_AGENT_S3_ADDRESSING_STYLE``
+    (default ``virtual``; set ``path``/``auto`` for a path-style store). If an
+    operator already exported ``AWS_CONFIG_FILE`` (a real profile/creds file), we
+    RESPECT it and skip rather than clobber."""
+    style = os.environ.get("OT_AGENT_S3_ADDRESSING_STYLE", "virtual")
+    existing = os.environ.get("AWS_CONFIG_FILE")
+    if existing and os.path.exists(existing):
+        _log(
+            f"AWS_CONFIG_FILE already set ({existing}); NOT overriding for S3 "
+            f"addressing_style. If Ray spill hits PathStyleRequestNotAllowed, add "
+            f"'s3 =\\n    addressing_style = {style}' to that file's [default] profile."
+        )
+        return
+    cfg_path = os.path.join(tempfile.gettempdir(), "ot_agent_aws_config")
+    try:
+        with open(cfg_path, "w") as f:
+            f.write(f"[default]\ns3 =\n    addressing_style = {style}\n")
+        os.environ["AWS_CONFIG_FILE"] = cfg_path
+        _log(
+            f"S3 addressing_style={style} pinned via AWS_CONFIG_FILE={cfg_path} "
+            f"(boto3/Ray-object-spill virtual-hosted addressing for CoreWeave R2)."
+        )
+    except OSError as exc:  # noqa: BLE001 - best-effort; falls back to boto3 default
+        _log(f"WARNING: could not write AWS config for S3 addressing_style ({exc}); "
+             f"Ray object-spill may hit PathStyleRequestNotAllowed on CoreWeave R2.")
 
 
 def _rendezvous_uri(rendezvous_dir: str) -> str:
@@ -856,6 +906,11 @@ def _print_env_snapshot() -> None:
 def main() -> None:
     args, train_argv = parse_args()
     _print_env_snapshot()
+    # Pin virtual-hosted S3 addressing for the boto3 path (Ray object-spill IO
+    # workers) BEFORE any `ray start`, on head + every worker — CoreWeave R2
+    # rejects path-style with PathStyleRequestNotAllowed. Companion to the
+    # fsspec FSSPEC_S3_CONFIG_KWARGS + the _fs_and_path rendezvous pin.
+    _pin_boto3_s3_addressing_style()
     # Stage the task dataset on THIS node before Ray bootstrap (head + every worker).
     # Without this, only rank-0 has the extracted tasks and the rollout workers die
     # with FileNotFoundError on task.toml (see stage_train_data docstring).

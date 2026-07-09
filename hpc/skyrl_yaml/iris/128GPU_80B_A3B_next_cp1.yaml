@@ -460,9 +460,14 @@ extra_env:
   # addressing — path-style CreateMultipartUpload/PutObject are rejected with
   # PathStyleRequestNotAllowed (v4 storm on the trace_jobs uploads, 2026-07-09). s3fs defaults
   # to path-style for a custom endpoint_url, so pin the botocore addressing_style via fsspec's
-  # env-config. This covers the EXTERNAL Harbor/terminal_bench trace writer (fsspec/upath→s3fs);
-  # our own rendezvous writer is pinned in scripts/iris/start_rl_iris_controller.py (_fs_and_path).
-  FSSPEC_S3_CONFIG_KWARGS: '{"s3": {"addressing_style": "virtual"}}'
+  # env-config for any bare-fsspec s3 writer that inherits this env.
+  # NOTE: the whole-protocol form FSSPEC_S3='{"config_kwargs": {...}}' is REQUIRED — the
+  # suffix form FSSPEC_S3_CONFIG_KWARGS='{"s3": {...}}' fsspec stores as a raw STRING, which
+  # s3fs then dies on ('str' object has no attribute 'copy'); it does NOT set virtual addressing.
+  # Belt-and-suspenders: harbor now ALSO self-pins in-code (src/harbor/__init__.py
+  # _pin_s3_addressing_style), the rendezvous writer is pinned in _fs_and_path, and the boto3
+  # Ray-object-spill path via AWS_CONFIG_FILE (start_rl_iris_controller _pin_boto3_s3_addressing_style).
+  FSSPEC_S3: '{"config_kwargs": {"s3": {"addressing_style": "virtual"}}}'
   # Force the pure-torch GDN path (the fla wheel is broken). LOAD-BEARING for ANY GDN-arch run.
   SKYRL_GDN_MASK_FLA: "1"
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
