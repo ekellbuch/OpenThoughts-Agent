@@ -19,7 +19,7 @@ piece for the task at hand (skills are also invocable by name via the Skill tool
   - **code (staged change workflow):** `code-create-staged-plan` (design a multi-stage codebase change → `notes/<codebase>/`), `code-execute-staged-plan` (run it gate-by-gate, log progress → `agent_logs/`).
   - **build / image:** `build-gpu-rl-image-iris` (build + push the gpu-rl Docker image — the CoreWeave H100 RL runtime — IN-CLUSTER as an iris job using kaniko; the Mac can't build it).
   - **role / bootstrap:** `supervisor-init` — assume the supervisor role at session start (orient, load env, take custody of secrets + codebase ground truth, survey in-flight work, stand up monitoring).
-- **`.claude/projects/<dep>/`** — what each codebase/dependency is + its facts & gotchas: `ot-agent/` (this repo's branches + launcher map), `marinskyrl/`, `harbor/`, `vllm/`, `llama-factory/`, `axolotl/`, `daytona/`, `ajudge/`.
+- **`.claude/projects/<dep>/`** — what each codebase/dependency is + its facts & gotchas: `ot-agent/` (this repo's branches + launcher map), `marin/` (marin monorepo + the accepted **publish-research-artifact-as-static-webpage** best practice, PR #6816), `marinskyrl/`, `harbor/`, `vllm/`, `llama-factory/`, `axolotl/`, `daytona/`, `ajudge/`.
 - **`.claude/ops/<target>/`** — machine/cluster particulars (access, paths, env/SIF map, gotchas): `jupiter/`, `leonardo/`, `torch/`, `iris/`, `local/` (this Mac), `all/` (cross-cluster HF/tmux), `experiments/` (the per-experiment tracker workspace `~/Documents/experiments`), `data/` (dataset trackers — e.g. `tasktrove.md`, the full TaskTrove inventory).
 - **`.claude/secret.md`** — untracked, gitignored; holds privileged values (pinggy bank, etc.) pulled out of the committable docs. Referenced by name from skills/ops.
 
