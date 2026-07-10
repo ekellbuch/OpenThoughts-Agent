@@ -129,7 +129,22 @@ def stage_train_data(train_data_json: str) -> None:
     from hpc.rl_launch_utils import resolve_rl_train_data
 
     _log(f"Staging train_data on this node (rank {_rank()}/{_num_tasks()}): {train_data}")
-    resolved = resolve_rl_train_data(train_data, on_exist="skip", verbose=True)
+    # The pod env carries HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1 (config extra_env,
+    # for the training ranks so they load the pre-staged model from the warm node-local
+    # cache). But this HF *parquet* dataset is NOT pre-cached — it must be fetched from
+    # the Hub here, so force-clear both for the extraction only (symmetric to
+    # stage_model; the ranks' env is untouched). Without this the snapshot_download
+    # inside resolve_rl_train_data dies OfflineModeIsEnabled and kills the whole gang
+    # in the controller pre-Ray phase.
+    saved = {k: os.environ.get(k) for k in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")}
+    for k in saved:
+        os.environ.pop(k, None)
+    try:
+        resolved = resolve_rl_train_data(train_data, on_exist="skip", verbose=True)
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
     _log(f"train_data staged to node-local paths: {resolved}")
 
 
