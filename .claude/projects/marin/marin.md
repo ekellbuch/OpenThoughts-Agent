@@ -61,3 +61,26 @@ version=…, title=…, summary="")` → `site.path` = the `gs://` dir.
 
 **Reference:** `docs/tutorials/publish-analysis-site.md` in the marin repo; PR #6816 (issue #6802) + #7084.
 Worked examples already live: `.../held/datakit-sidebyside/2026.07.01/`, `.../ahmad/delphi-midtraining/2026.07.01/`.
+
+---
+
+## Execution & artifacts — the ArtifactStep system (authority: `marin-executor/`)
+
+marin's pipeline/execution layer, and the substrate the publish mechanism above rides on.
+**⚠ The eager content-addressed `Executor` + `ExecutorStep` are RETIRED (PR #6649)** — replaced by lazy typed
+**`ArtifactStep`**s (`marin.execution.lazy`): explicit **`name@version`** (CALVER) addressing instead of an
+md5-of-the-config-tree, typed **`Artifact`** outputs (`LevanterCheckpoint`, `TokenizedCache`, …), with identity
+(`build_config(ctx)`, pure over a `StepContext`) separated from execution (compute rides `remote(fn,
+resources=…)`, not the graph node).
+
+**Full detail lives in `.claude/projects/marin-executor/marin-executor.md`** — read it for:
+- the retirement + the `ArtifactStep`/`remote(...)`/`name@version` migration model;
+- the surviving **`StepRunner` distributed-lock SPMD deadlock (#7080)** and the sanctioned workaround — a direct
+  `srun` launch via **`LevanterSlurmCluster`** (marin's first-class SLURM path; NOT a hack), i.e. ArtifactStep =
+  identity/graph layer, `srun` = execution layer on non-Fray clusters;
+- the legacy GCS `.executor_info` layout still used to recover OLD executor-launched runs (Delphi midtrains).
+
+**Connection to the best practice above:** `publish_site` records each page as a typed `Artifact`, so a
+published site is code-fetchable by its deterministic address via `Artifact.raw_load(site_uri(user, slug,
+version))` — the *same* typed-artifact system, no separate registry lookup. (See also `levanter/` — the JAX
+training engine most `ArtifactStep`s drive — and `marinskyrl/` — the SkyRL RL fork.)
