@@ -96,13 +96,17 @@ fi
 r2_op() {
   kubectl exec -i -n "$NS" "$POD" -c "$CONTAINER" -- python - "$S3_TJ" "$@" <<'PYEOF'
 import sys, os, re, collections, boto3
+from botocore.config import Config
 s3url = sys.argv[1]
 mode  = sys.argv[2] if len(sys.argv) > 2 else "count"
 arg   = sys.argv[3] if len(sys.argv) > 3 else ""
 assert s3url.startswith("s3://"), s3url
 BUCKET, _, PREFIX = s3url[5:].partition("/")
 PREFIX = PREFIX.rstrip("/") + "/"
-c = boto3.client("s3", endpoint_url=os.environ["AWS_ENDPOINT_URL"])
+# CW object store requires VIRTUAL-hosted addressing (path-style -> PathStyleRequestNotAllowed);
+# same fix as 398a0481/a9f4c8c5/2e194e31 for the training S3 clients.
+c = boto3.client("s3", endpoint_url=os.environ["AWS_ENDPOINT_URL"],
+                 config=Config(s3={"addressing_style": "virtual"}))
 keys = []
 for page in c.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=PREFIX):
     keys += [o["Key"] for o in page.get("Contents", [])]
@@ -198,9 +202,11 @@ case "$ACTION" in
       POD_TMP="/tmp/peek_cp_${TR//\//_}"
       kubectl exec -i -n "$NS" "$POD" -c "$CONTAINER" -- python - "$S3_TJ/$TR" /dev/null download "$POD_TMP" <<'PYEOF' >/dev/null
 import sys, os, boto3
+from botocore.config import Config
 s3url = sys.argv[1]; dest = sys.argv[3]
 BUCKET, _, PREFIX = s3url[5:].partition("/"); PREFIX = PREFIX.rstrip("/") + "/"
-c = boto3.client("s3", endpoint_url=os.environ["AWS_ENDPOINT_URL"])
+c = boto3.client("s3", endpoint_url=os.environ["AWS_ENDPOINT_URL"],
+                 config=Config(s3={"addressing_style": "virtual"}))
 for page in c.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=PREFIX):
     for o in page.get("Contents", []):
         r = o["Key"][len(PREFIX):]
@@ -275,7 +281,8 @@ bucket, _, prefix = s3url[5:].partition("/"); prefix = prefix.rstrip("/") + "/"
 # PEEK_MAX_OBJECT_BYTES (set 0 to disable skipping and fetch everything).
 MAXB = int(os.environ.get("PEEK_MAX_OBJECT_BYTES", str(20 * 1024**2)))
 cfg = botocore.config.Config(region_name="auto", connect_timeout=15, read_timeout=120,
-                             retries={"max_attempts": 5, "mode": "standard"}, max_pool_connections=64)
+                             retries={"max_attempts": 5, "mode": "standard"}, max_pool_connections=64,
+                             s3={"addressing_style": "virtual"})  # CW store: virtual-hosted, not path-style
 c = boto3.client("s3", endpoint_url=os.environ["AWS_ENDPOINT_URL"], config=cfg)
 tcfg = TransferConfig(multipart_threshold=16 * 1024**2, multipart_chunksize=16 * 1024**2,
                       max_concurrency=4, use_threads=True)
