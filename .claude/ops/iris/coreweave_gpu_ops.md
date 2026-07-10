@@ -122,6 +122,16 @@ exclusive** (`H100x8`, one iris task per node, no co-tenants). ~**36 H100 nodes*
   N-task gang admits **atomically** (all N whole nodes granted, or it queues). At submit
   you see `replicas=N, coscheduling=leafgroup`; pods then sit **SchedulingGated**
   (normal Kueue gang pre-admit) until admitted.
+- **⚠ JUST SUBMIT — do NOT pre-check free-node count and withhold the submit (operator 2026-07-10).**
+  A gang sitting `SchedulingGated`/pending because a transient `cw-hpc-verification`/`nhc-*` health-check
+  sweep or another tenant's job holds nodes is NORMAL — **Kueue admits it atomically the moment N whole
+  nodes free, with zero babysitting.** Polling the free-node count and refusing to submit until ≥N are free
+  is the WRONG pattern (it was mine, corrected): it keeps the job OUT of the queue entirely, so it never
+  gets its turn, and every transient sweep looks like a permanent block. **Submit, let Iris/Kueue schedule,
+  report the id + state (running or SchedulingGated — both fine), move on.** The health checks are NOT
+  blocking — the scheduler handles them. The ONLY real "doomed gang" is a CONFIG mis-size that can't fit one
+  IB leaf (e.g. `--cpu 64` → the `topology 'infiniband' allows to fit only 2 out of N` message below);
+  `--cpu 48` avoids it. Transient occupancy is not that — never gate a submit on it.
 - **The single-IB-leaf gang constraint is what `--cpu 48` is about.** The gang must fit
   on ONE IB leaf; with `--cpu 64` only ~2/32 nodes have ≥64 free cores (the daemonset
   overhead above), so an N-node single-leaf gang sits SchedulingGated forever with a
