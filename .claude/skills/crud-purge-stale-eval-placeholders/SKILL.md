@@ -93,10 +93,12 @@ Restrict every delete to rows you own; **never** delete another user's rows with
 authorization. A past cleanup once deleted 95 `Pending`/`Started` rows across ALL users —
 don't repeat it.
 
-**Default-scope to OUR rows** (the re-eval/eval owners `feuer1` + `bfeuer00`). Stale rows owned
-by OTHER users (`zhuang1`, `richard.zhuang`, `penfever`, `benjaminfeuer`, …) are **REPORTED with
-counts, never deleted** — surface them to the supervisor. The match and the job-delete are both
-scoped by `username IN OURS` so a scope error cannot leak across users.
+**Default-scope to OUR rows** (the eval/re-eval owners `feuer1`, `bfeuer00`, `penfever`,
+`benjaminfeuer` — all four are the operator's own accounts; matches the sibling
+`crud-purge-below-gate-evals` OURS). Stale rows owned by GENUINELY OTHER users (`zhuang1`,
+`richard.zhuang`, …) are **REPORTED with counts, never deleted** — surface them to the supervisor.
+The match and the job-delete are both scoped by `username IN OURS` so a scope error cannot leak
+across users.
 
 ## 3. The cascade — `sandbox_jobs.id` IS FK'd (REQUIRED)
 
@@ -123,7 +125,7 @@ from datetime import datetime, timezone, timedelta
 from supabase import create_client
 c = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
 NOW = datetime.now(timezone.utc); CUTOFF_H = 36
-OURS = {"feuer1", "bfeuer00"}          # the re-eval/eval owners we may delete
+OURS = {"feuer1", "bfeuer00", "penfever", "benjaminfeuer"}   # the operator's eval/re-eval owners we may delete
 
 def age_h(ts):                          # hours since an ISO ts (None -> None)
     return None if not ts else (NOW - datetime.fromisoformat(ts)).total_seconds()/3600
