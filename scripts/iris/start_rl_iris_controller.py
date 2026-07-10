@@ -533,6 +533,24 @@ def _ray_spill_flags(spill_uri: str | None) -> list[str]:
 # limit and pass it to `ray start` as --memory, and BOUND the plasma store so it can't
 # balloon off a misread host figure — leaving the bulk of host RAM for cpu_offload.
 RAY_OBJECT_STORE_CAP_GIB = 96  # bounded plasma; default can be ~30% of *detected* RAM (huge if host is misread)
+# Per-job override (env) for the plasma cap, in GiB. Default = RAY_OBJECT_STORE_CAP_GIB
+# (96) -> UNSET is byte-identical to the prior hard-coded behavior for every existing job.
+# WHY THIS EXISTS (2026-07-10, 80B v5 @98k dispatch-put stall,
+# agent_logs/2026-07-09_80b_v5_98k_nccl_wedge_kill.md "ROOT CAUSE DEFINITIVELY PINNED"):
+# the R3-resident forward dispatch (dispatch.py MeshDispatch.dispatch) ray.put()s one
+# ~4.6 GB per-dp-group chunk into the DRIVER's (head node's) local plasma. The 8 dp-group
+# chunks total only ~37 GB (fits in 96 GiB with room to spare), but at the FIRST training
+# forward the head's plasma is already ~91 GiB full of PRIOR-pipeline live objects, so the
+# store has room for only ONE more chunk: dp=0's chunk goes in + its forward pins it for
+# ~798 s; dp=1's ray.put() then blocks on eviction/R2-spill (can't evict dp=0's in-use
+# chunk) and trips the 600 s bounded-put timeout (d13c3586) -> the run dies at global_step 1.
+# Because the 8 chunks (37 GB) are NOT themselves the overflow, waving/bounding the dispatch
+# (candidate fixes b/c) does NOT help; only giving the store headroom ABOVE the ~91 GiB
+# lingering baseline does. Raising the cap to ~160 GiB clears 91+37 = 128 GiB with margin.
+# The min(., cgroup//8) OOM guard below still applies as the HARD ceiling (so a too-large
+# value is clamped, never an OOM risk); the H100 head/policy nodes have ~1.3 TB cgroup with
+# ~180 GB used by cpu_offload -> ~1 TB host headroom, so a 160 GiB plasma is safe.
+_RAY_STORE_CAP_ENV = "OT_AGENT_RAY_OBJECT_STORE_CAP_GIB"
 
 
 def _cgroup_mem_limit_bytes() -> int | None:
@@ -559,7 +577,16 @@ def _cgroup_mem_limit_bytes() -> int | None:
 def _ray_mem_flags() -> list[str]:
     """Make `ray start` cgroup-aware (see the block comment above). Always bounds the
     plasma object store; additionally pins --memory to the cgroup limit when readable."""
-    store_cap = RAY_OBJECT_STORE_CAP_GIB * (1 << 30)
+    try:
+        cap_gib = float(os.environ.get(_RAY_STORE_CAP_ENV, RAY_OBJECT_STORE_CAP_GIB))
+    except ValueError:
+        _log(f"Ray cgroup-aware: {_RAY_STORE_CAP_ENV}={os.environ.get(_RAY_STORE_CAP_ENV)!r} "
+             f"not a number; falling back to default {RAY_OBJECT_STORE_CAP_GIB}GiB")
+        cap_gib = float(RAY_OBJECT_STORE_CAP_GIB)
+    store_cap = int(cap_gib * (1 << 30))
+    if cap_gib != RAY_OBJECT_STORE_CAP_GIB:
+        _log(f"Ray cgroup-aware: plasma cap overridden via {_RAY_STORE_CAP_ENV} -> "
+             f"~{cap_gib:.0f}GiB (pre-guard)")
     limit = _cgroup_mem_limit_bytes()
     flags: list[str] = []
     if limit:

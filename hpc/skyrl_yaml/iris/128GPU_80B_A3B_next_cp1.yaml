@@ -468,6 +468,20 @@ extra_env:
   # _pin_s3_addressing_style), the rendezvous writer is pinned in _fs_and_path, and the boto3
   # Ray-object-spill path via AWS_CONFIG_FILE (start_rl_iris_controller _pin_boto3_s3_addressing_style).
   FSSPEC_S3: '{"config_kwargs": {"s3": {"addressing_style": "virtual"}}}'
+  # Ray plasma object-store cap (GiB) — RAISED 96 -> 160 for the 80B forward-dispatch stall
+  # (agent_logs/2026-07-09_80b_v5_98k_nccl_wedge_kill.md "ROOT CAUSE DEFINITIVELY PINNED",
+  # global_step 1). The R3-resident forward dispatch (MeshDispatch.dispatch) ray.put()s one
+  # ~4.6 GB per-dp-group chunk into the DRIVER's plasma; the 8 chunks total only ~37 GB, but
+  # at the first training forward the head's plasma is already ~91 GiB full of prior-pipeline
+  # live objects, leaving room for ONLY ONE chunk -> dp=0's chunk goes in + its forward pins
+  # it ~798 s -> dp=1's ray.put() blocks on eviction/R2-spill and trips the 600 s bounded-put
+  # (MarinSkyRL d13c3586) -> DispatchPutTimeoutError, job dies. The 37 GB of chunks are NOT
+  # the overflow, so waving/bounding dispatch would NOT help; only store HEADROOM above the
+  # ~91 GiB baseline does. 160 GiB clears 91+37 = 128 GiB with margin. SAFE on host RAM: the
+  # H100 nodes have ~1.3 TB cgroup with ~180 GB used by cpu_offload (~1 TB headroom), and the
+  # controller's min(cap, cgroup//8) OOM guard still hard-caps this at ~163-175 GiB. Read by
+  # scripts/iris/start_rl_iris_controller.py _ray_mem_flags().
+  OT_AGENT_RAY_OBJECT_STORE_CAP_GIB: "160"
   # Force the pure-torch GDN path (the fla wheel is broken). LOAD-BEARING for ANY GDN-arch run.
   SKYRL_GDN_MASK_FLA: "1"
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
