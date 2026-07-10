@@ -172,8 +172,10 @@ def stage_model(model_path: str) -> None:
     gang (``--max-retries``) re-runs it as a cheap cache-validate.
 
     The pod env carries ``HF_HUB_OFFLINE=1`` / ``TRANSFORMERS_OFFLINE=1`` for the
-    ranks; this download MUST reach the Hub, so it force-clears both for the
-    ``snapshot_download`` call only (the ranks' env is untouched).
+    ranks; this download MUST reach the Hub, so it runs ``snapshot_download`` in a
+    SUBPROCESS whose env has both flags stripped (an in-process env-pop is too late —
+    huggingface_hub caches HF_HUB_OFFLINE into a module constant at import; see the
+    body). The ranks' env is untouched.
     """
     if not model_path or model_path.startswith(("s3://", "gs://", "gcs://")) or os.path.isdir(model_path):
         # Nothing to pre-download: empty, an object-store URI (handled elsewhere),
@@ -181,34 +183,49 @@ def stage_model(model_path: str) -> None:
         _log(f"stage_model: skip (model_path={model_path!r} is empty/local/cloud)")
         return
 
-    from huggingface_hub import snapshot_download
-
     # Weights + config + tokenizer + any trust_remote_code modeling files. Mirrors
     # mirror_hf_to_gcs.INCLUDE_PATTERNS so from_pretrained resolves fully offline.
     allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.model", "*.py"]
 
-    def _download():
-        return snapshot_download(model_path, allow_patterns=allow_patterns)
-
-    # Try to reuse MarinSkyRL's transient-HF-flake retry wrapper; fall back to a
-    # bare call if skyrl_train isn't importable from the controller venv.
-    try:
-        from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
-        run = lambda: load_pretrained_with_retry(_download, model_id=model_path)  # noqa: E731
-    except Exception:  # noqa: BLE001
-        run = _download
-
-    saved = {k: os.environ.get(k) for k in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")}
-    for k in saved:
-        os.environ.pop(k, None)
+    # Download in a SUBPROCESS with the offline flags stripped from ITS env. An
+    # in-process os.environ.pop does NOT work here: huggingface_hub snapshots
+    # HF_HUB_OFFLINE into a module CONSTANT at IMPORT time, and the controller has
+    # already imported huggingface_hub, so clearing the env var afterward leaves the
+    # cached constant True -> snapshot_download still raises OfflineModeIsEnabled.
+    # A fresh child process re-reads the (cleaned) env at its own import. (This is
+    # exactly why stage_train_data — which shells out to a subprocess — works with the
+    # same env-pop, while stage_model, running in-process, did not: the 80b-next-cp1
+    # gang died here on 2026-07-10.) The child inherits HF_HOME/HF_HUB_CACHE, so it
+    # populates the SAME node-local cache the offline ranks then read.
+    child_env = {k: v for k, v in os.environ.items()
+                 if k not in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")}
+    child_env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # keep captured stderr bounded
+    code = (
+        "import sys\n"
+        "from huggingface_hub import snapshot_download\n"
+        "p = snapshot_download(sys.argv[1], allow_patterns=sys.argv[2].split(','))\n"
+        "print('PRESTAGE_LOCAL_DIR=' + p)\n"
+    )
     _log(f"Pre-staging model on this node (rank {_rank()}/{_num_tasks()}): {model_path}")
-    try:
-        local_dir = run()
-    finally:
-        for k, v in saved.items():
-            if v is not None:
-                os.environ[k] = v
-    _log(f"model pre-staged to node-local HF cache: {local_dir}")
+    last_err = ""
+    for attempt in range(1, 7):
+        proc = subprocess.run(
+            [sys.executable, "-c", code, model_path, ",".join(allow_patterns)],
+            env=child_env, capture_output=True, text=True,
+        )
+        if proc.returncode == 0:
+            local_dir = ""
+            for line in proc.stdout.splitlines():
+                if line.startswith("PRESTAGE_LOCAL_DIR="):
+                    local_dir = line.split("=", 1)[1]
+            _log(f"model pre-staged to node-local HF cache: {local_dir}")
+            return
+        last_err = (proc.stderr or proc.stdout or "")[-800:]
+        _log(f"model prestage attempt {attempt}/6 failed (rc={proc.returncode}): {last_err}")
+        time.sleep(min(30, 2 ** attempt))
+    raise RuntimeError(
+        f"model prestage failed after 6 attempts for {model_path}: {last_err}"
+    )
 
 
 def _rank() -> int:
