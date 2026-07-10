@@ -116,7 +116,9 @@
 # CONTAINER/ENV: NO container:/SIF/apptainer block (gpu-rl Docker image IS the runtime;
 #   top-level extra_env: is FORWARDED + LOAD-BEARING on Iris). NCCL H100+IB defaults (do NOT
 #   disable P2P) + the NCCL_SOCKET_IFNAME/AF_INET bootstrap pin (prevents the controller
-#   exclude-list wedge on the cross-node mesh — hard-won on 30B-C CP4 v4). HF online (egress).
+#   exclude-list wedge on the cross-node mesh — hard-won on 30B-C CP4 v4). HF_HUB_OFFLINE=1:
+#   the launcher pre-downloads the policy weights once-per-node into the node-local HF cache
+#   (before Ray), so the 128 FSDP ranks load from a warm cache instead of racing HF Hub at init.
 #
 # =============================================================================
 # LAUNCH COMMAND (CP1 map — DRY-RUN FIRST). Respect Daytona <=6 RUNNING RL/cluster;
@@ -468,6 +470,8 @@ extra_env:
   # _pin_s3_addressing_style), the rendezvous writer is pinned in _fs_and_path, and the boto3
   # Ray-object-spill path via AWS_CONFIG_FILE (start_rl_iris_controller _pin_boto3_s3_addressing_style).
   FSSPEC_S3: '{"config_kwargs": {"s3": {"addressing_style": "virtual"}}}'
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
   # Force the pure-torch GDN path (the fla wheel is broken). LOAD-BEARING for ANY GDN-arch run.
   SKYRL_GDN_MASK_FLA: "1"
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

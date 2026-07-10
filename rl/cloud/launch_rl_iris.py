@@ -654,6 +654,18 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # cheap no-op.
     if args.train_data and args.train_data != "[]":
         controller_cmd.extend(["--train-data", args.train_data])
+    # Per-NODE model pre-staging, coupled to HF_HUB_OFFLINE. A config that runs the
+    # FSDP ranks offline (extra_env HF_HUB_OFFLINE=1) has NO warm cache unless the
+    # weights are pulled first; without pre-staging each of the N*8 ranks would race
+    # HF Hub online inside init_model and a slow straggler blows the 20-min c10d store
+    # barrier (the 80B init-straggle kill, 2026-07-10). When the config is offline,
+    # forward the model repo-id so the controller pre-downloads it ONCE PER NODE into
+    # the node-local HF cache before Ray — off the collective critical path. Online
+    # configs are byte-identical (no flag forwarded).
+    _cfg_env = load_config_extra_env(args.rl_config)
+    if str(_cfg_env.get("HF_HUB_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on"):
+        if args.model_path and not args.model_path.startswith(("s3://", "gs://", "gcs://")):
+            controller_cmd.extend(["--prestage-model", args.model_path])
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)
 

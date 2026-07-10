@@ -133,6 +133,69 @@ def stage_train_data(train_data_json: str) -> None:
     _log(f"train_data staged to node-local paths: {resolved}")
 
 
+def stage_model(model_path: str) -> None:
+    """Pre-download the policy model into this NODE's local HF cache on EVERY node.
+
+    WHY THIS EXISTS (the init-straggle bug, 2026-07-10): with the model resolved
+    ONLINE by HF repo-id (``trainer.policy.model.path=<org/name>``, no
+    HF_HUB_OFFLINE), each of the N*8 FSDP ranks independently pulls the ~160 GB
+    of weights from HF Hub inside ``FSDPPolicyWorkerBase.init_model``. On a
+    network-saturated cluster the per-rank variance blew out — slow ranks were
+    still in ``from_pretrained`` at 68 min while the lazy policy-PG NCCL comm-init
+    (the first fsdp2_load_full_state_dict broadcast) fired a c10d
+    ``store->get('0')`` on the fast ranks that timed out at the 20-min store
+    barrier, SIGKILLing the whole gang before global_step 1.
+
+    Fix (symmetric to ``stage_train_data``): the controller runs on EVERY node
+    before Ray bootstrap, so pre-download the weights ONCE PER NODE here (16 pulls,
+    not 128) into the node-local HF cache. The download runs in the controller's
+    pre-Ray phase where no collective barrier is active, so a slow pull can no
+    longer race the init barrier. With ``HF_HUB_OFFLINE=1`` set for the training
+    ranks (config extra_env), all 8 ranks on a node then read the pre-populated
+    node-local cache — uniform + fast, zero HF contention at init. Idempotent:
+    ``snapshot_download`` skips already-complete cached files, so a re-brought-up
+    gang (``--max-retries``) re-runs it as a cheap cache-validate.
+
+    The pod env carries ``HF_HUB_OFFLINE=1`` / ``TRANSFORMERS_OFFLINE=1`` for the
+    ranks; this download MUST reach the Hub, so it force-clears both for the
+    ``snapshot_download`` call only (the ranks' env is untouched).
+    """
+    if not model_path or model_path.startswith(("s3://", "gs://", "gcs://")) or os.path.isdir(model_path):
+        # Nothing to pre-download: empty, an object-store URI (handled elsewhere),
+        # or already a local directory the ranks read directly.
+        _log(f"stage_model: skip (model_path={model_path!r} is empty/local/cloud)")
+        return
+
+    from huggingface_hub import snapshot_download
+
+    # Weights + config + tokenizer + any trust_remote_code modeling files. Mirrors
+    # mirror_hf_to_gcs.INCLUDE_PATTERNS so from_pretrained resolves fully offline.
+    allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.model", "*.py"]
+
+    def _download():
+        return snapshot_download(model_path, allow_patterns=allow_patterns)
+
+    # Try to reuse MarinSkyRL's transient-HF-flake retry wrapper; fall back to a
+    # bare call if skyrl_train isn't importable from the controller venv.
+    try:
+        from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
+        run = lambda: load_pretrained_with_retry(_download, model_id=model_path)  # noqa: E731
+    except Exception:  # noqa: BLE001
+        run = _download
+
+    saved = {k: os.environ.get(k) for k in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")}
+    for k in saved:
+        os.environ.pop(k, None)
+    _log(f"Pre-staging model on this node (rank {_rank()}/{_num_tasks()}): {model_path}")
+    try:
+        local_dir = run()
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+    _log(f"model pre-staged to node-local HF cache: {local_dir}")
+
+
 def _rank() -> int:
     # IRIS_TASK_ID is the full task path (e.g. "/user/job/0"); on retried tasks
     # iris appends a ":N" retry suffix. The rank is the trailing path segment
@@ -910,6 +973,14 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "task dir) on EVERY node before Ray starts. Required for agentic terminal_bench "
         "rollouts on a multi-node slice with no shared filesystem.",
     )
+    parser.add_argument(
+        "--prestage-model",
+        default=os.environ.get("OT_AGENT_IRIS_PRESTAGE_MODEL", ""),
+        help="HF repo-id of the policy model to pre-download into the node-local HF "
+        "cache on EVERY node before Ray starts. Set by the launcher when the config "
+        "runs HF_HUB_OFFLINE=1, so the FSDP ranks load from a warm node-local cache "
+        "instead of each racing HF Hub at init (the 80B init-straggle fix).",
+    )
     args, train_argv = parser.parse_known_args()
     # argparse leaves the `--` separator out of train_argv; strip a leading one
     # if the shell passed it through.
@@ -943,6 +1014,11 @@ def main() -> None:
     # with FileNotFoundError on task.toml (see stage_train_data docstring).
     if args.train_data:
         stage_train_data(args.train_data)
+    # Pre-download the policy weights into the node-local HF cache BEFORE Ray, so the
+    # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1 instead of each racing
+    # HF Hub inside init_model (the init-straggle store->get barrier kill). See stage_model.
+    if args.prestage_model:
+        stage_model(args.prestage_model)
     rank = _rank()
     if rank == 0:
         exit_code = run_head(args, train_argv)
