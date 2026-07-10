@@ -1269,7 +1269,11 @@ vista = HPC(
     total_partition_nodes=552,
     pretok_time_limit="4:00:00",
     pretok_partition="gh",
-    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082",
+    # c636-121 added 2026-07-10: SLURM-detected hardware failure (NODE_FAIL,
+    # "srun: error: Node failure on c636-121") mid-run on the axolotl Qwen3-32B
+    # SFT resume leg (job 819032) after 4.5h of otherwise-clean progress —
+    # agent_logs/2026-07-10_tacc_sft_818554_nccl_timeout.md.
+    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121",
     # Runtime configuration for Ray/vLLM
     modules=["gcc/15.1.0", "cuda/12.8", "tacc-apptainer"],
     conda_activate="source $SCRATCH/miniconda3/etc/profile.d/conda.sh && conda activate $SCRATCH/miniconda3/envs/vllm_sandboxes",
