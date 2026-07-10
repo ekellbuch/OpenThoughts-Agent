@@ -242,7 +242,7 @@ trainer:
 
   fully_async:
     max_staleness_steps: 16
-    num_parallel_generation_workers: 900
+    num_parallel_generation_workers: 128
 
 # =============================================================================
 # Generator configuration (vLLM) — IDENTICAL to the CP1 sibling (CP is training-only).

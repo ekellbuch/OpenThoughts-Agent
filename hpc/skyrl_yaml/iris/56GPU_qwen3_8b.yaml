@@ -198,8 +198,7 @@ trainer:
 
   fully_async:
     max_staleness_steps: 16
-    # ~1/2 of total Daytona concurrency.
-    num_parallel_generation_workers: 338
+    num_parallel_generation_workers: 128
 
 # Generator configuration
 generator:

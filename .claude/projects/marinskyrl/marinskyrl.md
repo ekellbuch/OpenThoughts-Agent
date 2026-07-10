@@ -169,7 +169,40 @@ surviving equivalent `grid_30b_EP8_FSDP2_CP2.yaml`) is **FIXED** — validated e
 - **Next bottleneck (does NOT block correctness):** throughput ~2h/step — `policy_train` ~7600s from the 3 GB
   **router-replay backward** (80 steps ≈ a week on 8 nodes). Open follow-up: harden the per-batch `.max()`
   dtype pick to a DETERMINISTIC int16/num_experts choice (per-batch max diverges across ranks for a >127-expert
-  model like Qwen3-Next; safe for Qwen3-Coder's 128).
+  model like Qwen3-Next; safe for Qwen3-Coder's 128). (DONE — `39faff7d` keys the dtype to num_experts → int16
+  for Qwen3-Next's 512.)
+
+### ⚠ 80B addendum (2026-07-10) — `ac4b3806` was a HALF-FIX; driver-centralization + async backlog re-manifested
+
+`ac4b3806` killed the PER-ACTOR redundancy (16×/dp-group → 1×) but its **"worker-resident" title is a MISNOMER**:
+`ray.put` in `MeshDispatch.dispatch` runs on the **DRIVER (head node)**, so R3 still lands in the **head plasma** —
+just deduped to 1 copy/dp-group (8 × ~4.6 GB ≈ 37 GB). The driver-centralization survived; at 80B
+(`128GPU_80B_A3B_next_cp1`) it re-manifested + was DEFINITIVELY diagnosed:
+- **The dp=1 put stall (gs1):** dp=0's chunk pins the store through its 798s forward → dp=1's `ray.put` blocks on
+  eviction → the bounded-put (`d13c3586`, 600s) trips → **`DispatchPutTimeoutError` at global_step 1** (loud +
+  pinpointed — `d13c3586` turned v5's silent 4.8h NCCL-watchdog wedge into a 10-min failure). NOT a GDN-kernel
+  deadlock, NOT a dp=0 straggler (dp=0's forward completed). Full: `agent_logs/2026-07-09_80b_v5_98k_...md`.
+- **The async-generation BACKLOG is the other half of the ~91 GiB head occupancy.** The fully_async buffer is
+  `asyncio.Queue[GeneratedOutputGroup](maxsize=num_parallel_generation_workers)`. **A generation "worker" owns a
+  GROUP, not a rollout** (`_run_generate_for_a_group_loop`; `max_concurrent_generation_groups =
+  num_parallel_generation_workers`; a `GeneratedOutputGroup` = one prompt × n_samples, ~126 MiB with R3 at 80B
+  L=48/K=10). At `num_parallel_generation_workers: 900` the buffer alone pins ~113 GiB before gs1. **This is NOT a
+  throughput lever** — generation concurrency is capped by the vLLM engine working set (`num_inference_engines ·
+  max_num_seqs / n_samples ≈ 24 groups`); workers ≫ that only accumulate STALE groups (discarded past
+  `max_staleness_steps` at consumption). This BOUNDS the "§scale n_concurrent_trials AND
+  num_parallel_generation_workers together" advice below at the top end — bound it, don't max it.
+- **Fix (2026-07-10):** (a) `trainer.fully_async.max_buffered_groups` knob (`8b065938`; default None ⇒
+  = num_parallel_generation_workers, byte-identical); (b) **`num_parallel_generation_workers: 128` across ALL iris
+  configs** (caps buffer AND worker-held groups, since max_buffered_groups defaults to it) → footprint O(1) in
+  model scale, fits the reverted **96 GB** store (the `OT_AGENT_RAY_OBJECT_STORE_CAP_GIB=160` band-aid was
+  reverted). **Dead ends:** uint8 is UNSAFE here (512 experts > 255 → truncate + rank-divergent → NCCL
+  size-mismatch hang; `39faff7d` correctly keys num_experts → int16); `del`/`ray free` after dispatch does NOT
+  help (the chunk is pinned by the LIVE `forward.remote()` task, not the driver ref).
+- **⏳ Fix A (the REAL structural fix, in progress):** get R3 out of the DRIVER plasma entirely — route the
+  captured routed-experts **generation-worker → policy-worker** (or node-resident), so the head holds ~0 R3 (O(1)
+  in model scale — the bounded-footprint property a scale-up demands). Touches the router-replay capture→train
+  correctness path (#6335 alignment guardrail) → staged + smoke-tested on a small CoreWeave alloc, not a hot
+  patch. This is the design prime-rl/verl/slime already use (they never centralize R3).
 
 ---
 
