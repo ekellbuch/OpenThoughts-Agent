@@ -23,6 +23,21 @@
 #   peek_rl_rollouts.sh <substr> pull [out-base-dir]          # FULL CAPTURE -> date-stamped subdir:
 #                                                             #   complete iris finelog + per-rank pod logs
 #                                                             #   + ALL trace_jobs (synced from R2) + MANIFEST.md
+#                                                             #   + any torch NCCL flight-recorder dumps (see frdump)
+#   peek_rl_rollouts.sh <substr> frdump [dest] [fr-base]      # torch NCCL flight-recorder dump ONLY (fast, no
+#                                                             #   S3/trace_jobs/finelog): kubectl-cp's
+#                                                             #   TORCH_NCCL_DEBUG_INFO_TEMP_FILE-prefixed files off
+#                                                             #   EVERY pod of this job (not just rank-0) into
+#                                                             #   dest/fr_dumps/<pod>/. Run this THE MOMENT a
+#                                                             #   "ProcessGroupNCCL's watchdog got stuck" /
+#                                                             #   "Fatal Python error: Aborted" signature appears in
+#                                                             #   the finelog -- BEFORE killing the job -- the FR
+#                                                             #   dump is node-local (CoreWeave has no shared POSIX
+#                                                             #   mount) and is lost once the pod is reaped.
+#                                                             #   fr-base defaults to /tmp/fr_dumps/<jobname>/nccl_fr_rank
+#                                                             #   (the 2026-07-10 job-scoped FR path convention --
+#                                                             #   override if a config still uses the old bare
+#                                                             #   /tmp/nccl_fr_rank).
 #
 # NOTE: <substr> matches the POD name (iris-benjaminfeuer-<name>-<rank>-<hash>-0), which can differ
 # from the iris job_id display name. With no match the script lists candidate rl pods.
@@ -33,6 +48,8 @@
 #      PEEK_TRIALS_S3 (override the remote trials_dir; default s3://marin-us-east-02a/iris/<jobname>/trace_jobs),
 #      PEEK_MAX_OBJECT_BYTES (pull: skip any single object larger than this; default 20MB=20971520,
 #                             set 0 to fetch everything incl. the 100s-of-MB result.json blobs)
+#      PEEK_FR_BASE (frdump/pull: override the in-pod FR dump path prefix; default
+#                    /tmp/fr_dumps/<jobname>/nccl_fr_rank)
 set -euo pipefail
 
 JOB="${1:-}"
@@ -75,6 +92,49 @@ JOBNAME=$(printf '%s' "$POD" | sed -E 's/^iris-[a-z0-9]+-(.+)-[0-9]+-[0-9a-f]+-[
 JOBID="/${USER_FROM_POD}/${JOBNAME}"
 
 kexec() { kubectl exec -n "$NS" "$POD" -c "$CONTAINER" -- bash -lc "$1"; }
+
+# In-pod torch NCCL flight-recorder dump path prefix. Default matches the 2026-07-10
+# job-scoped convention (TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /tmp/fr_dumps/<jobname>/nccl_fr_rank
+# in e.g. hpc/skyrl_yaml/iris/128GPU_80B_A3B_next_cp1.yaml); override via PEEK_FR_BASE for
+# configs still on the old bare /tmp/nccl_fr_rank. torch appends the GLOBAL RANK to this
+# prefix per-rank (no separator), so we glob "${FR_BASE}*".
+FR_BASE="${PEEK_FR_BASE:-/tmp/fr_dumps/${JOBNAME}/nccl_fr_rank}"
+
+# pull_fr_dumps <dest-dir> — kubectl-cp any files matching $FR_BASE* off EVERY pod of this
+# job (each pod = one node = up to 8 local ranks) into <dest-dir>/fr_dumps/<pod>/. No-op
+# (0 files) on a healthy run that never hit TORCH_NCCL_DUMP_ON_TIMEOUT. Safe to call anytime
+# the job's pods are still up -- this is the retrieval step that was MISSING for the
+# 2026-07-09 80b-next-cp1 wedge (dump path was node-local /tmp and nobody pulled it before
+# the pod was reaped).
+pull_fr_dumps() {
+  local dest="$1"
+  local nfound=0
+  echo "[frdump] base=${FR_BASE}*  (across all pods of job matching '*${JOB}*')"
+  for p in $(kubectl get pods -n "$NS" -o name 2>/dev/null | grep -E "iris-.*${JOB}.*-[0-9]+-[0-9a-f]+-[0-9]+$" | sed 's#pod/##' | sort); do
+    local files
+    files=$(kubectl exec -n "$NS" "$p" -c "$CONTAINER" -- sh -c "ls ${FR_BASE}* 2>/dev/null" 2>/dev/null | tr -d '\r' || true)
+    if [ -z "$files" ]; then
+      continue
+    fi
+    local poddir="${dest}/fr_dumps/${p}"
+    mkdir -p "$poddir"
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      if kubectl cp -c "$CONTAINER" "$NS/$p:$f" "$poddir/$(basename "$f")" >/dev/null 2>&1; then
+        nfound=$((nfound + 1))
+        echo "[frdump]   ${p}:${f} -> ${poddir}/$(basename "$f")"
+      else
+        echo "[frdump]   WARN: kubectl cp failed for ${p}:${f}" >&2
+      fi
+    done <<< "$files"
+  done
+  if [ "$nfound" -eq 0 ]; then
+    echo "[frdump] no FR dump files found (either a healthy run, or the pods are already gone)."
+  else
+    echo "[frdump] pulled ${nfound} FR dump file(s) -> ${dest}/fr_dumps/"
+  fi
+  return 0
+}
 
 # --- trials_dir discovery: prefer a node-local path (legacy trials_dir: null); else REMOTE R2. ---
 TJ_LOCAL=$(kexec 'ls -d /app/experiments/*/trace_jobs 2>/dev/null | head -1' 2>/dev/null | tr -d '\r' || true)
@@ -339,7 +399,12 @@ PYEOF
     N_SKIP=$([ -f "$DEST/.r2_skipped.tsv" ] && wc -l < "$DEST/.r2_skipped.tsv" | tr -d ' ' || echo 0)
     echo "[pull]   trial dirs=$N_TRIALS  COMPLETED(result.json)=$N_DONE  (large files skipped: $N_SKIP)"
 
-    # 4) Provenance manifest.
+    # 4) torch NCCL flight-recorder dumps (if any), off EVERY pod, not just rank-0. No-op on
+    #    a healthy run. See pull_fr_dumps() above / the `frdump` action for a fast, S3-free
+    #    variant to run immediately on a suspected hang, before killing the job.
+    pull_fr_dumps "$DEST"
+
+    # 5) Provenance manifest.
     cat > "$DEST/MANIFEST.md" <<EOF
 # Capture: ${JOBNAME} (${CLUSTER})
 
@@ -357,6 +422,11 @@ PYEOF
                  PEEK_MAX_OBJECT_BYTES=0, or a single one with boto3 against its key.
 - logs/iris_finelog.log   : complete iris/finelog job log (--no-tail)
 - logs/pod_rank*.log      : per-pod container stdout at capture time (rank-0 = harbor coordinator)
+- fr_dumps/<pod>/         : torch NCCL flight-recorder dumps (base ${FR_BASE}*), if any were
+                 present on that pod. Empty/absent = healthy run (no TORCH_NCCL_DUMP_ON_TIMEOUT
+                 fired) or the FR path predates the 2026-07-10 job-scoped convention (see
+                 PEEK_FR_BASE). Inspect with torch.distributed.debug.parse_fr_trace_from_file /
+                 the FR pickle-to-JSON tooling (torch>=2.6).
 
 ## Reproduce
 $(basename "$0") ${JOB} pull ${OUTBASE}
@@ -365,6 +435,20 @@ EOF
     echo "[pull] DONE — $DEST"
     echo "[pull]   trials: ${N_TRIALS} started / ${N_DONE} completed   total size: $(du -sh "$DEST" 2>/dev/null | cut -f1)"
     ;;
+  frdump)
+    # Fast, S3-free capture of JUST the torch NCCL flight-recorder dumps off every pod of
+    # this job. Intended to be run THE MOMENT a hang is suspected (watchdog-stuck / Aborted
+    # in the finelog), before any kill — see the usage header.
+    OUTBASE="${3:-$PEEK_OUT}"
+    if [ -n "${4:-}" ]; then
+      FR_BASE="$4"
+    fi
+    STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+    DEST="${OUTBASE}/${JOBNAME}_${STAMP}_frdump"
+    mkdir -p "$DEST"
+    echo "[frdump] dest=$DEST  jobid=$JOBID  cluster=$CLUSTER"
+    pull_fr_dumps "$DEST"
+    ;;
   *)
-    echo "[peek] unknown action '$ACTION' (ls|cat|grep|cp|pull)" >&2; exit 2;;
+    echo "[peek] unknown action '$ACTION' (ls|cat|grep|cp|pull|frdump)" >&2; exit 2;;
 esac

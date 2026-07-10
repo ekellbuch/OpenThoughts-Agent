@@ -491,13 +491,58 @@ extra_env:
   # >20 min → v3 died on store->get(ncclUniqueId) at the old 1200s cap. Now HONORED
   # by MarinSkyRL utils.py (was unconditionally clobbered to 1200). Heartbeat raised
   # to match so the NCCL monitor doesn't SIGABRT mid-load before the store timeout.
+  # This watchdog config is CONFIRMED CORRECT: v5 (98304, 2026-07-09) fired it
+  # exactly on schedule ("ProcessGroupNCCL's watchdog got stuck for 3600 seconds"),
+  # proving TORCH_NCCL_* pod-env vars DO reach the policy/ref FSDP Ray actors
+  # (unlike the vLLM inference-engine actor, which needs an explicit re-forward —
+  # see MarinSkyRL skyrl_train/inference_engines/ray_wrapped_inference_engine.py).
   SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "3600"
   TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "3600"
   TORCH_NCCL_ENABLE_MONITORING: "1"
   TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
-  TORCH_FR_BUFFER_SIZE: "2000"
+  # --- NCCL flight-recorder (FR) — hardened 2026-07-10 after the v5 GDN chunked-scan
+  #     wedge (agent_logs/2026-07-09_80b_v5_98k_nccl_wedge_kill.md). The watchdog +
+  #     DUMP_ON_TIMEOUT already fired correctly; the ONLY gap was the dump path:
+  #     TORCH_NCCL_DEBUG_INFO_TEMP_FILE pointed at the GENERIC /tmp/nccl_fr_rank (same
+  #     bare path every other iris config uses) and nobody kubectl-cp'd it off the pod
+  #     before the operator killed the wedged job ~4.8h later → dump lost with the pod.
+  #     CoreWeave/Iris has NO shared persistent POSIX mount (ops doc: "no shared
+  #     persistent POSIX scratch like Leonardo's $WORK") and torch's DebugInfoWriter is
+  #     a plain local-filesystem std::ofstream (cannot target s3://) — so "durable" here
+  #     means a STABLE, JOB-SCOPED, per-rank path that scripts/iris/peek_rl_rollouts.sh's
+  #     new `frdump` action can kubectl-cp off EVERY pod while it's still alive (the pod
+  #     stays "Running" for hours post-hang — confirmed in the incident; the loss was a
+  #     retrieval-process gap, not an inherent unretrievability).
+  #   Var names verified against torch 2.11.0+cu128 (this image) by symbol-string-grepping
+  #   the local torch 2.9.0 libtorch_cpu.dylib (same c10d/FlightRecorder cvar tables) +
+  #   cross-checking torch/include/torch/csrc/distributed/c10d/{ProcessGroupNCCL,FlightRecorder}.hpp,
+  #   consistent with the Jupiter SIF's independent verification (torch 2.11.0+cu130,
+  #   .claude/ops/jupiter/ops.md):
+  #     - TORCH_FR_BUFFER_SIZE is the CANONICAL ring-buffer-size cvar (getCvarInt checks
+  #       {"TORCH_FR_BUFFER_SIZE","TORCH_NCCL_TRACE_BUFFER_SIZE"} in order, EARLIER name
+  #       wins if both set — the deprecated TORCH_NCCL_TRACE_BUFFER_SIZE alias is NOT
+  #       needed). Raised 2000->20000 (more ring-buffer history = more chunked-scan
+  #       collectives captured before the dump). NOTE: MarinSkyRL utils.py
+  #       (skyrl-train/skyrl_train/utils/utils.py prepare_runtime_environment) ALREADY
+  #       force-sets this to 20000 for every Ray worker regardless of this file (added
+  #       after job 673119's MoE hang) — set here anyway for documentation/defense-in-depth.
+  #     - TORCH_NCCL_DEBUG_INFO_TEMP_FILE is the canonical dump-path cvar; torch appends
+  #       the global rank. TORCH_FR_DUMP_TEMP_FILE is a newer alias torch's fallback chain
+  #       checks FIRST (MarinSkyRL's utils.py already forwards both to every Ray worker,
+  #       reading THIS config's value) — set both to the same job-scoped path so the dump
+  #       lands there regardless of which name wins.
+  TORCH_FR_BUFFER_SIZE: "20000"
   TORCH_NCCL_TRACE_CPP_STACK: "1"
-  TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /tmp/nccl_fr_rank
+  TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /tmp/fr_dumps/80b-next-cp1/nccl_fr_rank
+  TORCH_FR_DUMP_TEMP_FILE: /tmp/fr_dumps/80b-next-cp1/nccl_fr_rank
+  # Desync debug: on a collective mismatch (e.g. one rank never issuing the collective
+  # the rest of its dp-group is waiting on — a live hypothesis for the GDN chunk-loop
+  # straggler, see the root-cause note) NCCL prints WHICH collective + WHICH ranks
+  # joined/didn't before the watchdog aborts. TORCH_NCCL_ASYNC_ERROR_HANDLING is already
+  # force-set by MarinSkyRL utils.py (job 673119 hardening) — set here too for clarity;
+  # TORCH_NCCL_DESYNC_DEBUG is NEW (not set anywhere else in the stack).
+  TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
+  TORCH_NCCL_DESYNC_DEBUG: "1"
   # --- R3 (router-replay) transport env — sized for the worst-case per-step routing payload at 131k.
   #     (VLLM_ALLOW_ROUTED_EXPERTS_DCP intentionally ABSENT — DCP=1.) ---
   VLLM_MQ_MAX_CHUNK_BYTES_MB: "160"
