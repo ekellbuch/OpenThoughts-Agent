@@ -71,12 +71,13 @@ tf32: false
 gradient_checkpointing: true
 
 logging_steps: 5
-# save_steps lowered 100->30 (2026-07-10): this run has hit ~6 TACC infra transients (NCCL
-# timeouts + NODE_FAILs), EVERY one before step 100 (max reached: 91) → with save_steps=100 it
-# never once checkpointed, so every --max_restarts leg restarted from step 0. save_total_limit=1
-# keeps only the latest checkpoint (disk bounded). Learning-neutral (save cadence only).
-# agent_logs/2026-07-10_tacc_sft_820379_nccl_watchdog.md.
-save_steps: 30
+# save_steps lowered 100->30 (2026-07-10) ->10 (2026-07-11): TACC GH200 IB fabric keeps hanging
+# this 16-node chain (818554/820379/822306 — 3 NCCL fabric timeouts in 2 days). 822306 hung at
+# step ~14 (~1h20m) — BEFORE the save_steps=30 checkpoint (~2.8h at 338 s/it) — so it banked
+# nothing and restarted from 0 (the no-progress loop). save_steps=10 checkpoints at ~56 min, INSIDE
+# the mean-time-to-hang, turning restart-from-0 into resume-from-N. save_total_limit=1 keeps disk
+# bounded. Learning-neutral (save cadence only). agent_logs/2026-07-11_tacc_sft_822306_nccl_reduce_scatter_hang.md.
+save_steps: 10
 save_total_limit: 1
 # Resume from the latest output_dir checkpoint on relaunch — makes `--max_restarts` / an
 # afterany chain leg RESUME (not restart from step 0) for the axolotl backend. Needs the
