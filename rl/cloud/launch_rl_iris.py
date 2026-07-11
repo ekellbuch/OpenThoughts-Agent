@@ -418,6 +418,16 @@ def create_parser() -> argparse.ArgumentParser:
              "CW creds+endpoint and can NO LONGER reach s3://marin-na (R2).",
     )
     parser.add_argument(
+        "--rendezvous-timeout", "--rendezvous_timeout", dest="rendezvous_timeout",
+        type=int, default=None,
+        help="Seconds the worker ranks poll for rank-0's Ray-head rendezvous file "
+             "(forwarded to start_rl_iris_controller.py --rendezvous-timeout). Unset = the "
+             "controller default (1800s). RAISE it (e.g. 3600) for a big model whose rank-0 "
+             "pre-stage/snapshot_download can legitimately take >30 min, so a SLOW-but-not-hung "
+             "head prestage completes inside the window instead of the workers timing out and "
+             "killing the gang (the 80B rank-spread bring-up flake, 2026-07-11).",
+    )
+    parser.add_argument(
         "--trials-dir", "--trials_dir", dest="trials_dir", default="auto",
         help="Where Harbor writes per-trial agentic-RL rollout artifacts "
              "(terminal_bench_config.trials_dir). 'auto' (default) = "
@@ -641,6 +651,11 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     ]
     if args.rendezvous_dir:
         controller_cmd.extend(["--rendezvous-dir", args.rendezvous_dir])
+    # Worker rendezvous poll deadline. Unset = controller default (1800s). Raise it when
+    # rank-0's per-node pre-stage of a large model can legitimately exceed 30 min, so a
+    # slow-but-not-hung head prestage completes before the workers give up + kill the gang.
+    if args.rendezvous_timeout is not None:
+        controller_cmd.extend(["--rendezvous-timeout", str(args.rendezvous_timeout)])
     # Per-NODE task-dataset staging. On a multi-node iris/CoreWeave slice each task
     # pod has its OWN node-local filesystem ($DCFT=/opt/openthoughts in the gpu-rl
     # image) — there is NO shared scratch like SLURM's GPFS. run_rl.py's
