@@ -37,7 +37,13 @@ chat_template: chatml
 # for concurrent multi-node load_from_disk (rationale in ops doc). $SCRATCH expanded by translator.
 dataset_prepared_path: $SCRATCH/axolotl_prepared/qwen3_32b_ot_sft_10k
 
-attn_implementation: sdpa
+# Flash-Attention-2 (~2x over SDPA on GH200; SDPA was ~338 s/it — the throughput blocker).
+# aarch64 prebuilt wheel flash_attn-2.8.3+cu128torch2.11-cp312 installed 2026-07-11
+# (mjun0812/flash-attention-prebuild-wheels v0.9.22; exact torch2.11/cu128/py312/aarch64 match).
+# `flash_attention: true` -> translator sets attn_implementation: flash_attention_2
+# (hpc/axolotl_config_utils.py L211-221). The old explicit `attn_implementation: sdpa` is
+# REMOVED because an explicit value WINS in the translator and would override flash-attn.
+flash_attention: true
 sample_packing: false
 
 # Liger fused kernels (LF parity: `enable_liger_kernel: true`). The load-bearing
