@@ -71,7 +71,12 @@ tf32: false
 gradient_checkpointing: true
 
 logging_steps: 5
-save_steps: 100
+# save_steps lowered 100->30 (2026-07-10): this run has hit ~6 TACC infra transients (NCCL
+# timeouts + NODE_FAILs), EVERY one before step 100 (max reached: 91) → with save_steps=100 it
+# never once checkpointed, so every --max_restarts leg restarted from step 0. save_total_limit=1
+# keeps only the latest checkpoint (disk bounded). Learning-neutral (save cadence only).
+# agent_logs/2026-07-10_tacc_sft_820379_nccl_watchdog.md.
+save_steps: 30
 save_total_limit: 1
 # Resume from the latest output_dir checkpoint on relaunch — makes `--max_restarts` / an
 # afterany chain leg RESUME (not restart from step 0) for the axolotl backend. Needs the

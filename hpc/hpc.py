@@ -1274,7 +1274,11 @@ vista = HPC(
     # c636-121 (819032), c635-101 (818130), c641-061 (820376), c611-051 (820378) — the
     # specific failed node from each job's LOG (NOT the whole allocation) —
     # agent_logs/2026-07-10_tacc_sft_818554_nccl_timeout.md.
-    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051",
+    # c636-152 added 2026-07-10 from job 820379's NCCL watchdog collective timeout: it was the
+    # single-rank straggler (rank 8) — the ONLY rank whose "last enqueued NCCL work" lagged
+    # (335264 vs 335268 on all 15 others) → it never joined the _ALLGATHER_BASE the others
+    # blocked on. Single-node straggler w/ healthy loss to the hang = flaky node, not a config bug.
+    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051,c636-152",
     # Runtime configuration for Ray/vLLM
     modules=["gcc/15.1.0", "cuda/12.8", "tacc-apptainer"],
     conda_activate="source $SCRATCH/miniconda3/etc/profile.d/conda.sh && conda activate $SCRATCH/miniconda3/envs/vllm_sandboxes",
