@@ -160,18 +160,28 @@ these ceilings so the SFT install does NOT clobber the datagen env:
 
 Always `git checkout penfever/working_branch` in the submodule before installing.
 
-### flash_attn on aarch64 — status
+### flash_attn on aarch64 — INSTALLED (2026-07-11, flash-attn 2.8.3)
 
-**No prebuilt wheel exists for torch 2.11+cu128 on aarch64.** Checked
-`mjun0812/flash-attention-prebuild-wheels` (2026-06-25):
-- v0.9.41: torch 2.12, cu126/130/132 — no cu128
-- v0.9.40: torch 2.10/2.9, cu126/130 — no cu128
-- v0.9.39: torch 2.9, cu126 — no cu128
-- v0.6.4 (old): `flash_attn-2.8.3+cu128torch2.9-cp312` — requires torch 2.9.0 downgrade
+**A matching prebuilt aarch64 wheel NOW EXISTS** (the old "no wheel" note below was true
+on 2026-06-25 but is STALE — `mjun0812/flash-attention-prebuild-wheels` added a torch-2.11
+aarch64 set). Installed into the **`sft-axolotl`** env (the env the axolotl SFT chain runs
+in — NOT `otagent`; the axolotl backend uses `--conda_env sft-axolotl`):
+- **Wheel**: `flash_attn-2.8.3+cu128torch2.11-cp312-cp312-linux_aarch64.whl`
+  (release **v0.9.22**) — EXACT match to torch 2.11.0+cu128 / Python 3.12 / aarch64.
+  Install (prebuilt → download-only, no nvcc): `pip install --no-deps <wheel-url>`
+  (`--no-deps` so pip never touches torch; `einops` already present).
+- **GPU-verified** on a GH200 (`-p gh-dev` job 822558): `flash_attn_2_cuda` loads clean
+  (no undefined-symbol/ABI mismatch) and a real `flash_attn_func` bf16 forward runs.
+- **Config switch**: `sft/axolotl_configs/qwen3_32b_ot_sft_10k.yaml` `attn_implementation:
+  sdpa` → `flash_attention: true` (the translator routes this to `attn_implementation:
+  flash_attention_2`; an explicit `attn_implementation` WINS, so the sdpa line was removed —
+  `hpc/axolotl_config_utils.py` L211-221). Axolotl pydantic-validates it. Expected ~2× over
+  the ~338 s/it SDPA throughput. Takes effect on the NEXT relaunch. `agent_logs/2026-07-11_tacc_flash_attn_aarch64_wheel.md`.
+- flash-attn 2.8.3 was ALSO installed into `otagent` (harmless — otagent doesn't run axolotl;
+  available if other otagent workflows want it).
 
-**Decision: use SDPA** (PyTorch native scaled dot-product attention). No torch
-downgrade needed. If flash_attn becomes necessary later, downgrade torch to 2.9.0
-and install the v0.6.4 wheel.
+Superseded stale note (2026-06-25 — kept for provenance): "No prebuilt wheel for torch
+2.11+cu128 on aarch64; v0.6.4 needs a torch 2.9.0 downgrade; decision = use SDPA."
 
 ### Building the vLLM wheel from source (otagent env, aarch64 + Hopper sm_90)
 
