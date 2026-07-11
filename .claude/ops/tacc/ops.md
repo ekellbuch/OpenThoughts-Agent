@@ -176,7 +176,18 @@ in — NOT `otagent`; the axolotl backend uses `--conda_env sft-axolotl`):
   sdpa` → `flash_attention: true` (the translator routes this to `attn_implementation:
   flash_attention_2`; an explicit `attn_implementation` WINS, so the sdpa line was removed —
   `hpc/axolotl_config_utils.py` L211-221). Axolotl pydantic-validates it. Expected ~2× over
-  the ~338 s/it SDPA throughput. Takes effect on the NEXT relaunch. `agent_logs/2026-07-11_tacc_flash_attn_aarch64_wheel.md`.
+  the ~338 s/it SDPA throughput. `agent_logs/2026-07-11_tacc_flash_attn_aarch64_wheel.md`.
+  - **⚠ Takes effect only on a FRESH `python -m hpc.launch` submission — NOT on an `afterany`
+    chain-restart.** A source-config edit re-renders the per-run `configs/*_train_config.yaml`
+    ONLY when `hpc.launch` runs (which increments the experiment dir `_N`→`_N+1` and renders).
+    `--max_restarts` submits N `afterany`-dependent sbatch legs that ALL point at the SAME
+    already-rendered sbatch/config — so once the head job's config is rendered, editing the
+    source YAML and letting the chain restart does NOTHING (the legs keep the stale render).
+    **Proof (2026-07-11):** the flash-attn source edit landed AFTER exp dir `_14` was rendered
+    (03:27, `attn_implementation: sdpa`); the whole 822306→307→308→309 `afterany` chain silently
+    kept running SDPA. Fix = a FRESH submission → new dir `_15` re-rendered `flash_attention_2`
+    (job 823417 + chain). **Rule: any source-config change requires a fresh `hpc.launch`, never
+    a chain restart, to take effect.** `agent_logs/2026-07-11_tacc_axolotl32b_freshrelaunch_flashattn.md`.
 - flash-attn 2.8.3 was ALSO installed into `otagent` (harmless — otagent doesn't run axolotl;
   available if other otagent workflows want it).
 
