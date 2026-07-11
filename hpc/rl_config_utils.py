@@ -468,11 +468,27 @@ def build_skyrl_hydra_args(
         placement["policy_num_nodes"] = policy_num_nodes if policy_num_nodes is not None else num_nodes
     if placement.get("ref_num_nodes") is None:
         placement["ref_num_nodes"] = policy_num_nodes if policy_num_nodes is not None else num_nodes
-    # Derive gpus_per_node from CLI (cluster-specific, not hardcoded in YAML)
-    if placement.get("policy_num_gpus_per_node") is None or exp_args.get("gpus_per_node"):
-        placement["policy_num_gpus_per_node"] = gpus_per_node
-    if placement.get("ref_num_gpus_per_node") is None or exp_args.get("gpus_per_node"):
-        placement["ref_num_gpus_per_node"] = gpus_per_node
+    # Derive gpus_per_node from CLI (cluster-specific, not hardcoded in YAML).
+    # EXCEPTION (rank-spread lever): honor an EXPLICIT YAML *_num_gpus_per_node when
+    # it is <= the node's gpus_per_node. This lets policy/ref use FEWER GPUs per
+    # (reserved whole) node than the node physically has — e.g. 4 policy ranks on a
+    # reserved 8-GPU CoreWeave node — which spreads a fixed policy-rank count over
+    # MORE nodes (fewer concurrent GDN scans / less cpu_offload host RAM per node).
+    # Without this, the CLI gpus_per_node unconditionally clobbered the YAML to 8,
+    # so sub-node policy placement was inexpressible (the 80B host-RAM-OOM lever).
+    # Byte-identical for every existing config: those leave it None (-> clobber to
+    # gpus_per_node, unchanged) or set it == gpus_per_node (8 <= 8 -> honored == 8).
+    def _resolve_gpus_per_node(key: str) -> int:
+        yaml_val = placement.get(key)
+        if yaml_val is None:
+            return gpus_per_node
+        if exp_args.get("gpus_per_node") and int(yaml_val) > gpus_per_node:
+            # A YAML value LARGER than the node has is a mis-size; clamp to CLI.
+            return gpus_per_node
+        return int(yaml_val)
+
+    placement["policy_num_gpus_per_node"] = _resolve_gpus_per_node("policy_num_gpus_per_node")
+    placement["ref_num_gpus_per_node"] = _resolve_gpus_per_node("ref_num_gpus_per_node")
     trainer["placement"] = placement
 
     # Compute num_inference_engines

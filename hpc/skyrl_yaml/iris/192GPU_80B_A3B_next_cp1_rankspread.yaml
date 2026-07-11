@@ -1,0 +1,586 @@
+# =============================================================================
+# 80B NAIVE-MAP CP1 RANK-SPREAD — Qwen3-Next-80B-A3B-Thinking @65536 — EP8×FSDP8×CP1
+#   spread at 4 POLICY RANKS/NODE over 16 policy nodes (was 8/node over 8).
+# CoreWeave/Iris (cw-us-east-02a, 8x H100-80GB + IB per node). HOST-RAM-OOM REDESIGN.
+# =============================================================================
+# WHY THIS EXISTS (v6 design — do NOT launch without supervisor GO):
+#   v4 @131k and v5 @98304 BOTH host-RAM-OOM'd a POLICY node at global_step 0 during the
+#   training-side forward (`fwd_logprobs_values_reward`), at the ~1303 GiB (`--memory 1400GB`)
+#   cgroup cap — floor ≥ ~1020 GiB OVER the ~280 GiB DESIGN estimate (~4.6×). 0 CUDA-OOM
+#   (HBM had headroom) ⇒ HOST RAM, not HBM. The 25% context cut (131k→98k) did NOT clear it.
+#   Diagnostics: agent_logs/2026-07-11_80b_v5_ctx98304_hostram_oom_diagnostic.md (+ the v4 one).
+#
+#   ROOT-CAUSE READ (code-verified this design pass): the transformers pure-torch GDN
+#   chunked-scan (`torch_chunk_gated_delta_rule`, chunk_size=64) builds its intra-chunk
+#   attn tensors on `query.device` = GPU/HBM — so the GDN scan is NOT the host-RAM driver
+#   (there was 0 CUDA-OOM). The host consumer during the cpu_offload forward is the PER-RANK
+#   FSDP offload/all-gather machinery (pinned host staging + the 22.5 GB/rank optimizer
+#   shard), which runs CONCURRENTLY on all policy ranks that share a node's host RAM.
+#   ⇒ the per-node host peak scales ~LINEARLY with POLICY-RANKS-PER-NODE, and is ~invariant
+#     to context and to the GDN chunk size. So the ONLY effective lever is ranks/node
+#     (context reduction and chunk-size reduction do NOT move the host peak — consistent
+#     with v5 @98304 dying at the same cap). CP is OFF-LIMITS (GDN+CP hard-crashes), so we
+#     cannot shard the sequence; we spread the RANKS instead.
+#
+# THE LEVER — halve policy ranks/node 8 → 4 (holds the SAME EP8×FSDP8×CP1=64 policy mesh):
+#   Place the 64 policy ranks on 16 nodes at 4/node instead of 8 nodes at 8/node. Each node
+#   then hosts HALF the concurrent offload working set + HALF the on-host optimizer shard
+#   (4×22.5=90 GB vs 8×22.5=180 GB). Per the linear-in-r model below this cuts the per-node
+#   host peak ~2× → well under the cap with margin.
+#
+# HOST-RAM MATH (DESIGN.md framework; P(r) = per-node host peak at r policy ranks/node):
+#   P(r) ≈ B + k·r   (B = node-fixed baseline: Ray + R3 host arrays ~5.85 GB + coordinator,
+#                     small; k = per-rank host cost = 22.5 GB offload shard + FSDP pinned
+#                     staging + per-rank activation offload).
+#   Observed FLOOR: P(8) ≥ ~1303 GiB (OOM-killed AT the cap). With B ≈ 40 GiB ⇒ k ≥ ~158
+#     GiB/rank (a LOWER bound — the true pre-kill peak is unknown; policy nodes were
+#     UNINSTRUMENTED — now FIXED, see the instrumentation note below).
+#   Predicted P(4) ≈ 40 + 158·4 ≈ 672 GiB ≈ 52% of the ~1303 GiB cap (≈78% even if the true
+#     k were ~245). ⇒ r=4 FITS with margin by this model. (r=2 ≈ 356 GiB is safer still but
+#     needs 32 policy nodes → 40 total = capacity-INFEASIBLE on ~32 GPU-nodes; r=4 is the
+#     max sensible spread that fits the cluster.)
+#   ⚠ THE MARGIN IS MODEL-PREDICTED, NOT MEASURED. The decisive proof is the new policy-node
+#     host-RAM/cgroup instrumentation (MarinSkyRL — fd-monitor now runs on FSDPPolicyWorkerBase,
+#     one rank/node, emitting peak RSS + cgroup-mem vs the cap). Pass --skyrl-ref <that sha>.
+#
+# GEOMETRY (24 CoreWeave nodes = 192 H100 RESERVED, 128 USED, colocate_all: false):
+#   Policy/Ref FSDP mesh: EP8 × FSDP8 × CP1 = 64 policy GPU, at 4/node → policy_num_nodes=16,
+#     policy_num_gpus_per_node=4  (leaves 4 GPU/node idle — the cost of the rank-spread on an
+#     8-GPU whole-node-exclusive cluster; see MECHANICS).
+#   Generation: 16 engines × TP4 = 64 gen GPU = 8 dedicated gen nodes (8/node).
+#   Total reserved = 16 policy + 8 gen = 24 nodes × 8 = 192 GPU (64 idle on the policy nodes).
+#   LAUNCH MUST PASS --num-nodes 24 --gpus_per_node 8.
+#   EP8 note: at 4 policy GPU/node an EP8 group now straddles 2 nodes (4+4) → the expert
+#     all-to-all crosses IB instead of intra-node NVLink (slower EP, not a correctness issue;
+#     the 30B-C CP4 cell already runs cross-node collectives on IB). Perf cost accepted for
+#     the host-RAM headroom.
+#
+# MECHANICS — WHY THIS NEEDS THE hpc/rl_config_utils.py ENABLER (shipped same commit):
+#   The Iris launcher forces policy_num_gpus_per_node = --gpus_per_node (=8) — a YAML value of
+#   4 was UNCONDITIONALLY CLOBBERED to 8 (rl_config_utils.py build_skyrl_hydra_args), so
+#   "4 policy ranks/node" was previously INEXPRESSIBLE in config. The enabler now HONORS an
+#   explicit YAML *_num_gpus_per_node when it is <= the node's gpus_per_node (byte-identical
+#   for every existing config, which omits it or sets 8). ⚠ RESIDUAL RISK (supervisor review):
+#   the launcher-side hydra geometry validates (dry-run below), but the SkyRL/Ray RUNTIME
+#   placement of 4 policy ranks on a reserved 8-GPU node with gen strictly on the disjoint 8
+#   gen nodes is UNVALIDATED — SkyRL could pack a TP4 gen engine onto a policy node's 4 idle
+#   GPUs (co-mingling → defeats the host-RAM isolation). Confirm the resolved placement (or run
+#   a small placement smoke) before the full 24-node launch. policy_strict_spread_pg=true is
+#   set to reserve the policy nodes up front.
+#
+# CONTEXT = 65536 (last ladder rung). Context is NOT the host-RAM lever (see ROOT-CAUSE) — it
+#   is set to the last unrun rung as free insurance (lower HBM + faster steps) so an instrumented
+#   run banks a real measured step. If the instrumented r=4 @65536 STILL OOMs, the host peak is
+#   ranks-invariant-dominated in a way this model missed → PAUSE the line pending a CP-aware GDN
+#   kernel (the only way to shard the sequence without the GDN+CP crash).
+# =============================================================================
+# EVERYTHING BELOW IS PRESERVED VERBATIM FROM 128GPU_80B_A3B_next_cp1.yaml (the v5 config)
+#   EXCEPT: context 98304→65536 (all four fields), placement (8→16 policy/ref nodes, 8→4
+#   gpus/node), the trace/slug paths (→ ...-rankspread), and the policy-host-RAM monitor env.
+#   All hparams (rloo_n/seqnorm/TIS/lr 8e-6/bs 64/R3) + the extra_env forwarding UNCHANGED.
+# =============================================================================
+# AUTHORED FOR: ~/Documents/experiments/active/qwen3_next_80b_naive_map_131k.
+# GOAL: naive-map the throughput-champ 30B RL geometry (30B-A = EP8×FSDP4×CP1,
+#   hpc/skyrl_yaml/iris/grid_30b_EP8_FSDP4_CP1.yaml) onto the 2.6× bigger
+#   Qwen3-Next-80B-A3B-Thinking @131k, and TEST WHETHER IT STILL WORKS (fits +
+#   trains + clears the first forward). This is the CP1 map = THE ONE TO LAUNCH.
+#   The CP4 sibling (128GPU_80B_A3B_next_cp4.yaml) is authored-but-NOT-launched
+#   (predicted GDN+CP crash — see that file's header + the tracker).
+#
+# WHY CP1 IS THE PRIMARY (and CP4 is not launched): Qwen3-Next-80B is HYBRID
+#   GatedDeltaNet (36/48 layers are GDN linear-attention). GDN + CP>1 HARD-CRASHES
+#   — there is NO CP-aware GDN kernel: the 35B GDN+CP2 (cell 35B-B) died at the
+#   step-1 forward with `RuntimeError: expanded size of the tensor (33784) must
+#   match the existing size (16892) at dim 3` (33784 = 2×16892 = the CP=2 seq-shard
+#   doubling on the GatedDeltaNet attention mask). CP=1 AVOIDS that crash, so it is
+#   the clean feasibility probe: does the 80B FIT + train on the scaled geometry?
+#
+# -----------------------------------------------------------------------------
+# MODEL: Qwen/Qwen3-Next-80B-A3B-Thinking  (arch mined from the 80B jupiter ref
+#   hpc/skyrl_yaml/jupiter/extra/128GPU_qwen3_next_80b_a3b.yaml + the 35B GDN ref
+#   hpc/skyrl_yaml/iris/64GPU_35B_A3B.yaml). 80B total / ~3B activated.
+#   HYBRID: 48 layers = 12 × [3×(GatedDeltaNet→MoE) + 1×(Gated-Attention→MoE)]
+#     → 36 GDN (linear-attn, small FIXED recurrent/conv state) + 12 full-attn.
+#     ⇒ long-ctx KV is CHEAP (only 12/48 layers grow KV) → 131k without DCP.
+#   MoE: 512 experts, top-10 routing, moe_intermediate_size 512, 1 shared expert.
+#   hidden_size 2048, head_dim 256, 16 attn heads / 2 KV heads (GQA group 8),
+#   native context 262144 → 131072 needs NO YaRN/rope_scaling (do NOT add).
+#   TEXT-ONLY backbone (no vision block) → FSDP wrap AUTODETECTS the decoder layer
+#   (the 80B jupiter ref sets NO wrap_policy and worked; we follow it — an explicit
+#   wrong class name is the bigger risk, cf. the 35B multimodal wrap_policy pain).
+#
+# -----------------------------------------------------------------------------
+# (GEOMETRY + HOST-RAM MATH + MECHANICS + the GDN-scan root-cause are in the TOP
+#  header block. Gen pattern + divisibility below are UNCHANGED from the v5 config.)
+#   GENERATION follows the GDN reference (35B / 80B-jupiter): TP=4, DCP=1, engine-EP=1.
+#     - NOT the dense-30B's TP8/DCP2: the hybrid 80B's KV is cheap (12/48 full-attn) so DCP is
+#       UNNEEDED, and GDN+DCP is UNVALIDATED. DCP=1 ⇒ VLLM_ALLOW_ROUTED_EXPERTS_DCP not needed.
+#     - qwen3_next needs the mp executor (Ray-DAG deadlock — see the generator block + v1 KILL).
+#   DIVISIBILITY (hard — all pass, mesh EP8×FSDP8×CP1=64 UNCHANGED): 512%EP8=0; (512/8)%FSDP8=0
+#     → 8 exp/GPU; EP×FSDP×CP=64=policy GPU; Gen TP4 | 16 heads + 512 exp, 2 KV replicated;
+#     train_batch==mini==64. The rank-spread changes ONLY node placement (16 policy nodes @4/node),
+#     NOT the mesh — so every divisibility check is identical to v5.
+#
+# -----------------------------------------------------------------------------
+# HPARAMS: preserved VERBATIM from 30B-A (only geometry/nodes/model changed) —
+#   rloo_n, seqnorm (seq_mean_token_sum_norm_global), use_tis + tis_imp_ratio_cap 2.0,
+#   eps_clip 0.2/0.05, epochs 2 / max_steps 80, batch 64 (train==mini==eval),
+#   lr 8e-6, max_grad_norm 0.9, ckpt_interval 1, hf_save_interval 5, staleness 16.
+#   micro 1/1 (one 131k seq/rank; raise micro_forward to 2 only with HBM headroom).
+#   R3 (moe_router_replay + grouped_gemm + mp executor + async_scheduling false) — on a
+#   MoE, TIS REQUIRES R3 (else the train recompute uses native routing ≠ rollout routing →
+#   the importance ratio explodes). GDN handling from the 35B/80B refs: SKYRL_GDN_MASK_FLA=1.
+#
+# CONTAINER/ENV: NO container:/SIF/apptainer block (gpu-rl Docker image IS the runtime;
+#   top-level extra_env: is FORWARDED + LOAD-BEARING on Iris). NCCL H100+IB defaults (do NOT
+#   disable P2P) + the NCCL_SOCKET_IFNAME/AF_INET bootstrap pin (prevents the controller
+#   exclude-list wedge on the cross-node mesh — hard-won on 30B-C CP4 v4). HF_HUB_OFFLINE=1:
+#   the launcher pre-downloads the policy weights once-per-node into the node-local HF cache
+#   (before Ray), so the 128 FSDP ranks load from a warm cache instead of racing HF Hub at init.
+#
+# =============================================================================
+# LAUNCH COMMAND (RANK-SPREAD — DRY-RUN FIRST, do NOT launch without supervisor GO).
+# Reserves 24 nodes (16 policy @4/node + 8 gen @8/node). Verify >=24 fully-free 8-GPU
+# nodes + leafgroup admission BEFORE launching (do NOT force a doomed 24-node gang) and
+# CONFIRM the resolved SkyRL placement isolates policy from gen (see MECHANICS risk).
+# Respect Daytona <=6 RUNNING RL/cluster. --skyrl-ref MUST be the policy-host-RAM-monitor
+# commit (83238e75 or newer) so the instrumentation is live — that measurement is the point.
+# =============================================================================
+#   set -a; source /Users/benjaminfeuer/Documents/secrets.env; set +a
+#   export KUBECONFIG=~/.kube/coreweave-iris-gpu
+#   python -m rl.cloud.launch_rl_iris \
+#     --rl_config hpc/skyrl_yaml/iris/192GPU_80B_A3B_next_cp1_rankspread.yaml \
+#     --model_path Qwen/Qwen3-Next-80B-A3B-Thinking \
+#     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
+#     --num-nodes 24 --gpus_per_node 8 --cpu 48 --max-retries 1 --memory 1400GB \
+#     --skyrl-ref 83238e75 \
+#     --daytona-api-key-env DAYTONA_RL_API_KEY \
+#     --rendezvous-dir s3://marin-us-east-02a/iris/80b-naive-map/cp1-rankspread \
+#     --job-name 80b-next-cp1-rankspread --priority interactive --no-wait
+#   (append --dry-run instead of --no-wait to validate the rendered geometry.)
+# =============================================================================
+
+entrypoint: examples.terminal_bench.entrypoints.main_tbench
+
+# Hydra config groups (+ prefix in CLI)
+config_groups:
+  terminal_bench_config: terminal_bench
+
+# Terminal bench / agentic environment settings
+terminal_bench:
+  # CW object store (s3://) so rollouts survive pod GC/preempt; cw pods inject creds+endpoint.
+  # null = ephemeral pod-local. --trials-dir auto overrides per-job.
+  trials_dir: s3://marin-us-east-02a/iris/80b-next-cp1-rankspread/trace_jobs
+
+  harbor:
+    name: terminus-2
+    max_episodes: 999999
+    enable_summarize: false
+    store_all_messages: true
+    trajectory_config:
+      raw_content: true
+    enable_episode_logging: false
+    record_terminal_session: false
+    enable_pane_logging: false
+
+    strict_json_parser: true
+
+    interleaved_thinking: true
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: true
+    # 1800s — the 80B is slower per agent step than the 8B; longer ceiling lets boundary
+    # samples finish rather than truncate. AgentTimeoutError stays PASSTHROUGH.
+    override_timeout_sec: 1800
+
+    override_cpus: 1
+    override_memory_mb: 2048
+    override_storage_mb: 2048
+
+    auto_snapshot: true
+
+    verifier_override_timeout_sec: 300
+
+    max_retries: 3
+    min_wait_sec: 60.0
+    max_wait_sec: 600.0
+    wait_multiplier: 2.0
+
+    exclude_exceptions:
+      - VerifierTimeoutError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - VerifierOutputParseError
+      - VerifierRuntimeError
+
+    # 32 = the 30B-A value (preserved). The 80B's R3 routing arrays (512 experts × top-10)
+    # are BIGGER per token than the 30B's (128 × top-8) → the resident-trial host footprint
+    # is bounded by THIS (not the gen-worker pool). Drop toward 16 on a RolloutCoordinator
+    # host-RAM OOM (the documented 80B failure mode).
+    n_concurrent_trials: 32
+
+    log_level: INFO
+
+    enable_reward_shaping: false
+
+    # REQUIRED for trainer.algorithm.use_tis (asserts non-null rollout_logprobs) + R3 ride.
+    collect_rollout_details: true
+
+    enable_error_classification: true
+    mask_exceptions:
+      - VerifierTimeoutError
+      - DaytonaError
+      - EnvironmentStartTimeoutError
+      - NetworkError
+      - ConnectionError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - AgentEnvironmentTimeoutError
+    default_error_treatment: zero
+    passthrough_exceptions:
+      - AgentTimeoutError
+      - ContextLengthExceededError
+
+  # LADDER RUNG 3: 65536 (rank-spread redesign; context is NOT the host-RAM lever — see header).
+  # input 64512 (1024 below max_model_len 65536) + 16384 out.
+  model_info:
+    max_input_tokens: 64512
+    max_output_tokens: 16384
+
+  archiving:
+    enabled: false
+
+  trace_upload:
+    enabled: true
+    repo_org: DCAgent
+    episodes: last
+    dataset_type: SFT
+    cleanup: true
+
+# =============================================================================
+# Trainer configuration
+# =============================================================================
+trainer:
+  strategy: fsdp2
+  # MUST be false: GDN carries recurrent/conv state across packed-seq boundaries →
+  # wrong logprobs (config_notes.md, the 35B GDN finding).
+  use_sample_packing: false
+  # REQUIRED at 131k (activation memory) — use_reentrant=false is recompute-safe.
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+  # NO attn_backend override at CP=1: the 12 full-attn layers use flash-attn (default,
+  # faster); the 36 GDN layers use the pure-torch GDN path (SKYRL_GDN_MASK_FLA=1). Forcing
+  # sdpa is only needed for CP>1 ring-SDPA (see the CP4 sibling).
+  algorithm:
+    advantage_estimator: rloo_n
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    eps_clip_low: 0.2
+    eps_clip_high: 0.05
+    # seqnorm (30B-A): global length-unbiased sequence-level normalizer.
+    loss_reduction: seq_mean_token_sum_norm_global
+    # TIS clamps the residual gen-vs-recompute bf16 gap; on a MoE it REQUIRES R3
+    # (moe_router_replay below) + collect_rollout_details (above).
+    use_tis: true
+    tis_imp_ratio_cap: 2.0
+
+  epochs: 2
+  max_steps: 80
+  update_epochs_per_batch: 1
+
+  # bs 64 == mini (fully-async assert). Preserved from 30B-A.
+  train_batch_size: 64
+  policy_mini_batch_size: 64
+  eval_batch_size: 64
+
+  # micro 1/1 at 131k (one seq/rank; raise micro_forward to 2 only with HBM headroom).
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+
+  # 65536 (LADDER RUNG 3, rank-spread): prompts may use the full context (no internal truncation).
+  max_prompt_length: 65536
+
+  eval_interval: 999999
+  eval_before_train: false
+  # ckpt_interval=1: 131k 80B steps are slow; bank step-1 so a transient kill never resumes from 0.
+  ckpt_interval: 1
+  resume_mode: latest
+  hf_save_interval: 5
+  hf_hub_repo_id: null
+  hf_hub_private: false
+  hf_hub_revision: main
+
+  enable_db_registration: false
+
+  project_name: OpenThoughts-Agent
+  log_level: INFO
+  tracker_commit_each_step: true
+  logger: wandb  # CoreWeave has egress -> log to dogml/OpenThoughts-Agent (entity via WANDB_ENTITY, defaulted by launcher)
+
+  run_name: null
+  ckpt_path: null
+  export_path: null
+
+  # Policy optimizer — 30B-A production hparams (lr 8e-6, max_grad_norm 0.9 collapse guard).
+  policy:
+    optimizer_config:
+      lr: 8e-6
+      weight_decay: 0.0
+      adam_betas: [0.9, 0.999]
+      max_grad_norm: 0.9
+    fsdp_config:
+      # cpu_offload: 80B optimizer state → host DDR on H100 (NOT GH200 LPDDR). This is the
+      # PER-RANK host consumer the rank-spread targets (see the header HOST-RAM MATH): 22.5 GB
+      # shard/rank + FSDP pinned staging, ×(ranks/node). Kept ON (HBM has headroom, 0 CUDA-OOM).
+      cpu_offload: true
+      reshard_after_forward: true
+      # NO wrap_policy: Qwen3-Next-80B is TEXT-ONLY → the FSDP wrap autodetects the decoder
+      # layer (the 80B jupiter ref sets none and worked). An explicit wrong class name is the
+      # bigger risk (cf. the 35B multimodal wrap_policy v1–v5 pain), so we follow the ref.
+      # MESH (CP1 map): EP8 × FSDP8 × CP1 = 64 policy GPU = 8 nodes.
+      # MoE dim-0 guard (num_experts//ep)%fsdp==0: 512/8=64; 64 % 8 = 0 → 8 experts/GPU. VALID.
+      fsdp_size: 8
+      expert_model_parallel_size: 8
+      context_parallel_size: 1
+      # R3: train forward replays the EXACT rollout routing (pi_old == pi_train) so TIS ratios
+      # stay sane. grouped-GEMM ON (vLLM-loadable per-expert names). torch all-to-all EP.
+      moe_router_replay: true
+      moe_grouped_gemm: true
+      ep_comm_backend: torch
+  ref:
+    # INERT (use_kl_loss=false → no RefWorker built). Mirrors policy for consistency.
+    model:
+      path: Qwen/Qwen3-Next-80B-A3B-Thinking
+    fsdp_config:
+      cpu_offload: true
+      reshard_after_forward: true
+      # MESH mirror (CP1 map): EP8 × FSDP8 × CP1. Inert (no RefWorker).
+      fsdp_size: 8
+      expert_model_parallel_size: 8
+      context_parallel_size: 1
+      moe_router_replay: true
+      moe_grouped_gemm: true
+      ep_comm_backend: torch
+
+  # RANK-SPREAD (host-RAM lever): policy/ref = 64 ranks over 16 nodes at 4 GPU/node (was 8@8/node),
+  # gen engines on the disjoint 8 gen nodes. policy_num_gpus_per_node=4 is HONORED by the
+  # rl_config_utils enabler (an explicit YAML value <= --gpus_per_node is no longer clobbered to 8).
+  # strict_spread reserves the policy nodes up front (needed here to keep gen off them — see the
+  # header MECHANICS residual risk). 4 idle GPU/node on the 16 policy nodes is the cost of the spread.
+  placement:
+    colocate_all: false
+    policy_num_nodes: 16
+    ref_num_nodes: 16
+    policy_num_gpus_per_node: 4
+    ref_num_gpus_per_node: 4
+    policy_strict_spread_pg: true
+    policy_per_gpu_bundles: true
+    policy_force_cvd_mask: true
+
+  fully_async:
+    max_staleness_steps: 16
+    num_parallel_generation_workers: 128
+
+# =============================================================================
+# Generator configuration (vLLM)
+# =============================================================================
+generator:
+  backend: vllm
+  timeout_multiplier: 1.0
+  model_dtype: bfloat16
+
+  # CUDA graphs ON — safe under R3 (the R3 capturer is cudagraph-designed).
+  enforce_eager: false
+
+  # TP=4 (Qwen3-Next model-card rec): 16 attn heads → 4/GPU, 512 experts → 128/GPU,
+  # 2 KV heads REPLICATED. Matches the 80B jupiter + 35B GDN references.
+  inference_engine_tensor_parallel_size: 4
+  # 16 engines × TP4 = 64 gen GPU = 8 gen nodes. Set EXPLICITLY — the launcher would derive
+  # (24 nodes × 8)//TP4 = 48 (WRONG: 16 of the 24 nodes are policy-only, at 4 GPU each). 16 is
+  # authoritative. (This pin is even more load-bearing at 24 reserved nodes than at v5's 16.)
+  num_inference_engines: 16
+
+  # engine-EP=1 (TP-sharded experts) — matches the 80B jupiter ref + the 30B cells (engine-EP=1
+  # + RAY executor + R3 is PROVEN on CoreWeave). engine-EP is independent of the policy EP=8.
+  inference_engine_expert_parallel_size: 1
+
+  # DCP=1: the hybrid arch's cheap KV (12/48 full-attn) needs no decode-context sharding, and
+  # GDN+DCP is unvalidated. DCP=1 ⇒ VLLM_ALLOW_ROUTED_EXPERTS_DCP is NOT needed.
+  inference_engine_decode_context_parallel_size: 1
+
+  # mp (multiprocessing) EXECUTOR — REQUIRED for qwen3_next + R3 (risk #2a CONFIRMED HIT on
+  # v1, 2026-07-08). The Qwen3-Next hybrid arch (GatedDeltaNet + 512-expert MoE) with R3
+  # capture ON (enable_return_routed_experts=true) DEADLOCKS vLLM's Ray Compiled-DAG: the
+  # engine handshake never returns — driver blocked in ray.get → create_ray_wrapped_inference_
+  # engines, `RuntimeWarning: coroutine 'AsyncLLM.collective_rpc' was never awaited`, all 128
+  # GPUs at 0% util, policy mesh never loaded (v1 wedged 16 nodes ~72 min, KILLED). The mp
+  # executor has NO Compiled-DAG → runs capture-ON cleanly at full cudagraph speed. This is
+  # the EXACT fix the 80B-jupiter ref used for this arch (jupiter/extra/128GPU_qwen3_next_80b_
+  # a3b.yaml, inference_engine_mp_backend: true, with R3+TIS intact — mp DOES emit per-token
+  # routing here, the newer gpu-rl vLLM fork bakes the routed_experts serialization). The
+  # earlier "mp can't emit routing / RAY is R3-mandatory" claim was WRONG for qwen3_next.
+  # REQUIRES colocate_all=false (set above, disaggregated). NO VLLM_ENABLE_V1_MULTIPROCESSING
+  # env is needed — this single field toggles distributed_executor_backend=mp.
+  inference_engine_mp_backend: true
+
+  n_samples_per_prompt: 8
+  eval_n_samples_per_prompt: 8
+
+  # 0.85 — hybrid arch, low KV pressure (only 12/48 full-attn). Drop 0.85→0.80→0.75 on a KV-bind OOM.
+  gpu_memory_utilization: 0.85
+
+  # 12 at 131k (~13 concurrent 131k seqs fit per header math; below the KV ceiling). The 80B's
+  # 20 GB/GPU weights eat more KV headroom than the 35B's 8.6 GB → 12 (vs 35B's 16). Drop to 8 on OOM.
+  max_num_seqs: 12
+  max_num_batched_tokens: 16384
+
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  enable_http_endpoint: true
+  enable_ray_prometheus_stats: false
+  vllm_stats_interval: 1
+  append_eos_token_after_stop_str_in_multi_turn: true
+  max_turns: 999999
+
+  sampling_params:
+    # 131k: 16384 max generation (matches the 30B/35B 131k arms).
+    max_generate_length: 16384
+    temperature: 0.7
+    top_p: 0.95
+    top_k: 20
+
+  engine_init_kwargs:
+    # 65536 (LADDER RUNG 3) — within native 262144 → NO YaRN rope_scaling/hf_overrides (do NOT add).
+    max_model_len: 65536
+    # Interleaved-thinking template (the -Thinking variant); relative path resolves against /app.
+    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
+    # Disable vLLM custom CUDA all-reduce (safe vs the NCCL weight-sync deadlock class).
+    disable_custom_all_reduce: true
+    # R3: emit per-token expert routing (consumed by the FSDP2 router-replay hook).
+    enable_return_routed_experts: true
+    # MUST be false whenever R3 routed-experts capture is ON (the vLLM R3 guard requires it) —
+    # independent of the executor. Stays false under the mp executor.
+    async_scheduling: false
+
+# Data paths (set via CLI --train_data / --val_data)
+data:
+  train_data: []
+  val_data: []
+
+# K-actor rollout fan-out — ON (breaks the single-event-loop GIL ceiling).
+rollout:
+  fanout:
+    enabled: true
+    num_coordinators: 4
+    cpus_per_coordinator: 8
+
+# =============================================================================
+# Runtime env — TOP-LEVEL extra_env: is LOAD-BEARING (Iris has no container: block, so
+# without this the env is SILENTLY DROPPED). No SIF/GH200-NCCL-disable/HF-OFFLINE vars.
+# =============================================================================
+extra_env:
+  # CoreWeave object store (marin-us-east-02a) REQUIRES virtual-hosted (hostname-based) S3
+  # addressing — path-style CreateMultipartUpload/PutObject are rejected with
+  # PathStyleRequestNotAllowed (v4 storm on the trace_jobs uploads, 2026-07-09). s3fs defaults
+  # to path-style for a custom endpoint_url, so pin the botocore addressing_style via fsspec's
+  # env-config for any bare-fsspec s3 writer that inherits this env.
+  # NOTE: the whole-protocol form FSSPEC_S3='{"config_kwargs": {...}}' is REQUIRED — the
+  # suffix form FSSPEC_S3_CONFIG_KWARGS='{"s3": {...}}' fsspec stores as a raw STRING, which
+  # s3fs then dies on ('str' object has no attribute 'copy'); it does NOT set virtual addressing.
+  # Belt-and-suspenders: harbor now ALSO self-pins in-code (src/harbor/__init__.py
+  # _pin_s3_addressing_style), the rendezvous writer is pinned in _fs_and_path, and the boto3
+  # Ray-object-spill path via AWS_CONFIG_FILE (start_rl_iris_controller _pin_boto3_s3_addressing_style).
+  FSSPEC_S3: '{"config_kwargs": {"s3": {"addressing_style": "virtual"}}}'
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  # Force the pure-torch GDN path (the fla wheel is broken). LOAD-BEARING for ANY GDN-arch run.
+  SKYRL_GDN_MASK_FLA: "1"
+  # POLICY-NODE host-RAM instrumentation (MarinSkyRL 83238e75): fd-monitor now runs on
+  # FSDPPolicyWorkerBase (one rank/node) emitting peak RSS + cgroup-mem vs the --memory cap —
+  # the MEASURED proof this rank-spread redesign needs (v4/v5 policy nodes were uninstrumented).
+  # Default-on; pinned here for clarity. Interval 60s to sample the fast first-forward peak.
+  SKYRL_POLICY_HOST_RAM_MONITOR: "1"
+  SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL: "60"
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  # TIS Fix A (skyrl 3caeb79f, baked): served completion_token_ids for exact TIS alignment.
+  SKYRL_TIS_SERVED_ID_SPLICE: "1"
+  # --- vLLM serve flags ---
+  VLLM_USE_FLASHINFER_SAMPLER: "0"
+  VLLM_ATTENTION_BACKEND: FLASH_ATTN
+  # gpu-rl RL conda env prefix — literal (NOT $CONDA_PREFIX/lib): k8s does NOT shell-expand.
+  LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib
+  # --- NCCL: H100+IB DEFAULTS (do NOT disable P2P). IB userspace is baked (gpu-rl-7d15b25a) →
+  #     expect NET/IB. The SOCKET pins are the cross-node BOOTSTRAP fix: the controller config's
+  #     NCCL_SOCKET_IFNAME exclude-list otherwise reaches the Ray actors and enumerates unroutable
+  #     IPv6 VF addrs → cross-node mesh never forms (hard-won on 30B-C CP4 v4). Positively pin the
+  #     routable ethernet NIC + force IPv4. NCCL_IB_DISABLE/HCA LEFT UNSET so IB transport engages. ---
+  NCCL_DEBUG: WARN
+  NCCL_SOCKET_IFNAME: enp157s0np0
+  NCCL_SOCKET_FAMILY: AF_INET
+  # 3600s (60 min): the 80B rank-0 full-CPU-state-dict materialization before the
+  # FIRST fsdp2_load_full_state_dict broadcast (lazy policy-PG NCCL comm-init) took
+  # >20 min → v3 died on store->get(ncclUniqueId) at the old 1200s cap. Now HONORED
+  # by MarinSkyRL utils.py (was unconditionally clobbered to 1200). Heartbeat raised
+  # to match so the NCCL monitor doesn't SIGABRT mid-load before the store timeout.
+  # This watchdog config is CONFIRMED CORRECT: v5 (98304, 2026-07-09) fired it
+  # exactly on schedule ("ProcessGroupNCCL's watchdog got stuck for 3600 seconds"),
+  # proving TORCH_NCCL_* pod-env vars DO reach the policy/ref FSDP Ray actors
+  # (unlike the vLLM inference-engine actor, which needs an explicit re-forward —
+  # see MarinSkyRL skyrl_train/inference_engines/ray_wrapped_inference_engine.py).
+  SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "3600"
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "3600"
+  TORCH_NCCL_ENABLE_MONITORING: "1"
+  TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+  # --- NCCL flight-recorder (FR) — hardened 2026-07-10 after the v5 GDN chunked-scan
+  #     wedge (agent_logs/2026-07-09_80b_v5_98k_nccl_wedge_kill.md). The watchdog +
+  #     DUMP_ON_TIMEOUT already fired correctly; the ONLY gap was the dump path:
+  #     TORCH_NCCL_DEBUG_INFO_TEMP_FILE pointed at the GENERIC /tmp/nccl_fr_rank (same
+  #     bare path every other iris config uses) and nobody kubectl-cp'd it off the pod
+  #     before the operator killed the wedged job ~4.8h later → dump lost with the pod.
+  #     CoreWeave/Iris has NO shared persistent POSIX mount (ops doc: "no shared
+  #     persistent POSIX scratch like Leonardo's $WORK") and torch's DebugInfoWriter is
+  #     a plain local-filesystem std::ofstream (cannot target s3://) — so "durable" here
+  #     means a STABLE, JOB-SCOPED, per-rank path that scripts/iris/peek_rl_rollouts.sh's
+  #     new `frdump` action can kubectl-cp off EVERY pod while it's still alive (the pod
+  #     stays "Running" for hours post-hang — confirmed in the incident; the loss was a
+  #     retrieval-process gap, not an inherent unretrievability).
+  #   Var names verified against torch 2.11.0+cu128 (this image) by symbol-string-grepping
+  #   the local torch 2.9.0 libtorch_cpu.dylib (same c10d/FlightRecorder cvar tables) +
+  #   cross-checking torch/include/torch/csrc/distributed/c10d/{ProcessGroupNCCL,FlightRecorder}.hpp,
+  #   consistent with the Jupiter SIF's independent verification (torch 2.11.0+cu130,
+  #   .claude/ops/jupiter/ops.md):
+  #     - TORCH_FR_BUFFER_SIZE is the CANONICAL ring-buffer-size cvar (getCvarInt checks
+  #       {"TORCH_FR_BUFFER_SIZE","TORCH_NCCL_TRACE_BUFFER_SIZE"} in order, EARLIER name
+  #       wins if both set — the deprecated TORCH_NCCL_TRACE_BUFFER_SIZE alias is NOT
+  #       needed). Raised 2000->20000 (more ring-buffer history = more chunked-scan
+  #       collectives captured before the dump). NOTE: MarinSkyRL utils.py
+  #       (skyrl-train/skyrl_train/utils/utils.py prepare_runtime_environment) ALREADY
+  #       force-sets this to 20000 for every Ray worker regardless of this file (added
+  #       after job 673119's MoE hang) — set here anyway for documentation/defense-in-depth.
+  #     - TORCH_NCCL_DEBUG_INFO_TEMP_FILE is the canonical dump-path cvar; torch appends
+  #       the global rank. TORCH_FR_DUMP_TEMP_FILE is a newer alias torch's fallback chain
+  #       checks FIRST (MarinSkyRL's utils.py already forwards both to every Ray worker,
+  #       reading THIS config's value) — set both to the same job-scoped path so the dump
+  #       lands there regardless of which name wins.
+  TORCH_FR_BUFFER_SIZE: "20000"
+  TORCH_NCCL_TRACE_CPP_STACK: "1"
+  TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /tmp/fr_dumps/80b-next-cp1-rankspread/nccl_fr_rank
+  TORCH_FR_DUMP_TEMP_FILE: /tmp/fr_dumps/80b-next-cp1-rankspread/nccl_fr_rank
+  # Desync debug: on a collective mismatch (e.g. one rank never issuing the collective
+  # the rest of its dp-group is waiting on — a live hypothesis for the GDN chunk-loop
+  # straggler, see the root-cause note) NCCL prints WHICH collective + WHICH ranks
+  # joined/didn't before the watchdog aborts. TORCH_NCCL_ASYNC_ERROR_HANDLING is already
+  # force-set by MarinSkyRL utils.py (job 673119 hardening) — set here too for clarity;
+  # TORCH_NCCL_DESYNC_DEBUG is NEW (not set anywhere else in the stack).
+  TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
+  TORCH_NCCL_DESYNC_DEBUG: "1"
+  # --- R3 (router-replay) transport env — sized for the worst-case per-step routing payload at 131k.
+  #     (VLLM_ALLOW_ROUTED_EXPERTS_DCP intentionally ABSENT — DCP=1.) ---
+  VLLM_MQ_MAX_CHUNK_BYTES_MB: "160"
+  VLLM_ROUTED_EXPERTS_SIDE_TIMEOUT_SECONDS: "1200"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "900"
