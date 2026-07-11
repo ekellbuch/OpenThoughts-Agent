@@ -332,6 +332,52 @@ def _pin_boto3_s3_addressing_style() -> None:
              f"Ray object-spill may hit PathStyleRequestNotAllowed on CoreWeave R2.")
 
 
+def ensure_fr_dump_dir() -> None:
+    """`mkdir -p` the NCCL flight-recorder dump directory on THIS node before torch init.
+
+    WHY THIS EXISTS (2026-07-11, /benjaminfeuer/80b-next-cp1 gs1-optimizer NCCL hang):
+    the 80B config enables the flight recorder (``TORCH_NCCL_DUMP_ON_TIMEOUT=1``) and
+    points the per-rank dump path at a JOB-SCOPED subdir via
+    ``TORCH_NCCL_DEBUG_INFO_TEMP_FILE`` / ``TORCH_FR_DUMP_TEMP_FILE`` (e.g.
+    ``/tmp/fr_dumps/<job>/nccl_fr_rank`` — torch appends the global rank). But NOTHING
+    created the parent ``/tmp/fr_dumps/<job>/``: torch's ``DebugInfoWriter`` is a plain
+    local ``std::ofstream`` that does NOT ``mkdir -p`` its parent, so on the collective
+    timeout every rank's dump SILENTLY failed to write (confirmed: the abort logged
+    ``[F711] … after attempting to dump debug info`` yet a filesystem-wide find for
+    ``nccl_fr_rank*`` on all 16 pods returned nothing) — we lost the one artifact that
+    would have fingerprinted the AWOL rank.
+
+    This controller runs on EVERY node in the pre-Ray phase (before any FSDP/vLLM Ray
+    actor — and thus before any torch/NCCL init — on that node), and the FR dump path is
+    a NODE-LOCAL ``/tmp`` path shared by every rank/actor in this pod, so creating the
+    dir here once per node guarantees it exists before the first torch init. The dir is
+    DERIVED from the cvar (``dirname`` of the dump-path prefix), so it is robust to the
+    path changing per-job — no job name is hardcoded. Best-effort: a failure here must
+    never block bring-up (the FR dump is instrumentation, not correctness)."""
+    # TORCH_FR_DUMP_TEMP_FILE is the newer alias torch's fallback chain checks first;
+    # TORCH_NCCL_DEBUG_INFO_TEMP_FILE is the canonical name. Honor whichever is set
+    # (both to the same value in our configs). The value is a per-rank FILENAME PREFIX
+    # (torch appends the global rank), so the dir to create is its dirname.
+    dump_prefix = (
+        os.environ.get("TORCH_FR_DUMP_TEMP_FILE")
+        or os.environ.get("TORCH_NCCL_DEBUG_INFO_TEMP_FILE")
+    )
+    if not dump_prefix:
+        _log("FR dump dir: no TORCH_(FR_DUMP|NCCL_DEBUG_INFO)_TEMP_FILE set; nothing to create.")
+        return
+    dump_dir = os.path.dirname(dump_prefix)
+    if not dump_dir:
+        # Bare filename with no directory component (e.g. the generic "/tmp/nccl_fr_rank"
+        # has dirname "/tmp", which exists; a relative bare name has no dir to make).
+        return
+    try:
+        os.makedirs(dump_dir, exist_ok=True)
+        _log(f"FR dump dir ensured (mkdir -p): {dump_dir} (from cvar prefix {dump_prefix!r})")
+    except OSError as exc:  # noqa: BLE001 - best-effort; never block bring-up on instrumentation
+        _log(f"WARNING: could not create FR dump dir {dump_dir} ({exc}); "
+             f"NCCL flight-recorder dumps may fail to write on a collective timeout.")
+
+
 def _rendezvous_uri(rendezvous_dir: str) -> str:
     return f"{rendezvous_dir.rstrip('/')}/{RENDEZVOUS_FILENAME}"
 
@@ -1041,6 +1087,11 @@ def main() -> None:
     # rejects path-style with PathStyleRequestNotAllowed. Companion to the
     # fsspec FSSPEC_S3_CONFIG_KWARGS + the _fs_and_path rendezvous pin.
     _pin_boto3_s3_addressing_style()
+    # Ensure the NCCL flight-recorder dump dir exists on THIS node BEFORE any torch/NCCL
+    # init (head + every worker), so a collective-timeout FR dump actually writes instead
+    # of silently failing — torch's DebugInfoWriter does not mkdir -p its parent (the
+    # 80b-next-cp1 gs1 hang lost its dump this way). See ensure_fr_dump_dir.
+    ensure_fr_dump_dir()
     # Stage the task dataset on THIS node before Ray bootstrap (head + every worker).
     # Without this, only rank-0 has the extracted tasks and the rollout workers die
     # with FileNotFoundError on task.toml (see stage_train_data docstring).
