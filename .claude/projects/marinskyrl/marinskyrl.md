@@ -198,11 +198,32 @@ just deduped to 1 copy/dp-group (8 × ~4.6 GB ≈ 37 GB). The driver-centralizat
   reverted). **Dead ends:** uint8 is UNSAFE here (512 experts > 255 → truncate + rank-divergent → NCCL
   size-mismatch hang; `39faff7d` correctly keys num_experts → int16); `del`/`ray free` after dispatch does NOT
   help (the chunk is pinned by the LIVE `forward.remote()` task, not the driver ref).
-- **⏳ Fix A (the REAL structural fix, in progress):** get R3 out of the DRIVER plasma entirely — route the
-  captured routed-experts **generation-worker → policy-worker** (or node-resident), so the head holds ~0 R3 (O(1)
-  in model scale — the bounded-footprint property a scale-up demands). Touches the router-replay capture→train
-  correctness path (#6335 alignment guardrail) → staged + smoke-tested on a small CoreWeave alloc, not a hot
-  patch. This is the design prime-rl/verl/slime already use (they never centralize R3).
+- **✅ Fix B HELD at gs1 (2026-07-11, `/benjaminfeuer/80b-next-cp1`, EP8×FSDP8×CP1 / 128×H100).** Clean A/B on the
+  SAME job: a prior incarnation (pid=13928) died at the gs1 forward (Jul-10 13:44) with `DispatchPutTimeoutError:
+  ray.put() for method=forward dp=1 did not return within 600s` (in `fwd_logprobs_values_reward` → mesh `forward`
+  → `_ray_put_bounded`) — the exact store-overflow-at-first-forward this fix targets. The current gen-0 gang
+  (pid=14310, num_parallel_generation_workers=128 + 96 GB store) resumed gs0 Jul-10 21:14, ran the same forward,
+  and **`Finished: fwd_logprobs` at 01:50 with NO DispatchPutTimeout — the store never overflowed** (no
+  `_ray_put_bounded`/`ObjectStoreFull` in-window; only 8 benign spills over 4.6h), then proceeded into the gs1
+  optimizer step. ⚠ Strong but not yet conclusive across steps — **the forward took ~2h9m** (completed, not a
+  hang, but slow cadence); confirm no DispatchPutTimeout recurs at the gs2 forward + measure step cadence before
+  declaring Fix B fully closed. Fix A (above) makes the store cap a non-issue by design and is the durable answer;
+  Fix B is the config-only mitigation that keeps the 80B training on the default 96 GB store today.
+- **✅ Fix A (the REAL structural fix — PLUMBING VALIDATED 2026-07-11 on a 2-node CoreWeave smoke):** get R3 out
+  of the DRIVER plasma entirely — route the captured routed-experts **generation-worker → node-resident consumer**,
+  so the head holds ~0 R3 (O(1) in model scale — the bounded-footprint property a scale-up demands). Gated behind
+  **`SKYRL_R3_DECENTRAL`** (default OFF "0"); `_relocate_chunk_to_node` re-puts the chunk with a
+  `NodeAffinitySchedulingStrategy` (soft) pass-through, byte-identical, bounded-put fallback. Touches the
+  router-replay capture→train correctness path (#6335 alignment guardrail) → staged + smoke-tested, not a hot patch.
+  This is the design prime-rl/verl/slime already use (they never centralize R3).
+  **Smoke verdict (`/benjaminfeuer/r3decentral-smoke`, Qwen3-Coder-30B, 2×8 H100, `SKYRL_R3_DECENTRAL=1`):** the
+  marker fired correctly at the training forward — `R3_DECENTRAL_SET method=ppo_train dp=5..15 nbytes=5250048
+  dtype=torch.uint8 node=<7eb67dbe|dcb2d1db>` (both NON-driver nodes) — and the run reached **`global_step=1`**
+  with a clean `fwd_logprobs_values_reward` (~17.5s, **no `DispatchPutTimeoutError`**), entropy 0.44 / log_ratio
+  0.009 (healthy). So R3 relocates to consumer nodes byte-identically and gs1 completes end-to-end. (Rewards 0 /
+  ContextLengthExceeded=128 are the smoke's tiny 1024-tok gen budget truncating trajectories — irrelevant to the
+  plumbing question.) Next: prove it at 80B scale (flip `SKYRL_R3_DECENTRAL=1` on the cp1 config once Fix B's 96 GB
+  behavior at gs1 is characterized — Fix A makes the store cap a non-issue by design).
 
 ---
 
