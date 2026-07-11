@@ -144,9 +144,44 @@ NOT swap** → the same skip is harmless there (the likely Jupiter-GH200-OK reco
 - **Bring-up check:** confirm the bracket engaged — engine log shows `initialize_layerwise_reload` /
   `finish_weight_reload`. Full account: `agent_logs/2026-06-27_coreweave_moe_ep_garbage_debug_cycle.md`.
 
-## MarinSkyRL runtime env flags — GDN + TIS
-- **`SKYRL_GDN_MASK_FLA=1`** — force the proven pure-torch GatedDeltaNet (GDN) path (the `fla` wheel is broken). REQUIRED for the linear-attention layers on ANY GDN-arch run (e.g. Qwen3.6-35B-A3B's 30 GDN layers). Absent → the broken `fla` path.
-- **`SKYRL_TIS_SERVED_ID_SPLICE=1`** — TIS Fix A (skyrl `3caeb79f`): use vLLM's raw served `completion_token_ids` as the generated region so TIS tier-1 exact-by-id alignment holds (closes the residual off-by-1..4 think-block re-tokenization divergence). Requires `--skyrl-ref ≥ 3caeb79f`.
+## MarinSkyRL runtime knobs — now FLAGS, not magic env (DESLOP 2026-07-11)
+
+**The `SKYRL_*` runtime knobs are now first-class CLI flags on the iris RL launcher
+(`rl/cloud/launch_rl_iris.py`, argparse group "MarinSkyRL runtime knobs").** The env var
+is retained as an override — precedence is **env/`extra_env` > flag > code default**. Every
+flag defaults to *unspecified*, so an all-defaults launch injects `{}` and the pod env is
+byte-identical to before; a config's `extra_env:` still wins over a flag. Footgun defaults were
+flipped ON (Stage 2) so a config that FORGETS the line is now safe. Full lineage + per-stage
+commits: `notes/marinskyrl/deslop_plan.md` (MarinSkyRL Stages 1-2 `2f20bf91`/`06756e36`;
+OT-Agent Stage 3 `c9397e24`).
+
+- **GDN path — flag `--gdn-mask-fla {auto,on,off}` (env `SKYRL_GDN_MASK_FLA`), default AUTO.**
+  Now **default-ON, auto-derived from the model arch** (`model_wrapper._gdn_mask_fla_enabled`): the
+  pure-torch GatedDeltaNet path (the `fla` wheel is broken) auto-engages for GDN archs (Qwen3-Next /
+  Qwen3.6-35B-A3B's GDN layers) and is a strict **no-op on dense** models. No longer a required knob
+  for the common case; set `--gdn-mask-fla on/off` (or the env) to force.
+- **TIS served-id splice — flag `--tis-splice {on,off}` (canonical env `SKYRL_TIS_SPLICE`),
+  default ON.** Uses vLLM's raw served `completion_token_ids` as the generated region so TIS
+  tier-1 exact-by-id alignment holds (closes the think-block re-tokenization divergence). The two
+  old knobs were **merged**: `SKYRL_TIS_SERVED_ID_SPLICE` (generalized, was default OFF — now the
+  default-ON superseding path) + `SKYRL_QWEN3_5_TIS_SPLICE` (empty-think special case, was default
+  ON) → one `_tis_splice_enabled()` policy (both legacy env names still honored). Byte-identical on
+  non-thinking turns (re-tok already equals the served stream). Baked default (skyrl `3caeb79f`).
+- **NCCL timeout — flag `--nccl-timeout-s` (env `SKYRL_WORKER_NCCL_TIMEOUT_IN_S`), default 1800.**
+  The two divergent read-sites (constants default 600, utils `max(1200,…)`) collapsed into ONE
+  accessor `constants.get_worker_nccl_timeout_s()` / `DEFAULT_WORKER_NCCL_TIMEOUT_IN_S=1800`.
+- **R3 transport — flag `--r3-transport {by_value,resident,decentral}`, default `decentral`**
+  (folds `SKYRL_R3_RESIDENT` + `SKYRL_R3_DECENTRAL`); `--r3-put-timeout-s` = `SKYRL_DISPATCH_PUT_TIMEOUT_S`.
+- **Correctness knobs (default-ON), each now a flag:** `--forward-dispatch-fix`,
+  `--weightsync-drain-barrier`, `--cp-require-right-align`, `--w13-reload-bracket` (pass `off` only
+  for an A/B). Observability: `--host-ram-monitor`(+`-interval-s`). Feature: `--gdn-flashqla`,
+  `--ep-loader-chunk-rows`.
+- **REMOVED as dead (Stage 1):** `SKYRL_FWD_UNSHARD_FENCE` (superseded by the drain barrier), the
+  whole EPDIAG/`SKYRL_GROUPMM_DIAG`/`SKYRL_NUM_EXPERTS`/`SKYRL_EP_LOADER_DEBUG`/
+  `SKYRL_ROUTER_REPLAY_DEBUG` diagnostic family (the EP/CP-dispatch + grouped-mm bugs are fixed),
+  and `SKYRL_WEIGHT_SYNC_SERIALIZE` (superseded by the gather-order fix + drain barriers). The
+  `R3_EPTRACE` knob was already absent. Jupiter `extra/` configs still carry now-inert EPDIAG env
+  lines (harmless — no reader).
 
 ---
 
