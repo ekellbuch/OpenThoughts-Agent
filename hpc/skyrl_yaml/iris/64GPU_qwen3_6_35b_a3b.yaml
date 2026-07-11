@@ -320,7 +320,6 @@ extra_env:
   # TIS Fix A (skyrl 3caeb79f) — served completion_token_ids for exact TIS alignment. Needs --skyrl-ref >= 3caeb79f.
   SKYRL_TIS_SERVED_ID_SPLICE: "1"
   # --- vLLM serve flags ---
-  VLLM_USE_FLASHINFER_SAMPLER: "0"
   VLLM_ATTENTION_BACKEND: FLASH_ATTN
   # gpu-rl RL conda env prefix — literal (NOT $CONDA_PREFIX/lib): k8s does NOT shell-expand.
   LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib

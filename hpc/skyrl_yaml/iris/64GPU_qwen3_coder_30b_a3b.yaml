@@ -480,16 +480,9 @@ rollout:
 # dropped for H100+IB).
 # =============================================================================
 extra_env:
-  # --- [EPDIAG2] diagnostic probe ARM (dumps sel_rows for the A-vs-B verdict) ---
-  EPDIAG: "1"
-  EPDIAG_CP: "1"
-  EPDIAG_EP: "8"
-  EPDIAG_SP: "1"
-  # --- end [EPDIAG2] ---
   SKYRL_GDN_MASK_FLA: "1"
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
   # --- vLLM serve flags (gpu-rl image §2f) ---
-  VLLM_USE_FLASHINFER_SAMPLER: "0"
   VLLM_ATTENTION_BACKEND: FLASH_ATTN
   # gpu-rl RL conda env prefix is /opt/openthoughts/envs/rl. Hardcoded (NOT
   # $CONDA_PREFIX/lib): the launcher injects env as literal k8s env values and k8s
