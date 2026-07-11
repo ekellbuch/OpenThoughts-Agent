@@ -230,15 +230,19 @@ DEFAULT_GPUS_PER_NODE = 8           # gd-8xh100ib-i128 = 8x H100-80GB + IB
 # CPU / ~2014 GiB mem / 8 GPU.
 #   - CPU 48 (NOT 64): ~64-68 of the 128 cores are persistent daemonset reservation, so a
 #     request >~60 FAILS the single-IB-leaf gang admission (observed: 64 unplaceable, 48 admits).
-#   - MEMORY 1400GB is the validated middle. It must clear TWO opposing footguns:
-#     (a) too LOW (e.g. the old 512GB) → container-cgroup OOM at FSDP weight-load on an EP=8
-#         + cpu_offload policy rank (peaks >512GB while the node sits <200GB used); and
+#   - MEMORY 1700GB (≈1583 GiB cgroup) — RAISED from 1400GB on 2026-07-11 because 1400 was
+#     UNDER-allocating. It must clear TWO opposing footguns:
+#     (a) too LOW → container-cgroup OOM at the training forward. The old 512GB OOM'd at FSDP
+#         weight-load; and 1400GB (≈1303 GiB cgroup) sits RIGHT AT the ~1303 GiB forward peak
+#         at 8 ranks/node (the 80B cp1 128-GPU EP8×FSDP8 geometry) — the r2 rankspread run
+#         measured a 1028 GiB forward peak at only 4 ranks/node (2026-07-11 diagnosis), so at
+#         8 ranks/node the peak clears 1400's cgroup → no headroom = OOM risk; and
 #     (b) too HIGH (1800GB ≈ 1676 GiB) → sits so close to node-allocatable (~2014 GiB) that
 #         after daemonset/persistent-reservation overhead a leafgroup gang (all-or-nothing,
 #         one IB leaf) can't fit all pods → Kueue SchedulingGated stall (cost multiple
 #         60-120min stalls overnight 2026-06-26, on a 1-GPU probe AND 8-node gangs).
-#     1400GB admits the 8-node 131k EP8 gang cleanly AND does the full weight-load with no
-#     cgroup-OOM. Lower toward the real need on an admission stall; NEVER raise toward 1800.
+#     1700GB fits with headroom (≈1583 GiB < 2014 GiB allocatable) AND clears the forward
+#     peak. Lower toward the real need on an admission stall; do NOT raise toward 1800.
 #     (1000-1200GB suffices for 2-node smokes.) See .claude/ops/iris/coreweave_gpu_ops.md.
 #   - DISK defaults to "auto" = 80% of the node's live allocatable ephemeral-storage (~27.2 TiB
 #     → ~21 TiB). WHY NOT the old 512GB: the long MoE training step's Ray object store spills to
@@ -247,7 +251,7 @@ DEFAULT_GPUS_PER_NODE = 8           # gd-8xh100ib-i128 = 8x H100-80GB + IB
 #     so reserving disk is pure waste — claim ~80%. (R2 object-spilling, the durable fix, is also
 #     on; this headroom is belt-and-suspenders.) Pass --disk explicitly to override.
 DEFAULT_CPU_PER_NODE = 48.0
-DEFAULT_MEMORY_PER_NODE = "1400GB"
+DEFAULT_MEMORY_PER_NODE = "1700GB"
 # --disk "auto" → DISK_FRACTION of the GPU node's live allocatable ephemeral-storage at launch
 # (FALLBACK_DISK_GIB iff the node query fails). See _resolve_default_disk().
 DEFAULT_DISK_PER_NODE = "auto"

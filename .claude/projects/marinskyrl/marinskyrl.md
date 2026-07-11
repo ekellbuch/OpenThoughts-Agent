@@ -220,7 +220,9 @@ just deduped to 1 copy/dp-group (8 × ~4.6 GB ≈ 37 GB). The driver-centralizat
 - **✅ Fix A (the REAL structural fix — PLUMBING VALIDATED 2026-07-11 on a 2-node CoreWeave smoke):** get R3 out
   of the DRIVER plasma entirely — route the captured routed-experts **generation-worker → node-resident consumer**,
   so the head holds ~0 R3 (O(1) in model scale — the bounded-footprint property a scale-up demands). Gated behind
-  **`SKYRL_R3_DECENTRAL`** (default OFF "0"); `_relocate_chunk_to_node` re-puts the chunk with a
+  **`SKYRL_R3_DECENTRAL`** (**default ON "1" as of 2026-07-11, dispatch.py `e9b2f10d` — flipped from OFF after
+  the r2 80B rankspread run died on the R3-head-plasma `DispatchPutTimeoutError` at the gs1 forward with the fix
+  OFF; set =0 to force the old centralized driver-put for A/B**); `_relocate_chunk_to_node` re-puts the chunk with a
   `NodeAffinitySchedulingStrategy` (soft) pass-through, byte-identical, bounded-put fallback. Touches the
   router-replay capture→train correctness path (#6335 alignment guardrail) → staged + smoke-tested, not a hot patch.
   This is the design prime-rl/verl/slime already use (they never centralize R3).

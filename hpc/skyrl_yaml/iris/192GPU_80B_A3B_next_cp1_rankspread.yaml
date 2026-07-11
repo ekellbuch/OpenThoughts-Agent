@@ -144,7 +144,23 @@
 # nodes + leafgroup admission BEFORE launching (do NOT force a doomed 24-node gang) and
 # CONFIRM the resolved SkyRL placement isolates policy from gen (see MECHANICS risk).
 # Respect Daytona <=6 RUNNING RL/cluster. --skyrl-ref MUST be the policy-host-RAM-monitor
-# commit (83238e75 or newer) so the instrumentation is live — that measurement is the point.
+# commit (83238e75 or newer; e9b2f10d shown) so the instrumentation is live — that measurement
+# is the point.
+#
+# UPDATES (operator 2026-07-11 — apply to THIS series):
+#   * --memory default RAISED 1400GB → 1700GB in the launcher (1400 was UNDER-allocating: the r2
+#     forward host-RAM peaked ~1028 GiB at 4 ranks/node, and 1400GB ≈ 1303 GiB cgroup is right at
+#     the 8-ranks/node forward peak). The explicit --memory flag is now GONE from the launch
+#     command below — inherit the 1700GB default (≈1583 GiB, fits under ~2014 GiB allocatable).
+#   * SKYRL_R3_DECENTRAL is now the CODE DEFAULT (dispatch.py e9b2f10d flipped 0→1). NOTE: this
+#     rankspread config does NOT set it in extra_env (r2 ran the fix OFF — that is what proved the
+#     dispatch-put wedge). A future rankspread relaunch on --skyrl-ref ≥ e9b2f10d would inherit the
+#     fix ON by default; add an explicit SKYRL_R3_DECENTRAL: "0" to extra_env to force it OFF.
+#   * r2 VERDICT: this rank-spread run (80b-next-rankspread-r2) PROVED host-RAM FITS through the gs1
+#     forward (peak ~1028 GiB @4 ranks/node, all fd-monitor OK, NO OOM) — rank-spread SOLVES the
+#     host-RAM OOM. The binding failure was instead the R3 driver-head-plasma DispatchPutTimeoutError
+#     at the gs1 forward (fix OFF). The follow-on 16-node cp1 relaunch runs the R3-decentral fix ON
+#     (now default) as the clean A/B against that wedge — see 128GPU_80B_A3B_next_cp1.yaml.
 # =============================================================================
 #   set -a; source /Users/benjaminfeuer/Documents/secrets.env; set +a
 #   export KUBECONFIG=~/.kube/coreweave-iris-gpu
@@ -152,8 +168,8 @@
 #     --rl_config hpc/skyrl_yaml/iris/192GPU_80B_A3B_next_cp1_rankspread.yaml \
 #     --model_path Qwen/Qwen3-Next-80B-A3B-Thinking \
 #     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
-#     --num-nodes 24 --gpus_per_node 8 --cpu 48 --max-retries 1 --memory 1400GB \
-#     --skyrl-ref 83238e75 \
+#     --num-nodes 24 --gpus_per_node 8 --cpu 48 --max-retries 1 \
+#     --skyrl-ref e9b2f10d \
 #     --daytona-api-key-env DAYTONA_RL_API_KEY \
 #     --rendezvous-dir s3://marin-us-east-02a/iris/80b-naive-map/cp1-rankspread \
 #     --job-name 80b-next-cp1-rankspread --priority interactive --no-wait

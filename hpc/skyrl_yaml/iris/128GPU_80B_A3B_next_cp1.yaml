@@ -11,19 +11,36 @@
 # STANDING DIRECTIVE (operator 2026-07-11) — this IS the 16-node relaunch on r2's death.
 #   When the live 24-node rank-spread run (80b-next-rankspread-r2) dies, relaunch HERE at
 #   16 NODES (128 GPU, EP8×FSDP8×CP1) — NOT another 24-node rank-spread. Three changes from v5:
-#     (1) R3 router-replay OUT of the driver head plasma — SKYRL_R3_DECENTRAL=1 (extra_env,
-#         Fix A / 168b345f). The operator's read is that the v4/v5 host-RAM OOM was the
+#     (1) R3 router-replay OUT of the driver head plasma — SKYRL_R3_DECENTRAL (Fix A / 168b345f).
+#         *** As of 2026-07-11 this is the CODE DEFAULT (dispatch.py default flipped 0→1) — it was
+#         a footgun to leave OFF (the r2 rankspread run died on the R3-head-plasma
+#         DispatchPutTimeoutError at the gs1 forward with the fix OFF). The explicit
+#         SKYRL_R3_DECENTRAL: "1" in extra_env below is now REDUNDANT but KEPT as
+#         self-documenting. *** The operator's read is that the v4/v5 host-RAM OOM was the
 #         router-replay OBJECT-STORE residency ("junk in the object store"), not (only) the
 #         cpu_offload FSDP shard. R3 stays ON (moe_router_replay/enable_return_routed_experts —
 #         TIS on a MoE REQUIRES it); Fix A only moves WHERE the R3 bytes live (byte-identical).
 #     (2) NCCL_DEBUG=WARN (already set below) so the log isn't spammed, while KEEPING the
 #         on-failure capture (TORCH_NCCL_DESYNC_DEBUG=1 + TORCH_NCCL_DUMP_ON_TIMEOUT=1 + the
 #         FR-dir fix OT-Agent 2ee76ff3) so a wedge still yields the desync/FR fingerprint.
-#     (3) --skyrl-ref 83238e75 (≥168b345f): includes 6a3f9e5e (NCCL-timeout honor — the 80B
+#     (3) --skyrl-ref e9b2f10d (≥168b345f): includes 6a3f9e5e (NCCL-timeout honor — the 80B
 #         MUST have this or it init-straggles under load), 8b065938 (Fix B), d13c3586
-#         (bounded-put), 168b345f (Fix A), + 83238e75 (policy-node host-RAM monitor → MEASURES
-#         the OOM this time). Do NOT pin 272bf011 or older.
+#         (bounded-put), 168b345f (Fix A), 83238e75 (policy-node host-RAM monitor → MEASURES
+#         the OOM this time), + e9b2f10d (the SKYRL_R3_DECENTRAL default 0→1 flip). Do NOT pin
+#         272bf011 or older.
 #   Context left @98304 unchanged — the hypothesis is that R3 (not context) drove the OOM.
+#
+#   RAM (operator 2026-07-11): --memory default RAISED 1400GB → 1700GB in the launcher (1400 was
+#     UNDER-allocating). The r2 rankspread diagnosis measured the training-forward host-RAM peak
+#     at ~1028 GiB at 4 ranks/node; at THIS config's 8 ranks/node the forward peak is ~1303 GiB —
+#     right at 1400GB's ~1303 GiB cgroup (no headroom). 1700GB (≈1583 GiB cgroup) fits under the
+#     ~2014 GiB node allocatable with headroom AND clears the forward peak. The explicit
+#     --memory flag is now GONE from the launch command below (inherit the new default).
+#   r2 VERDICT (the fix-validation this relaunch closes): rank-spread PROVED host-RAM FITS through
+#     the gs1 forward (peak ~1028 GiB, all fd-monitor OK, no OOM) — the binding failure was NOT
+#     host-RAM but the R3 driver-head-plasma DispatchPutTimeoutError at the gs1 forward, with
+#     SKYRL_R3_DECENTRAL OFF. This 16-node relaunch runs the fix ON (now the code default) = a
+#     clean A/B against that exact wedge.
 # =============================================================================
 # AUTHORED FOR: ~/Documents/experiments/active/qwen3_next_80b_naive_map_131k.
 # GOAL: naive-map the throughput-champ 30B RL geometry (30B-A = EP8×FSDP4×CP1,
@@ -98,7 +115,8 @@
 #     per-rank ≈ 1440/64 = 22.5 GB → per-node (8 ranks) ≈ 180 GB host RAM for the shard,
 #     + activation buffers + bounded R3 host arrays (n_concurrent_trials=32) + Ray/coord.
 #     Analog: 30B@64GPU used 240–280 GiB/node → 80B@128GPU ~ similar-to-a-bit-more,
-#     COMFORTABLY < the 1400 GB --memory gate and < ~2014 GiB node allocatable.
+#     COMFORTABLY < the 1700 GB --memory gate (raised from 1400 on 2026-07-11) and < ~2014 GiB
+#     node allocatable.
 #     ⇒ HOST RAM is NOT the binding constraint.
 #   HBM (the real question): with cpu_offload only the active all-gathered FSDP shard +
 #     the current-microbatch activations + the GDN chunked-scan transient sit in the 80 GB
@@ -148,8 +166,8 @@
 #     --rl_config hpc/skyrl_yaml/iris/128GPU_80B_A3B_next_cp1.yaml \
 #     --model_path Qwen/Qwen3-Next-80B-A3B-Thinking \
 #     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
-#     --num-nodes 16 --gpus_per_node 8 --cpu 48 --max-retries 3 --memory 1400GB \
-#     --skyrl-ref 83238e75 \
+#     --num-nodes 16 --gpus_per_node 8 --cpu 48 --max-retries 3 \
+#     --skyrl-ref e9b2f10d \
 #     --daytona-api-key-env DAYTONA_RL_API_KEY \
 #     --rendezvous-dir s3://marin-us-east-02a/iris/80b-naive-map/cp1 \
 #     --job-name 80b-next-cp1 --priority interactive --no-wait
@@ -492,7 +510,8 @@ extra_env:
   # Force the pure-torch GDN path (the fla wheel is broken). LOAD-BEARING for ANY GDN-arch run.
   SKYRL_GDN_MASK_FLA: "1"
   # R3 Fix A — ROUTER-REPLAY OUT OF THE DRIVER HEAD PLASMA (SKYRL_R3_DECENTRAL, MarinSkyRL
-  #   168b345f; default OFF). WHY (operator directive 2026-07-11: "router replay was
+  #   168b345f; NOW THE CODE DEFAULT as of 2026-07-11 dispatch.py e9b2f10d — this explicit "1"
+  #   is REDUNDANT but KEPT self-documenting). WHY (operator directive 2026-07-11: "router replay was
   #   misconfigured and was dumping junk into the object store"): with this OFF, the deduped
   #   1-put/dp-group R3 chunk (SKYRL_R3_RESIDENT, default ON) STILL runs `ray.put` on the DRIVER,
   #   so the multi-GB `rollout_routed_experts` chunk lands in the HEAD-node plasma and stays
@@ -503,8 +522,9 @@ extra_env:
   #   dp/CP/micro-batch alignment inherited unchanged) → does NOT break R3 replay or TIS correctness.
   #   Smoke-validated at 30B (R3_DECENTRAL_SET fired on non-driver nodes, gs1 clean, entropy 0.44 /
   #   log_ratio 0.009). This is the 80B-scale flip the marinskyrl notes flagged as "next". REQUIRES
-  #   --skyrl-ref ≥ 168b345f (pinned 83238e75 in the launch cmd). Falls back to the bounded driver
-  #   put on any node-resolve failure (never loses the loud DispatchPutTimeoutError).
+  #   --skyrl-ref ≥ 168b345f (pinned e9b2f10d in the launch cmd — also the sha that made it default).
+  #   Falls back to the bounded driver put on any node-resolve failure (never loses the loud
+  #   DispatchPutTimeoutError).
   SKYRL_R3_DECENTRAL: "1"
   # POLICY-NODE host-RAM instrumentation (MarinSkyRL 83238e75): fd-monitor now runs on
   #   FSDPPolicyWorkerBase (one rank/node) emitting peak RSS + cgroup-mem vs the --memory cap.
