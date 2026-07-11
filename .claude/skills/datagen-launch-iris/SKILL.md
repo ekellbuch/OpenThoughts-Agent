@@ -157,8 +157,10 @@ deletes by your task set and would remove teammates' ACTIVE snapshots.
 When the org is at cap with **0 MISSING** (all ACTIVE) but many `harbor__` are idle
 leftovers of completed jobs, use the idle-gated reclaim (safe; spares live/teammate +
 base snapshots) via the **datagen-reclaim-stale-snapshots** skill:
-`daytona_snapshot_manager.py --name-prefix harbor__ --stale-days 0.0833 --delete-stale`
-(~2h idle gate; the 3-hourly cron routinely reclaims 15–34/tick on the shared `cli` org).
+`daytona_snapshot_manager.py --name-prefix harbor__ --delete-stale`
+— at the stale threshold defined in `.claude/projects/daytona/daytona.md` § "How to clean stale
+snapshots" (GT — don't restate the value); the 3-hourly cron routinely reclaims 15–34/tick on the shared
+`cli` org.
 
 **Stuck PENDING** (no v5p-8 capacity): report it and relaunch UNPINNED (the
 `--gcs-output-dir gs://marin-models-us/ot-agent` flag above). Kill the stuck

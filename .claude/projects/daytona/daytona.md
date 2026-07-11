@@ -66,12 +66,13 @@ Run from the otagent env; `source secrets.env` first (it reads the key from `--a
 
 ```bash
 # 1. AUDIT first (read-only default — no deletes). Shows used/headroom + which snapshots are STALE.
-python scripts/daytona/daytona_snapshot_manager.py --api-key-env DAYTONA_DATA_API_KEY --stale-days 2
+#    --stale-days takes a FLOAT → 2 HOURS = 0.0833 (2/24). This is the standard threshold.
+python scripts/daytona/daytona_snapshot_manager.py --api-key-env DAYTONA_DATA_API_KEY --stale-days 0.0833
 # 2. RECLAIM (dry-run unless --yes). Deletes only STALE harbor__* envs:
-python scripts/daytona/daytona_snapshot_manager.py --api-key-env DAYTONA_DATA_API_KEY --delete-stale --yes --stale-days 2
+python scripts/daytona/daytona_snapshot_manager.py --api-key-env DAYTONA_DATA_API_KEY --delete-stale --yes --stale-days 0.0833
 ```
 
-- **Staleness = idle** (`last_used_at` older than `--stale-days`) **AND not protected/active.** Error-ish snapshots are deletable only once ALSO past the stale window. So this NEVER deletes an env a running/queued job depends on — it's the safe scoping the "leave shared envs" rule requires. `--stale-days 2` is the standard threshold (the RECLAIM EVENT used it to reclaim 13 envs idle 6–11d).
+- **Staleness = idle** (`last_used_at` older than `--stale-days`) **AND not protected/active.** Error-ish snapshots are deletable only once ALSO past the stale window. So this NEVER deletes an env a running/queued job depends on — it's the safe scoping the "leave shared envs" rule requires. **`--stale-days 0.0833` (= 2 HOURS) is the standard threshold (operator, 2026-07-11), NOT 2 days** — in a fast-churning campaign (eval legs cycle in hours) a 2-day window reclaims ~nothing (everything is idle <2d), so 2 days is far too conservative. 2 hours is safe: a reclaimed shared `harbor__<hash>` env that a later run needs **rebuilds instantly as a registry hit (0 err)** (see below), so reclaiming an env merely idle 2h+ costs a cheap rebuild, not lost work — while an env an ACTIVELY-running leg is still using has a fresh `last_used_at` (<2h) and is NOT reclaimed. (History: an early RECLAIM EVENT ran `--stale-days 2` and still found 13 envs idle 6–11d — but that long window is the exception; use 2 hours as standard.)
 - **Exit codes:** `3` = `--delete-stale` requested but the confirm prompt was declined (use `--yes` to skip the prompt in autonomous runs).
 - **Caveats (from the 2026-06-12 reclaim event):**
   - The manager's post-delete "N/60" re-read can lag (e.g. still shows `40/60` right after a reclaim) — that's a **Daytona list-API eventual-consistency artifact**, NOT a failed delete. Confirm real headroom by the next launch's prebuild line (`0 built` / registry-HIT = headroom freed).

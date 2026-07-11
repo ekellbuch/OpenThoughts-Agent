@@ -121,7 +121,9 @@ To confirm which a job used, read its rendered sbatch (`experiments/<job>/sbatch
 - **Daytona snapshots:** a new task set builds snapshots on first launch; caps are **HARD**
   (10 new / 60 org — RL org observed at 40, server-side). Registry hits (snapshots already ACTIVE) cost 0
   new. **At the org cap, clean STALE snapshots first (autonomous) — do NOT raise the cap:**
-  `python scripts/daytona/daytona_snapshot_manager.py --api-key-env DAYTONA_RL_API_KEY --delete-stale --yes --stale-days 2`
+  `python scripts/daytona/daytona_snapshot_manager.py --api-key-env DAYTONA_RL_API_KEY --delete-stale --yes`
+  — at the stale threshold defined in `.claude/projects/daytona/daytona.md` § "How to clean stale
+  snapshots" (GT — don't restate the value)
   (audit-only without `--delete-stale`; deletes only idle/unprotected `harbor__*` envs — safe). Only a
   single dataset legitimately needing >`max_new_snapshots` unique envs escalates → ask. Full procedure +
   caveats → `.claude/projects/daytona/daytona.md` § "How to clean stale snapshots".

@@ -86,7 +86,9 @@ python -m hpc.launch \
   **datagen-reduce-dataset-snapshots**, or reuse a dataset whose snapshots already exist (0 new). If still
   blocked, ask the user. Snapshots are keyed by sandbox **environment**, not dataset — they're shared, so
   do NOT reclaim them per-run. **Clean stale at the cap (autonomous):**
-  `python scripts/daytona/daytona_snapshot_manager.py --api-key-env DAYTONA_DATA_API_KEY --delete-stale --yes --stale-days 2`
+  `python scripts/daytona/daytona_snapshot_manager.py --api-key-env DAYTONA_DATA_API_KEY --delete-stale --yes`
+  — at the stale threshold defined in `.claude/projects/daytona/daytona.md` § "How to clean stale
+  snapshots" (GT — don't restate the value)
   (audit-only without `--delete-stale`; deletes only idle/unprotected `harbor__*` envs). Full procedure +
   caveats → `.claude/projects/daytona/daytona.md` § "How to clean stale snapshots".
 

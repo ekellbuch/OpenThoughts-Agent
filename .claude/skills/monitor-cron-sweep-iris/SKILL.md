@@ -64,7 +64,8 @@ job_id prefix:
 - **C. Other** (anything matching none of A/B/D/E — e.g. `serve-%` inference jobs): report state + a one-line
   health read; no autonomous write action.
 - **E. Executor/Levanter training** (a marin-executor training run — a CPU coordinator `<run>-coord` PLUS its
-  nested v5p training child `<run>-coord/checkpoints-<step>-<hash>`; e.g. the `delphi-%` midtraining runs):
+  nested v5p training child `<run>-coord/checkpoints-<step>-<hash>`; e.g. the `delphi-%`/`iris-run-midtrain_*`
+  midtraining runs):
   **monitor-only — NO rescue, NO keep-2, NO auto-relaunch.** The §2 harbor analyzer does NOT apply (training
   has no harbor trial sidecars, like GPU-RL). Run the **analyze-training-run-iris** skill on the CHILD job and
   report its compact line: `step=<cur>/<total> (X%) loss=<L> ~<T>tok/s preempts=<P> gaps=<G>/<H>h ckpt=step-<C>`
@@ -123,12 +124,16 @@ unpinned — prefer building this off `marin_prefix()` (auto-resolves the storag
 bucket), see `.claude/ops/iris/coreweave_gpu_ops.md` §rendezvous, repo `penfever/<slug>-qwen3.5-122b-32k-traces`) — see **datagen-launch-iris**. Flip its tracker row to
 RUNNING. Eval jobs do NOT count toward the 2 and are never auto-launched.
 
-**Snapshot-cap hygiene (every tick):** audit the cli-org (`DAYTONA_API_KEY`) snapshot count. If a datagen refill
-is blocked by `SnapshotCapExceeded` OR the org is ≥ ~58/60, **reclaim idle `harbor__` snapshots** (idle > 120 min)
-via `daytona_snapshot_manager.py --api-key-env DAYTONA_API_KEY --stale-days 0.0833 --delete-stale --yes`, then retry
-the launch. This deletes ONLY idle `harbor__` env snapshots (rebuilt on demand) — the `--name-prefix harbor__`
-default guards the shared base images (`daytonaio/sandbox:*`, `daytona-*`, `windows-*`), which must never be deleted.
-This supersedes the old MISSING-only rule (which stalls at 0 MISSING). Full procedure: **datagen-reclaim-stale-snapshots**.
+**Snapshot-cap hygiene — PROACTIVE every tick (2026-07-10 operator directive):** every tick, unconditionally
+**reclaim idle `harbor__` snapshots** on the cli-org (`DAYTONA_API_KEY`) via
+`daytona_snapshot_manager.py --api-key-env DAYTONA_API_KEY --delete-stale --yes` (run from the
+OT-Agent dir, secrets sourced) — at the stale threshold defined in `.claude/projects/daytona/daytona.md`
+§ "How to clean stale snapshots" (GT — don't restate the value). Do NOT wait for a refill to be blocked or the org to hit ~58/60; keep the org
+clean by default. Report before/after count. This deletes ONLY idle `harbor__` env snapshots (rebuilt on demand
+by harbor `auto_snapshot`) — the `--name-prefix harbor__` default guards the shared base images
+(`daytonaio/sandbox:*`, `daytona-*`, `windows-*`), which must never be deleted, and the idle threshold never hits an
+ACTIVE-recent snapshot in use by a running job. Supersedes both the old MISSING-only rule and the
+"only when a refill is blocked" gate. Full procedure: **datagen-reclaim-stale-snapshots**.
 
 ## 6. No-kill guardrail
 Never kill/restart/bounce a RUNNING job or the cluster without express permission — the ONLY exception is the §4b

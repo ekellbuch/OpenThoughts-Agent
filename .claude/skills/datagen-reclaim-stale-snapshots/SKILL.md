@@ -3,7 +3,8 @@ name: datagen-reclaim-stale-snapshots
 description: >-
   Reclaim idle Daytona SNAPSHOTS org-wide to free space under the 60-snapshot cap,
   using scripts/daytona/daytona_snapshot_manager.py. Deletes only harbor__ per-
-  environment snapshots idle past a threshold (default 120 min) — NEVER the shared
+  environment snapshots idle past the standing threshold GT'd in
+  .claude/projects/daytona/daytona.md — NEVER the shared
   base/template images (daytonaio/sandbox:*, daytona-*, windows-*), which do not
   rebuild-on-demand. Use when a datagen/eval launch hits SnapshotCapExceeded, when a
   monitor sweep finds the cap full, or as routine cap hygiene. This is the org-wide
@@ -58,17 +59,17 @@ source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first
 PY=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python
 SCRIPT=scripts/daytona/daytona_snapshot_manager.py
 
-# 1. AUDIT — read-only, see what WOULD be reclaimed (120 min = 0.0833 days idle)
-$PY $SCRIPT --api-key-env DAYTONA_API_KEY --stale-days 0.0833
+# 1. AUDIT — read-only, see what WOULD be reclaimed (at the stale threshold — see below)
+$PY $SCRIPT --api-key-env DAYTONA_API_KEY --stale-days <threshold>
 
 # 2. RECLAIM — actually delete the stale harbor__ snapshots
-$PY $SCRIPT --api-key-env DAYTONA_API_KEY --stale-days 0.0833 --delete-stale --yes
+$PY $SCRIPT --api-key-env DAYTONA_API_KEY --stale-days <threshold> --delete-stale --yes
 ```
 
-`--stale-days` takes a float, so sub-day thresholds are minutes/1440 (120 min =
-`0.0833`, 1 h = `0.0417`, 6 h = `0.25`). **120 min is the standing default** for
-unblocking a launch — long enough that a live job's actively-rotating
-environments (idle < 2 h) are spared, short enough to reclaim the leftovers of
+`--stale-days` takes a float, so sub-day thresholds are minutes/1440. **The standing
+threshold value is GT'd in `.claude/projects/daytona/daytona.md` § "How to clean stale
+snapshots" — don't restate it here; read it there** — long enough that a live job's
+actively-rotating environments are spared, short enough to reclaim the leftovers of
 completed jobs. Raise it if you want to be more conservative.
 
 ## Flags (this tool)
@@ -76,7 +77,7 @@ completed jobs. Raise it if you want to be more conservative.
 | Flag | Default | Purpose |
 |---|---|---|
 | `--api-key-env` | `DAYTONA_DATA_API_KEY` | Org key env var. **Use `DAYTONA_API_KEY`** for the cli/datagen org. |
-| `--stale-days` | 14 | Idle-days threshold (float). Use `0.0833` for 120 min. |
+| `--stale-days` | 14 | Idle-days threshold (float). Standing value GT'd in `.claude/projects/daytona/daytona.md` § "How to clean stale snapshots" — don't restate it here. |
 | `--name-prefix` | `harbor__` | Only names starting with this are deletable. **Do not widen it** — the default guards base images. |
 | `--delete-stale` | off (dry-run) | Actually delete. |
 | `--yes` | off | Skip the confirm prompt (for scripted/cron use). |
@@ -94,7 +95,8 @@ completed jobs. Raise it if you want to be more conservative.
   real reclaim pool.
 - Reclaiming forces a rebuild the next time a live job hits a deleted
   environment — harmless (auto_snapshot rebuilds) but adds a one-time
-  per-environment build latency. 120 min avoids this for actively-rotating envs.
+  per-environment build latency. The standing threshold (see daytona.md) avoids
+  this for actively-rotating envs.
 
 ## In the monitor sweep
 
