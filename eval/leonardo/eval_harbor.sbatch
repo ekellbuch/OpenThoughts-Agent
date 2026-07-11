@@ -493,7 +493,7 @@ if [[ "$REPO_ID" == /* ]]; then
         echo "ERROR: Local dataset path does not exist: $DATASET_PATH"
         exit 1
     fi
-    TASK_COUNT=$(ls -d "$DATASET_PATH"/*/instruction.md 2>/dev/null | wc -l)
+    TASK_COUNT=$( { ls -d "$DATASET_PATH"/*/instruction.md 2>/dev/null || true; } | wc -l)
     echo "[DEBUG] Found $TASK_COUNT tasks with instruction.md"
 else
     echo "Downloading/locating dataset: $REPO_ID"
@@ -502,8 +502,19 @@ else
 
     # Check if dataset was pre-downloaded on login node (compute nodes have no internet)
     # First check the custom local dir, then check the HF cache
+    #
+    # ⚠ set -eo pipefail SILENT-EXIT trap (root-cause 2026-07-11, jobs 49122290/
+    # 49132499/49157426/49157427 — tb2 legs died 0-trials right here). The idiom
+    # `VAR=$(ls -d .../*/instruction.md 2>/dev/null | wc -l)` is FATAL under this
+    # script's global `set -eo pipefail`: when the glob matches nothing, `ls` exits
+    # 2, pipefail promotes that to the pipeline, and the bare command-substitution
+    # assignment trips `set -e` → the whole job exits 2 SILENTLY (2>/dev/null hides
+    # ls's stderr, no traceback) → trap prints "Cleaning up.../Cleanup done." with
+    # 0 trials + no Supabase row. Wrap the `ls` in `{ ...; || true; }` so an empty
+    # glob counts 0 and the script FALLS THROUGH to the robust proxied
+    # snapshot_download.py path instead of dying.
     if [ -d "$DATASET_LOCAL_DIR" ]; then
-        TASK_COUNT=$(ls -d "$DATASET_LOCAL_DIR"/*/instruction.md 2>/dev/null | wc -l)
+        TASK_COUNT=$( { ls -d "$DATASET_LOCAL_DIR"/*/instruction.md 2>/dev/null || true; } | wc -l)
         echo "[DEBUG] Found $TASK_COUNT tasks with instruction.md in local dir"
     fi
 
@@ -512,11 +523,20 @@ else
     if [ "${TASK_COUNT:-0}" -eq 0 ]; then
         HF_CACHE_DIR="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
         HF_REPO_CACHE_NAME="datasets--$(echo "$REPO_ID" | sed 's/\//--/g')"
-        HF_DATASET_CACHE=$(find "$HF_CACHE_DIR" -maxdepth 3 -type d -name "snapshots" -path "*${HF_REPO_CACHE_NAME}*" 2>/dev/null | head -1)
+        # ⚠ EXACT-DIR anchor (root-cause 2026-07-11). A trailing-`*` substring glob
+        # (`-path "*${HF_REPO_CACHE_NAME}*"`) also matches SIBLING datasets that merely
+        # share the prefix — e.g. `datasets--DCAgent2--terminal_bench_2` vs the README-
+        # only `datasets--DCAgent2--terminal_bench_2_a3_rl_SankalpKJ_...` — and `head -1`
+        # deterministically picked the task-less sibling, sending the block into the
+        # silent-exit trap below. Anchor the segment exactly: `*/${NAME}/snapshots`
+        # matches ONLY the dir whose name is exactly $HF_REPO_CACHE_NAME. The
+        # `{ ...; || true; }` wrap also neutralises the find|head SIGPIPE pipefail risk.
+        HF_DATASET_CACHE=$( { find "$HF_CACHE_DIR" -maxdepth 3 -type d -name "snapshots" -path "*/${HF_REPO_CACHE_NAME}/snapshots" 2>/dev/null || true; } | head -1)
         if [ -n "$HF_DATASET_CACHE" ]; then
-            HF_SNAPSHOT=$(ls -dt "$HF_DATASET_CACHE"/*/ 2>/dev/null | head -1)
+            HF_SNAPSHOT=$( { ls -dt "$HF_DATASET_CACHE"/*/ 2>/dev/null || true; } | head -1)
             if [ -n "$HF_SNAPSHOT" ]; then
-                HF_TASK_COUNT=$(ls -d "$HF_SNAPSHOT"/*/instruction.md 2>/dev/null | wc -l)
+                # Same set -eo pipefail silent-exit trap as the local-dir count above.
+                HF_TASK_COUNT=$( { ls -d "$HF_SNAPSHOT"/*/instruction.md 2>/dev/null || true; } | wc -l)
                 echo "[DEBUG] Found $HF_TASK_COUNT tasks in HF cache: $HF_SNAPSHOT"
                 if [ "$HF_TASK_COUNT" -gt 0 ]; then
                     TASK_COUNT=$HF_TASK_COUNT
