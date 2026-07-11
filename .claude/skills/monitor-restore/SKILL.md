@@ -102,12 +102,16 @@ LEONARDO CAMPAIGN DRIVER (the priority — drive it every sweep):
   then fire the Delphi downstream eval suite (`eval-standard-launch` §5b).
 - The **SummarizationTimeoutError-deflated re-eval campaign (a1-`<benchmark>` models)** — re-evaluating
   `DCAgent/a1-<benchmark>` evals that the SummarizationTimeoutError bug deflated (zhuang1 + richard.zhuang owners),
-  scored on tb2 / swebench / dev_set_v2. **Tracker (source of truth):
-  `~/Documents/experiments/active/flawed_summ_evals/reeval_tracker.md`** (NOT the old `notes/ot-agent/…` path);
-  the affected universe is `affected_evals.md` in the same dir. **Driver** (per the tracker's "🚦 CAMPAIGN DRIVER"
-  section): each sweep, (1) HARVEST every leg gone terminal since the last pass — read new_score, compute
-  `delta = new_score − old_deflated`, flip the row `🚀 → ✅/⚠️`, flag genuinely-negative deltas beyond ~1 stderr;
-  (2) REFILL the next still-`⏳ pending` **Section A** rows (Section A before B) until the **in-flight target the
+  scored on tb2 / swebench / dev_set_v2. **Source of truth (2026-07-11, split policy/worklist/history):
+  `~/Documents/experiments/active/flawed_summ_evals/POLICY.md`** = the canonical directive (READ + drive off it),
+  **`STATE.md`** = the per-row worklist (registered/in-flight/blocked/pending across the 1391-row universe — pick the
+  next rows to resume from here), **`reeval_tracker.md`** = the append-only sweep-history LOG. **Core policy
+  (POLICY.md):** resume EVERY non-registered row until it registers (NO give-up / NO strike limit — the gate is
+  infra-quality, so any clean re-fire passes; root-cause + fix the blocker in parallel); ONE benchmark at a time
+  (warm snapshots); clean stale snapshots across ALL Daytona accounts each sweep. **Driver:** each sweep,
+  (1) HARVEST every leg gone terminal since the last pass — read new_score, compute
+  `delta = new_score − old_deflated`, flip the STATE.md row → registered, flag genuinely-negative deltas beyond ~1
+  stderr; (2) RE-FIRE flaked/below-gate rows FIRST, then REFILL the next still-`pending` rows until the **in-flight target the
   tracker records for this series** — read it from the tracker's "🚦 CAMPAIGN DRIVER" / latest-sweep "Target =" line.
   The count is a **property of the experiment series, NOT this skill — do NOT hardcode a number here**; look it up
   each sweep (it is raised/lowered by directive in the tracker). **The refill CLUSTER is likewise read from the
