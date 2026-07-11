@@ -206,9 +206,17 @@ just deduped to 1 copy/dp-group (8 × ~4.6 GB ≈ 37 GB). The driver-centralizat
   and **`Finished: fwd_logprobs` at 01:50 with NO DispatchPutTimeout — the store never overflowed** (no
   `_ray_put_bounded`/`ObjectStoreFull` in-window; only 8 benign spills over 4.6h), then proceeded into the gs1
   optimizer step. ⚠ Strong but not yet conclusive across steps — **the forward took ~2h9m** (completed, not a
-  hang, but slow cadence); confirm no DispatchPutTimeout recurs at the gs2 forward + measure step cadence before
-  declaring Fix B fully closed. Fix A (above) makes the store cap a non-issue by design and is the durable answer;
-  Fix B is the config-only mitigation that keeps the 80B training on the default 96 GB store today.
+  hang, but slow cadence). **UPDATE 2026-07-11 — Fix B FULLY VINDICATED, but a SEPARATE new failure killed the run:**
+  across the ENTIRE 8.85h run there was **zero `DispatchPutTimeout`/`ObjectStoreFull`/`_ray_put_bounded` at any
+  forward — the store never overflowed.** The overflow path is CLEARED; Fix B does not need revisiting. The job
+  instead died at the **gs1 OPTIMIZER step** (`policy_train`, ~4 min after it started 01:50) on an NCCL-collective
+  hang — a `default_pg` ALLREDUCE `SeqNum=288606 NumelIn=1` (a barrier/grad-norm reduce) hung 01:54→timeout 02:14,
+  then `mesh_fsdp _ALLGATHER_BASE SeqNum=6936` timeout 02:55 → SIGABRT on FSDP policy workers → raylet
+  worker-death cascade (epicenter 10.184.199.67), no recovery (failure_count stayed 0 → held the 128-H100 gang
+  wedged indefinitely; state-poll "running/16pods" was the colocated-vLLM-engine deception). global_step never
+  reached 1. This is a NEW/untested code path — the FIRST backward+optimizer at 80B EP8×FSDP8×CP1 — NOT a Fix-A/B
+  regression. See the separate 80B-gs1-optimizer-hang agent_log. Fix A (below) makes the store cap a non-issue by
+  design and is the durable answer; Fix B is the config-only mitigation that keeps the 80B on the 96 GB store today.
 - **✅ Fix A (the REAL structural fix — PLUMBING VALIDATED 2026-07-11 on a 2-node CoreWeave smoke):** get R3 out
   of the DRIVER plasma entirely — route the captured routed-experts **generation-worker → node-resident consumer**,
   so the head holds ~0 R3 (O(1) in model scale — the bounded-footprint property a scale-up demands). Gated behind
