@@ -1282,7 +1282,12 @@ vista = HPC(
     # NODE_FAIL + log "srun: error: Node failure on c608-042". It hosted rank 1; that node died in
     # early init, and rank 0 (c608-041) NCCL-watchdog'd ~90s later on "remote process exited or
     # there was a network error" (the symptom, not the cause). agent_logs/2026-07-10_tacc_sft_820379_nccl_watchdog.md.
-    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051,c636-152,c608-042",
+    # c634-142 added 2026-07-11 from job 822309 (axolotl Qwen3-32B SFT, exp _14, died step 9 ~16:59
+    # CDT): SLURM State NODE_FAIL + log "srun: error: Node failure on c634-142". It hosted rank 11 —
+    # the ONE task not in srun's terminated list (the node died before srun could kill it); rank 10
+    # (c622-151) merely NCCL-watchdog-timed-out waiting on the dead peer's _ALLGATHER_BASE (symptom,
+    # not cause).
+    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051,c636-152,c608-042,c634-142",
     # Runtime configuration for Ray/vLLM
     modules=["gcc/15.1.0", "cuda/12.8", "tacc-apptainer"],
     conda_activate="source $SCRATCH/miniconda3/etc/profile.d/conda.sh && conda activate $SCRATCH/miniconda3/envs/vllm_sandboxes",
