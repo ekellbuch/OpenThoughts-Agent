@@ -1278,7 +1278,11 @@ vista = HPC(
     # single-rank straggler (rank 8) — the ONLY rank whose "last enqueued NCCL work" lagged
     # (335264 vs 335268 on all 15 others) → it never joined the _ALLGATHER_BASE the others
     # blocked on. Single-node straggler w/ healthy loss to the hang = flaky node, not a config bug.
-    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051,c636-152",
+    # c608-042 added 2026-07-11 from job 821885 (7th pre-step-100 transient today): SLURM State
+    # NODE_FAIL + log "srun: error: Node failure on c608-042". It hosted rank 1; that node died in
+    # early init, and rank 0 (c608-041) NCCL-watchdog'd ~90s later on "remote process exited or
+    # there was a network error" (the symptom, not the cause). agent_logs/2026-07-10_tacc_sft_820379_nccl_watchdog.md.
+    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051,c636-152,c608-042",
     # Runtime configuration for Ray/vLLM
     modules=["gcc/15.1.0", "cuda/12.8", "tacc-apptainer"],
     conda_activate="source $SCRATCH/miniconda3/etc/profile.d/conda.sh && conda activate $SCRATCH/miniconda3/envs/vllm_sandboxes",
