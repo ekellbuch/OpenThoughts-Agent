@@ -58,3 +58,41 @@ but not others — see `mum`).
 `initialize_from_hf` = the matching base; optimizer = Muon dual-LR (`learning_rate` matrix + `adam_lr`),
 `lr_schedule: linear`, `warmup: 0.1`, `min_lr_ratio: 0`; tokenizer `meta-llama/Meta-Llama-3.1-8B`, seq_len 4096,
 `block_cross_document_attention: true`. Configs pulled to `~/Documents/experiments/active/midtrain-25B/configs/`.
+
+## Checkpoint & resume gotchas (production — `delphi_1e22`, 2026-07-11)
+
+- **⚠ RESUME-ONLY OOM = BFC-allocator fragmentation → fix with the `cuda_async` DEFRAG allocator.** A large-model
+  run trains fine from step 0 but, on RESUME, semi-deterministically OOMs at (or a few thousand steps after) the
+  first post-resume step: `RESOURCE_EXHAUSTED: … allocate <N>GiB [executable_name='jit__train_step']`, while the BFC
+  free-map shows plenty of FREE HBM but **no contiguous hole**. Cause: on resume, tensorstore materializes params +
+  Adam μ/ν on-device in a layout differing from the compiled step's, and the default **BFC allocator can't compact**
+  → the step's large transient contiguous block can't be placed against the load-fragmented heap (steady-state
+  in-place reuse never has to). Fragmentation, not a real shortage — marin issue **#7115** (proper upstream fix =
+  buffer donation across the resume boundary). **FIX (allocator plumbing only, math-neutral): switch to `cuda_async`**
+  — `JAX_PJRT_CLIENT_CREATE_OPTIONS=allocator:cuda_async` (env: `SINGULARITYENV_…`; + mirror in the executor's
+  `trainer.jax_config` as `"jax_pjrt_client_create_options":"allocator:cuda_async"`, re-listing the DEFAULT_JAX_CONFIG
+  keys since supplying `jax_config` REPLACES them). **⚠ ALLOCATOR-ENV TRAP (version-specific):** on jax/jaxlib
+  **0.10.1 + `jax_cuda13`** the allocator comes from the PJRT create-options dict, populated ONLY by
+  `JAX_PJRT_CLIENT_CREATE_OPTIONS` — so **`XLA_PYTHON_CLIENT_ALLOCATOR=platform` is INERT** (older-JAX flag), and
+  `TF_GPU_ALLOCATOR=cuda_malloc_async` is inert too (a TF var). Verify via `device.memory_stats()['pool_bytes']` —
+  **None = cuda_async (good), numeric = still BFC**. **Do NOT also set `XLA_PYTHON_CLIENT_MEM_FRACTION`** with
+  cuda_async (0.90 shrinks out-of-pool headroom to ~6.5 GB — risky for NCCL/cublas; the 0.75 default leaves ~16 GB).
+
+- **⚠ Wall-SIGKILL mid-save orphans a metadata-only staging checkpoint that POISONS resume discovery.** If SIGKILL'd
+  at the wall *during* a save, Levanter leaves a ghost `step-<N>/` in the atomic-write staging mirror
+  `<exp>/tmp/checkpoints-temp/…/checkpoints/step-<N>/` with **only `metadata.json` (~80 B)** — no `d/`, no
+  `manifest.ocdbt`, no tensors (post-save cleanup + atomic rename never ran). Discovery scans INTO the staging
+  mirror, sees the ghost `> ` the last complete step, picks it → **all ranks `FileNotFoundError` on every tensor
+  leaf in <33s, 0 steps**, every afterany resume identical. The crash-teardown `grpc … UNAVAILABLE … Connection
+  refused` is NOISE, not the cause (`jax.distributed.initialize` actually succeeded — ranks jointly log "Discovered
+  latest checkpoint at step-<ghost>"; don't chase a coordinator red herring). **Fix:** `rm -rf
+  <exp>/tmp/checkpoints-temp` (the real `checkpoints/step-*` tree is untouched) → discovery falls back to the last
+  complete step (verify the ghost is metadata-only + the fallback has `d/`+`manifest.ocdbt` first). **Durable guard:**
+  `rm -rf "$OUT/tmp/checkpoints-temp"` before `srun` so every relaunch self-cleans.
+
+- **Save cadence vs mean-time-to-failure:** `keep: [{every: N}]` retains only every-N permanent keeps; the 30m
+  rolling "latest" is NOT reliably rediscovered after an abnormal (wedge/OOM-hang) termination → resume lands on the
+  last every-N keep. On a flaky cluster where the job dies BETWEEN keeps, it re-resumes the same keep = a
+  no-progress loop. Make `keep` frequent enough to bank progress inside the mean-time-to-failure.
+
+(Full write-ups: `agent_logs/2026-07-10_1e22_dod_resume_chain_jax_coordinator_death.md`.)
