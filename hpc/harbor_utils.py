@@ -931,6 +931,133 @@ def build_harbor_command(
     return cmd
 
 
+def prune_refire_errored_trials(
+    run_dir_uri: str,
+    filter_error_types: List[str],
+    *,
+    log_prefix: str = "",
+) -> Tuple[int, Dict[str, int]]:
+    """Delete infra-errored trial dirs from a Harbor run dir so a subsequent
+    ``harbor jobs start`` AUTO-RESUME re-runs them.
+
+    This is a UPath/fsspec-native, ``gs://``-capable reimplementation of the
+    trial-deletion pass inside ``harbor jobs resume --filter-error-type``.
+
+    WHY not just call ``harbor jobs resume`` (as the Jupiter/Leonardo sbatches
+    do): harbor's ``resume`` CLI (``src/harbor/cli/jobs.py``) opens the job dir
+    with plain ``pathlib.Path`` (``job_dir = Path(job_path)``), so
+    ``-p gs://bucket/...`` fails — ``pathlib`` collapses the ``//`` and the dir
+    "does not exist". The Iris eval writes its durable run dir to GCS, so the
+    SLURM path's ``harbor jobs resume`` call cannot be reused verbatim in-pod.
+
+    This helper applies the SAME deletion criterion harbor's resume uses —
+    remove any trial whose ``result.json``'s
+    ``exception_info.exception_type`` is in ``filter_error_types`` — but through
+    ``upath.UPath`` + harbor's ``safe_rmtree``, so it works on ``gs://``,
+    ``s3://`` AND local paths. After pruning, the existing ``harbor jobs start``
+    auto-resume (which reads the run dir via UPath and re-runs only the
+    now-missing trials, against the LIVE vLLM endpoint the merged ``--config``
+    points at) does the actual re-run. BENIGN "not-solved" results (types NOT in
+    the filter — AgentTimeoutError, ContextLengthExceededError, etc.) are kept:
+    they are valid results, not infra flakes.
+
+    Byte-identical no-op when ``filter_error_types`` is empty/falsey or the run
+    dir does not yet exist (a fresh launch) — nothing is inspected or deleted.
+
+    Returns ``(n_pruned, {exception_type: count})``.
+    """
+    if not filter_error_types:
+        return 0, {}
+    try:
+        from upath import UPath
+        from harbor.models.trial.paths import TrialPaths
+        from harbor.models.trial.result import TrialResult
+        from harbor.utils.path_compat import safe_rmtree
+    except ImportError as exc:
+        print(
+            f"{log_prefix}[refire] WARNING: harbor/upath not importable ({exc}); "
+            "skipping errored-trial prune. Auto-resume will run but will NOT "
+            "re-run the infra-errored trials.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 0, {}
+
+    filter_set = set(filter_error_types)
+    job_dir = UPath(run_dir_uri)
+    try:
+        if not job_dir.exists():
+            print(
+                f"{log_prefix}[refire] no existing run dir at {run_dir_uri}; "
+                "nothing to prune (fresh launch).",
+                flush=True,
+            )
+            return 0, {}
+    except Exception as exc:  # noqa: BLE001 — stat can raise on a bad/unauth URI
+        print(
+            f"{log_prefix}[refire] WARNING: could not stat {run_dir_uri} "
+            f"({type(exc).__name__}: {exc}); skipping prune.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 0, {}
+
+    n_pruned = 0
+    breakdown: Dict[str, int] = {}
+    for trial_dir in job_dir.iterdir():
+        try:
+            if not trial_dir.is_dir():
+                continue
+            result_path = TrialPaths(trial_dir).result_path
+            if not result_path.exists():
+                # No result yet -> a genuinely incomplete/missing trial that
+                # auto-resume already re-runs. Leave it alone.
+                continue
+            try:
+                trial_result = TrialResult.model_validate_json(result_path.read_text())
+            except Exception as exc:  # noqa: BLE001
+                # Deliberately MORE conservative than harbor's local-only resume
+                # (which deletes on any parse error): on a REMOTE filesystem a
+                # transient read error must NOT destroy a possibly-valid trial.
+                # Skip + warn; a later pass re-fires it if it is still errored.
+                print(
+                    f"{log_prefix}[refire] WARNING: unreadable result for "
+                    f"{trial_dir.name} ({type(exc).__name__}); leaving in place.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            exc_info = trial_result.exception_info
+            if exc_info is not None and exc_info.exception_type in filter_set:
+                safe_rmtree(trial_dir)
+                n_pruned += 1
+                breakdown[exc_info.exception_type] = (
+                    breakdown.get(exc_info.exception_type, 0) + 1
+                )
+        except Exception as exc:  # noqa: BLE001 — never let one bad dir abort the sweep
+            print(
+                f"{log_prefix}[refire] WARNING: error handling {trial_dir} "
+                f"({type(exc).__name__}: {exc}); skipping.",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
+
+    if n_pruned:
+        print(
+            f"{log_prefix}[refire] pruned {n_pruned} infra-errored trial dir(s) "
+            f"from {run_dir_uri} so auto-resume re-runs them: {breakdown}",
+            flush=True,
+        )
+    else:
+        print(
+            f"{log_prefix}[refire] no trials matched the infra filter "
+            f"{sorted(filter_set)} in {run_dir_uri}; nothing to re-run.",
+            flush=True,
+        )
+    return n_pruned, breakdown
+
+
 def _sync_runtime_fields_into_config_json(
     *,
     config_json_path: "Path",
@@ -1098,6 +1225,7 @@ __all__ = [
     "default_job_name",
     # Command building and execution
     "build_harbor_command",
+    "prune_refire_errored_trials",
     "merge_harbor_config",
     "run_harbor_cli",
 ]

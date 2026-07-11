@@ -42,6 +42,21 @@ from hpc.datagen_config_utils import parse_datagen_config
 from hpc.hf_utils import is_hf_dataset_path
 from hpc.launch_utils import PROJECT_ROOT
 from eval.presets import load_presets
+from database.unified_db.infra_errors import INFRA_ERROR_TYPES
+
+# Default re-fire filter: the non-benign INFRA error types a warm-dir re-fire
+# should DELETE-and-re-run (so the harbor auto-resume actually re-runs them
+# instead of keeping their errored trial dirs — the campaign no-op bug). This is
+# the shared INFRA_ERROR_TYPES set (the single source of truth the Jupiter/
+# Leonardo sbatches' `harbor jobs resume --filter-error-type` derives from) UNION
+# two POLICY.md non-benign types not (yet) in that set. BENIGN types
+# (AgentTimeoutError, ContextLengthExceededError, SummarizationTimeoutError/Error,
+# BadRequestError, NonZeroAgentExitCodeError, VerifierRuntimeError) are
+# deliberately EXCLUDED — they are valid "not-solved" results, not infra flakes,
+# and must NOT be re-run.
+DEFAULT_REFIRE_ERROR_TYPES = sorted(
+    set(INFRA_ERROR_TYPES) | {"DaytonaValidationError", "VerifierTimeoutError"}
+)
 
 # Preset fields with no Iris analog (SLURM orchestrator / vLLM-serve only, or fields
 # Iris forces via a different channel). Listed explicitly so the applied/ignored split
@@ -149,6 +164,28 @@ class EvalIrisLauncher(IrisLauncher):
         )
 
         # NOTE: --job_name comes from add_harbor_args above.
+
+        # Re-fire errored-trial filter. On a warm-dir re-fire (same --job_name /
+        # --resume-from onto an existing run dir), a plain relaunch triggers
+        # harbor AUTO-RESUME, which KEEPS infra-errored trial dirs (they have
+        # exception_info + no reward -> counted "done") and re-runs only truly-
+        # missing trials -> the errored trials NEVER re-run (the campaign no-op).
+        # These types are deleted before auto-resume so they DO re-run — the
+        # gs://-capable analog of the Jupiter/Leonardo sbatch's
+        # `harbor jobs resume --filter-error-type`. Repeatable; defaults to the
+        # non-benign infra set. Pass 'none' (or '') to DISABLE (plain auto-resume).
+        parser.add_argument(
+            "--refire-filter-error-type",
+            "--refire_filter_error_type",
+            dest="refire_filter_error_types",
+            action="append",
+            default=None,
+            help="Infra exception type to delete-and-re-run on a warm-dir "
+                 "re-fire (repeatable). Default: the non-benign infra set "
+                 f"{DEFAULT_REFIRE_ERROR_TYPES}. Pass 'none' to DISABLE pruning "
+                 "(errored trials will NOT be re-run). A fresh launch with no "
+                 "existing run dir is unaffected either way.",
+        )
 
         add_hf_upload_args(parser)
         add_database_upload_args(parser)
@@ -337,6 +374,29 @@ class EvalIrisLauncher(IrisLauncher):
         from hpc.model_config_apply import apply_to_launcher
         apply_to_launcher(args, log_prefix="[eval-iris]", iris=True)
 
+        # Resolve the re-fire infra-error filter. Unset -> the default non-benign
+        # set (ON; harmless on a fresh launch — there is no run dir to prune).
+        # An explicit 'none'/'off'/'' DISABLES pruning (plain auto-resume). Any
+        # explicit type(s) REPLACE the default. The resolved list is baked into
+        # the run_eval command in build_task_command.
+        raw_refire = getattr(args, "refire_filter_error_types", None)
+        if raw_refire is None:
+            args.refire_filter_error_types = list(DEFAULT_REFIRE_ERROR_TYPES)
+        elif any(str(v).strip().lower() in ("", "none", "off") for v in raw_refire):
+            args.refire_filter_error_types = []
+            print(
+                "[eval-iris] re-fire errored-trial pruning DISABLED "
+                "(--refire-filter-error-type none): a warm-dir re-fire will NOT "
+                "re-run infra-errored trials."
+            )
+        else:
+            args.refire_filter_error_types = list(raw_refire)
+        if args.refire_filter_error_types:
+            print(
+                "[eval-iris] re-fire filter (delete + re-run these on an existing "
+                f"run dir): {args.refire_filter_error_types}"
+            )
+
         if args.harbor_env == "docker":
             print(
                 "[eval-iris] WARNING: --harbor_env=docker on an iris worker requires "
@@ -469,6 +529,13 @@ class EvalIrisLauncher(IrisLauncher):
             # "looks like an option" heuristic and gets rejected with
             # "argument --harbor_extra_arg: expected one argument".
             cmd.append(f"--harbor_extra_arg={extra}")
+
+        # Bake the resolved re-fire filter into the in-pod run_eval command. On a
+        # warm-dir re-fire, run_eval prunes trials with these error types before
+        # auto-resume so they re-run. Empty (disabled) -> nothing baked ->
+        # run_eval's default (no pruning) -> byte-identical to the old behavior.
+        for _et in getattr(args, "refire_filter_error_types", None) or []:
+            cmd.extend(["--refire_filter_error_type", _et])
 
         if args.upload_to_database:
             cmd.append("--upload_to_database")

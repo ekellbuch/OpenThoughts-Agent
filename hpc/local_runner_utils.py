@@ -45,6 +45,7 @@ from hpc.harbor_utils import (
     serialize_agent_kwargs,
     default_job_name,
     build_harbor_command,
+    prune_refire_errored_trials,
     merge_agent_kwargs,
     collect_extra_agent_kwargs,
     resolve_jobs_dir_path,
@@ -1366,6 +1367,49 @@ class LocalHarborRunner:
                     print(
                         f"[{self.JOB_PREFIX}-local] opencode routing: model={harbor_model} "
                         f"OPENAI_BASE_URL={opencode_base_url}",
+                        flush=True,
+                    )
+
+                # --- RE-FIRE: prune infra-errored trials before auto-resume -----
+                # On a same-identity relaunch (same run dir / --resume-from), the
+                # `harbor jobs start` command below AUTO-RESUMES: it keeps EVERY
+                # existing trial dir and re-runs only truly-missing ones. An
+                # infra-errored trial (DaytonaAuthenticationError, etc.) still has
+                # a dir (exception_info, no reward), so auto-resume treats it as
+                # "done" and never re-runs it — making a warm-dir re-fire a NO-OP
+                # for infra flakes. When the eval launcher enabled a re-fire filter
+                # (args.refire_filter_error_types — datagen/other callers never set
+                # it, so this whole block is skipped there), DELETE the matching
+                # errored trial dirs FIRST so auto-resume sees them as missing and
+                # re-runs them against the live endpoint. This is the gs://-capable
+                # analog of the Jupiter/Leonardo sbatch's
+                # `harbor jobs resume --filter-error-type` (harbor's `resume` CLI
+                # uses plain pathlib.Path and cannot open the iris GCS run dir; see
+                # prune_refire_errored_trials). Fresh launch (no run dir) / empty
+                # filter -> no-op. Never prune on --dry_run (destructive).
+                refire_types = getattr(args, "refire_filter_error_types", None)
+                if refire_types and not args.dry_run:
+                    refire_root = _extract_injected_jobs_dir(
+                        getattr(args, "harbor_extra_arg", None)
+                    ) or (str(getattr(args, "_jobs_dir_path", "") or "") or None)
+                    if refire_root:
+                        refire_run_dir = f"{refire_root.rstrip('/')}/{job_name}"
+                        prune_refire_errored_trials(
+                            refire_run_dir,
+                            list(refire_types),
+                            log_prefix=f"[{self.JOB_PREFIX}-local] ",
+                        )
+                    else:
+                        print(
+                            f"[{self.JOB_PREFIX}-local][refire] no jobs-dir resolved; "
+                            "cannot locate the run dir to prune errored trials (skipping).",
+                            flush=True,
+                        )
+                elif refire_types and args.dry_run:
+                    print(
+                        f"[{self.JOB_PREFIX}-local][refire] --dry_run: would prune "
+                        f"trials with error types {sorted(set(refire_types))} before "
+                        "auto-resume (skipped under dry-run).",
                         flush=True,
                     )
 

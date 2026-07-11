@@ -82,6 +82,29 @@ class EvalRunner(LocalHarborRunner):
         )
         parser.add_argument("--experiments-dir", dest="experiments_dir", help=argparse.SUPPRESS)
 
+        # Re-fire errored-trial pruning. On a warm-dir re-fire (an existing run
+        # dir), delete trials whose exception_info.exception_type is one of these
+        # BEFORE the harbor auto-resume, so those infra-errored trials re-run
+        # (the gs://-capable analog of `harbor jobs resume --filter-error-type`).
+        # Repeatable; empty/unset -> no pruning (auto-resume keeps errored trials,
+        # i.e. the historical no-op behavior). The Iris launcher bakes the
+        # resolved non-benign infra set here; a direct run_eval invocation must
+        # pass the types explicitly.
+        parser.add_argument(
+            "--refire_filter_error_type",
+            dest="refire_filter_error_types",
+            action="append",
+            default=None,
+            help="Exception type to delete-and-re-run on a warm-dir re-fire "
+                 "(repeatable). Unset -> no pruning.",
+        )
+        parser.add_argument(
+            "--refire-filter-error-type",
+            dest="refire_filter_error_types",
+            action="append",
+            help=argparse.SUPPRESS,
+        )
+
         # Upload options (shared from arg_groups)
         add_hf_upload_args(parser)
         add_database_upload_args(parser)
