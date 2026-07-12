@@ -87,14 +87,17 @@ tf32: false
 gradient_checkpointing: true
 
 logging_steps: 5
-# save_steps lowered 100->30 (2026-07-10) ->10 (2026-07-11): TACC GH200 IB fabric keeps hanging
-# this 16-node chain (818554/820379/822306 — 3 NCCL fabric timeouts in 2 days). 822306 hung at
-# step ~14 (~1h20m) — BEFORE the save_steps=30 checkpoint (~2.8h at 338 s/it) — so it banked
-# nothing and restarted from 0 (the no-progress loop). save_steps=10 checkpoints at ~56 min, INSIDE
-# the mean-time-to-hang, turning restart-from-0 into resume-from-N. save_total_limit=1 keeps disk
-# bounded. Learning-neutral (save cadence only). agent_logs/2026-07-11_tacc_sft_822306_nccl_reduce_scatter_hang.md.
-save_steps: 10
-save_total_limit: 1
+# save_steps RAISED back to 200 (2026-07-12): the low cadences (100->30->10) were a DEBUG band-aid
+# for the step-10 save-gather NCCL hang, which is now FIXED at the source by the sharded-save
+# deepspeed config (gather_16bit_weights_on_model_save:false; zero3_bf16_shardsave.json) — saves no
+# longer do the 16-node _ALLGATHER_BASE that deadlocked, so there's no reason to checkpoint every 10
+# steps (that banked ~8 wasteful 32B ZeRO-3 shard sets by step 85). 200 is the normal cadence: for a
+# 704-step run that's saves at 200/400/600 + the final. save_total_limit=3 caps disk (latest 3 shard
+# sets kept — safe for auto_resume, which needs the latest intact; NOT 1, which risks losing the
+# latest mid-rotation). Learning-neutral (save cadence only).
+# agent_logs/2026-07-12_tacc_axolotl32b_nccl_save_gather_hang.md.
+save_steps: 200
+save_total_limit: 3
 # Resume from the latest output_dir checkpoint on relaunch — makes `--max_restarts` / an
 # afterany chain leg RESUME (not restart from step 0) for the axolotl backend. Needs the
 # translator passthrough (hpc/axolotl_config_utils.py). Fresh runs (empty output_dir) start
