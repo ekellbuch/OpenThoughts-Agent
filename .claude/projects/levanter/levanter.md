@@ -96,3 +96,31 @@ but not others — see `mum`).
   no-progress loop. Make `keep` frequent enough to bank progress inside the mean-time-to-failure.
 
 (Full write-ups: `agent_logs/2026-07-10_1e22_dod_resume_chain_jax_coordinator_death.md`.)
+
+## Throughput / mesh perf gotchas
+
+- **XLA "Involuntary full rematerialization" on a small square mesh ([4,4]) throttles `scan(layer)` throughput.**
+  On a `[4,4]` device mesh, XLA reshards the scanned-transformer-layer activation carry (the `scan(layer)` +
+  gradient-checkpointing loop-carried state) inefficiently and emits `Involuntary full rematerialization`
+  warnings — recomputing more than necessary. **THROUGHPUT-ONLY, not a correctness issue** (loss/result
+  unaffected; do not chase it as a bug). On the delphi 1e22 SFT (dense 9.7B, 16× A100 = `[4,4]` mesh, seq 4096,
+  packed) this is the dominant reason its MFU (~18%, real/packed) trails an equivalent LLaMA-Factory run by ~2× —
+  the lever is **mesh/axis-mapping tuning** (a non-square or differently-mapped device mesh), NOT the data
+  pipeline (packing IS on — see the parity note below). Observed 2026-07-09 (job 49038797); relocated here from
+  the run tracker 2026-07-12 (codebase gotcha, not run-specific).
+
+## Sequence packing (chat SFT) — ON by default, and the step-count trap
+
+- **`ChatLmDatasetFormat` PACKS by default.** With `pack` unset, `_effective_pack()` (`data/datasets.py:365`)
+  returns `True` for chat → builds a greedy packer (`GreedyPrepackedDataset`, `max_segments_per_example=64`)
+  that fills each `seq_len` slot with multiple conversations. There is **no chat pad-to-seq_len path**
+  (`pack=="pad"` raises `NotImplementedError`). Cross-sample isolation is correct: the packer emits
+  `segment_ids` + `AttentionMask.causal().with_segment_ids(…)` and `block_cross_document_attention` defaults
+  `True` — no attention leak between packed conversations, per-segment completion mask preserved.
+- **⚠ STEP-COUNT TRAP (bit delphi_1e22): `num_train_steps` must account for packing.** Levanter SFT is
+  step-based (no config-level epoch cap wired — the `EpochDataset(max_epochs=N)` primitive at
+  `data/dataset.py:362` exists but is not constructed by `train_lm`). Computing `num_train_steps` as
+  `rows / weight / global_batch` assumes **one doc per slot** → with packing (~6 docs/slot for short
+  instruction data) that's **~6× too many steps = ~6× over-training** (delphi_1e22 ran 34,722 steps = ~6.5
+  epochs; near-zero loss = the symptom). For 1 packed epoch use `packed_examples / weight / global_batch`
+  (`packed_examples ≈ total_tokens / seq_len`). (Observed 2026-07-12.)
