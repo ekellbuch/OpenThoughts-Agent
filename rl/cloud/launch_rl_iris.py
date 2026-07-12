@@ -596,6 +596,17 @@ def create_parser() -> argparse.ArgumentParser:
         help="Per-broadcast dim-0 row budget for the streamed EP full-state-dict loader "
              "(SKYRL_EP_LOADER_CHUNK_ROWS). Default: unset = 8.",
     )
+    g.add_argument(
+        "--collective-count-diag", dest="collective_count_diag", choices=["on", "off"], default=None,
+        help="GC-proof per-rank default-PG collective-count instrumentation "
+             "(SKYRL_COLLECTIVE_COUNT_DIAG), a DIAGNOSTIC knob for the 80B gs1 NCCL "
+             "desync. Logs each policy rank's default-PG collective count at forward "
+             "phase boundaries (forward/_forward_impl enter+exit + the first MoE-EP "
+             "all-to-all per forward) to the finelog, which survives pod GC — diffing "
+             "the counts across ranks at the wedge localizes the divergent EP group. "
+             "O(phases), reads torch's own PG seq counter (no perturbation). "
+             "Default: unset = off.",
+    )
 
     parser.add_argument(
         "--dry-run", "--dry_run", dest="dry_run", action="store_true", default=False,
@@ -644,6 +655,7 @@ def build_skyrl_flag_env(args: argparse.Namespace) -> dict[str, str]:
     _onoff("SKYRL_W13_RELOAD_BRACKET", args.w13_reload_bracket)
     if args.ep_loader_chunk_rows is not None:
         env["SKYRL_EP_LOADER_CHUNK_ROWS"] = str(args.ep_loader_chunk_rows)
+    _onoff("SKYRL_COLLECTIVE_COUNT_DIAG", args.collective_count_diag)
     return env
 
 
@@ -685,6 +697,30 @@ def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
             v = int(v)
         out[str(k)] = str(v)
     return out
+
+
+def _job_scope_fr_dump_path(prefix: str, job_name: str) -> str:
+    """Rewrite a JOB-SCOPED NCCL flight-recorder dump path so its slug segment is the
+    ACTUAL job name, e.g. ``/tmp/fr_dumps/<slug>/nccl_fr_rank`` -> ``/tmp/fr_dumps/
+    <job_name>/nccl_fr_rank``.
+
+    WHY (2026-07-11 FR-slug bug): the 80B configs hardcode
+    ``TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /tmp/fr_dumps/80b-next-cp1/nccl_fr_rank`` in
+    their ``extra_env:``, so a run launched under a DIFFERENT ``--job-name`` (e.g.
+    ``80b-next-cp1-r3d2``) still wrote its FR dumps under the stale ``80b-next-cp1``
+    slug (harmless there, but wrong — a future FR dump would land under the wrong
+    slug). Deriving the slug from the live job name keeps the dump under the right
+    per-job dir. The controller's ``ensure_fr_dump_dir`` mkdir -p's whatever dirname
+    the cvar carries, so overriding the cvar here is sufficient.
+
+    ONLY rewrites the job-scoped ``.../fr_dumps/<slug>/<file>`` pattern; a bare
+    generic path (``/tmp/nccl_fr_rank``, which every non-80B iris config uses) has no
+    slug segment and is returned UNCHANGED (byte-identical for those configs)."""
+    parent = os.path.dirname(prefix)          # e.g. /tmp/fr_dumps/<slug>
+    grandparent = os.path.dirname(parent)     # e.g. /tmp/fr_dumps
+    if os.path.basename(grandparent) != "fr_dumps":
+        return prefix                         # not a job-scoped fr_dumps path; leave it
+    return os.path.join(grandparent, job_name, os.path.basename(prefix))
 
 
 def normalize(args: argparse.Namespace) -> None:
@@ -904,6 +940,14 @@ def main() -> int:
     print(f"[rl-iris] Per node:   cpu={args.cpu} memory={args.memory} disk={args.disk}", flush=True)
     print(f"[rl-iris] Priority:   {args.priority}", flush=True)
     print(f"[rl-iris] RL config:  {args.rl_config}  model={args.model_path}", flush=True)
+    # Surface the resolved SKYRL_* runtime-knob flag env here (before the --dry-run
+    # return) so a dry-run confirms e.g. --collective-count-diag actually resolves.
+    # This is display-only; main() re-derives it (idempotent, pure fn of args) below.
+    _flag_env_preview = build_skyrl_flag_env(args)
+    if _flag_env_preview:
+        print("[rl-iris] SKYRL flag env: "
+              f"{', '.join(f'{k}={v}' for k, v in sorted(_flag_env_preview.items()))}",
+              flush=True)
     if args.num_nodes > 1:
         print(f"[rl-iris] Rendezvous: {args.rendezvous_dir}", flush=True)
     print(f"[rl-iris] Command:    {shlex.join(command)}", flush=True)
@@ -978,6 +1022,18 @@ def main() -> int:
     if config_extra_env:
         env_vars.update(config_extra_env)
         print(f"[rl-iris] Config extra_env: {', '.join(sorted(config_extra_env))}", flush=True)
+    # FR-slug fix: a config may hardcode a JOB-SCOPED NCCL flight-recorder dump path
+    # (/tmp/fr_dumps/<slug>/nccl_fr_rank) with a STALE slug from the config it was
+    # copied from. Re-scope the slug to the live --job-name so a future FR dump lands
+    # under the right per-job dir (the controller mkdir -p's the cvar's dirname). No-op
+    # for the bare generic /tmp/nccl_fr_rank path every non-80B config uses.
+    for _fr_cvar in ("TORCH_NCCL_DEBUG_INFO_TEMP_FILE", "TORCH_FR_DUMP_TEMP_FILE"):
+        _old = env_vars.get(_fr_cvar)
+        if _old:
+            _new = _job_scope_fr_dump_path(_old, args.job_name)
+            if _new != _old:
+                env_vars[_fr_cvar] = _new
+                print(f"[rl-iris] FR-slug re-scope: {_fr_cvar} {_old} -> {_new}", flush=True)
     if args.rendezvous_dir:
         env_vars["OT_AGENT_IRIS_RENDEZVOUS_DIR"] = args.rendezvous_dir
     env_vars["OT_AGENT_IRIS_RAY_PORT"] = str(args.ray_port)

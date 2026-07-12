@@ -167,11 +167,17 @@
 #     --model_path Qwen/Qwen3-Next-80B-A3B-Thinking \
 #     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
 #     --num-nodes 16 --gpus_per_node 8 --cpu 48 --max-retries 3 \
-#     --skyrl-ref e9b2f10d \
+#     --skyrl-ref 68627485 \
 #     --daytona-api-key-env DAYTONA_RL_API_KEY \
 #     --rendezvous-dir s3://marin-us-east-02a/iris/80b-naive-map/cp1 \
 #     --job-name 80b-next-cp1 --priority interactive --no-wait
 #   (append --dry-run instead of --no-wait to validate the rendered geometry.)
+#   --skyrl-ref bumped e9b2f10d -> 68627485 (2026-07-12): adds the GC-proof per-rank
+#     default-PG collective-count instrumentation for the gs1 NCCL desync (default OFF;
+#     pass --collective-count-diag on for a diagnostic capture run). Also: the FR dump
+#     path's slug is now auto-re-scoped to --job-name by the launcher, so a relaunch
+#     under a fresh job name lands its FR dump under the right per-job dir (the hardcoded
+#     TORCH_NCCL_DEBUG_INFO_TEMP_FILE slug below is re-scoped at launch, not stale).
 # =============================================================================
 
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
