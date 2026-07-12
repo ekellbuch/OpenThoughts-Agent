@@ -243,8 +243,10 @@ testpaths = ["tests"]
 # Terminal-Bench task assets (data/*/few-shots/*/tests, data/*/templates) carry
 # the terminal-bench-canary GUID and assert in-container paths — they are
 # benchmark ground-truth run inside the Daytona/Docker container by Harbor, NOT
-# repo tests. Belt-and-suspenders exclusion so pytest never recurses into them.
-norecursedirs = ["data/*/few-shots", "data/*/templates", "*.egg-info", ".git"]
+# repo tests. Belt-and-suspenders exclusion so pytest never recurses into them
+# even if pointed at data/. NOTE: pytest matches norecursedirs against directory
+# BASENAMES (fnmatch), not relative paths — hence bare "few-shots"/"templates".
+norecursedirs = ["few-shots", "templates", "*.egg-info", ".git"]
 markers = [
     "gpu: needs a CUDA/accelerator device (torch/vllm)",
     "cluster: needs a live SLURM or iris/CoreWeave cluster (ssh/squeue/sbatch)",

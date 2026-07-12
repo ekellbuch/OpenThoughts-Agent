@@ -1,7 +1,7 @@
 # Test-suite reorganization — staged plan (SCOPING; propose-only, no code yet)
 
 - **Date:** 2026-07-12
-- **Status:** `scoped — propose-only; no code migrated yet` (gated on operator review)
+- **Status:** `EXECUTED Stages 0/1/2/4 on penfever/working (2026-07-12)` — Stage 0 (markers+conftest+norecursedirs), Stage 1 (`tests/TESTS.md` catalog), Stage 2 (6 genuine suites migrated into `tests/`, incl. the registry script→pytest reshape), Stage 4 (11 ad-hoc `test_*` scripts renamed off the namespace). **Stage 3 = N/A** (every migrated genuine suite was CI-safe; none needed an infra marker). **Stage 5 (flip CI `pytest.yml` to the `-m "not …"` marker lane + `make` targets + README) = PENDING** — deliberately deferred; CI still invokes `pytest tests/`. Suite: **271 → 361 passed + 2 skipped** (363 collected); collect-only clean; ruff `tests/` clean. See `tests/TESTS.md` + the "Execution log" at the bottom.
 - **Target repo:** `OpenThoughts-Agent` · canonical clone `/Users/benjaminfeuer/Documents/OpenThoughts-Agent` · branch `penfever/working`
 - **Isolated working copy (for execution):** `/Users/benjaminfeuer/Documents/staged-work/test-suite-reorg/OpenThoughts-Agent` (rsync-clone + cut `feuer/test-suite-reorg` there — NOT on the canonical clone; see code-create-staged-plan §"Isolated working copy")
 - **This doc:** parent plan + inline per-stage scopes (single-doc form; the suite change is mechanical enough not to warrant per-stage split files).
@@ -217,3 +217,17 @@ def pytest_collection_modifyitems(config, items):
             if item.get_closest_marker(name) and missing():
                 item.add_marker(pytest.mark.skip(reason=f"{name}: {why}"))
 ```
+
+---
+
+## Execution log (2026-07-12, branch `penfever/working`)
+
+Executed on the canonical clone (local = ground truth), not the isolated worktree.
+
+- **Stage 0 ✅** — added `[tool.pytest.ini_options]` (testpaths/markers/norecursedirs) + `tests/conftest.py` skip-guards. Gate: 271 passed, no unknown-marker warnings, ruff clean. Fixed the `norecursedirs` globs to **basenames** (`few-shots`/`templates`) — pytest matches norecursedirs against dir basenames, not the plan's `data/*/…` paths; verified TB assets now excluded even when pytest is pointed at `data/`.
+- **Stage 1 ✅** — `tests/TESTS.md` catalog (every genuine test's home + marker; quarantine + TB-asset + false-positive callouts).
+- **Stage 2 ✅** — migrated the 6 CI-safe group-B suites into `tests/data/…` + `tests/eval/`; relative→absolute import fixes; `test_model_registry_resolve.py` reshaped script→pytest. **One migration-induced regression caught + fixed:** the reshaped registry test mutated `unified_eval_listener` module globals in-process, breaking `tests/eval/test_vllm_parallelism_sizing.py` (fine as a standalone script, leaked under pytest) → guarded with `monkeypatch`. Gate: 361 passed + 2 skipped.
+- **Stage 3 = N/A** — no migrated genuine suite needed an infra marker (all CI-safe unmarked).
+- **Stage 4 ✅** — renamed the 11 group-C ad-hoc `test_*` scripts off the namespace (in place, `*_smoke.py`/`check_*.py`); updated the 2 `test_hpc.py` references. Audit: no ad-hoc `test_*` harness left outside `tests/` (only TB assets + patcher false-positives + the 1 quarantine remain).
+- **Quarantined:** `data/nl2bash_sampled_verified/tests/test_failure_categorization.py` — imports a nonexistent `analyze_failures` module (collection ERROR); left OUTSIDE `tests/` + logged in `tests/TESTS.md` for a separate fix pass.
+- **Stage 5 PENDING** — CI `pytest.yml` still runs `pytest tests/` (green); flipping to the marker lane + `make` targets + `tests/README.md` deferred.

@@ -3,7 +3,8 @@ Pre-download datasets and models for JSC clusters (no internet on compute nodes)
 
 This script only implements and exports the `pre_download_dataset` function.
 
-It is tested in `test_hpc.py`'s `test_pre_download` function.
+It is exercised by `hpc_smoke.py`'s `test_pre_download` function (a manual smoke
+harness, not a pytest test).
 """
 
 import os
