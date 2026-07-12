@@ -513,6 +513,14 @@ extra_env:
   FSSPEC_S3: '{"config_kwargs": {"s3": {"addressing_style": "virtual"}}}'
   HF_HUB_OFFLINE: "1"
   TRANSFORMERS_OFFLINE: "1"
+  # DOWNLOAD-ROBUSTNESS (r3f, 2026-07-12): bound the per-file HF Hub read so a stalled
+  #   prestage socket raises a read-timeout the rc-based `attempt N/K` retry wrapper CAN
+  #   catch, instead of hanging forever with no return code. r3e died in BRING-UP when
+  #   ranks 6 & 12 silently stalled on the node-local 80B prestage download (no rc → the
+  #   retry never fired → only 14/16 Ray nodes joined → rank-0 rendezvous timeout killed
+  #   the gang). Download-robustness ONLY — does NOT change training semantics (the gs1
+  #   A/B stays clean).
+  HF_HUB_DOWNLOAD_TIMEOUT: "60"
   # Force the pure-torch GDN path (the fla wheel is broken). LOAD-BEARING for ANY GDN-arch run.
   SKYRL_GDN_MASK_FLA: "1"
   # R3 Fix A — ROUTER-REPLAY OUT OF THE DRIVER HEAD PLASMA (SKYRL_R3_DECENTRAL, MarinSkyRL
