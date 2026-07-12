@@ -489,3 +489,6 @@ eval/lists/reeval_priority_*.txt
 # names — README.md, EXAMPLE.txt, models_131k.txt, id_evals_*/bfcl_*/dsv2_* — and stay tracked.)
 eval/lists/*_refill_*.txt
 eval/lists/resume_*.txt
+
+# Local throwaway working space (never commit; excluded from the iris workspace bundle)
+scratchpad/
