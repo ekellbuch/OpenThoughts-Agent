@@ -236,6 +236,26 @@ exclude = [
     "tmp*",
 ]
 
+[tool.pytest.ini_options]
+# CI collects only tests/ (the one genuine repo-level suite). Explicit paths
+# passed on the CLI still override this.
+testpaths = ["tests"]
+# Terminal-Bench task assets (data/*/few-shots/*/tests, data/*/templates) carry
+# the terminal-bench-canary GUID and assert in-container paths — they are
+# benchmark ground-truth run inside the Daytona/Docker container by Harbor, NOT
+# repo tests. Belt-and-suspenders exclusion so pytest never recurses into them.
+norecursedirs = ["data/*/few-shots", "data/*/templates", "*.egg-info", ".git"]
+markers = [
+    "gpu: needs a CUDA/accelerator device (torch/vllm)",
+    "cluster: needs a live SLURM or iris/CoreWeave cluster (ssh/squeue/sbatch)",
+    "daytona: needs live Daytona sandbox API + key",
+    "hf: needs HuggingFace hub access (dataset/model download or token)",
+    "supabase: needs Supabase registry creds",
+    "net: needs outbound network / a live LLM or 3rd-party API (LiteLLM/OpenAI/S3)",
+    "slow: long-running (minutes+); excluded from the fast CI lane",
+    "integration: multi-component end-to-end (implies at least one of the above)",
+]
+
 [tool.uv.pip]
 # Default: CUDA 12.8 PyTorch index
 # For ROCm/AMD GPUs (e.g., Frontier), use instead:
