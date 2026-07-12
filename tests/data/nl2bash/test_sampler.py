@@ -15,15 +15,39 @@ def detect_skills(bash_command: str) -> list:
     """
     # Common bash commands to detect
     commands = [
-        'awk', 'sed', 'grep', 'find', 'cat', 'sort', 'uniq', 'head', 'tail',
-        'cut', 'tr', 'wc', 'xargs', 'tar', 'gzip', 'wget', 'curl', 'date',
-        'echo', 'printf', 'ls', 'chmod', 'chown', 'mkdir', 'rm', 'cp', 'mv'
+        "awk",
+        "sed",
+        "grep",
+        "find",
+        "cat",
+        "sort",
+        "uniq",
+        "head",
+        "tail",
+        "cut",
+        "tr",
+        "wc",
+        "xargs",
+        "tar",
+        "gzip",
+        "wget",
+        "curl",
+        "date",
+        "echo",
+        "printf",
+        "ls",
+        "chmod",
+        "chown",
+        "mkdir",
+        "rm",
+        "cp",
+        "mv",
     ]
 
     skills = []
     for cmd in commands:
         # Look for command as a word boundary
-        if re.search(rf'\b{cmd}\b', bash_command):
+        if re.search(rf"\b{cmd}\b", bash_command):
             skills.append(cmd)
 
     return skills
@@ -101,5 +125,5 @@ class TestSamplingConfiguration(unittest.TestCase):
         pass
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -22,11 +22,13 @@ ROOT = Path(__file__).resolve().parents[3]
 # Lazy import of generate to avoid pulling in data.commons (pyarrow) until needed
 _generate_module = None
 
+
 def _get_generate():
     global _generate_module
     if _generate_module is None:
         try:
             import data.negotiation.generate as m
+
             _generate_module = m
         except Exception as e:
             _generate_module = e
@@ -39,7 +41,10 @@ def _get_generate():
 # Verifier reward formula (inline for test independence)
 # ---------------------------------------------------------------------------
 
-def compute_reward(price: float, r_s: float, r_b: float, role: str, eps: float = 1e-9) -> float:
+
+def compute_reward(
+    price: float, r_s: float, r_b: float, role: str, eps: float = 1e-9
+) -> float:
     """Verifier reward formula: A * (u_agent / (TS + eps))."""
     A = 1.0 if (r_s <= price <= r_b) else 0.0
     if A == 0:
@@ -115,11 +120,16 @@ class TestLoadItems(unittest.TestCase):
         except Exception as e:
             self.skipTest(f"generate module unavailable: {e}")
         import random
+
         rng = random.Random(42)
         items = gen.load_items_from_csv(csv_path, zopa_mode="resample", rng=rng)
-        self.assertGreater(len(items), 0, "resample mode should yield items even without ZOPA rows")
+        self.assertGreater(
+            len(items), 0, "resample mode should yield items even without ZOPA rows"
+        )
         for item in items[:10]:
-            self.assertLessEqual(item["r_s"], item["r_b"], "resample must ensure r_s <= r_b")
+            self.assertLessEqual(
+                item["r_s"], item["r_b"], "resample must ensure r_s <= r_b"
+            )
 
 
 class TestDeriveTaskParams(unittest.TestCase):
@@ -130,8 +140,14 @@ class TestDeriveTaskParams(unittest.TestCase):
             gen = _get_generate()
         except Exception as e:
             self.skipTest(f"generate module unavailable: {e}")
-        item = {"title": "X", "description": "", "list_price": 100.0, "category": "cat",
-                "r_s": 80.0, "r_b": 120.0}
+        item = {
+            "title": "X",
+            "description": "",
+            "list_price": 100.0,
+            "category": "cat",
+            "r_s": 80.0,
+            "r_b": 120.0,
+        }
         params = gen._derive_task_params(item, "seller")
         self.assertEqual(params["K"], 10)
         self.assertAlmostEqual(params["p_min"], 50.0)
@@ -144,8 +160,14 @@ class TestDeriveTaskParams(unittest.TestCase):
             gen = _get_generate()
         except Exception as e:
             self.skipTest(f"generate module unavailable: {e}")
-        item = {"title": "X", "description": "", "list_price": 100.0, "category": "cat",
-                "r_s": 80.0, "r_b": 120.0}
+        item = {
+            "title": "X",
+            "description": "",
+            "list_price": 100.0,
+            "category": "cat",
+            "r_s": 80.0,
+            "r_b": 120.0,
+        }
         params = gen._derive_task_params(item, "buyer")
         # Counterpart is seller with r_s=80; opening = min(200, 80*1.20) = 96
         self.assertAlmostEqual(params["counterpart_opening"], 96.0)
@@ -155,8 +177,14 @@ class TestDeriveTaskParams(unittest.TestCase):
             gen = _get_generate()
         except Exception as e:
             self.skipTest(f"generate module unavailable: {e}")
-        item = {"title": "X", "description": "", "list_price": 1.0, "category": "cat",
-                "r_s": 0.5, "r_b": 1.5}
+        item = {
+            "title": "X",
+            "description": "",
+            "list_price": 1.0,
+            "category": "cat",
+            "r_s": 0.5,
+            "r_b": 1.5,
+        }
         params = gen._derive_task_params(item, "seller")
         self.assertGreaterEqual(params["p_min"], 0.0)
 
@@ -169,8 +197,14 @@ class TestBuildScenarioAndInstruction(unittest.TestCase):
             gen = _get_generate()
         except Exception as e:
             self.skipTest(f"generate module unavailable: {e}")
-        item = {"title": "X", "description": "Y", "list_price": 50.0, "category": "cat",
-                "r_s": 40.0, "r_b": 60.0}
+        item = {
+            "title": "X",
+            "description": "Y",
+            "list_price": 50.0,
+            "category": "cat",
+            "r_s": 40.0,
+            "r_b": 60.0,
+        }
         scenario = gen.build_scenario(item, "seller", seed=1)
         self.assertEqual(scenario["r_s"], 40.0)
         self.assertEqual(scenario["r_b"], 60.0)
@@ -189,8 +223,14 @@ class TestBuildScenarioAndInstruction(unittest.TestCase):
             gen = _get_generate()
         except Exception as e:
             self.skipTest(f"generate module unavailable: {e}")
-        item = {"title": "Test Item", "description": "Desc", "list_price": 50.0,
-                "category": "electronics", "r_s": 40.0, "r_b": 60.0}
+        item = {
+            "title": "Test Item",
+            "description": "Desc",
+            "list_price": 50.0,
+            "category": "electronics",
+            "r_s": 40.0,
+            "r_b": 60.0,
+        }
         scenario = gen.build_scenario(item, "buyer", seed=99)
         text = gen.build_instruction("buyer", item, scenario)
         self.assertIn("buyer", text)
@@ -208,8 +248,14 @@ class TestBuildScenarioAndInstruction(unittest.TestCase):
             gen = _get_generate()
         except Exception as e:
             self.skipTest(f"generate module unavailable: {e}")
-        item = {"title": "Chair", "description": "", "list_price": 100.0,
-                "category": "furniture", "r_s": 80.0, "r_b": 120.0}
+        item = {
+            "title": "Chair",
+            "description": "",
+            "list_price": 100.0,
+            "category": "furniture",
+            "r_s": 80.0,
+            "r_b": 120.0,
+        }
         scenario = gen.build_scenario(item, "seller", seed=5)
         text = gen.build_instruction("seller", item, scenario)
         self.assertIn("seller", text)
@@ -224,11 +270,19 @@ class TestExampleTask(unittest.TestCase):
     def test_example_task_files_exist(self):
         example_dir = ROOT / "data" / "negotiation" / "example_task"
         self.assertTrue((example_dir / "instruction.md").exists(), "instruction.md")
-        self.assertTrue((example_dir / "data" / "scenario.json").exists(), "data/scenario.json")
+        self.assertTrue(
+            (example_dir / "data" / "scenario.json").exists(), "data/scenario.json"
+        )
         self.assertTrue((example_dir / "tests" / "test.sh").exists(), "tests/test.sh")
         self.assertTrue((example_dir / "task.toml").exists(), "task.toml")
-        self.assertTrue((example_dir / "environment" / "Dockerfile").exists(), "environment/Dockerfile")
-        self.assertTrue((example_dir / "environment" / "counterpart.py").exists(), "environment/counterpart.py")
+        self.assertTrue(
+            (example_dir / "environment" / "Dockerfile").exists(),
+            "environment/Dockerfile",
+        )
+        self.assertTrue(
+            (example_dir / "environment" / "counterpart.py").exists(),
+            "environment/counterpart.py",
+        )
 
     def test_example_scenario_valid(self):
         path = ROOT / "data" / "negotiation" / "example_task" / "data" / "scenario.json"
@@ -246,12 +300,20 @@ class TestExampleTask(unittest.TestCase):
         content = path.read_text()
         # Agent timeout should be >= 1800 for multi-round
         import re
+
         m = re.search(r"timeout_sec\s*=\s*(\d+\.?\d*)", content)
         self.assertIsNotNone(m, "timeout_sec not found in task.toml")
         self.assertGreaterEqual(float(m.group(1)), 1800.0)
 
     def test_example_dockerfile_has_openai(self):
-        path = ROOT / "data" / "negotiation" / "example_task" / "environment" / "Dockerfile"
+        path = (
+            ROOT
+            / "data"
+            / "negotiation"
+            / "example_task"
+            / "environment"
+            / "Dockerfile"
+        )
         content = path.read_text()
         self.assertIn("openai", content)
         self.assertIn("counterpart.py", content)
@@ -280,6 +342,7 @@ class TestCounterpartModule(unittest.TestCase):
         if not cp_path.exists():
             self.skipTest("counterpart.py not found")
         import importlib.util
+
         spec = importlib.util.spec_from_file_location("counterpart", cp_path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -313,7 +376,9 @@ class TestCounterpartModule(unittest.TestCase):
             counterpart_role="buyer",
             counterpart_reservation=110.0,
             agent_offer=120.0,  # above buyer reservation -> should counter
-            history=[{"turn": "counterpart", "action": "offer", "price": 95.0, "message": ""}],
+            history=[
+                {"turn": "counterpart", "action": "offer", "price": 95.0, "message": ""}
+            ],
             rounds_remaining=5,
         )
         self.assertEqual(resp["action"], "offer")
@@ -338,10 +403,21 @@ class TestCounterpartModule(unittest.TestCase):
         """State initialized correctly for seller agent (buyer counterpart)."""
         mod = self._get_counterpart()
         scenario = {
-            "r_s": 90.0, "r_b": 110.0, "role": "seller", "seed": 42,
-            "K": 10, "p_min": 12.5, "p_max": 50.0, "delta_max": 3.75,
+            "r_s": 90.0,
+            "r_b": 110.0,
+            "role": "seller",
+            "seed": 42,
+            "K": 10,
+            "p_min": 12.5,
+            "p_max": 50.0,
+            "delta_max": 3.75,
             "counterpart_opening": 88.0,
-            "item_context": {"title": "Mouse", "description": "", "list_price": 25.0, "category": "electronics"},
+            "item_context": {
+                "title": "Mouse",
+                "description": "",
+                "list_price": 25.0,
+                "category": "electronics",
+            },
         }
         state = mod.init_state(scenario)
         self.assertEqual(state["counterpart_role"], "buyer")
@@ -376,8 +452,10 @@ class TestFullGeneration(unittest.TestCase):
                 self.assertTrue((task_dir / "task.toml").exists())
                 self.assertTrue((task_dir / "environment" / "Dockerfile").exists())
                 # Multi-round additions
-                self.assertTrue((task_dir / "environment" / "counterpart.py").exists(),
-                                "counterpart.py must be in environment/")
+                self.assertTrue(
+                    (task_dir / "environment" / "counterpart.py").exists(),
+                    "counterpart.py must be in environment/",
+                )
                 # Scenario has multi-round fields
                 with open(task_dir / "data" / "scenario.json") as f:
                     loaded = json.load(f)

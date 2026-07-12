@@ -150,7 +150,9 @@ def test_tarball_contains_expected_files():
 
 
 def test_tarball_verifier_data_json_parses():
-    t = _make_valid_task(verifier_data={"expected_answer": "x", "nested": {"a": [1, 2]}})
+    t = _make_valid_task(
+        verifier_data={"expected_answer": "x", "nested": {"a": [1, 2]}}
+    )
     blob = t.to_tarball()
     with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
         f = tar.extractfile("tests/verifier_data.json")
@@ -196,7 +198,9 @@ def test_math_converter_smoke():
 
 
 def test_competitive_coding_converter_smoke():
-    from data.nemotron_gym.converters.competitive_coding import convert_competitive_coding
+    from data.nemotron_gym.converters.competitive_coding import (
+        convert_competitive_coding,
+    )
 
     row = {
         "input": [{"role": "user", "content": "Echo n lines."}],
@@ -237,7 +241,9 @@ def test_mcqa_converter_smoke():
 
 
 def test_ifeval_converter_smoke():
-    from data.nemotron_gym.converters.instruction_following import convert_instruction_following
+    from data.nemotron_gym.converters.instruction_following import (
+        convert_instruction_following,
+    )
 
     row = {
         "id": 42,
@@ -311,7 +317,10 @@ def test_workplace_converter_smoke():
     row = {
         "input": [{"role": "user", "content": "Reply to email 42."}],
         "ground_truth": [
-            {"name": "email_reply_email", "arguments": '{"email_id": "42", "body": "ok"}'}
+            {
+                "name": "email_reply_email",
+                "arguments": '{"email_id": "42", "body": "ok"}',
+            }
         ],
         "id": 1,
         "category": "workplace_assistant_email",
@@ -334,7 +343,9 @@ def test_safety_converter_skips_when_no_signal():
 
 
 def test_identity_converter_skips_when_no_signal():
-    from data.nemotron_gym.converters.identity_following import convert_identity_following
+    from data.nemotron_gym.converters.identity_following import (
+        convert_identity_following,
+    )
 
     row = {"input": [{"role": "user", "content": "Hi"}]}
     assert convert_identity_following(row, 0) is None
@@ -364,7 +375,9 @@ def test_safety_converter_with_principle_makes_judge_task():
 
 
 def test_identity_converter_with_principle_makes_judge_task():
-    from data.nemotron_gym.converters.identity_following import convert_identity_following
+    from data.nemotron_gym.converters.identity_following import (
+        convert_identity_following,
+    )
 
     row = {
         "responses_create_params": {

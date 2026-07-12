@@ -119,8 +119,10 @@ class TestTaskManifest(unittest.TestCase):
         mutated = "mkdir test && find test -type f"
 
         # Commands should be different
-        self.assertNotEqual(original, mutated, "Original and mutated commands must differ")
+        self.assertNotEqual(
+            original, mutated, "Original and mutated commands must differ"
+        )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

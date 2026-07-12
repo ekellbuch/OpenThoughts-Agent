@@ -20,40 +20,44 @@ class TestOutputNormalization(unittest.TestCase):
         Python implementation of the normalize_output awk script.
         Should match the logic in template_task/tests/test.sh
         """
-        lines = text.strip().split('\n')
+        lines = text.strip().split("\n")
         normalized = []
 
         for line in lines:
             # Skip "total XX" lines from ls -l
-            if line.startswith('total ') and len(line.split()) == 2 and line.split()[1].isdigit():
+            if (
+                line.startswith("total ")
+                and len(line.split()) == 2
+                and line.split()[1].isdigit()
+            ):
                 continue
 
             # Normalize directory sizes in ls -l output
             # Format: drwxr-xr-x 2 root root 4096 Oct 28 18:08 dirname
             parts = line.split()
-            if len(parts) >= 9 and parts[0].startswith('d'):
+            if len(parts) >= 9 and parts[0].startswith("d"):
                 # Check if this looks like ls -l output
                 try:
                     int(parts[1])  # links
                     int(parts[4])  # size
                     # Replace size with placeholder for directories
-                    parts[4] = 'DIRSIZE'
-                    line = ' '.join(parts)
+                    parts[4] = "DIRSIZE"
+                    line = " ".join(parts)
                 except (ValueError, IndexError):
                     pass
 
             # Normalize du output for directory entries
             # Format: SIZE<whitespace>PATH
             elif len(parts) >= 2 and parts[0].isdigit():
-                path = ' '.join(parts[1:])
+                path = " ".join(parts[1:])
                 # Normalize if path is . or .. (always directories) or ends with /
-                if path in ['.', '..'] or path.endswith('/'):
-                    parts[0] = 'DIRSIZE'
-                    line = '\t'.join(parts)
+                if path in [".", ".."] or path.endswith("/"):
+                    parts[0] = "DIRSIZE"
+                    line = "\t".join(parts)
 
             normalized.append(line)
 
-        return '\n'.join(normalized)
+        return "\n".join(normalized)
 
     def test_removes_total_lines(self):
         """Test that 'total XX' lines are removed."""
@@ -202,5 +206,5 @@ class TestNormalizationIntegration(unittest.TestCase):
         pass
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
