@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from hpc.launch_utils import setup_experiments_dir
 

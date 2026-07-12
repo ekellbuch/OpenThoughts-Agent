@@ -47,7 +47,10 @@ class _FakeGCS:
 
 
 HIT_LAYOUT = {
-    "gs://marin-models-us/ot-agent/models/Qwen/Qwen3-8B": ["config.json", "model.safetensors"],
+    "gs://marin-models-us/ot-agent/models/Qwen/Qwen3-8B": [
+        "config.json",
+        "model.safetensors",
+    ],
     "gs://marin-models-us/ot-agent/datasets/DCAgent/foo": ["train.parquet"],
 }
 
@@ -62,7 +65,9 @@ def no_hf(monkeypatch):
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", _boom, raising=False)
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", _boom, raising=False)
-    monkeypatch.setattr(huggingface_hub, "HfApi", lambda *a, **k: _boom(), raising=False)
+    monkeypatch.setattr(
+        huggingface_hub, "HfApi", lambda *a, **k: _boom(), raising=False
+    )
 
 
 def _use_layout(monkeypatch, layout):
@@ -85,7 +90,9 @@ def test_helper_cache_hit_zero_hf_and_offline(monkeypatch, no_hf):
 
     assert result.offline_ok is True
     # Model served from the region-local mirror as an s3:// (runai_streamer) URI.
-    assert result.model_serve_uri == "s3://marin-models-us/ot-agent/models/Qwen/Qwen3-8B/"
+    assert (
+        result.model_serve_uri == "s3://marin-models-us/ot-agent/models/Qwen/Qwen3-8B/"
+    )
     # Dataset routed through the region-local GCS mirror.
     assert result.dataset_uris == ["gs://marin-models-us/ot-agent/datasets/DCAgent/foo"]
     # Offline flags + the GCS S3-compat endpoint for runai_streamer.
@@ -96,7 +103,10 @@ def test_helper_cache_hit_zero_hf_and_offline(monkeypatch, no_hf):
 
 def test_helper_region_selects_eu_bucket(monkeypatch, no_hf):
     layout = {
-        "gs://marin-models-eu/ot-agent/models/Qwen/Qwen3-8B": ["config.json", "model.safetensors"],
+        "gs://marin-models-eu/ot-agent/models/Qwen/Qwen3-8B": [
+            "config.json",
+            "model.safetensors",
+        ],
     }
     _use_layout(monkeypatch, layout)
     result = precache.precache_for_eval(
@@ -113,9 +123,12 @@ def test_helper_region_selects_eu_bucket(monkeypatch, no_hf):
 
 def test_helper_model_miss_auto_falls_back_online(monkeypatch):
     # Only the dataset is present; the model dir is missing -> not offline-eligible.
-    _use_layout(monkeypatch, {
-        "gs://marin-models-us/ot-agent/datasets/DCAgent/foo": ["train.parquet"],
-    })
+    _use_layout(
+        monkeypatch,
+        {
+            "gs://marin-models-us/ot-agent/datasets/DCAgent/foo": ["train.parquet"],
+        },
+    )
     result = precache.precache_for_eval(
         "Qwen/Qwen3-8B", ["DCAgent/foo"], region=None, mode="auto", verbose=False
     )
@@ -139,7 +152,9 @@ def test_helper_mode_off_is_noop(monkeypatch):
         raise AssertionError("GCS touched in mode=off")
 
     monkeypatch.setattr(precache, "_gcs_fs", _explode)
-    result = precache.precache_for_eval("Qwen/Qwen3-8B", ["DCAgent/foo"], region=None, mode="off")
+    result = precache.precache_for_eval(
+        "Qwen/Qwen3-8B", ["DCAgent/foo"], region=None, mode="off"
+    )
     assert result.offline_ok is False
     assert result.env == {}
 
@@ -191,7 +206,9 @@ def test_launcher_hit_emits_offline_and_mirror_uris(monkeypatch, no_hf):
     launcher = EvalIrisLauncher(PROJECT_ROOT)
     args = _eval_args()
 
-    env = launcher.pre_submit_precache(args, remote_output_dir="gs://marin-models-us/ot-agent/eval-x")
+    env = launcher.pre_submit_precache(
+        args, remote_output_dir="gs://marin-models-us/ot-agent/eval-x"
+    )
 
     # Offline env is emitted...
     assert env["HF_HUB_OFFLINE"] == "1"
@@ -218,8 +235,10 @@ def test_launcher_miss_auto_no_offline_no_serve_uri(monkeypatch):
     _use_layout(monkeypatch, {})  # nothing mirrored
     # dataset inline-mirror would try HF; force it to fail so we stay online.
     import huggingface_hub
+
     monkeypatch.setattr(
-        huggingface_hub, "snapshot_download",
+        huggingface_hub,
+        "snapshot_download",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no HF in test")),
         raising=False,
     )

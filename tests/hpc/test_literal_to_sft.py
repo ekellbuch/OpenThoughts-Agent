@@ -53,9 +53,12 @@ def _row():
         "completion_token_ids": [[2], [3]],
         "task": "t-1",
         "conversations": [
-            {"role": "user", "content": ""},        # empty leading user (task lives in prompt[0])
+            {
+                "role": "user",
+                "content": "",
+            },  # empty leading user (task lives in prompt[0])
             {"role": "assistant", "content": "x"},
-            {"role": "user", "content": "OBS 1"},   # tool observation
+            {"role": "user", "content": "OBS 1"},  # tool observation
             {"role": "assistant", "content": "y"},
         ],
     }
@@ -67,7 +70,9 @@ def _tok():
 
 def test_fix_orphan_think():
     assert fix_orphan_think("foo</think>bar") == "<think>foo</think>bar"
-    assert fix_orphan_think("<think>foo</think>") == "<think>foo</think>"  # already opened
+    assert (
+        fix_orphan_think("<think>foo</think>") == "<think>foo</think>"
+    )  # already opened
     assert fix_orphan_think("no tags") == "no tags"
 
 
@@ -87,7 +92,13 @@ def test_leading_context_messages_parses_system_and_task():
 
 def test_reconstruct_messages_verbatim_assistants_and_observations():
     messages = reconstruct_messages(_row(), _tok())
-    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user", "assistant"]
+    assert [m["role"] for m in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
     # assistant 0: orphan-think fixed + trailing <|im_end|> stripped
     assert messages[2]["content"] == "<think>reasoning A</think>\n\nanswer A"
     # observation between assistants comes from the trace's user turn

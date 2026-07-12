@@ -25,9 +25,7 @@ import pytest
 from eval.cloud.launch_eval_iris import EvalIrisLauncher
 from eval.presets import load_presets
 
-NESTED_THINKING_KWARG = (
-    'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
-)
+NESTED_THINKING_KWARG = 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
 
 
 def _make_args(**overrides) -> argparse.Namespace:
@@ -110,4 +108,6 @@ def test_catalog_presets_do_not_carry_thinking(preset_name):
     )
     assert not any(
         "enable_thinking" in kw for kw in preset.get("agent_kwargs", []) or []
-    ), f"{preset_name}: preset still injects thinking; it must be per-model: {preset.get('agent_kwargs')}"
+    ), (
+        f"{preset_name}: preset still injects thinking; it must be per-model: {preset.get('agent_kwargs')}"
+    )

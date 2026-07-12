@@ -36,9 +36,13 @@ def test_served_model_id_deterministic_for_same_job_name():
     # two "serves" of the same job -> identical synthetic served-model id
     assert generate_served_model_id(job_name=j) == generate_served_model_id(job_name=j)
     # different job -> different id
-    assert generate_served_model_id(job_name=j) != generate_served_model_id(job_name=j + "-b")
+    assert generate_served_model_id(job_name=j) != generate_served_model_id(
+        job_name=j + "-b"
+    )
     # no job_name -> time-based fallback (NOT stable) — the pre-fix worker behavior
-    assert generate_served_model_id(job_name=None) != generate_served_model_id(job_name=None)
+    assert generate_served_model_id(job_name=None) != generate_served_model_id(
+        job_name=None
+    )
 
 
 def test_harbor_run_dir_name_stable_when_job_name_set():
@@ -48,7 +52,9 @@ def test_harbor_run_dir_name_stable_when_job_name_set():
     stable = "tracegen-iris-20260704-070416"
     assert (stable or default_job_name("tracegen", "ds", "m")) == stable
     # default_job_name IS per-serve (drifts) — what the worker fell back to:
-    assert default_job_name("tracegen", "ds", "m") != "" and "__" in default_job_name("tracegen", "ds", "m")
+    assert default_job_name("tracegen", "ds", "m") != "" and "__" in default_job_name(
+        "tracegen", "ds", "m"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -59,23 +65,40 @@ def _tracegen_args(job_name):
         harbor_config="hpc/harbor_yaml/datagen/opencode_ctx131k.yaml",
         datagen_config="hpc/datagen_yaml/x.yaml",
         tasks_input_path="DCAgent/inferredbugs-sandboxes-verifier",
-        model=None, agent="opencode", n_concurrent=32, n_attempts=1, gpus=8,
-        health_max_attempts=600, health_retry_delay=None, harbor_env="daytona",
-        record_literal=True, ingress_mode="controller", ingress_host="https://h",
-        job_name=job_name, dry_run=False, agent_kwarg=[], harbor_extra_arg=[],
-        upload_hf_repo=None, upload_hf_token=None, upload_hf_private=False,
+        model=None,
+        agent="opencode",
+        n_concurrent=32,
+        n_attempts=1,
+        gpus=8,
+        health_max_attempts=600,
+        health_retry_delay=None,
+        harbor_env="daytona",
+        record_literal=True,
+        ingress_mode="controller",
+        ingress_host="https://h",
+        job_name=job_name,
+        dry_run=False,
+        agent_kwarg=[],
+        harbor_extra_arg=[],
+        upload_hf_repo=None,
+        upload_hf_token=None,
+        upload_hf_private=False,
     )
 
 
 def _launcher():
     from data.cloud.launch_tracegen_iris import TracegenIrisLauncher
     from hpc.launch_utils import PROJECT_ROOT
+
     return TracegenIrisLauncher(PROJECT_ROOT)
 
 
 def test_build_task_command_bakes_job_name_when_set():
     launcher = _launcher()
-    cmd = launcher.build_task_command(_tracegen_args("tracegen-iris-20260704-070416"), "gs://b/ot-agent/tracegen-iris-20260704-070416")
+    cmd = launcher.build_task_command(
+        _tracegen_args("tracegen-iris-20260704-070416"),
+        "gs://b/ot-agent/tracegen-iris-20260704-070416",
+    )
     assert "--job_name" in cmd
     assert cmd[cmd.index("--job_name") + 1] == "tracegen-iris-20260704-070416"
 
@@ -95,13 +118,15 @@ def test_derive_and_persist_yields_stable_baked_name_across_serves():
     # resumes the same jobs_dir/served-model instead of re-running from task 1.
     launcher = _launcher()
     args = _tracegen_args(None)
-    args.job_name = launcher._derive_job_name(args)   # the fix
+    args.job_name = launcher._derive_job_name(args)  # the fix
     assert args.job_name and args.job_name.startswith("tracegen-iris-")
     out = "gs://b/ot-agent/" + args.job_name
     cmd_serve0 = launcher.build_task_command(args, out)
-    cmd_serve1 = launcher.build_task_command(args, out)   # iris re-runs the baked cmd
+    cmd_serve1 = launcher.build_task_command(args, out)  # iris re-runs the baked cmd
     n0 = cmd_serve0[cmd_serve0.index("--job_name") + 1]
     n1 = cmd_serve1[cmd_serve1.index("--job_name") + 1]
     assert n0 == n1 == args.job_name
     # same job_name -> same served-model id both serves
-    assert generate_served_model_id(job_name=n0) == generate_served_model_id(job_name=n1)
+    assert generate_served_model_id(job_name=n0) == generate_served_model_id(
+        job_name=n1
+    )

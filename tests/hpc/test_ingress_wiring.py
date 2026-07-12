@@ -57,7 +57,9 @@ class _FakeMinter:
         return f"TKN-{self.calls}", self.expires_at
 
 
-def _fixed_cache(token: str = "TKN", expires_at: float = 10_000_000_000.0) -> CapabilityTokenCache:
+def _fixed_cache(
+    token: str = "TKN", expires_at: float = 10_000_000_000.0
+) -> CapabilityTokenCache:
     class _Fixed:
         def mint(self, endpoint_name, ttl_hours):
             return token, expires_at
@@ -81,7 +83,10 @@ def test_encode_endpoint_name_matches_rigging_scheme():
     # strip leading/trailing '/', then '/' -> '.'.
     assert encode_endpoint_name("/serve/foo") == "serve.foo"
     assert encode_endpoint_name("otagent-job") == "otagent-job"
-    assert encode_endpoint_name("/serve/serve-qwen3-0-6b-973241") == "serve.serve-qwen3-0-6b-973241"
+    assert (
+        encode_endpoint_name("/serve/serve-qwen3-0-6b-973241")
+        == "serve.serve-qwen3-0-6b-973241"
+    )
 
 
 def test_build_capability_api_base_puts_token_in_path():
@@ -145,7 +150,9 @@ def test_build_endpoint_meta_api_key_dormant_by_default():
 
 def test_build_controller_endpoint_meta_mints_capability_url():
     cache = _fixed_cache(token="XYZ")
-    meta = build_controller_endpoint_meta("ingress.example", "otagent-myjob", cache=cache)
+    meta = build_controller_endpoint_meta(
+        "ingress.example", "otagent-myjob", cache=cache
+    )
     assert meta["api_base"] == "https://ingress.example/proxy/t/XYZ/otagent-myjob/v1"
     assert meta["api_key"] == DUMMY_API_KEY
     # metrics endpoint intentionally absent (capability route fronts only /v1)
@@ -157,15 +164,24 @@ def test_merge_agent_kwargs_carries_capability_url_in_controller_mode():
 
     # legacy/pinggy endpoint_meta (no api_key) -> agent_kwargs has NO api_key
     legacy_meta = build_endpoint_meta("http://host:8000/v1")
-    merged_legacy, _ = merge_agent_kwargs(cfg, agent_name="qwen-code", endpoint_meta=legacy_meta)
+    merged_legacy, _ = merge_agent_kwargs(
+        cfg, agent_name="qwen-code", endpoint_meta=legacy_meta
+    )
     assert "api_key" not in merged_legacy
     assert merged_legacy["api_base"] == "http://host:8000/v1"
 
     # controller endpoint_meta -> api_base is the capability URL + dummy key
     cache = _fixed_cache(token="XYZ")
-    ctrl_meta = build_controller_endpoint_meta("ingress.example", "otagent-myjob", cache=cache)
-    merged_ctrl, _ = merge_agent_kwargs(cfg, agent_name="qwen-code", endpoint_meta=ctrl_meta)
-    assert merged_ctrl["api_base"] == "https://ingress.example/proxy/t/XYZ/otagent-myjob/v1"
+    ctrl_meta = build_controller_endpoint_meta(
+        "ingress.example", "otagent-myjob", cache=cache
+    )
+    merged_ctrl, _ = merge_agent_kwargs(
+        cfg, agent_name="qwen-code", endpoint_meta=ctrl_meta
+    )
+    assert (
+        merged_ctrl["api_base"]
+        == "https://ingress.example/proxy/t/XYZ/otagent-myjob/v1"
+    )
     assert merged_ctrl["api_key"] == DUMMY_API_KEY
 
 
@@ -173,11 +189,15 @@ def test_eval_listener_to_env_controller_additive():
     """SbatchParams.to_env(): pinggy default byte-identical; controller adds EVAL_INGRESS_*."""
     from eval.unified_eval_listener import SbatchParams
 
-    default_env = SbatchParams(pinggy_url="x.a.pinggy.link", pinggy_token="tok").to_env()
+    default_env = SbatchParams(
+        pinggy_url="x.a.pinggy.link", pinggy_token="tok"
+    ).to_env()
     assert not any(k.startswith("EVAL_INGRESS_") for k in default_env)
     assert default_env["EVAL_PINGGY_URL"] == "x.a.pinggy.link"
 
-    ctrl_env = SbatchParams(ingress_mode="controller", ingress_host="ingress.example").to_env()
+    ctrl_env = SbatchParams(
+        ingress_mode="controller", ingress_host="ingress.example"
+    ).to_env()
     assert ctrl_env["EVAL_INGRESS_MODE"] == "controller"
     assert ctrl_env["EVAL_INGRESS_HOST"] == "ingress.example"
 
@@ -237,7 +257,9 @@ def test_register_controller_endpoint_fails_loud_on_empty_id():
             return ""
 
     with pytest.raises(RuntimeError):
-        register_controller_endpoint("otagent-j", "http://h:8000", registrar=_EmptyRegistrar())
+        register_controller_endpoint(
+            "otagent-j", "http://h:8000", registrar=_EmptyRegistrar()
+        )
 
 
 def test_controller_registration_plan_plain_registers_vllm_port():
@@ -319,7 +341,9 @@ def test_record_proxy_accepts_unauthenticated_calls():
     import tempfile
 
     with tempfile.TemporaryDirectory() as td:
-        proxy = RecordProxy("http://vllm.local", Path(td) / "literal.jsonl", timeout=10.0)
+        proxy = RecordProxy(
+            "http://vllm.local", Path(td) / "literal.jsonl", timeout=10.0
+        )
         stub_client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=stub), base_url="http://vllm.local"
         )

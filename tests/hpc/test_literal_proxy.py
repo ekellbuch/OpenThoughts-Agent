@@ -82,8 +82,13 @@ def test_literal_log_path_sanitizes_and_places_under_logs(tmp_path):
 def test_literal_log_remote_uri_for_gcs_experiments_dir():
     # A gs:// experiments_dir yields a DURABLE gs:// upload URI under logs/, NOT a
     # collapsed local ``Path('gs://…')`` (the bug that lost every literal log on iris).
-    uri = lp.literal_log_remote_uri("gs://marin-models-us/ot-agent/tgen-x", "rl-q8b/run.1", "tok0")
-    assert uri == "gs://marin-models-us/ot-agent/tgen-x/logs/rl-q8b-run.1__tok0_literal.jsonl"
+    uri = lp.literal_log_remote_uri(
+        "gs://marin-models-us/ot-agent/tgen-x", "rl-q8b/run.1", "tok0"
+    )
+    assert (
+        uri
+        == "gs://marin-models-us/ot-agent/tgen-x/logs/rl-q8b-run.1__tok0_literal.jsonl"
+    )
     # crucially the scheme survives (no gs:/ collapse)
     assert uri.startswith("gs://")
 
@@ -100,19 +105,29 @@ def test_literal_log_remote_uri_reexpands_path_collapsed_scheme():
     # the literal log was never uploaded).
     from pathlib import Path
 
-    collapsed = Path("gs://marin-models-us/ot-agent/tgen-x")  # str() == "gs:/marin-models-us/..."
+    collapsed = Path(
+        "gs://marin-models-us/ot-agent/tgen-x"
+    )  # str() == "gs:/marin-models-us/..."
     assert "gs:/" in str(collapsed) and "gs://" not in str(collapsed)
     uri = lp.literal_log_remote_uri(collapsed, "myjob", "tok")
     assert uri == "gs://marin-models-us/ot-agent/tgen-x/logs/myjob__tok_literal.jsonl"
     # bare collapsed string form too
-    assert lp.literal_log_remote_uri("gs:/marin-models-us/ot-agent/tgen-x", "myjob", "tok") == uri
+    assert (
+        lp.literal_log_remote_uri("gs:/marin-models-us/ot-agent/tgen-x", "myjob", "tok")
+        == uri
+    )
 
 
 def test_literal_log_remote_uri_resolved_local_path_stays_local():
     # A fully resolve()'d form ("/app/gs:/…") is genuinely local (scheme lost to
     # the leading "/") and must NOT be treated as remote — callers pass the raw
     # gs:// arg for that case (local_runner_utils fix), not this resolved Path.
-    assert lp.literal_log_remote_uri("/app/gs:/marin-models-us/ot-agent/tgen-x", "j", "tok") is None
+    assert (
+        lp.literal_log_remote_uri(
+            "/app/gs:/marin-models-us/ot-agent/tgen-x", "j", "tok"
+        )
+        is None
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -124,7 +139,9 @@ def test_serve_token_folds_in_iris_retry_suffix(monkeypatch):
     monkeypatch.setenv("IRIS_TASK_ID", "/benjaminfeuer/tracegen/0:2")
     assert lp.serve_token().endswith("-0-2")  # rank 0, retry attempt 2
     monkeypatch.delenv("IRIS_TASK_ID", raising=False)
-    assert not lp.serve_token().endswith("-0-2")  # no iris id -> plain serve-start stamp
+    assert not lp.serve_token().endswith(
+        "-0-2"
+    )  # no iris id -> plain serve-start stamp
 
 
 def test_two_serve_tokens_yield_distinct_glob_matching_paths():
@@ -142,7 +159,9 @@ def test_two_serve_tokens_yield_distinct_glob_matching_paths():
     # local staging mirrors the same distinct token (staging + upload stay in sync)
     s0, s1 = lp._local_staging_path("job", t0), lp._local_staging_path("job", t1)
     assert s0 != s1
-    assert fnmatch.fnmatch(s0.name, "*_literal.jsonl") and fnmatch.fnmatch(s1.name, "*_literal.jsonl")
+    assert fnmatch.fnmatch(s0.name, "*_literal.jsonl") and fnmatch.fnmatch(
+        s1.name, "*_literal.jsonl"
+    )
 
 
 def test_maybe_serve_remote_stages_locally_and_passes_upload_uri(monkeypatch):
@@ -151,8 +170,15 @@ def test_maybe_serve_remote_stages_locally_and_passes_upload_uri(monkeypatch):
     calls: dict = {}
 
     @contextlib.contextmanager
-    def _fake_serve(up, log_path, *, host=lp.DEFAULT_LITERAL_PROXY_HOST,
-                    port=lp.DEFAULT_LITERAL_PROXY_PORT, remote_uri=None, **kw):
+    def _fake_serve(
+        up,
+        log_path,
+        *,
+        host=lp.DEFAULT_LITERAL_PROXY_HOST,
+        port=lp.DEFAULT_LITERAL_PROXY_PORT,
+        remote_uri=None,
+        **kw,
+    ):
         calls["log_path"] = Path(log_path)
         calls["remote_uri"] = remote_uri
         yield lp.literal_proxy_endpoint(host, port)
@@ -173,7 +199,10 @@ def test_maybe_serve_remote_stages_locally_and_passes_upload_uri(monkeypatch):
     assert "gs:" not in str(calls["log_path"])
     assert calls["log_path"].name == "myjob__tokA_literal.jsonl"
     # durable upload target: the gs:// URI under logs/ with the SAME per-serve token
-    assert calls["remote_uri"] == "gs://marin-models-us/ot-agent/tgen-x/logs/myjob__tokA_literal.jsonl"
+    assert (
+        calls["remote_uri"]
+        == "gs://marin-models-us/ot-agent/tgen-x/logs/myjob__tokA_literal.jsonl"
+    )
 
 
 def test_maybe_serve_two_attempts_do_not_clobber(monkeypatch):
@@ -185,8 +214,15 @@ def test_maybe_serve_two_attempts_do_not_clobber(monkeypatch):
     seen: list = []
 
     @contextlib.contextmanager
-    def _fake_serve(up, log_path, *, host=lp.DEFAULT_LITERAL_PROXY_HOST,
-                    port=lp.DEFAULT_LITERAL_PROXY_PORT, remote_uri=None, **kw):
+    def _fake_serve(
+        up,
+        log_path,
+        *,
+        host=lp.DEFAULT_LITERAL_PROXY_HOST,
+        port=lp.DEFAULT_LITERAL_PROXY_PORT,
+        remote_uri=None,
+        **kw,
+    ):
         seen.append((Path(log_path), remote_uri))
         yield lp.literal_proxy_endpoint(host, port)
 
@@ -266,8 +302,14 @@ def test_maybe_serve_enabled_routes_through_serve(monkeypatch, tmp_path):
     calls: dict = {}
 
     @contextlib.contextmanager
-    def _fake_serve(up, log_path, *, host=lp.DEFAULT_LITERAL_PROXY_HOST,
-                    port=lp.DEFAULT_LITERAL_PROXY_PORT, **kw):
+    def _fake_serve(
+        up,
+        log_path,
+        *,
+        host=lp.DEFAULT_LITERAL_PROXY_HOST,
+        port=lp.DEFAULT_LITERAL_PROXY_PORT,
+        **kw,
+    ):
         calls["upstream"] = up
         calls["log_path"] = Path(log_path)
         yield lp.literal_proxy_endpoint(host, port)

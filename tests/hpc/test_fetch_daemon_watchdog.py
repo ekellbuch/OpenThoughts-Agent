@@ -26,7 +26,9 @@ def test_hung_when_served_and_stale_past_threshold():
 
 def test_not_hung_when_recently_flushed():
     fresh = _now() - timedelta(minutes=3)
-    assert not _is_hung(fresh, n_completed=7110, now=_now(), threshold_seconds=THRESHOLD)
+    assert not _is_hung(
+        fresh, n_completed=7110, now=_now(), threshold_seconds=THRESHOLD
+    )
 
 
 def test_not_hung_just_under_threshold():
@@ -39,8 +41,9 @@ def test_cold_compile_never_hung(n_completed):
     # No trials served yet (cold compile): stale updated_at must NOT trip the
     # watchdog — that's the engine healthcheck's job, not ours.
     very_stale = _now() - timedelta(hours=10)
-    assert not _is_hung(very_stale, n_completed=n_completed, now=_now(),
-                        threshold_seconds=THRESHOLD)
+    assert not _is_hung(
+        very_stale, n_completed=n_completed, now=_now(), threshold_seconds=THRESHOLD
+    )
 
 
 def test_no_result_json_never_hung():

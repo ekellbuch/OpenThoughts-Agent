@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import types
 
-import pytest
 
 from hpc.rl_launch_utils import RLJobRunner
 
@@ -36,7 +35,9 @@ def test_hydra_arg_value_basic():
 
 
 def test_hydra_arg_value_missing_returns_none():
-    assert RLJobRunner._hydra_arg_value(["trainer.epochs=2"], "trainer.max_steps") is None
+    assert (
+        RLJobRunner._hydra_arg_value(["trainer.epochs=2"], "trainer.max_steps") is None
+    )
 
 
 def test_hydra_arg_value_last_wins():
@@ -53,17 +54,27 @@ def test_hydra_arg_value_last_wins():
 
 
 def test_hydra_arg_value_strips_override_markers():
-    assert RLJobRunner._hydra_arg_value(["++trainer.max_steps=80"], "trainer.max_steps") == "80"
-    assert RLJobRunner._hydra_arg_value(["+trainer.max_steps=80"], "trainer.max_steps") == "80"
+    assert (
+        RLJobRunner._hydra_arg_value(["++trainer.max_steps=80"], "trainer.max_steps")
+        == "80"
+    )
+    assert (
+        RLJobRunner._hydra_arg_value(["+trainer.max_steps=80"], "trainer.max_steps")
+        == "80"
+    )
 
 
 def test_hydra_arg_value_strips_surrounding_quotes():
     assert (
-        RLJobRunner._hydra_arg_value(["trainer.ckpt_path='/a path/ckpts'"], "trainer.ckpt_path")
+        RLJobRunner._hydra_arg_value(
+            ["trainer.ckpt_path='/a path/ckpts'"], "trainer.ckpt_path"
+        )
         == "/a path/ckpts"
     )
     assert (
-        RLJobRunner._hydra_arg_value(['trainer.ckpt_path="/a:b/ckpts"'], "trainer.ckpt_path")
+        RLJobRunner._hydra_arg_value(
+            ['trainer.ckpt_path="/a:b/ckpts"'], "trainer.ckpt_path"
+        )
         == "/a:b/ckpts"
     )
 
@@ -184,4 +195,6 @@ def test_run_proceeds_for_incomplete_link(tmp_path):
     runner._launch_trace_upload = lambda *a, **k: None
 
     assert runner.run() == 0
-    assert calls["setup"] == 1 and calls["ray"] == 1, "incomplete link must train normally"
+    assert calls["setup"] == 1 and calls["ray"] == 1, (
+        "incomplete link must train normally"
+    )

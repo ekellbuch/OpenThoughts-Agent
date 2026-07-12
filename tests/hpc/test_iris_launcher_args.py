@@ -11,7 +11,9 @@ from hpc.iris_launch_utils import IrisLauncher, ResolvedIrisAccelerator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HARBOR_CONFIG = REPO_ROOT / "hpc/harbor_yaml/eval/dcagent_eval_defaults.yaml"
-DATAGEN_CONFIG = REPO_ROOT / "hpc/datagen_yaml/extra/qwen3_coder_30b_a3b_vllm_serve_32k.yaml"
+DATAGEN_CONFIG = (
+    REPO_ROOT / "hpc/datagen_yaml/extra/qwen3_coder_30b_a3b_vllm_serve_32k.yaml"
+)
 HF_DATASET = "DCAgent2/swebench-verified-random-100-folders"
 
 
@@ -73,7 +75,9 @@ class FakeIrisJobApi:
 
     def resolve_multinode_defaults(self, tpu, gpu, replicas):
         if tpu and self.get_tpu_topology(tpu).vm_count > 1:
-            return replicas or self.get_tpu_topology(tpu).vm_count, FakeCoscheduling(group_by="tpu-name")
+            return replicas or self.get_tpu_topology(tpu).vm_count, FakeCoscheduling(
+                group_by="tpu-name"
+            )
         if gpu and replicas and replicas > 1:
             return replicas, FakeCoscheduling(group_by="leafgroup")
         return replicas or 1, None
@@ -125,7 +129,7 @@ def _option_value(command, flag):
 
 def _equals_option_values(command, flag):
     prefix = f"{flag}="
-    return [arg[len(prefix):] for arg in command if arg.startswith(prefix)]
+    return [arg[len(prefix) :] for arg in command if arg.startswith(prefix)]
 
 
 def test_gpu_parsing_and_accelerator_resolution_cover_iris_specs():
@@ -141,7 +145,12 @@ def test_gpu_parsing_and_accelerator_resolution_cover_iris_specs():
     )
 
     tpu = _parse_dummy_args("--tpu", "v5p-32")._resolved_iris_accelerator
-    assert (tpu.is_tpu, tpu.primary_tpu, tpu.downstream_eval_device_count, tpu.vm_count) == (
+    assert (
+        tpu.is_tpu,
+        tpu.primary_tpu,
+        tpu.downstream_eval_device_count,
+        tpu.vm_count,
+    ) == (
         True,
         "v5p-32",
         16,
@@ -154,7 +163,10 @@ def test_gpu_parsing_and_accelerator_resolution_cover_iris_specs():
     )
 
     default_tpu = _parse_dummy_args()._resolved_iris_accelerator
-    assert (default_tpu.is_tpu, default_tpu.primary_tpu) == (True, DummyIrisLauncher.default_tpu)
+    assert (default_tpu.is_tpu, default_tpu.primary_tpu) == (
+        True,
+        DummyIrisLauncher.default_tpu,
+    )
 
     with pytest.raises(SystemExit, match="mutually exclusive"):
         _parse_dummy_args("--gpu", "H100x8", "--tpu", "v5p-32")
@@ -173,10 +185,15 @@ def test_eval_iris_gpu_local_default_registers_in_pod():
 
     assert args.output_mode == "local"
     assert launcher.remote_output_dir == "/tmp/ot-agent-runs/gpu-local-smoke"
-    assert _option_value(launcher.command, "--experiments_dir") == "/tmp/ot-agent-runs/gpu-local-smoke"
+    assert (
+        _option_value(launcher.command, "--experiments_dir")
+        == "/tmp/ot-agent-runs/gpu-local-smoke"
+    )
     # Harbor jobs-dir root is DISTINCT from the experiments dir so the harbor
     # job dir holds only trial subdirs; run_eval reads <root>/<job_name>.
-    assert "--jobs-dir=/tmp/ot-agent-runs/harbor_jobs" in _equals_option_values(launcher.command, "--harbor_extra_arg")
+    assert "--jobs-dir=/tmp/ot-agent-runs/harbor_jobs" in _equals_option_values(
+        launcher.command, "--harbor_extra_arg"
+    )
     assert "--upload_to_database" in launcher.command
     assert (args.dataset_path, args.gpus) == (HF_DATASET, 8)
 
@@ -198,7 +215,9 @@ def test_eval_iris_gpu_s3_dry_run_covers_runtime_paths():
     assert launcher.remote_output_dir == expected_remote_output
     assert args._work_output_dir == expected_work_output
     assert _option_value(launcher.command, "--experiments_dir") == expected_work_output
-    assert "--jobs-dir=s3://marin-us-east-02a/evals" in _equals_option_values(launcher.command, "--harbor_extra_arg")
+    assert "--jobs-dir=s3://marin-us-east-02a/evals" in _equals_option_values(
+        launcher.command, "--harbor_extra_arg"
+    )
     assert (args.dataset_path, args.gpus) == (HF_DATASET, 8)
 
 
@@ -222,8 +241,16 @@ def test_eval_iris_gpu_rejects_unsafe_output_and_replica_modes(extra, message):
 def test_gpu_storage_creds_withheld_and_tpu_aliasing_preserved():
     # GPU pods must use the cluster-injected R2 creds — the launch host's AWS_*
     # and LAION_* must be withheld so they cannot clobber the pod's envFrom.
-    assert {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_ENDPOINT_URL"} <= _GPU_STORAGE_CRED_KEYS
-    assert {"LAION_ENDPOINT", "LAION_ACCESS_KEY", "LAION_SECRET_KEY"} <= _GPU_STORAGE_CRED_KEYS
+    assert {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_ENDPOINT_URL",
+    } <= _GPU_STORAGE_CRED_KEYS
+    assert {
+        "LAION_ENDPOINT",
+        "LAION_ACCESS_KEY",
+        "LAION_SECRET_KEY",
+    } <= _GPU_STORAGE_CRED_KEYS
     assert {"MARIN_HMAC_ACCESS_ID", "MARIN_HMAC_SECRET"} <= _GPU_STORAGE_CRED_KEYS
 
     # TPU path keeps the marin HMAC → AWS aliasing precedence.

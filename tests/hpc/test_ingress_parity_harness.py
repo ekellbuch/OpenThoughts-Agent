@@ -182,7 +182,9 @@ def diff_against_golden() -> list[str]:
                         f"[{section}] {k}: golden={gold_sec.get(k)!r} current={cur_sec.get(k)!r}"
                     )
         if not drifts:
-            drifts.append("Surface changed but no per-cell diff isolated; compare golden JSON directly.")
+            drifts.append(
+                "Surface changed but no per-cell diff isolated; compare golden JSON directly."
+            )
     return drifts
 
 
@@ -198,7 +200,9 @@ def test_golden_exists():
 
 def test_flag_off_surface_matches_golden():
     drifts = diff_against_golden()
-    assert not drifts, "Flag-off pinggy surface drifted from golden:\n" + "\n".join(drifts)
+    assert not drifts, "Flag-off pinggy surface drifted from golden:\n" + "\n".join(
+        drifts
+    )
 
 
 def test_needs_tunnel_semantics_unchanged():
@@ -216,10 +220,18 @@ def test_needs_tunnel_semantics_unchanged():
 # CLI
 # --------------------------------------------------------------------------- #
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     g = ap.add_mutually_exclusive_group(required=True)
-    g.add_argument("--capture", action="store_true", help="Regenerate the committed golden JSON.")
-    g.add_argument("--check", action="store_true", help="Diff current code vs golden; non-zero exit on drift.")
+    g.add_argument(
+        "--capture", action="store_true", help="Regenerate the committed golden JSON."
+    )
+    g.add_argument(
+        "--check",
+        action="store_true",
+        help="Diff current code vs golden; non-zero exit on drift.",
+    )
     args = ap.parse_args(argv)
 
     if args.capture:
@@ -230,7 +242,9 @@ def main(argv=None) -> int:
 
     # --check
     if not GOLDEN_PATH.exists():
-        print(f"[ingress-parity] FAIL: golden missing at {GOLDEN_PATH}", file=sys.stderr)
+        print(
+            f"[ingress-parity] FAIL: golden missing at {GOLDEN_PATH}", file=sys.stderr
+        )
         return 2
     drifts = diff_against_golden()
     if drifts:

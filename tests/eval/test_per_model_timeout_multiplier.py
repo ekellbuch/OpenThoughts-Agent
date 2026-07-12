@@ -56,15 +56,20 @@ def _listener(cli=None, global_tm=None):
     build_config()."""
     if global_tm is None:
         global_tm = cli if cli is not None else DEFAULT
-    cfg = types.SimpleNamespace(cli_timeout_multiplier=cli, timeout_multiplier=global_tm)
+    cfg = types.SimpleNamespace(
+        cli_timeout_multiplier=cli, timeout_multiplier=global_tm
+    )
     stub = types.SimpleNamespace(config=cfg)
-    stub._resolve_timeout_multiplier = EvalListener._resolve_timeout_multiplier.__get__(stub)
+    stub._resolve_timeout_multiplier = EvalListener._resolve_timeout_multiplier.__get__(
+        stub
+    )
     return stub
 
 
 # ---------------------------------------------------------------------------
 # (a) infer_size_timeout_multiplier — pure size-token helper
 # ---------------------------------------------------------------------------
+
 
 def test_infer_8b_is_2x():
     assert infer_size_timeout_multiplier("Qwen/Qwen3-8B") == 2.0
@@ -120,18 +125,22 @@ def test_infer_out_of_band_is_none():
 # (b) per-model baseline field
 # ---------------------------------------------------------------------------
 
+
 def test_baseline_field_read():
     cfgs = {"Qwen/Qwen3-8B": {"timeout_multiplier": 4.0}}
     assert get_baseline_timeout_multiplier("Qwen/Qwen3-8B", cfgs) == 4.0
 
 
 def test_baseline_field_absent_is_none():
-    assert get_baseline_timeout_multiplier("Qwen/Qwen3-8B", {"Qwen/Qwen3-8B": {}}) is None
+    assert (
+        get_baseline_timeout_multiplier("Qwen/Qwen3-8B", {"Qwen/Qwen3-8B": {}}) is None
+    )
 
 
 # ---------------------------------------------------------------------------
 # (c)-(e) hybrid precedence on the real method
 # ---------------------------------------------------------------------------
+
 
 def test_own_name_size_resolves_without_supabase():
     # An 8B baseline carries its own token -> 2.0, no base lookup needed.
@@ -140,7 +149,10 @@ def test_own_name_size_resolves_without_supabase():
 
 def test_finetune_inherits_size_from_base_model():
     # a1-* has no own token; base model Qwen/Qwen3-8B (8) -> 2.0.
-    assert _listener()._resolve_timeout_multiplier("DCAgent/a1-crosscodeeval_python", {}) == 2.0
+    assert (
+        _listener()._resolve_timeout_multiplier("DCAgent/a1-crosscodeeval_python", {})
+        == 2.0
+    )
 
 
 def test_per_model_baseline_beats_size():
@@ -162,4 +174,6 @@ def test_explicit_cli_one_overrides_inferred_two():
 
 def test_unknown_model_falls_back_to_default():
     # No CLI, no baseline, no own token, no base model -> the 1.0 default (+ WARN log).
-    assert _listener()._resolve_timeout_multiplier("mystery/model-no-size", {}) == DEFAULT
+    assert (
+        _listener()._resolve_timeout_multiplier("mystery/model-no-size", {}) == DEFAULT
+    )

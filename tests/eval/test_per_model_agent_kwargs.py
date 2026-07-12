@@ -29,7 +29,9 @@ from eval.unified_eval_listener import (
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-CANONICAL = os.path.join(REPO_ROOT, "eval", "configs", "baseline_model_configs_minimal.yaml")
+CANONICAL = os.path.join(
+    REPO_ROOT, "eval", "configs", "baseline_model_configs_minimal.yaml"
+)
 
 THINK = 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
 NOTHINK = 'extra_body={"chat_template_kwargs":{"enable_thinking":false}}'
@@ -65,6 +67,7 @@ def _listener(cli=None, preset=None):
 # merge_agent_kwargs — pure precedence helper
 # ---------------------------------------------------------------------------
 
+
 def test_merge_first_wins_by_key():
     assert merge_agent_kwargs([THINK], [NOTHINK]) == [THINK]
 
@@ -81,6 +84,7 @@ def test_merge_empty_lists():
 # (a) per-model baseline agent_kwargs → resolved list
 # ---------------------------------------------------------------------------
 
+
 def test_thinking_model_carries_kwarg_in_yaml(baseline_configs):
     # Qwen3-32B is a hybrid-thinking model; it must declare the thinking kwarg.
     ak = get_baseline_agent_kwargs("Qwen/Qwen3-32B", baseline_configs)
@@ -96,6 +100,7 @@ def test_per_model_kwarg_reaches_resolution(baseline_configs):
 # ---------------------------------------------------------------------------
 # (b) precedence CLI > per-model > preset
 # ---------------------------------------------------------------------------
+
 
 def test_precedence_cli_overrides_per_model(baseline_configs):
     # CLI supplies extra_body=...false; the per-model thinking (extra_body=...true)
@@ -125,6 +130,7 @@ def test_no_duplicate_keys_emitted(baseline_configs):
 # (c) NON-thinking model gets NO thinking kwarg
 # ---------------------------------------------------------------------------
 
+
 def test_qwen25_coder_is_non_thinking(baseline_configs):
     # Qwen2.5-Coder-32B-Instruct has no native thinking; it must carry NO
     # thinking agent-kwarg (it is only pattern-matched, never an explicit entry
@@ -135,7 +141,9 @@ def test_qwen25_coder_is_non_thinking(baseline_configs):
 
 def test_non_thinking_model_resolution_has_no_thinking(baseline_configs):
     lst = _listener()
-    resolved = lst._resolve_agent_kwargs("Qwen/Qwen2.5-Coder-32B-Instruct", baseline_configs)
+    resolved = lst._resolve_agent_kwargs(
+        "Qwen/Qwen2.5-Coder-32B-Instruct", baseline_configs
+    )
     assert not any("enable_thinking" in kw for kw in resolved)
     # With no CLI/preset and no per-model override, it equals the (empty) global.
     assert resolved == list(lst.config.agent_kwargs)
@@ -149,7 +157,9 @@ def test_explicit_cli_thinking_overrides_even_non_thinking(baseline_configs):
     # precisely why thinking lives in the per-model baseline config and NOT in
     # presets: only an intentional CLI override can force it onto a non-thinker.
     lst = _listener(cli=[THINK])
-    resolved = lst._resolve_agent_kwargs("Qwen/Qwen2.5-Coder-32B-Instruct", baseline_configs)
+    resolved = lst._resolve_agent_kwargs(
+        "Qwen/Qwen2.5-Coder-32B-Instruct", baseline_configs
+    )
     assert resolved == [THINK]
 
 
@@ -157,10 +167,13 @@ def test_explicit_cli_thinking_overrides_even_non_thinking(baseline_configs):
 # (d) consolidated file loads; removed file gone
 # ---------------------------------------------------------------------------
 
+
 def test_canonical_loads_and_old_file_removed():
     assert os.path.isfile(CANONICAL)
     old = os.path.join(REPO_ROOT, "eval", "baseline_model_configs.yaml")
-    assert not os.path.exists(old), "superseded eval/baseline_model_configs.yaml still present"
+    assert not os.path.exists(old), (
+        "superseded eval/baseline_model_configs.yaml still present"
+    )
 
 
 def test_canonical_has_no_dangling_reference_to_removed_file():

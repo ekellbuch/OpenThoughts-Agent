@@ -62,8 +62,12 @@ def test_parse_filters_non200_and_missing_literal():
     lines = [
         _record_line([SYS, _msg("user", "A")], [1, 2, 3], [9, 9]),  # keep
         _record_line([SYS, _msg("user", "B")], [1], [9], status=500),  # drop: non-200
-        json.dumps({"status_code": 200, "request": {"messages": []}}),  # drop: no literal
-        json.dumps({"status_code": 200, "literal": {"completion_token_ids": [1]}}),  # drop: no messages
+        json.dumps(
+            {"status_code": 200, "request": {"messages": []}}
+        ),  # drop: no literal
+        json.dumps(
+            {"status_code": 200, "literal": {"completion_token_ids": [1]}}
+        ),  # drop: no messages
         "not json",  # drop
     ]
     recs = parse_literal_records(lines)
@@ -89,12 +93,17 @@ def _trial_records(task: str, steps: list[tuple[list[int], list[int]]], base_ts:
             )
         )
         # opencode replays full history: append this turn's assistant + observation
-        messages = messages + [_msg("assistant", f"{task}-a{i}"), _msg("user", f"{task}-o{i}")]
+        messages = messages + [
+            _msg("assistant", f"{task}-a{i}"),
+            _msg("user", f"{task}-o{i}"),
+        ]
     return recs
 
 
 def test_reconstruct_distinct_trials_into_clean_ordered_chains():
-    a = _trial_records("TASK_A", [([1, 2, 3, 4, 5], [7, 7]), (list(range(9)), [7, 7, 7])], base_ts=100)
+    a = _trial_records(
+        "TASK_A", [([1, 2, 3, 4, 5], [7, 7]), (list(range(9)), [7, 7, 7])], base_ts=100
+    )
     b = _trial_records("TASK_B", [([1, 2, 3, 4, 5, 6], [8, 8, 8, 8])], base_ts=200)
     # Interleave arrival order; reconstruction must not depend on it.
     chains = reconstruct_chains([a[1], b[0], a[0]])
@@ -122,7 +131,9 @@ def test_reconstruct_duplicate_task_marks_continuations_ambiguous():
 # Binding (verify-or-skip)
 # --------------------------------------------------------------------------- #
 def test_bind_exact_match_unique():
-    a = _trial_records("TASK_A", [([1, 2, 3, 4, 5], [7, 7]), (list(range(9)), [7, 7, 7])], base_ts=100)
+    a = _trial_records(
+        "TASK_A", [([1, 2, 3, 4, 5], [7, 7]), (list(range(9)), [7, 7, 7])], base_ts=100
+    )
     b = _trial_records("TASK_B", [([1, 2, 3, 4, 5, 6], [8, 8, 8, 8])], base_ts=200)
     chains = reconstruct_chains(a + b)
     bound = bind_chain(chains, [(5, 2), (9, 3)])
@@ -156,8 +167,14 @@ def test_bind_tie_broken_by_window():
 def test_inject_populates_matching_steps():
     trajectory = {
         "steps": [
-            {"source": "agent", "metrics": {"prompt_tokens": 5, "completion_tokens": 2}},
-            {"source": "agent", "metrics": {"prompt_tokens": 9, "completion_tokens": 3}},
+            {
+                "source": "agent",
+                "metrics": {"prompt_tokens": 5, "completion_tokens": 2},
+            },
+            {
+                "source": "agent",
+                "metrics": {"prompt_tokens": 9, "completion_tokens": 3},
+            },
         ]
     }
     chain = Chain(
@@ -178,7 +195,12 @@ def test_inject_skips_step_on_count_mismatch():
     # Defensive: a step whose completion count disagrees with the record is left
     # untouched (never poison training tokens), even if the chain was bound.
     trajectory = {
-        "steps": [{"source": "agent", "metrics": {"prompt_tokens": 5, "completion_tokens": 999}}]
+        "steps": [
+            {
+                "source": "agent",
+                "metrics": {"prompt_tokens": 5, "completion_tokens": 999},
+            }
+        ]
     }
     chain = Chain(records=[LiteralRecord(0.0, [], [1, 2, 3, 4, 5], [7, 7], None)])
     assert inject_literals(trajectory, chain) == 0
@@ -189,8 +211,15 @@ def test_trajectory_count_sequence_skips_copied_and_nonagent():
     trajectory = {
         "steps": [
             {"source": "system", "message": "task"},
-            {"source": "agent", "is_copied_context": True, "metrics": {"prompt_tokens": 1, "completion_tokens": 1}},
-            {"source": "agent", "metrics": {"prompt_tokens": 5, "completion_tokens": 2}},
+            {
+                "source": "agent",
+                "is_copied_context": True,
+                "metrics": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+            {
+                "source": "agent",
+                "metrics": {"prompt_tokens": 5, "completion_tokens": 2},
+            },
         ]
     }
     assert trajectory_count_sequence(trajectory) == [(5, 2)]
@@ -203,7 +232,11 @@ def _write_trial(root: Path, name: str, count_seq, window=None) -> Path:
     trial = root / name
     (trial / "agent").mkdir(parents=True)
     steps = [
-        {"source": "agent", "message": f"turn-{i}", "metrics": {"prompt_tokens": p, "completion_tokens": c}}
+        {
+            "source": "agent",
+            "message": f"turn-{i}",
+            "metrics": {"prompt_tokens": p, "completion_tokens": c},
+        }
         for i, (p, c) in enumerate(count_seq)
     ]
     (trial / "agent" / "trajectory.json").write_text(json.dumps({"steps": steps}))
@@ -220,12 +253,22 @@ def test_enrich_end_to_end_joins_correct_trial(tmp_path):
     trial_a = _write_trial(job, "trial-A", [(5, 2), (9, 3)])
     _write_trial(job, "trial-B", [(6, 4)])
 
-    a = _trial_records("TASK_A", [([1, 2, 3, 4, 5], [70, 71]), (list(range(9)), [72, 73, 74])], base_ts=100)
+    a = _trial_records(
+        "TASK_A",
+        [([1, 2, 3, 4, 5], [70, 71]), (list(range(9)), [72, 73, 74])],
+        base_ts=100,
+    )
     b = _trial_records("TASK_B", [([1, 2, 3, 4, 5, 6], [80, 81, 82, 83])], base_ts=200)
     log = tmp_path / "literal.jsonl"
     log.write_text(
         "\n".join(
-            _record_line(r.messages, r.prompt_token_ids, r.completion_token_ids, r.logprobs, r.timestamp)
+            _record_line(
+                r.messages,
+                r.prompt_token_ids,
+                r.completion_token_ids,
+                r.logprobs,
+                r.timestamp,
+            )
             for r in [a[1], b[0], a[0]]
         )
     )
@@ -258,7 +301,13 @@ def test_enrich_skips_ambiguous_duplicate_tasks(tmp_path):
     log = tmp_path / "literal.jsonl"
     log.write_text(
         "\n".join(
-            _record_line(r.messages, r.prompt_token_ids, r.completion_token_ids, r.logprobs, r.timestamp)
+            _record_line(
+                r.messages,
+                r.prompt_token_ids,
+                r.completion_token_ids,
+                r.logprobs,
+                r.timestamp,
+            )
             for r in [a[0], c[0], a[1], c[1]]
         )
     )
@@ -287,9 +336,9 @@ def _write_trial_with_bogus_ids(root: Path, name: str, count_seq) -> Path:
             "metrics": {
                 "prompt_tokens": p,
                 "completion_tokens": c,
-                "prompt_token_ids": [999] * p,      # BOGUS
+                "prompt_token_ids": [999] * p,  # BOGUS
                 "completion_token_ids": [999] * c,  # BOGUS
-                "logprobs": [-9.9] * c,             # BOGUS
+                "logprobs": [-9.9] * c,  # BOGUS
             },
         }
         for i, (p, c) in enumerate(count_seq)
@@ -306,16 +355,30 @@ def _iter(root):
 def test_strip_literal_metrics_removes_ids_keeps_counts():
     traj = {
         "steps": [
-            {"source": "agent", "metrics": {"prompt_tokens": 5, "completion_tokens": 2,
-                                            "prompt_token_ids": [9, 9, 9, 9, 9],
-                                            "completion_token_ids": [9, 9], "logprobs": [-1.0, -1.0]}},
-            {"source": "agent", "metrics": {"prompt_tokens": 9, "completion_tokens": 3}},  # counts only
+            {
+                "source": "agent",
+                "metrics": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 2,
+                    "prompt_token_ids": [9, 9, 9, 9, 9],
+                    "completion_token_ids": [9, 9],
+                    "logprobs": [-1.0, -1.0],
+                },
+            },
+            {
+                "source": "agent",
+                "metrics": {"prompt_tokens": 9, "completion_tokens": 3},
+            },  # counts only
         ]
     }
     n = _strip_literal_metrics(traj)
     assert n == 1  # only the first step had token_ids
     m0 = traj["steps"][0]["metrics"]
-    assert "prompt_token_ids" not in m0 and "completion_token_ids" not in m0 and "logprobs" not in m0
+    assert (
+        "prompt_token_ids" not in m0
+        and "completion_token_ids" not in m0
+        and "logprobs" not in m0
+    )
     # counts preserved (binding relies on them)
     assert m0["prompt_tokens"] == 5 and m0["completion_tokens"] == 2
 
@@ -324,12 +387,24 @@ def test_enrich_overwrites_bogus_ids_on_bound_trial(tmp_path):
     job = tmp_path / "job"
     job.mkdir()
     trial = _write_trial_with_bogus_ids(job, "trial-A", [(5, 2), (9, 3)])
-    a = _trial_records("TASK_A", [([1, 2, 3, 4, 5], [70, 71]), (list(range(9)), [72, 73, 74])], base_ts=100)
+    a = _trial_records(
+        "TASK_A",
+        [([1, 2, 3, 4, 5], [70, 71]), (list(range(9)), [72, 73, 74])],
+        base_ts=100,
+    )
     log = tmp_path / "literal.jsonl"
-    log.write_text("\n".join(
-        _record_line(r.messages, r.prompt_token_ids, r.completion_token_ids, r.logprobs, r.timestamp)
-        for r in a
-    ))
+    log.write_text(
+        "\n".join(
+            _record_line(
+                r.messages,
+                r.prompt_token_ids,
+                r.completion_token_ids,
+                r.logprobs,
+                r.timestamp,
+            )
+            for r in a
+        )
+    )
     stats = enrich_trajectories_with_literals(str(job), str(log), iter_trial_dirs=_iter)
     assert stats.trials_enriched == 1
     traj = json.loads((trial / "agent" / "trajectory.json").read_text())
@@ -348,15 +423,29 @@ def test_enrich_strips_bogus_ids_on_unbound_trial(tmp_path):
     # literal.jsonl for a DIFFERENT trial with different counts -> no bind for trial-Z
     other = _trial_records("TASK_OTHER", [([1, 2, 3], [7, 7, 7, 7])], base_ts=100)
     log = tmp_path / "literal.jsonl"
-    log.write_text("\n".join(
-        _record_line(r.messages, r.prompt_token_ids, r.completion_token_ids, r.logprobs, r.timestamp)
-        for r in other
-    ))
+    log.write_text(
+        "\n".join(
+            _record_line(
+                r.messages,
+                r.prompt_token_ids,
+                r.completion_token_ids,
+                r.logprobs,
+                r.timestamp,
+            )
+            for r in other
+        )
+    )
     stats = enrich_trajectories_with_literals(str(job), str(log), iter_trial_dirs=_iter)
     assert stats.trials_enriched == 0
     assert stats.trials_stripped == 1
-    m = json.loads((trial / "agent" / "trajectory.json").read_text())["steps"][0]["metrics"]
-    assert "prompt_token_ids" not in m and "completion_token_ids" not in m and "logprobs" not in m
+    m = json.loads((trial / "agent" / "trajectory.json").read_text())["steps"][0][
+        "metrics"
+    ]
+    assert (
+        "prompt_token_ids" not in m
+        and "completion_token_ids" not in m
+        and "logprobs" not in m
+    )
 
 
 def test_enrich_zero_bind_condition_for_fail_loud(tmp_path):
@@ -367,10 +456,18 @@ def test_enrich_zero_bind_condition_for_fail_loud(tmp_path):
     _write_trial(job, "trial-Z", [(5, 2)])
     other = _trial_records("OTHER", [([1, 2, 3], [7, 7, 7, 7])], base_ts=100)
     log = tmp_path / "literal.jsonl"
-    log.write_text("\n".join(
-        _record_line(r.messages, r.prompt_token_ids, r.completion_token_ids, r.logprobs, r.timestamp)
-        for r in other
-    ))
+    log.write_text(
+        "\n".join(
+            _record_line(
+                r.messages,
+                r.prompt_token_ids,
+                r.completion_token_ids,
+                r.logprobs,
+                r.timestamp,
+            )
+            for r in other
+        )
+    )
     stats = enrich_trajectories_with_literals(str(job), str(log), iter_trial_dirs=_iter)
     assert stats.trials > 0 and stats.trials_enriched == 0
 
@@ -381,21 +478,47 @@ def test_enrich_binds_across_two_serve_files(tmp_path):
     # bind BOTH attempts' trials, with no cross-attempt mis-merge (0 ambiguous).
     job = tmp_path / "job"
     job.mkdir()
-    trial_a = _write_trial(job, "trial-A", [(5, 2), (9, 3)])   # served by attempt 0
-    trial_b = _write_trial(job, "trial-B", [(6, 4)])           # served by attempt 1
-    a = _trial_records("TASK_A", [([1, 2, 3, 4, 5], [70, 71]), (list(range(9)), [72, 73, 74])], base_ts=100)
+    trial_a = _write_trial(job, "trial-A", [(5, 2), (9, 3)])  # served by attempt 0
+    trial_b = _write_trial(job, "trial-B", [(6, 4)])  # served by attempt 1
+    a = _trial_records(
+        "TASK_A",
+        [([1, 2, 3, 4, 5], [70, 71]), (list(range(9)), [72, 73, 74])],
+        base_ts=100,
+    )
     b = _trial_records("TASK_B", [([1, 2, 3, 4, 5, 6], [80, 81, 82, 83])], base_ts=9000)
     f0 = tmp_path / "s0_literal.jsonl"
     f1 = tmp_path / "s1_literal.jsonl"
-    f0.write_text("\n".join(
-        _record_line(r.messages, r.prompt_token_ids, r.completion_token_ids, r.logprobs, r.timestamp) for r in a))
-    f1.write_text("\n".join(
-        _record_line(r.messages, r.prompt_token_ids, r.completion_token_ids, r.logprobs, r.timestamp) for r in b))
+    f0.write_text(
+        "\n".join(
+            _record_line(
+                r.messages,
+                r.prompt_token_ids,
+                r.completion_token_ids,
+                r.logprobs,
+                r.timestamp,
+            )
+            for r in a
+        )
+    )
+    f1.write_text(
+        "\n".join(
+            _record_line(
+                r.messages,
+                r.prompt_token_ids,
+                r.completion_token_ids,
+                r.logprobs,
+                r.timestamp,
+            )
+            for r in b
+        )
+    )
 
-    stats = enrich_trajectories_with_literals(str(job), [str(f0), str(f1)], iter_trial_dirs=_iter)
+    stats = enrich_trajectories_with_literals(
+        str(job), [str(f0), str(f1)], iter_trial_dirs=_iter
+    )
     assert stats.trials == 2
-    assert stats.trials_enriched == 2       # BOTH attempts' trials bound
-    assert stats.ambiguous_chains == 0      # no cross-attempt mis-merge
+    assert stats.trials_enriched == 2  # BOTH attempts' trials bound
+    assert stats.ambiguous_chains == 0  # no cross-attempt mis-merge
     ta = json.loads((trial_a / "agent" / "trajectory.json").read_text())
     tb = json.loads((trial_b / "agent" / "trajectory.json").read_text())
     assert ta["steps"][0]["metrics"]["completion_token_ids"] == [70, 71]

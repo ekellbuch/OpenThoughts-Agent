@@ -38,9 +38,15 @@ from scripts.harbor import make_and_upload_trace_dataset as mkupload  # noqa: E4
 def _patch_installers(monkeypatch) -> list[str]:
     """Replace the three _install_* helpers with call recorders."""
     called: list[str] = []
-    monkeypatch.setattr(mkupload, "_install_safe_episode_guard", lambda: called.append("safe"))
-    monkeypatch.setattr(mkupload, "_install_dataset_sanitizer", lambda: called.append("sanitize"))
-    monkeypatch.setattr(mkupload, "_install_inline_subagent_merger", lambda: called.append("inline"))
+    monkeypatch.setattr(
+        mkupload, "_install_safe_episode_guard", lambda: called.append("safe")
+    )
+    monkeypatch.setattr(
+        mkupload, "_install_dataset_sanitizer", lambda: called.append("sanitize")
+    )
+    monkeypatch.setattr(
+        mkupload, "_install_inline_subagent_merger", lambda: called.append("inline")
+    )
     return called
 
 

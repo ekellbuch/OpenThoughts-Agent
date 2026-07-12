@@ -25,17 +25,23 @@ def _job_with_literal(tmp_path: Path, name: str = "job") -> Path:
     """A job dir with a trial + a sibling logs/<slug>_literal.jsonl (durable layout)."""
     job = tmp_path / name
     (job / "trial-A" / "agent").mkdir(parents=True)
-    (job / "trial-A" / "agent" / "trajectory.json").write_text(json.dumps({"steps": []}))
+    (job / "trial-A" / "agent" / "trajectory.json").write_text(
+        json.dumps({"steps": []})
+    )
     (job / "logs").mkdir()
     lit = job / "logs" / f"{name}_literal.jsonl"
-    lit.write_text('{"status_code":200,"request":{"messages":[]},"literal":{"completion_token_ids":[1]}}\n')
+    lit.write_text(
+        '{"status_code":200,"request":{"messages":[]},"literal":{"completion_token_ids":[1]}}\n'
+    )
     return job
 
 
 def _job_without_literal(tmp_path: Path) -> Path:
     job = tmp_path / "plain"
     (job / "trial-A" / "agent").mkdir(parents=True)
-    (job / "trial-A" / "agent" / "trajectory.json").write_text(json.dumps({"steps": []}))
+    (job / "trial-A" / "agent" / "trajectory.json").write_text(
+        json.dumps({"steps": []})
+    )
     return job
 
 
@@ -46,7 +52,10 @@ def test_parity_no_literal_no_flags_is_text_only(tmp_path):
     # GLOBAL INVARIANT: a job with no literal.jsonl and no flags -> text-only.
     job = _job_without_literal(tmp_path)
     assert resolve_literal_inclusion(
-        str(job), literal_log=None, include_literal_tokens=False, no_literal_tokens=False
+        str(job),
+        literal_log=None,
+        include_literal_tokens=False,
+        no_literal_tokens=False,
     ) == (False, [])
 
 
@@ -54,7 +63,10 @@ def test_favor_literal_present_default_on(tmp_path):
     # FAVOR: a discoverable sibling logs/*literal.jsonl -> literals ON, no flag needed.
     job = _job_with_literal(tmp_path)
     include, uris = resolve_literal_inclusion(
-        str(job), literal_log=None, include_literal_tokens=False, no_literal_tokens=False
+        str(job),
+        literal_log=None,
+        include_literal_tokens=False,
+        no_literal_tokens=False,
     )
     assert include is True
     assert len(uris) == 1 and uris[0].endswith("job_literal.jsonl")
@@ -71,7 +83,10 @@ def test_explicit_literal_log_wins(tmp_path):
     job = _job_without_literal(tmp_path)
     explicit = "gs://bucket/x/logs/y_literal.jsonl"
     assert resolve_literal_inclusion(
-        str(job), literal_log=explicit, include_literal_tokens=False, no_literal_tokens=False
+        str(job),
+        literal_log=explicit,
+        include_literal_tokens=False,
+        no_literal_tokens=False,
     ) == (True, [explicit])
 
 
@@ -81,7 +96,10 @@ def test_require_missing_fails_loud(tmp_path):
     job = _job_without_literal(tmp_path)
     with pytest.raises(SystemExit):
         resolve_literal_inclusion(
-            str(job), literal_log=None, include_literal_tokens=True, no_literal_tokens=False
+            str(job),
+            literal_log=None,
+            include_literal_tokens=True,
+            no_literal_tokens=False,
         )
 
 
@@ -99,10 +117,14 @@ def test_no_literal_wins_over_require(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_count_populated_literal_rows():
     import pyarrow as pa
-    from scripts.harbor.make_and_upload_trace_dataset import count_populated_literal_rows
+    from scripts.harbor.make_and_upload_trace_dataset import (
+        count_populated_literal_rows,
+    )
 
     # 3 rows: two with non-empty prompt_token_ids, one empty.
-    t = pa.table({"prompt_token_ids": [[[1, 2, 3]], [], [[4]]], "conversations": [[], [], []]})
+    t = pa.table(
+        {"prompt_token_ids": [[[1, 2, 3]], [], [[4]]], "conversations": [[], [], []]}
+    )
     assert count_populated_literal_rows(t) == 2
     # column absent -> 0 (a text-only dataset), never raises.
     t2 = pa.table({"conversations": [[], []]})
@@ -128,8 +150,18 @@ def test_pin_literal_token_columns_recovers_dropped_tokens():
 
     # source rows: row 0 has no literals (leading null), row 1 does
     rows = [
-        {"conversations": [{"role": "user", "content": "a"}], "prompt_token_ids": [], "completion_token_ids": [], "logprobs": []},
-        {"conversations": [{"role": "user", "content": "b"}], "prompt_token_ids": [[1, 2]], "completion_token_ids": [[10, 11, 12]], "logprobs": [[-0.1, -0.2, -0.3]]},
+        {
+            "conversations": [{"role": "user", "content": "a"}],
+            "prompt_token_ids": [],
+            "completion_token_ids": [],
+            "logprobs": [],
+        },
+        {
+            "conversations": [{"role": "user", "content": "b"}],
+            "prompt_token_ids": [[1, 2]],
+            "completion_token_ids": [[10, 11, 12]],
+            "logprobs": [[-0.1, -0.2, -0.3]],
+        },
     ]
     # Dataset as the lossy pipeline would leave it: token columns absent entirely.
     ds = Dataset.from_list([{"conversations": r["conversations"]} for r in rows])
@@ -175,7 +207,9 @@ def _job_with_two_literal_files(tmp_path):
     job = tmp_path / "job"
     (job / "logs").mkdir(parents=True)
     (job / "trial-A" / "agent").mkdir(parents=True)
-    (job / "trial-A" / "agent" / "trajectory.json").write_text(json.dumps({"steps": []}))
+    (job / "trial-A" / "agent" / "trajectory.json").write_text(
+        json.dumps({"steps": []})
+    )
     (job / "logs" / "tracegen__x__20260704_111941_literal.jsonl").write_text(
         '{"status_code":200,"request":{"messages":[]},"literal":{"completion_token_ids":[1]}}\n'
     )
@@ -186,7 +220,10 @@ def _job_with_two_literal_files(tmp_path):
 
 
 def test_discover_literal_logs_returns_all_attempts(tmp_path):
-    from scripts.harbor.literal_correlator import discover_literal_logs, discover_literal_log
+    from scripts.harbor.literal_correlator import (
+        discover_literal_logs,
+        discover_literal_log,
+    )
 
     job = _job_with_two_literal_files(tmp_path)
     logs = discover_literal_logs(str(job))
@@ -199,7 +236,10 @@ def test_discover_literal_logs_returns_all_attempts(tmp_path):
 def test_resolve_returns_all_literal_files(tmp_path):
     job = _job_with_two_literal_files(tmp_path)
     include, uris = resolve_literal_inclusion(
-        str(job), literal_log=None, include_literal_tokens=False, no_literal_tokens=False
+        str(job),
+        literal_log=None,
+        include_literal_tokens=False,
+        no_literal_tokens=False,
     )
     assert include is True and len(uris) == 2
 
@@ -209,10 +249,14 @@ def test_load_literal_records_unions_multiple_files(tmp_path):
 
     a = tmp_path / "a_literal.jsonl"
     b = tmp_path / "b_literal.jsonl"
-    a.write_text('{"status_code":200,"request":{"messages":[{"role":"user","content":"A"}]},'
-                 '"literal":{"prompt_token_ids":[1],"completion_token_ids":[9]}}\n')
-    b.write_text('{"status_code":200,"request":{"messages":[{"role":"user","content":"B"}]},'
-                 '"literal":{"prompt_token_ids":[2],"completion_token_ids":[8]}}\n')
+    a.write_text(
+        '{"status_code":200,"request":{"messages":[{"role":"user","content":"A"}]},'
+        '"literal":{"prompt_token_ids":[1],"completion_token_ids":[9]}}\n'
+    )
+    b.write_text(
+        '{"status_code":200,"request":{"messages":[{"role":"user","content":"B"}]},'
+        '"literal":{"prompt_token_ids":[2],"completion_token_ids":[8]}}\n'
+    )
     # one file
     assert len(load_literal_records(str(a))) == 1
     # union of both
@@ -225,7 +269,9 @@ def test_load_literal_records_unions_multiple_files(tmp_path):
 # Tokenizer provenance stamp (self-service decodability of literal columns)
 # --------------------------------------------------------------------------- #
 def test_read_served_model_name_from_literals_first_record(tmp_path):
-    from scripts.harbor.make_and_upload_trace_dataset import read_served_model_name_from_literals
+    from scripts.harbor.make_and_upload_trace_dataset import (
+        read_served_model_name_from_literals,
+    )
 
     lit = tmp_path / "j_literal.jsonl"
     lit.write_text(
@@ -236,24 +282,35 @@ def test_read_served_model_name_from_literals_first_record(tmp_path):
 
 
 def test_read_served_model_name_absent_returns_none(tmp_path):
-    from scripts.harbor.make_and_upload_trace_dataset import read_served_model_name_from_literals
+    from scripts.harbor.make_and_upload_trace_dataset import (
+        read_served_model_name_from_literals,
+    )
 
     lit = tmp_path / "j_literal.jsonl"
-    lit.write_text('{"status_code":200,"request":{"messages":[]},"literal":{"completion_token_ids":[1]}}\n')
+    lit.write_text(
+        '{"status_code":200,"request":{"messages":[]},"literal":{"completion_token_ids":[1]}}\n'
+    )
     assert read_served_model_name_from_literals([str(lit)]) is None
     # unreadable file -> None, never raises
-    assert read_served_model_name_from_literals([str(tmp_path / "missing.jsonl")]) is None
+    assert (
+        read_served_model_name_from_literals([str(tmp_path / "missing.jsonl")]) is None
+    )
 
 
 def test_build_tokenizer_provenance_carries_served_model():
     from scripts.harbor.make_and_upload_trace_dataset import build_tokenizer_provenance
 
     prov = build_tokenizer_provenance(
-        served_model="Qwen/Qwen3.5-122B-A10B-FP8", served_model_name_observed="served-slug"
+        served_model="Qwen/Qwen3.5-122B-A10B-FP8",
+        served_model_name_observed="served-slug",
     )
     assert prov["served_model"] == "Qwen/Qwen3.5-122B-A10B-FP8"
     assert prov["served_model_name_observed"] == "served-slug"
-    assert prov["literal_columns"] == ["prompt_token_ids", "completion_token_ids", "logprobs"]
+    assert prov["literal_columns"] == [
+        "prompt_token_ids",
+        "completion_token_ids",
+        "logprobs",
+    ]
     assert prov["schema"] == "tokenizer_provenance/v1"
 
 
@@ -268,12 +325,15 @@ def test_write_tokenizer_provenance_stamps_json_and_readme():
         def __init__(self):
             self.uploads = {}
 
-        def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message):
+        def upload_file(
+            self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message
+        ):
             self.uploads[path_in_repo] = bytes(path_or_fileobj)
 
     api = _FakeApi()
     prov = build_tokenizer_provenance(
-        served_model="Qwen/Qwen3.5-122B-A10B-FP8", served_model_name_observed="served-slug"
+        served_model="Qwen/Qwen3.5-122B-A10B-FP8",
+        served_model_name_observed="served-slug",
     )
     write_tokenizer_provenance(api, "penfever/example-traces", prov)
 

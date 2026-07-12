@@ -5,6 +5,7 @@ Fix (2026-06-26): a <=14B eval served TP=1/DP=1 used only 1 of a 4-GPU node's GP
 <=14B -> TP1/DP(gpus_per_node); >14B -> TP2/DP(gpus_per_node//2). An explicit
 baseline-config TP/DP still wins per-field.
 """
+
 import importlib
 
 import pytest
@@ -20,9 +21,10 @@ def leonardo(monkeypatch):
 
 # ---- infer_size_tp_dp (pure) -------------------------------------------------
 
+
 def test_infer_small_fills_node():
     assert mod.infer_size_tp_dp("foo-8b", 4) == (1, 4)
-    assert mod.infer_size_tp_dp("foo-14b", 4) == (1, 4)   # boundary inclusive
+    assert mod.infer_size_tp_dp("foo-14b", 4) == (1, 4)  # boundary inclusive
 
 
 def test_infer_large_tp2():
@@ -36,6 +38,7 @@ def test_infer_whole_node_one_gpu():
 
 
 # ---- get_vllm_env_overrides (size-default + cfg precedence) -------------------
+
 
 def test_8b_in_name_fills_4gpu_node(leonardo, monkeypatch):
     monkeypatch.setattr(mod, "resolve_base_model_name", lambda m: None)
@@ -72,8 +75,8 @@ def test_explicit_cfg_dp_wins(leonardo, monkeypatch):
     monkeypatch.setattr(mod, "resolve_base_model_name", lambda m: None)
     cfg = {"laion/x-8b": {"data_parallel_size": 2}}
     env = mod.get_vllm_env_overrides("laion/x-8b", cfg)
-    assert env["EVAL_VLLM_TENSOR_PARALLEL_SIZE"] == "1"   # size default
-    assert env["EVAL_VLLM_DATA_PARALLEL_SIZE"] == "2"     # cfg override
+    assert env["EVAL_VLLM_TENSOR_PARALLEL_SIZE"] == "1"  # size default
+    assert env["EVAL_VLLM_DATA_PARALLEL_SIZE"] == "2"  # cfg override
 
 
 def test_unknown_size_treated_small(leonardo, monkeypatch):
@@ -96,6 +99,7 @@ def test_tacc_whole_node_one_gpu_unchanged(monkeypatch):
 # (model_type qwen3_5 / qwen3_5_moe), rather than leaving it at vLLM's default.
 # Detection is by the eval model's own name, else its Supabase base model's name.
 
+
 def test_is_qwen35_family_by_own_name(monkeypatch):
     monkeypatch.setattr(mod, "resolve_base_model_name", lambda m: None)
     assert mod._is_qwen35_family("Qwen/Qwen3.5-35B-A3B")
@@ -110,7 +114,8 @@ def test_is_qwen35_family_by_own_name(monkeypatch):
 def test_is_qwen35_family_via_base_model(monkeypatch):
     # A finetune whose own name lacks the token but whose base is Qwen3.5 (e.g. tmax-9b).
     monkeypatch.setattr(
-        mod, "resolve_base_model_name",
+        mod,
+        "resolve_base_model_name",
         lambda m: "Qwen/Qwen3.5-9B" if "tmax" in m else None,
     )
     assert mod._is_qwen35_family("allenai/tmax-9b")

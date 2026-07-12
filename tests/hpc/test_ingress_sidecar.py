@@ -52,10 +52,12 @@ def _make_stub_upstream() -> FastAPI:
         if request.url.path.endswith("/v1/models"):
             return JSONResponse({"object": "list", "data": [{"id": "stub-model"}]})
         if request.url.path.endswith("/v1/chat/completions"):
+
             async def _sse():
                 for i in range(3):
                     yield f"data: chunk{i}\n\n".encode()
                 yield b"data: [DONE]\n\n"
+
             return StreamingResponse(_sse(), media_type="text/event-stream")
         return JSONResponse({"echo": request.url.path})
 
@@ -109,12 +111,12 @@ def test_non_bearer_scheme_returns_401(client):
 @pytest.mark.parametrize(
     "path",
     [
-        "/proxy/otagent.job1/admin",          # non-/v1 proxy subpath
-        "/proxy/otagent.job1",                # bare endpoint, no /v1
-        "/rpc/submit_job",                    # control/RPC route
-        "/api/cluster/status",                # dashboard control route
-        "/proxy/otagent.job1/v2/models",      # not /v1
-        "/v1/models",                         # /v1 but not under /proxy/<name>/
+        "/proxy/otagent.job1/admin",  # non-/v1 proxy subpath
+        "/proxy/otagent.job1",  # bare endpoint, no /v1
+        "/rpc/submit_job",  # control/RPC route
+        "/api/cluster/status",  # dashboard control route
+        "/proxy/otagent.job1/v2/models",  # not /v1
+        "/v1/models",  # /v1 but not under /proxy/<name>/
     ],
 )
 def test_valid_key_but_forbidden_path_returns_403(client, path):

@@ -13,8 +13,6 @@ Run from the OT-Agent repo root with:
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 
 import pytest
 
@@ -30,6 +28,7 @@ def _clean_env(monkeypatch):
 
 
 # --- resolve_rl_repo_dir: probe precedence ---------------------------------
+
 
 def test_skyrl_only(tmp_path):
     """SkyRL exists alone -> returns <parent>/SkyRL (byte-identical back-compat)."""
@@ -71,6 +70,7 @@ def test_env_override_honored_when_neither_exists(tmp_path, monkeypatch):
 
 
 # --- _resolve_skyrl_home: SKYRL_HOME-based resolution ----------------------
+
 
 def test_skyrl_home_existing_returned_unchanged(tmp_path, monkeypatch):
     """SKYRL_HOME points at an existing dir -> returned unchanged (precedence a)."""
