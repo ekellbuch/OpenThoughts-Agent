@@ -1287,7 +1287,11 @@ vista = HPC(
     # the ONE task not in srun's terminated list (the node died before srun could kill it); rank 10
     # (c622-151) merely NCCL-watchdog-timed-out waiting on the dead peer's _ALLGATHER_BASE (symptom,
     # not cause).
-    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051,c636-152,c608-042,c634-142",
+    # c641-012 added 2026-07-12 from job 823965 (axolotl Qwen3-32B SFT, exp _16, died ~02:01 CDT,
+    # ~27 min in): SLURM State NODE_FAIL + log "srun: error: Node failure on c641-012", matching
+    # `sinfo -R` ("Not responding", timestamp 2026-07-12T02:01:19 == job End). It hosted rank 15;
+    # peer c641-001 (rank 14) merely exited with code 1 ~seconds earlier (symptom, not cause).
+    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051,c636-152,c608-042,c634-142,c641-012",
     # Runtime configuration for Ray/vLLM
     modules=["gcc/15.1.0", "cuda/12.8", "tacc-apptainer"],
     conda_activate="source $SCRATCH/miniconda3/etc/profile.d/conda.sh && conda activate $SCRATCH/miniconda3/envs/vllm_sandboxes",
