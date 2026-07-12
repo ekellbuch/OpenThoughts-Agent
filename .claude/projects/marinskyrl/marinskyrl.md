@@ -20,6 +20,19 @@ strict-superset SoT).
 
 ---
 
+## CI — the `SkyRL-GPU-E2E-CI` convergence test is DISABLED (2026-07-12); RESTORE when Marin CI can substitute
+The daily-scheduled `SkyRL-GPU-E2E-CI` (`.github/workflows/gpu_e2e_ci.yaml` → `Basic convergence test`)
+`anyscale job submit`s to **upstream SkyRL's Anyscale account**, which the `marin-community/MarinSkyRL` fork
+has **no `ANYSCALE_CLI_TOKEN`/`WANDB_API_KEY` for** → every scheduled run fast-fails (~30s) at CLI auth
+(40+ consecutive red X's since ~2026-06-06, never reaching any SkyRL code — so NOT a signal about our
+changes). We **disabled the `schedule:` cron** (kept `workflow_dispatch` so it can still be run manually);
+the disable must land on **`main`** to take effect (scheduled workflows run off the default branch).
+**⚠ RESTORE this** (re-enable the `schedule:` trigger) **once Marin CI is ready to substitute** — i.e. once
+there's a Marin-owned GPU-E2E CI (Anyscale creds set on the fork, or a Marin-cluster runner) that actually
+exercises the convergence test. Until then a manual `workflow_dispatch` is the way to run it.
+
+---
+
 ## `strategy.all_reduce(status)` requires IDENTICAL keys on every rank
 
 `DistributedStrategy.all_reduce(data: dict)` iterates `for k,v in data.items(): ret[k]=all_reduce(v)` —
