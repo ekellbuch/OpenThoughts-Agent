@@ -191,6 +191,18 @@ in — NOT `otagent`; the axolotl backend uses `--conda_env sft-axolotl`):
 - flash-attn 2.8.3 was ALSO installed into `otagent` (harmless — otagent doesn't run axolotl;
   available if other otagent workflows want it).
 
+### Checkpoint save: SHARDED (16-bit gather OFF) — CONSOLIDATE AT CLEANUP
+
+The axolotl-32B run saves **DeepSpeed-SHARDED** checkpoints — `deepspeed_config:
+sft/axolotl_configs/deepspeed/zero3_bf16_shardsave.json` sets `gather_16bit_weights_on_model_save:
+false` (the consolidated-16bit save-gather deadlocked the 16-node Vista IB fabric at step-10 save —
+CONFIRMED job 823417, exp `_15`; `agent_logs/2026-07-12_tacc_axolotl32b_nccl_save_gather_hang.md`).
+Consequence: checkpoint-N dirs hold per-rank `global_stepN/*.pt` + `zero_to_fp32.py`, **NO
+consolidated root safetensors even at end-of-training** → cleanup MUST take the sft-job-cleanup
+**32B ZeRO-3 consolidate path** (`global_stepN/`+`zero_to_fp32.py` recognition → consolidate before
+HF upload). `deepspeed:` in the source YAML is only the ON/OFF toggle — the honored path key is
+`deepspeed_config:` (the translator ignores the `deepspeed:` value).
+
 Superseded stale note (2026-06-25 — kept for provenance): "No prebuilt wheel for torch
 2.11+cu128 on aarch64; v0.6.4 needs a torch 2.9.0 downgrade; decision = use SDPA."
 

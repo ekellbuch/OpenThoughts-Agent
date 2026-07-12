@@ -14,9 +14,19 @@ base_model: Qwen/Qwen3-32B
 trust_remote_code: true
 
 # ZeRO-3. Offload currently OFF pending the cpu_adam toolchain fix (axolotl.md gotcha #2 —
-# offload IS achievable on this aarch64 GH200; LF does it on Jupiter). Translator maps a
-# truthy `deepspeed` -> sft/axolotl/deepspeed_configs/zero3_bf16.json.
-deepspeed: sft/axolotl/deepspeed_configs/zero3_bf16.json
+# offload IS achievable on this aarch64 GH200; LF does it on Jupiter).
+# `deepspeed:` is only the ON/OFF toggle — its PATH value is IGNORED by the translator
+# (hpc/axolotl_config_utils.py: ax["deepspeed"] = deepspeed_config or hardcoded default).
+# The honored path key is `deepspeed_config:` below → shard-save variant (16-bit gather OFF).
+deepspeed: true
+# SAVE SHARDED — gather_16bit_weights_on_model_save: false. The consolidated-16bit GATHER on
+# checkpoint save (save_steps=10) deadlocks the 16-node Vista GH200 IB fabric: the 16-way
+# _ALLGATHER_BASE that reconstructs the full 32B model on every rank hangs the full PG timeout
+# (CONFIRMED, stack-trace-definitive: job 823417 exp _15, step-10 save; the end-of-training
+# save_model uses the identical gather → would hang the same way). Sharded save skips the gather
+# → RESUMABLE per-rank shards + zero_to_fp32.py; consolidate at cleanup before HF upload.
+# agent_logs/2026-07-12_tacc_axolotl32b_nccl_save_gather_hang.md.
+deepspeed_config: sft/axolotl_configs/deepspeed/zero3_bf16_shardsave.json
 
 # NOTE: the launcher REBUILDS this datasets block from --dataset + --role_tag/--content_tag
 # at launch (hpc/axolotl_config_utils.py::_build_datasets); this in-config block is honored
