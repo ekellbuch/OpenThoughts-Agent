@@ -1,26 +1,29 @@
-#!/usr/bin/env python
-"""Stage-1 unit tests for the shared model-config registry loader/resolver.
+"""Unit tests for the shared model-config registry loader/resolver.
 
-Validates load_model_registry's behavior in isolation against a hand-written fixture:
+Reshaped (2026-07-12) from the former self-contained script
+`eval/tests/test_model_registry_resolve.py` into a pytest test — the assertion
+logic is byte-for-byte the original `check(...)` conditions, now collected into
+one pytest case that fails with the aggregated list of failed checks.
+
+Validates `load_model_registry`'s behavior in isolation against a hand-written
+fixture:
   * group expansion + per-model override (mirrors the legacy loader),
   * the 4-tier precedence exact+variant > exact > group > pattern,
-  * shallow-merge variant semantics (variant replaces a named top-level key wholesale),
-  * the G3 STRICT-SUPERSET property: a profile with NO matching variant resolves to the
-    base entry byte-identical to the legacy exact/group/pattern result.
+  * shallow-merge variant semantics (variant replaces a named top-level key),
+  * the G3 STRICT-SUPERSET property: a profile with NO matching variant resolves
+    to the base entry byte-identical to the legacy exact/group/pattern result.
 
-Run: /path/to/otagent/bin/python eval/tests/test_model_registry_resolve.py
-(self-contained; no pytest required — prints PASS/FAIL and exits nonzero on any failure.)
+CI-safe: hermetic, no network/creds (patches out the base-model resolver).
 """
+
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 from pathlib import Path
 
+# unified_eval_listener reads DCFT at import; point it at the repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 os.environ.setdefault("DCFT", str(_REPO_ROOT))
 
 import eval.unified_eval_listener as uel  # noqa: E402
@@ -110,18 +113,22 @@ def _load(profile):
     return configs, patterns
 
 
-_failures = []
+def test_model_registry_resolve(monkeypatch):
+    # This test mutates module-level globals on unified_eval_listener (the loader's
+    # memo caches, the cluster shape, and the base-model resolver). As a standalone
+    # script that was harmless; in-process under pytest it would LEAK into sibling
+    # tests (e.g. test_vllm_parallelism_sizing). Register the current values with
+    # monkeypatch so they are restored at teardown regardless of the direct
+    # reassignments below.
+    for _attr in ("_CLUSTER_CONFIG", "resolve_base_model_name",
+                  "_BASELINE_MODEL_CONFIGS", "_BASELINE_MODEL_PATTERNS"):
+        monkeypatch.setattr(uel, _attr, getattr(uel, _attr, None), raising=False)
 
+    failures = []
 
-def check(name, cond, detail=""):
-    status = "PASS" if cond else "FAIL"
-    print(f"  [{status}] {name}" + (f" — {detail}" if detail and not cond else ""))
-    if not cond:
-        _failures.append(f"{name}: {detail}")
-
-
-def main() -> int:
-    print("== Stage-1 registry resolver unit tests ==")
+    def check(name, cond, detail=""):
+        if not cond:
+            failures.append(f"{name}: {detail}")
 
     # --- profile=None (no variant active): base entries, superset property ---
     cfg, pats = _load(None)
@@ -241,9 +248,11 @@ def main() -> int:
     _, pats_n = _load(None)
     _, pats_g = _load("gh200")
     check("profile-scoped pattern absent off-profile (no 70B pattern under default)",
-          not any(p.get("match") == "(?i)70[Bb]" for p in pats_n), repr([p.get("match") for p in pats_n]))
+          not any(p.get("match") == "(?i)70[Bb]" for p in pats_n),
+          repr([p.get("match") for p in pats_n]))
     check("profile-scoped pattern present on-profile (70B pattern under gh200)",
-          any(p.get("match") == "(?i)70[Bb]" for p in pats_g), repr([p.get("match") for p in pats_g]))
+          any(p.get("match") == "(?i)70[Bb]" for p in pats_g),
+          repr([p.get("match") for p in pats_g]))
     check("profiles filter key stripped from stored patterns",
           all("profiles" not in p for p in pats_g))
     # behavioral: an unlisted 70B name resolves TP=1 under gh200 (its pattern), but falls to the
@@ -271,9 +280,4 @@ def main() -> int:
     check("max_output_tokens variant override -> EVAL_MAX_OUTPUT_TOKENS=8192 (gh200)",
           env_var_set.get("EVAL_MAX_OUTPUT_TOKENS") == "8192", repr(env_var_set))
 
-    print(f"\n== {len(_failures)} failure(s) ==" if _failures else "\n== ALL TESTS PASS ==")
-    return 1 if _failures else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    assert not failures, "registry-resolve checks failed:\n" + "\n".join(failures)

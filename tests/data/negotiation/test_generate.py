@@ -14,11 +14,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-# Repo root
-ROOT = Path(__file__).resolve().parents[2]
-import sys
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# Repo root (this file lives at tests/data/negotiation/ -> up 3 to repo root).
+# Used only to locate on-disk fixture data files; `data` is an installed package
+# so the lazy `import data.negotiation.generate` below resolves without a sys.path hack.
+ROOT = Path(__file__).resolve().parents[3]
 
 # Lazy import of generate to avoid pulling in data.commons (pyarrow) until needed
 _generate_module = None

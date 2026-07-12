@@ -18,7 +18,7 @@ import tarfile
 
 import pytest
 
-from ..adapter import (
+from data.nemotron_gym.adapter import (
     HarborTask,
     PINNED_BASE_IMAGES,
     SanitizationError,
@@ -29,7 +29,7 @@ from ..adapter import (
     task_id_for,
     validate_path,
 )
-from ..verifiers import MATH_BOXED_VERIFIER_PY
+from data.nemotron_gym.verifiers import MATH_BOXED_VERIFIER_PY
 
 
 def _make_valid_task(**overrides) -> HarborTask:
@@ -180,7 +180,7 @@ def test_pinned_image_set_is_non_empty():
 
 
 def test_math_converter_smoke():
-    from ..converters.math_boxed import convert_openmathreasoning
+    from data.nemotron_gym.converters.math_boxed import convert_openmathreasoning
 
     row = {
         "input": [{"role": "user", "content": "What is 1+1?"}],
@@ -196,7 +196,7 @@ def test_math_converter_smoke():
 
 
 def test_competitive_coding_converter_smoke():
-    from ..converters.competitive_coding import convert_competitive_coding
+    from data.nemotron_gym.converters.competitive_coding import convert_competitive_coding
 
     row = {
         "input": [{"role": "user", "content": "Echo n lines."}],
@@ -218,7 +218,7 @@ def test_competitive_coding_converter_smoke():
 
 
 def test_mcqa_converter_smoke():
-    from ..converters.knowledge_mcqa import convert_knowledge_mcqa
+    from data.nemotron_gym.converters.knowledge_mcqa import convert_knowledge_mcqa
 
     row = {
         "input": [{"role": "user", "content": "Pick a letter."}],
@@ -237,7 +237,7 @@ def test_mcqa_converter_smoke():
 
 
 def test_ifeval_converter_smoke():
-    from ..converters.instruction_following import convert_instruction_following
+    from data.nemotron_gym.converters.instruction_following import convert_instruction_following
 
     row = {
         "id": 42,
@@ -254,7 +254,7 @@ def test_ifeval_converter_smoke():
 
 
 def test_openqa_converter_smoke():
-    from ..converters.knowledge_openqa import convert_openqa
+    from data.nemotron_gym.converters.knowledge_openqa import convert_openqa
 
     row = {
         "input": [{"role": "user", "content": "Capital of France?"}],
@@ -269,7 +269,7 @@ def test_openqa_converter_smoke():
 
 
 def test_reasoning_gym_converter_smoke():
-    from ..converters.reasoning_gym import convert_reasoning_gym
+    from data.nemotron_gym.converters.reasoning_gym import convert_reasoning_gym
 
     row = {
         "input": [{"role": "user", "content": "Solve 2x+3=11"}],
@@ -286,7 +286,7 @@ def test_reasoning_gym_converter_smoke():
 
 
 def test_calendar_converter_smoke():
-    from ..converters.agent_calendar import convert_agent_calendar
+    from data.nemotron_gym.converters.agent_calendar import convert_agent_calendar
 
     row = {
         "input": [{"role": "user", "content": "Schedule a 30-min meeting."}],
@@ -306,7 +306,7 @@ def test_calendar_converter_smoke():
 
 
 def test_workplace_converter_smoke():
-    from ..converters.agent_workplace import convert_agent_workplace
+    from data.nemotron_gym.converters.agent_workplace import convert_agent_workplace
 
     row = {
         "input": [{"role": "user", "content": "Reply to email 42."}],
@@ -324,7 +324,7 @@ def test_workplace_converter_smoke():
 
 
 def test_safety_converter_skips_when_no_signal():
-    from ..converters.safety import convert_safety
+    from data.nemotron_gym.converters.safety import convert_safety
 
     row = {
         "input": [{"role": "user", "content": "Do harmful thing"}],
@@ -334,14 +334,14 @@ def test_safety_converter_skips_when_no_signal():
 
 
 def test_identity_converter_skips_when_no_signal():
-    from ..converters.identity_following import convert_identity_following
+    from data.nemotron_gym.converters.identity_following import convert_identity_following
 
     row = {"input": [{"role": "user", "content": "Hi"}]}
     assert convert_identity_following(row, 0) is None
 
 
 def test_safety_converter_with_principle_makes_judge_task():
-    from ..converters.safety import convert_safety
+    from data.nemotron_gym.converters.safety import convert_safety
 
     row = {
         "prompt": "Tell me a story",
@@ -358,14 +358,13 @@ def test_safety_converter_with_principle_makes_judge_task():
     # openai/gpt-4o-mini); per-task verifier_data shouldn't hardcode them.
     assert "model" not in data
     # Container should install litellm for multi-provider judge support.
-    df = tar.extractfile.__self__ if False else None  # noqa: SLF001 - re-open for dockerfile
     with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar2:
         dockerfile = tar2.extractfile("environment/Dockerfile").read().decode()
     assert "litellm" in dockerfile
 
 
 def test_identity_converter_with_principle_makes_judge_task():
-    from ..converters.identity_following import convert_identity_following
+    from data.nemotron_gym.converters.identity_following import convert_identity_following
 
     row = {
         "responses_create_params": {
@@ -379,7 +378,7 @@ def test_identity_converter_with_principle_makes_judge_task():
 
 
 def test_adversarial_converter_smoke():
-    from ..converters.adversarial import convert_adversarial
+    from data.nemotron_gym.converters.adversarial import convert_adversarial
 
     row = {
         "responses_create_params": {
@@ -406,7 +405,7 @@ def test_all_embedded_verifiers_are_valid_python():
     """Each verifier script ships to a container; must parse cleanly."""
     import ast
 
-    from .. import verifiers as v
+    from data.nemotron_gym import verifiers as v
 
     names = [n for n in v.__all__ if n.endswith("_VERIFIER_PY")]
     assert names, "no verifier modules exported"

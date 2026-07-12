@@ -5,9 +5,7 @@ Tests that filesystem-specific differences are properly normalized.
 """
 
 import unittest
-import subprocess
 import tempfile
-from pathlib import Path
 
 
 class TestOutputNormalization(unittest.TestCase):

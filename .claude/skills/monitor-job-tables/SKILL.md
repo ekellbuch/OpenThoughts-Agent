@@ -193,15 +193,17 @@ elastic summary — often masked), CUDA OOM at first fwd/bwd (eager attn at 32k 
 ## Datagen
 
 ```
-┌────────────────────────────────────┬──────────────┬─────────┬───────────┬──────┬──────────────────────────┐
-│             Datagen run             │    Chunks    │ Trials  │ avg_turns │ exc% │           Trend          │
-├────────────────────────────────────┼──────────────┼─────────┼───────────┼──────┼──────────────────────────┤
-│ codenet-python-v2 (MiniMax Row #34) │ 18/20 done   │ ~8.6k   │ 5.1       │ 19%  │ 2 chunks running         │
-└────────────────────────────────────┴──────────────┴─────────┴───────────┴──────┴──────────────────────────┘
+┌────────────────────────────────────┬──────────────┬─────────┬───────────┬──────┬──────┬──────────────────────────┐
+│             Datagen run             │    Chunks    │ Trials  │ avg_turns │ Mean │ exc% │           Trend          │
+├────────────────────────────────────┼──────────────┼─────────┼───────────┼──────┼──────┼──────────────────────────┤
+│ codenet-python-v2 (MiniMax Row #34) │ 18/20 done   │ ~8.6k   │ 5.1       │ 0.53 │ 19%  │ 2 chunks running         │
+└────────────────────────────────────┴──────────────┴─────────┴───────────┴──────┴──────┴──────────────────────────┘
 ```
 Columns: run (+ tracker row), Chunks (`done/total`, from squeue+sacct), Trials (`result.json` count),
-avg_turns, exc%, Trend. **avg_turns is the realness gate** — `>1` = real multi-step; **`≈1.0` = dead-engine
-run, do NOT consolidate**. exc% ~20–25% AgentTimeout is normal for hard sets.
+avg_turns, **Mean** (mean reward — the harbor `<done>/<total> Mean: <X>` progress line; INCLUDE IT WHEN
+AVAILABLE, i.e. verifier-on runs emit it, `iris … job logs | grep -aoE '[0-9]+/[0-9]+ Mean: [-0-9.]+' | tail -1`
+— mark `—` if the run has no verifier / no Mean line), exc%, Trend. **avg_turns is the realness gate** — `>1` =
+real multi-step; **`≈1.0` = dead-engine run, do NOT consolidate**. exc% ~20–25% AgentTimeout is normal for hard sets.
 **Red flags:** `TIMEOUT` **strands the traces** (Harbor's terminal upload is killed — traces on disk, NOT
 uploaded → must consolidate manually); a chunk **hung** (its `.out` silent for hours + `result.json` count
 stalled while still RUNNING); avg_turns≈1.0.

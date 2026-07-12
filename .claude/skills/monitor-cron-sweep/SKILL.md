@@ -30,9 +30,11 @@ Deploy this each cron sweep to produce ONE comprehensive update across all activ
 > **Bake this rule into EVERY subagent prompt you dispatch** — the recurring Leonardo-clone divergence came from
 > in-cluster edits/commits during reactive relaunches.
 
-> **Formats** (the exact per-type tables + which metrics to pull + per-type red-flags) live in
-> **`/Users/benjaminfeuer/Documents/notes/ot-agent/job_monitor_table.md`** — read it; this skill is the
-> *process* that fills it. **Cluster particulars** (ssh invocation, code/experiments/log paths, the RL
+> **Formats → the `monitor-job-tables` skill** — the authority for the exact per-type tables (box-drawing
+> `┌─┬─┐`, NOT markdown — hard preference), bucketed RL · SFT · Datagen · Eval · Catch-all, with the mandatory
+> metric columns, signal thresholds, and benign-noise-vs-real-fault rules per bucket. Read it; this skill is
+> the *process* that fills those tables. (The older `~/Documents/notes/ot-agent/job_monitor_table.md` is the
+> legacy copy the skill supersedes.) **Cluster particulars** (ssh invocation, code/experiments/log paths, the RL
 > concurrency cap, gpu-mem ceiling, dotenv) live in **`.claude/ops/<cluster>/ops.md`** — read the ops for
 > each cluster you sweep. No cluster-specific values are inlined here.
 
@@ -118,7 +120,7 @@ By job-name prefix / run-tag: `rl__*` → **RL**, `sft__*` → **SFT**, `datagen
 `eval-*` / eval run-tags → **Eval**, everything else (consolidate, pretokenize, hf_upload, SIF build,
 DCP/CP/GPU-CI smoke, measurement/grid probes) → **Catch-all**.
 
-## 3. Render per `job_monitor_table.md` (unify cross-cluster per type)
+## 3. Render per the `monitor-job-tables` skill (unify cross-cluster per type)
 For each bucket, pull the type's signals and render its table. **Unify all clusters' runs of a type into
 ONE table.** Extraction pointers:
 - **RL** — Step (`.out` tqdm `Training Step Progress: N/M` or `trainer/global_step`) + reward/grad/entropy/
@@ -193,7 +195,7 @@ ONE table.** Extraction pointers:
   of OUR OWN doomed/wedged jobs, so (with the standing kill-permission in mind) the supervisor cancels +
   relaunches on the corrected setting per `rl-agentic-launch-iris`/`rl-*-launch-*`, and logs the probe + verdict
   to a dated `agent_logs/` entry. Don't sit on a confirmed-garbage run for another 3h sweep.
-- **Eval** stall/zombie/instant-fail red-flags → act per `job_monitor_table.md` Eval section; **`DCAgent2/*`
+- **Eval** stall/zombie/instant-fail red-flags → act per the `monitor-job-tables` Eval section; **`DCAgent2/*`
   measurement runs are EXEMPT** (report as calibration, not production).
 
 ## 5. Respect the standing constraints (reference, don't relitigate)
