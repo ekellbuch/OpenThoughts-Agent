@@ -1015,11 +1015,7 @@ def main(include_substrings: List[str] = None, exclude_substrings: List[str] = N
         # Print summary
         valid_accuracy_count = sum(1 for row in csv_data if row['accuracy'] is not None)
         print(f"Jobs with valid accuracy: {valid_accuracy_count}/{len(csv_data)}")
-        
-        # Display formatted results for non-model searches (unless comprehensive CSV was generated)
-        if not model_id and not detected_eval_type:
-            display_formatted_results(csv_data)
-        
+
     except Exception as e:
         print(f"Error: {e}")
 

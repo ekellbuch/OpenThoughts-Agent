@@ -20,6 +20,7 @@ import importlib
 import inspect
 import os
 from pydantic import BaseModel
+from datasets import Dataset
 
 from harbor.job import Job
 from harbor.models.agent.name import AgentName
@@ -286,7 +287,7 @@ def force_resume(
         _shutdown_litellm(timeout=5.0)
 
     ds = _export_traces(
-        root=job_dir,
+        root=existing_job_dir,
         recursive=bool(recursive),
         episodes=episodes,
         to_sharegpt=to_sharegpt,

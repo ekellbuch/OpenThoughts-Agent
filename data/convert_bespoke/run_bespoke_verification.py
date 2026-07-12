@@ -38,7 +38,7 @@ from harbor.utils.traces_utils import export_traces
 from scripts.harbor._harbor_compat import LocalDatasetConfig, create_job, set_orchestrator_field
 
 if __name__ == "__main__":
-    dataset_path = Path("/Users/etashguha/Downloads/tb-lite-tasks/sb\")
+    dataset_path = Path("/Users/etashguha/Downloads/tb-lite-tasks/sb")
 
     print(f"Running verification on {dataset_path}")
     print("Agent: terminus-2")

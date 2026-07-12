@@ -49,6 +49,11 @@ the two log-only fields that skill extracts (NOT in the sidecar): **mean reward*
 apply to CoreWeave GPU-RL — see class D.)
 
 ## 3. Report + classify (`## Iris jobs status — <ISO UTC>`)
+> **Table formatting → `monitor-job-tables`.** That skill is the authority for HOW to lay out the status
+> report: box-drawing tables (`┌─┬─┐`, NOT markdown — a hard preference for RL), bucketed by type
+> (RL · SFT · Datagen · Eval · Catch-all), with the mandatory metric columns, signal thresholds, and
+> benign-noise-vs-real-fault rules per bucket. Use it whenever you render this tick's job status.
+
 One line per job (name + state + CLOSED/PARTIAL/OPEN/DEAD) + a compact metrics block + a survival check (past
 cold compile? throughput sane vs S1 baseline gen mean~400/peak~1115? traces/results landing on HF?). Classify by
 job_id prefix:
@@ -142,6 +147,7 @@ confirmed-zombie DATAGEN kill (the precondition of its rescue). Autonomous write
 capacity) → report + surface the unpinned-relaunch option; don't kill a placed job unprompted.
 
 ## Related skills
+- **monitor-job-tables** — the §3 report FORMATTING authority: box-drawing tables bucketed by type (RL · SFT · Datagen · Eval · Catch-all) with mandatory columns, signal thresholds, and benign-noise rules per bucket.
 - **monitor-restore-iris** — (re)installs the recurring 3-hour cron that runs this procedure (holds the verbatim prompt).
 - **analyze-job-history-iris** — the §2 analyzer recipe for class A/B datagen+eval (foreground-and-wait; mean-reward + completed/total extraction).
 - **analyze-training-run-iris** — the class-E recipe for executor/Levanter training runs (step progress + major-gap detection via W&B + `iris job summary` + GCS checkpoints).

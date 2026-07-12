@@ -164,6 +164,34 @@ verify the repo exists before any manual rescue.
   cap with nothing reclaimable → note + move on). A pending refill is not an
   escalation (see the preemptible rule above).
 
+### How the pools work — monotonic tier ladder + crash-vs-preempt reservations (2026-07-11)
+
+Two mechanics explain almost every long `v5p…`/`v6e…` PENDING, including multi-hour ones. Both are
+**capacity behavior, not config faults** — HOLD FAST applies; do NOT mis-escalate them as quota/config blocks.
+
+- **Monotonic tier ladder (per pool).** Each preemptible pool (e.g. `v5p-preemptible/us-east5-a`) has a
+  **tier ladder by slice size** — `v5p-8` = tier 1, `v5p-16` = tier 2, `v5p-32` = tier 3, `v5p-64` = tier 4,
+  … up to 2048 (static in `marin:lib/iris/config/marin.yaml` tpu_pools). **The autoscaler will NOT scale up a
+  higher tier while a LOWER tier in the SAME pool has unsatisfied demand** — the pending reason is literally
+  `Autoscaler: tier_blocked: quota-pool tier monotonicity`. So a `v5p-64` (tier-4) request can sit PENDING for
+  hours *even when the raw chips exist*, purely because tier-1 `v5p-8` demand (often OTHER users' jobs) is
+  backlogged in that pool/zone. It self-resolves the instant the lower-tier backlog drains. Diagnose by
+  enumerating same-pool lower-tier demand (the `workers` table + autoscaler snapshot: `peak_demand`,
+  `slice_failed … no more capacity in zone`), NOT by touching your job.
+
+- **A crash tears down the reservation; a preempt holds it.** While a training child is RUNNING it *holds* its
+  slice, so the tier gate above is moot — which is why days of **preempt→resume** work fine (a preempt keeps the
+  slice reserved and re-attaches). But a **hard crash (e.g. SIGSEGV exit 139) destroys the slice entirely**; the
+  coordinator's `--max-retries` respawn must then **re-acquire the tier-N slice from scratch**, and *that* is
+  when it hits the monotonicity gate at whatever the current contention is. So a crash-resume can be
+  dramatically slower to place than a preempt-resume, even for the identical job — expected, not a wedge.
+
+Worked example (midtrain `1e23_p33m67_k0p20`, 2026-07-10→11): child SIGSEGV'd @18:42Z → respawn sat **13h12m**
+PENDING with zero task-attempts on `tier_blocked` behind a last-24h surge of others' `v5p-8` demand
+(`calvinxu/dm-delphi` sweeps, `tonyhlee/eval-chimera`, GCP zone `us-east5-a` capacity exhausted) → **self-placed
+@07:55Z** the moment that tier-1 backlog drained, on a freshly-formed v5p-64 slice, resuming from its last
+checkpoint. No config change, no quota grant, no intervention — the HOLD-FAST wait was correct.
+
 ### Wedged / stalled TRAINING run (coordinator + child) — checkpoint-resume
 > **⚠ The Executor + `ExecutorStep` are RETIRED (marin PR #6649, 2026-07-09) → lazy `ArtifactStep`
 > (`marin.execution.lazy`, `remote(fn,…)`, `name@version`). See `.claude/projects/marin-executor/`.** The

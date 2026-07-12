@@ -1,0 +1,305 @@
+# =============================================================================
+# R3 DE-CENTRALIZATION PLUMBING SMOKE — 2 nodes (16 H100), Qwen3-Coder-30B-A3B (MoE)
+# UNTRACKED smoke input (NOT a production config). Validates MarinSkyRL 168b345f
+#   (SKYRL_R3_DECENTRAL, Fix A): confirm the per-dp-group R3 chunk lands on a CONSUMER
+#   (dp-group) node instead of the driver head plasma, and routing stays correct.
+# =============================================================================
+# GEOMETRY (2 nodes = 16 H100, COLOCATED):
+#   colocate_all: TRUE  → policy + vLLM engines share all 16 GPU (vLLM sleep-mode ping-pong).
+#   Policy mesh: FSDP=8 × EP=1 × CP=1  → ddp = world(16)/(fsdp8·cp1·ep1) = 2 = dp_size.
+#     dp-group 0 → node 0 (Ray head / DRIVER).  dp-group 1 → node 1 (NON-driver).
+#     ⇒ R3_DECENTRAL_SET method=forward dp=1 node=<node1> is GUARANTEED non-driver — the point.
+#   EP=1 → NO expert-parallel all-to-all → sidesteps the 30B-Coder gs1 ALLTOALL deadlock (a CP=1/EP>1 issue).
+#   Generation: TP=4, EP=1, DCP=1, num_inference_engines=null (colocated → derived 16/4 = 4).
+#   MoE dim-0 guard (num_experts//ep)%fsdp: 128/1=128; 128%8=0 → VALID.
+#
+# ⚠ TRAINER NUANCE (main_tbench.py:56-64): colocate_all=true selects the SYNC RayPPOTrainer,
+#   NOT FullyAsyncRayPPOTrainer (fully-async REQUIRES colocate_all=false = separate GPU sets).
+#   The R3 relocate path under test (MeshDispatch.dispatch → _relocate_chunk_to_node) is the
+#   SAME code in both trainers, so this smoke validates the plumbing identically. To exercise
+#   the FullyAsyncRayPPOTrainer AND keep a guaranteed-non-driver dp-group you need a
+#   DISAGGREGATED 3-node layout (2 policy nodes for ddp=2 + 1 engine node = 24 GPU); a 2-node
+#   disaggregated layout puts both dp-groups on the single policy node, so the non-driver
+#   guarantee then hinges on which node the driver lands on (not robust).
+#
+# Model: Qwen/Qwen3-Coder-30B-A3B-Instruct — the smallest R3-PROVEN production MoE. (The
+#   in-code tiny test MoE is not HF/vLLM-servable; other small MoEs are unproven on the
+#   R3 / w13-reload / chat-template path → would add a variable to a plumbing test.)
+#
+# LAUNCH (only when ≥2 whole 8-GPU nodes are FREE — do NOT preempt the 80B / cross-user grug):
+#   set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
+#   export KUBECONFIG=~/.kube/coreweave-iris-gpu
+#   python -m rl.cloud.launch_rl_iris \
+#     --rl_config hpc/skyrl_yaml/iris/2node_qwen3_coder_30b_r3decentral_SMOKE.yaml \
+#     --model_path Qwen/Qwen3-Coder-30B-A3B-Instruct \
+#     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
+#     --num-nodes 2 --gpus_per_node 8 --cpu 48 --max-retries 1 --memory 1200GB \
+#     --skyrl-ref 168b345f \
+#     --rendezvous-dir s3://marin-us-east-02a/iris/rl-r3decentral-smoke/x \
+#     --job-name r3decentral-smoke --priority batch --no-wait
+#   (append --dry-run instead of --no-wait to validate the resolved geometry.)
+# =============================================================================
+
+entrypoint: examples.terminal_bench.entrypoints.main_tbench
+
+config_groups:
+  terminal_bench_config: terminal_bench
+
+terminal_bench:
+  trials_dir: s3://marin-us-east-02a/iris/rl-r3decentral-smoke/trace_jobs
+
+  harbor:
+    name: terminus-2
+    max_episodes: 999999
+    enable_summarize: false
+    store_all_messages: true
+    trajectory_config:
+      raw_content: true
+    enable_episode_logging: false
+    record_terminal_session: false
+    enable_pane_logging: false
+    strict_json_parser: true
+    interleaved_thinking: true
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: true
+    # Short ceiling — smoke just needs episodes to TERMINATE so a batch assembles.
+    override_timeout_sec: 600
+    override_cpus: 1
+    override_memory_mb: 2048
+    override_storage_mb: 2048
+    auto_snapshot: true
+    verifier_override_timeout_sec: 300
+    max_retries: 3
+    min_wait_sec: 60.0
+    max_wait_sec: 600.0
+    wait_multiplier: 2.0
+    exclude_exceptions:
+      - VerifierTimeoutError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - VerifierOutputParseError
+      - VerifierRuntimeError
+    # Small — 1 unique prompt × 8 samples = 8-trajectory batch; low concurrency for a colocated smoke.
+    n_concurrent_trials: 8
+    log_level: INFO
+    enable_reward_shaping: false
+    # REQUIRED for R3 ride + use_tis (per-token rollout logprobs + routed_experts capture).
+    collect_rollout_details: true
+    enable_error_classification: true
+    mask_exceptions:
+      - VerifierTimeoutError
+      - DaytonaError
+      - EnvironmentStartTimeoutError
+      - NetworkError
+      - ConnectionError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - AgentEnvironmentTimeoutError
+    default_error_treatment: zero
+    passthrough_exceptions:
+      - AgentTimeoutError
+      - ContextLengthExceededError
+
+  # SMALL context (≤4k): 3000 in + 1024 out (< max_model_len 4096).
+  model_info:
+    max_input_tokens: 3000
+    max_output_tokens: 1024
+
+  archiving:
+    enabled: false
+
+  # No trace upload for a throwaway smoke.
+  trace_upload:
+    enabled: false
+    repo_org: DCAgent
+    episodes: last
+    dataset_type: SFT
+    cleanup: true
+
+trainer:
+  strategy: fsdp2
+  # CP=1 → flash-attn varlen is fine (no ring-SDPA needed).
+  flash_attn: true
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+  algorithm:
+    advantage_estimator: rloo_n
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    eps_clip_low: 0.2
+    eps_clip_high: 0.05
+    loss_reduction: sequence_mean
+    use_tis: true
+    tis_imp_ratio_cap: 2.0
+
+  epochs: 1
+  # SMOKE: reach gs1 (the first fwd_logprobs_values_reward dispatch → R3_DECENTRAL_SET fires),
+  # take a couple steps, then KILL. Not for production.
+  max_steps: 2
+  update_epochs_per_batch: 1
+
+  # 8 = 1 prompt × 8 samples. train==mini (fully-async assert, harmless under sync too).
+  # 8 % dp_size(2) == 0 → chunks into 2 dp-groups of 4 trajectories.
+  train_batch_size: 16
+  policy_mini_batch_size: 16
+  eval_batch_size: 8
+
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+
+  max_prompt_length: 4096
+  use_sample_packing: false
+
+  eval_interval: 999999
+  eval_before_train: false
+  # Don't checkpoint a throwaway smoke.
+  ckpt_interval: 999999
+  resume_mode: latest
+  hf_save_interval: 999999
+  hf_hub_repo_id: null
+  hf_hub_private: false
+  hf_hub_revision: main
+
+  enable_db_registration: false
+
+  project_name: OpenThoughts-Agent
+  log_level: INFO
+  tracker_commit_each_step: true
+  logger: wandb
+
+  run_name: null
+  ckpt_path: null
+  export_path: null
+
+  policy:
+    optimizer_config:
+      lr: 8e-6
+      weight_decay: 0.0
+      adam_betas: [0.9, 0.999]
+      max_grad_norm: 0.9
+    fsdp_config:
+      cpu_offload: true
+      reshard_after_forward: true
+      # MESH: FSDP=8 × EP=1 × CP=1 → ddp=2 over the colocated 16 GPU.
+      fsdp_size: 8
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      # R3 ON: router-replay recomputes exact rollout routing in the train forward.
+      moe_router_replay: true
+      moe_grouped_gemm: true
+      ep_comm_backend: torch
+  ref:
+    # INERT (use_kl_loss=false → no RefWorker). Mirror for consistency.
+    model:
+      path: Qwen/Qwen3-Coder-30B-A3B-Instruct
+    fsdp_config:
+      cpu_offload: true
+      reshard_after_forward: true
+      fsdp_size: 8
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      moe_router_replay: true
+      moe_grouped_gemm: true
+      ep_comm_backend: torch
+
+  # COLOCATED: policy + ref + engines share all 16 GPU (vLLM sleep-mode). Placement counts
+  # null → derived. NOTE: colocate_all=true → SYNC RayPPOTrainer (see header nuance).
+  placement:
+    colocate_all: true
+
+  # Ignored under the sync trainer (colocate_all=true); kept inert for documentation.
+  fully_async:
+    max_staleness_steps: 16
+    num_parallel_generation_workers: 16
+
+generator:
+  backend: vllm
+  timeout_multiplier: 1.0
+  model_dtype: bfloat16
+
+  # Eager for a fast smoke bring-up (skip cudagraph capture). R3 capturer is eager-safe.
+  enforce_eager: true
+
+  # TP=4 (operator ceiling); EP=1; DCP=1. num_inference_engines null → colocated derive 16/4=4.
+  inference_engine_tensor_parallel_size: 4
+  num_inference_engines: null
+  inference_engine_expert_parallel_size: 1
+  inference_engine_decode_context_parallel_size: 1
+  # RAY executor — R3-mandatory; works colocated OR disaggregated (mp_backend=true is the
+  # one that requires colocate_all=false; false does not).
+  inference_engine_mp_backend: false
+
+  n_samples_per_prompt: 8
+  eval_n_samples_per_prompt: 8
+
+  # Colocated share — vLLM ping-pongs with the policy via sleep-mode. Low KV at 4k.
+  gpu_memory_utilization: 0.70
+
+  max_num_seqs: 8
+  max_num_batched_tokens: 4096
+
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  enable_http_endpoint: true
+  enable_ray_prometheus_stats: false
+  vllm_stats_interval: 1
+  append_eos_token_after_stop_str_in_multi_turn: true
+  max_turns: 999999
+
+  sampling_params:
+    max_generate_length: 1024
+    temperature: 1.2
+    top_p: 0.95
+    top_k: 20
+
+  engine_init_kwargs:
+    # 4096 — within Coder-Instruct native 262144 → NO YaRN / hf_overrides.
+    max_model_len: 4096
+    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
+    disable_custom_all_reduce: true
+    # R3 ON: emit per-token expert routing over /chat/completions.
+    enable_return_routed_experts: true
+    # MUST be false under the RAY executor (trips vLLM's R3 guard otherwise).
+    async_scheduling: false
+
+data:
+  train_data: []
+  val_data: []
+
+rollout:
+  fanout:
+    enabled: true
+    num_coordinators: 2
+    cpus_per_coordinator: 8
+
+# =============================================================================
+# Runtime env — TOP-LEVEL extra_env: is LOAD-BEARING on Iris (no container: block).
+# =============================================================================
+extra_env:
+  # ===== Fix A — R3 de-centralization (MarinSkyRL 168b345f). The point of this smoke. =====
+  SKYRL_R3_DECENTRAL: "1"
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  # --- vLLM serve flags ---
+  VLLM_ATTENTION_BACKEND: FLASH_ATTN
+  # gpu-rl RL conda prefix — literal (k8s does NOT shell-expand $VAR).
+  LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib
+  # --- NCCL: H100+IB DEFAULTS (do NOT disable P2P). Observability + raised timeouts. ---
+  NCCL_DEBUG: WARN
+  SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "1800"
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "1800"
+  TORCH_NCCL_ENABLE_MONITORING: "1"
+  TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+  TORCH_FR_BUFFER_SIZE: "2000"
+  TORCH_NCCL_TRACE_CPP_STACK: "1"
+  TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /tmp/nccl_fr_rank
+  # --- R3 transport env (small at 4k, but keep the guard/timeout shape) ---
+  VLLM_MQ_MAX_CHUNK_BYTES_MB: "160"
+  VLLM_ROUTED_EXPERTS_SIDE_TIMEOUT_SECONDS: "1200"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "900"
+  # NOTE: VLLM_ALLOW_ROUTED_EXPERTS_DCP intentionally ABSENT (DCP=1).

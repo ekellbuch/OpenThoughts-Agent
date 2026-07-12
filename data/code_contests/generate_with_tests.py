@@ -306,7 +306,7 @@ def main() -> None:
     # )
     # upload_traces_to_hf(hf_dataset, "mlfoundations-dev/code-contests-sandboxes-traces-terminus-2", "SFT")
     
-    print(f"\nGeneration complete! Tasks with tests are in: {subsampled_dataset_dir}")
+    print(f"\nGeneration complete! Tasks with tests are in: {final_dataset_dir}")
     print(f"Each task directory contains:")
     print("  - instruction.md: The problem description")
     print("  - task.toml: Task configuration")

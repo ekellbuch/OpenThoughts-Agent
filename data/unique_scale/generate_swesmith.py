@@ -41,7 +41,7 @@ def filter_unique_instructions(
     return unique_instructions, unique_metadata, unique_dockerfiles, unique_task_tomls
 
 
-
+def main():
     instances = load_r2egym_instances()
     dockerfile = create_standard_dockerfile()
     task_toml = create_r2egym_task_toml()
