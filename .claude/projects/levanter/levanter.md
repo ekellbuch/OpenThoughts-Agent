@@ -99,15 +99,21 @@ but not others — see `mum`).
 
 ## Throughput / mesh perf gotchas
 
-- **XLA "Involuntary full rematerialization" on a small square mesh ([4,4]) throttles `scan(layer)` throughput.**
-  On a `[4,4]` device mesh, XLA reshards the scanned-transformer-layer activation carry (the `scan(layer)` +
-  gradient-checkpointing loop-carried state) inefficiently and emits `Involuntary full rematerialization`
-  warnings — recomputing more than necessary. **THROUGHPUT-ONLY, not a correctness issue** (loss/result
-  unaffected; do not chase it as a bug). On the delphi 1e22 SFT (dense 9.7B, 16× A100 = `[4,4]` mesh, seq 4096,
-  packed) this is the dominant reason its MFU (~18%, real/packed) trails an equivalent LLaMA-Factory run by ~2× —
-  the lever is **mesh/axis-mapping tuning** (a non-square or differently-mapped device mesh), NOT the data
-  pipeline (packing IS on — see the parity note below). Observed 2026-07-09 (job 49038797); relocated here from
-  the run tracker 2026-07-12 (codebase gotcha, not run-specific).
+- **delphi_1e22 SFT (dense ~9.7B, 16×A100, seq 4096, packed) logged MFU ~18% (packed) — but the CAUSE of the
+  gap vs other frameworks is UNQUANTIFIED. Do NOT repeat "involuntary-remat is the dominant reason MFU trails
+  LLaMA-Factory ~2×, lever = mesh tuning" — that was asserted here in commit `75071208` and is UNSUPPORTED
+  (audited + retracted 2026-07-12).** Grounded fact: `throughput/mfu` median ~18.3% (job 49038797). ⚠ Why the
+  retraction: (a) **no LLaMA-Factory *throughput* number was ever measured** (only LF comparison on record is
+  MATH-500 *accuracy* — a quality metric), so the "~2×" has no counterpart; (b) **no profiler/HLO/ablation** ever
+  attributed the gap to remat (an `Involuntary full rematerialization` warning was *noted at bring-up* but never
+  quantified — raw line/count/op/budget not preserved); (c) **the "mesh-tuning" lever is ~no-op** — the run is
+  ALREADY logical `[16,1]` pure-FSDP; `[4,4]` is the physical 4-node×4-GPU topology, not a tunable axis map.
+  Leading *unranked* candidates for the gap: **per-device batch = 1** (`train_batch_size 16 / 16 GPUs`,
+  `per_device_parallelism -1`) and **cross-node FSDP** (Leonardo 4×A100/node → 16-way FSDP spans 4 nodes every
+  layer). Remat IS config-reachable if it turns out to matter (`gradient_checkpointing: bool|ScanCheckpointPolicy|str`,
+  `models/llama.py:80`; policies `haliax/_src/scan.py`); higher-EV knob is `per_device_parallelism 1→2`.
+  **Diagnose before mitigating** — full audit + the cheap confirmation experiment (~50-step `save_all` ablation /
+  `jax.profiler` trace): `agent_logs/2026-07-12_delphi1e22_mfu_attribution_audit.md`.
 
 ## Sequence packing (chat SFT) — ON by default, and the step-count trap
 
