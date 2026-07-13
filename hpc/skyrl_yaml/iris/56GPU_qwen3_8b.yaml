@@ -245,6 +245,16 @@ generator:
     # Relative path resolves against /app (synced repo root).
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
 
+# Runtime env — TOP-LEVEL extra_env: is LOAD-BEARING on Iris (no container: block, so
+# the launcher forwards this into the pod env / ray runtime_env — see the sibling MoE
+# configs). NCCL: H100+IB DEFAULTS (do NOT disable P2P). NCCL_DEBUG=WARN keeps rank-0
+# logs readable (the per-collective INFO flood, incl. the vLLM inference engines,
+# drowns them out) while the NCCL flight recorder — set programmatically in
+# skyrl_train.utils.prepare_runtime_environment (TORCH_NCCL_DUMP_ON_TIMEOUT +
+# TORCH_FR_BUFFER_SIZE) — still dumps the stuck-collective trace on a hang.
+extra_env:
+  NCCL_DEBUG: WARN
+
 # Data paths (set via CLI --train_data / --val_data)
 data:
   train_data: []
