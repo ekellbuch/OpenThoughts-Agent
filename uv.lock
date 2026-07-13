@@ -2410,7 +2410,7 @@ wheels = [
 [[package]]
 name = "harbor"
 version = "0.8.1"
-source = { git = "https://github.com/marin-community/harbor.git?rev=penfever%2Fworking#877d26d5df05aa79146a7be7add5c83f338a5d21" }
+source = { git = "https://github.com/marin-community/harbor.git?rev=penfever%2Fworking#4ac18dc4571f59f590973697472325a1dd48bff4" }
 dependencies = [
     { name = "claude-agent-sdk" },
     { name = "datasets" },
