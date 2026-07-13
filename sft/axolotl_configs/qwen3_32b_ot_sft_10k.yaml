@@ -98,16 +98,19 @@ tf32: false
 gradient_checkpointing: true
 
 logging_steps: 5
-# save_steps RAISED back to 200 (2026-07-12): the low cadences (100->30->10) were a DEBUG band-aid
-# for the step-10 save-gather NCCL hang, which is now FIXED at the source by the sharded-save
-# deepspeed config (gather_16bit_weights_on_model_save:false; zero3_bf16_shardsave.json) — saves no
-# longer do the 16-node _ALLGATHER_BASE that deadlocked, so there's no reason to checkpoint every 10
-# steps (that banked ~8 wasteful 32B ZeRO-3 shard sets by step 85). 200 is the normal cadence: for a
-# 704-step run that's saves at 200/400/600 + the final. save_total_limit=3 caps disk (latest 3 shard
+# save_steps LOWERED to 50 (2026-07-13): the recurring backward `_REDUCE_SCATTER_BASE` NCCL
+# deadlock on the 16-node Vista IB fabric fires at an INTERMITTENT/variable training step
+# (observed steps 10, 14/16, and 72 across runs) — NOT at a save. With save_steps=200 the chain
+# banks NO checkpoint before the deadlock, so every afterany restart resumes from step 0 and the
+# hours before the deadlock are lost (job 827304 exp _21: FAILED at step 72, banked nothing in
+# 3h40m). Sharded save (gather_16bit_weights_on_model_save:false; zero3_bf16_offload_shardsave.json)
+# already killed the step-10 save-GATHER hang, so a mid-run save is CHEAP and does NOT hit the
+# _ALLGATHER_BASE deadlock. save_steps=50 banks a resumable shard set BEFORE the empirical deadlock
+# step → restarts resume instead of restarting from 0. save_total_limit=3 caps disk (latest 3 shard
 # sets kept — safe for auto_resume, which needs the latest intact; NOT 1, which risks losing the
 # latest mid-rotation). Learning-neutral (save cadence only).
-# agent_logs/2026-07-12_tacc_axolotl32b_nccl_save_gather_hang.md.
-save_steps: 200
+# agent_logs/2026-07-13_tacc_axolotl32b_827304_reduce_scatter_deadlock.md.
+save_steps: 50
 save_total_limit: 3
 # Resume from the latest output_dir checkpoint on relaunch — makes `--max_restarts` / an
 # afterany chain leg RESUME (not restart from step 0) for the axolotl backend. Needs the
