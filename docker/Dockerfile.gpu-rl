@@ -363,7 +363,15 @@ ENV SKYRL_BRANCH=penfever/working
 #     `--skyrl-ref 272bf011` a no-op safety belt. Another SKYRL_COMMIT-only bump (wheels
 #     + harbor + rl_env_constraints unchanged); the substantive change this rebuild is FOR
 #     is the rdma-core IB userspace in the apt-get above (2026-07-08).
-ENV SKYRL_COMMIT=272bf011cfe96d3f9ad6b771761c2f2ded4ae443
+#   - d75c3f83 = penfever/working HEAD (2026-07-13). Linear descendant of 272bf011 (14
+#     commits, safe superset — preserves everything baked above). Notable: NCCL_DEBUG
+#     default WARN (was forced INFO, quiets vLLM engines), SKYRL_R3_DECENTRAL default ON
+#     (prevents the 80B R3-head-plasma DispatchPutTimeout footgun), host-RAM/cgroup
+#     breakdown instrumentation + async-safe seq_mean_token_sum_norm_global denom (80B gs1
+#     host-RAM OOM), httpx/httpcore transient HF-load retry, deslop stages 1-2. SKYRL_COMMIT
+#     bump only (wheels + rl_env_constraints unchanged) — see the harbor bump below for the
+#     substantive change this rebuild is FOR (create_session retry fix). (2026-07-13)
+ENV SKYRL_COMMIT=d75c3f83ce949c9e03c643904e42834f531c0089
 
 RUN git clone --branch $SKYRL_BRANCH https://github.com/marin-community/MarinSkyRL.git $SKYRL_HOME && \
     git -C $SKYRL_HOME checkout $SKYRL_COMMIT
@@ -584,7 +592,15 @@ RUN . $RL_ENV_DIR/bin/activate && \
 #     (2026-07-05) — it lets the grid run clean at n=768.
 #   - 1143aba8 "auto_stop_interval_mins 0->5" — killed-job orphaned sandboxes now
 #     idle-stop after 5 min then auto-delete (self-clean) instead of leaking forever.
-ENV HARBOR_COMMIT=d58043c3679f152ac1483bee81bb7ea653463df4
+#   - 4ac18dc4 = penfever/working HEAD (2026-07-13), harbor 0.8.1 (was 0.8.0 @ d58043c3).
+#     Linear descendant of d58043c3 (carries ALL the Daytona throughput fixes above). THE
+#     SUBSTANTIVE CHANGE THIS REBUILD IS FOR: the create_session RETRY fix (877d26d5 +
+#     3c7efbf1) — `_create_exec_session_with_retry` in environments/daytona/{environment,
+#     utils}.py wraps Daytona exec-session creation in retry-with-backoff so a transient
+#     session-create failure no longer aborts a trial. The currently-running 80B pod's
+#     baked harbor 0.8.0 (d58043c3) LACKS this. Also carries the OPENCODE_DUMMY_KEY sandbox
+#     key fix. --no-deps source-only swap → wheel cache-key + rl_env_constraints unchanged.
+ENV HARBOR_COMMIT=4ac18dc4571f59f590973697472325a1dd48bff4
 RUN . $RL_ENV_DIR/bin/activate && \
     uv pip install --no-deps --force-reinstall \
         "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
