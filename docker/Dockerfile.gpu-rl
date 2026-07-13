@@ -371,7 +371,15 @@ ENV SKYRL_BRANCH=penfever/working
 #     host-RAM OOM), httpx/httpcore transient HF-load retry, deslop stages 1-2. SKYRL_COMMIT
 #     bump only (wheels + rl_env_constraints unchanged) — see the harbor bump below for the
 #     substantive change this rebuild is FOR (create_session retry fix). (2026-07-13)
-ENV SKYRL_COMMIT=d75c3f83ce949c9e03c643904e42834f531c0089
+#   - de40d31c = penfever/working HEAD (2026-07-13). DIRECT child of d75c3f83 (adds ONE
+#     commit, safe superset — preserves everything baked above). Substantive change: a
+#     log-capture-safe tqdm fallback (skyrl_train/utils/progress.py) — on a non-TTY stderr
+#     (CoreWeave/Iris captured logs, SLURM) every SkyRL progress bar now emits THROTTLED
+#     newline-terminated loguru lines instead of invisible \r-in-place frames, so Generation
+#     Buffer / Training Step progress finally shows up in the container logs; delegates to
+#     real tqdm on a TTY. SKYRL_COMMIT bump only (wheels + harbor + rl_env_constraints
+#     unchanged). (2026-07-13)
+ENV SKYRL_COMMIT=de40d31c8dcb0411295ea11d4dc4a01b91421e1c
 
 RUN git clone --branch $SKYRL_BRANCH https://github.com/marin-community/MarinSkyRL.git $SKYRL_HOME && \
     git -C $SKYRL_HOME checkout $SKYRL_COMMIT
