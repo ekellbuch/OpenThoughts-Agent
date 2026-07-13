@@ -363,6 +363,20 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-path", dest="model_path", help=argparse.SUPPRESS)
 
     parser.add_argument(
+        "--model-warm-source", "--model_warm_source", dest="model_warm_source",
+        default=None,
+        help="In-region CW-object-store prefix seeded (once, via scripts/iris/"
+             "mirror_hf_to_s3.py) with the model weights, so the controller SYNCS them "
+             "from there into each node's HF cache instead of cold-pulling ~160 GB per "
+             "node from HF Hub (the flaky path behind the 80B r4a/r4b bring-up failures). "
+             "Default: AUTO-DERIVE s3://marin-us-east-02a/models/<org>--<name> from the "
+             "repo id (a missing/empty source is a clean no-op -> HF prestage fallback, "
+             "byte-identical to today). Pass 'none'/'off' to DISABLE the warm path (pure "
+             "HF prestage). Only used when the config runs HF_HUB_OFFLINE=1 with a "
+             "repo-id model_path (same gate as --prestage-model).",
+    )
+
+    parser.add_argument(
         "--train_data", default="[]",
         help="Training data paths as a JSON list (e.g., '[\"org/dataset\"]').",
     )
@@ -856,6 +870,18 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     if str(_cfg_env.get("HF_HUB_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on"):
         if args.model_path and not args.model_path.startswith(("s3://", "gs://", "gcs://")):
             controller_cmd.extend(["--prestage-model", args.model_path])
+            # In-region warm source. Default = auto-derive the CW-S3 convention path from
+            # the repo id; a seed job (mirror_hf_to_s3.py) populates it once and every node
+            # then S3-syncs from there instead of cold-pulling from HF Hub. When the source
+            # is un-seeded the controller falls back to the HF prestage (byte-identical to
+            # pre-warm-path). 'none'/'off' disables the warm path entirely (pure HF prestage).
+            warm = args.model_warm_source
+            if warm is None:
+                warm = f"s3://marin-us-east-02a/models/{args.model_path.replace('/', '--')}"
+            elif warm.strip().lower() in ("none", "off", ""):
+                warm = None
+            if warm:
+                controller_cmd.extend(["--model-warm-source", warm])
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)
 
