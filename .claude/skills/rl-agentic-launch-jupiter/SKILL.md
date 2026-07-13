@@ -11,6 +11,8 @@ description: >-
   .claude/ops/jupiter/{ops.md,ENVIRONMENT_MAP.md}.
 ---
 
+> ⚠ **Do not add comments to YAMLs. Report your recommendations directly to the supervisor.**
+
 # rl-agentic-launch-jupiter
 
 > **⚠ Local clone = ground truth (CLAUDE.md §Always).** ALL code/config/sbatch edits (OpenThoughts-Agent +

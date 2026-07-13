@@ -35,12 +35,12 @@ audit not needed (upload only production winners). Skip.
 > **⚠️ `VerificationNotCompletedError` (no-reward trials) — the bias depends on WHICH score path you read (verified empirically 2026-06-17):**
 > - **harbor's internal `JobStats` mean** (`stats.evals.*.metrics[0].mean_reward`; `JobStats.increment` only counts reward-bearing trials in `n_trials`) **DROPS no-reward trials from the denominator → biased UP** (looks better than reality).
 > - **the DB/leaderboard auto-harvest path**, however, was observed to register with the **full /300 denominator** (masked trials counted as **0**) — so the leaderboard number was NOT inflated in the 2026-06-17 cohort. Don't assume the leaderboard is up-biased; check whether the registered `n_trials`/denominator is the full count or the reward-bearing count for the path that produced the row.
-> - **Either way, resuming is worth it** — but the payoff is usually **recovering real passes hidden as 0s**, not "fixing inflation": the 2026-06-17 VNC-resume of 5 swebench evals re-ran 198 relabeled trials, found real passes (e.g. symclip 13/46), and corrected accuracy **ROSE** in all five (lrboost .300→.317, symclip .270→.313, stageB .307→.320, stageD .300→.327, swesmith .213→.223), VNC-residual 0. So: a non-trivial VNC rate means the score is **untrustworthy** (could be inflated in harbor-mean terms, or just hiding recoverable passes) → resume on a healthy sandbox.
-> This trial state (harbor 9203989f) = the verifier never produced a result (e.g. `AddTestsDirError` on a sandbox left degraded by a 3000 s agent timeout); reward is absent. **Pre-9203989f these were mislabeled `AgentTimeoutError`** and conflated with the legitimately-scored-after-timeout trials (which DO have a reward); discriminate by **reward presence**, not the label.
+> - **Either way, resuming is worth it** — the payoff is usually **recovering real passes hidden as 0s**, not "fixing inflation" (verified 2026-06-17: VNC-resume of 5 swebench evals re-ran ~198 relabeled trials and accuracy **rose** in all five). So: a non-trivial VNC rate means the score is **untrustworthy** (could be inflated in harbor-mean terms, or hiding recoverable passes) → resume on a healthy sandbox.
+> This trial state (harbor 9203989f) = the verifier never produced a result (e.g. `AddTestsDirError` on a sandbox left degraded by a 3000 s agent timeout); reward is absent. Pre-9203989f these were mislabeled `AgentTimeoutError`; **discriminate by reward presence, not the label** (legitimately-scored-after-timeout trials DO have a reward).
 >
-> **The bias direction depends on WHY the trial is missing — handle no-reward classes differently:**
-> - **`AgentTimeoutError`/`VerificationNotCompletedError` = *informative* missingness (MNAR).** Missing *because* the agent burned its full budget without solving → true score ≈ 0 with high probability (SWE-bench is ~pass/fail; a timeout rarely hides a passing patch). Dropping these removes near-certain 0s → **directional up-bias.** Correct repair: **impute 0 *or* re-run** (both land ≈0).
-> - **Infra errors (`DaytonaAuthenticationError`/`DaytonaValidationError`/etc.) = ~*ignorable* missingness (MAR/MCAR).** The failure fires at a point uncorrelated with task solvability → the dropped trials' true scores are ~population-distributed → dropping them is **approximately unbiased** (mostly just lowers N). Repair: **re-run for completeness only — do NOT impute these as 0** (that would *introduce* a down-bias, the opposite mistake). Lower priority than the MNAR class.
+> **Handle no-reward classes differently (the bias direction depends on WHY the trial is missing):**
+> - **`AgentTimeoutError`/`VerificationNotCompletedError` = informative missingness (MNAR):** missing *because* the agent burned its budget without solving → true score ≈ 0 (SWE-bench is ~pass/fail; a timeout rarely hides a pass). Dropping them → up-bias. Repair: **impute 0 *or* re-run** (both ≈0).
+> - **Infra errors (`DaytonaAuthenticationError`/`DaytonaValidationError`/etc.) = ~ignorable missingness (MAR/MCAR):** failure uncorrelated with solvability → dropping is ~unbiased (just lowers N). Repair: **re-run for completeness only — do NOT impute 0** (that introduces a down-bias). Lower priority.
 | 3 | **HF traces present + linked** | trace HF repo exists + non-empty (`hf` API 200) AND the eval's DB/LB row has the trace/url field set | repo 200 **and** linked | repo missing/empty OR unlinked → **upload traces + register the link** (§1–§3) |
 | 4 | **VALID trial count (PARSE, don't file-count)** | **Parse** each per-trial `result.json` for a numeric reward — do NOT `ls`/`find | wc -l` (an errored trial STILL writes a `result.json`, just with `exception_info` and no reward, so a file count overstates coverage). Count VALID vs ERRORED per eval — see the snippet below. | VALID ≥ ~90% of `n_rep_eval × benchmark_size` | materially short on VALID (<~90%, a whole rep missing, OR a high hard-error rate like 15–25%) → **resume the errored trials** by re-submitting the SAME eval (same run-tag): the Jupiter sbatch auto-calls `harbor jobs resume --filter-error-type …` (keeps valid trials, re-runs the filtered error classes). First check the error TYPES (aggregate `result.json` → `exception_stats`); if they're outside the Jupiter sbatch's filter list (`EnvironmentStartTimeoutError`/`DaytonaError`/`DaytonaRateLimitError`/**`VerificationNotCompletedError`**), widen it — see `.claude/projects/harbor/harbor.md` "Resume". Expected: swebench-verified-random-100=100, dev_set_v2=100, terminal_bench_2=89; × `n_rep_eval` (default 3) → ~300/~300/~267. **`AgentTimeoutError` WITH a reward is a passthrough VALID 0 (verifier scored it) — don't filter/re-run those.** But an `AgentTimeoutError` (or, post-9203989f, `VerificationNotCompletedError`) **with NO reward** is the verifier-never-completed state from the check-2 note — it **biases accuracy UP**, so it IS retriable: resume it. Discriminate by reward presence, not the bare label. |
 
@@ -57,33 +57,27 @@ source of truth, the remediations below are the only side-effecting parts and yo
 > it: delete that ONE row** so it doesn't pollute the leaderboard; it re-registers cleanly when the resume finishes. (≥90% / a
 > ~99% tail-short is fine to finalize + register normally.)
 >
-> **🔑 The SAME (model × benchmark) pair can have MULTIPLE rows in `sandbox_jobs`** — a `Pending` + a `Finished`, reruns, a
-> resume that minted a new row, sibling `model_id`s, AND other users' rows. **Before you delete/de-register ANYTHING, query ALL
-> rows for that pair and disambiguate by `created_at` TIMESTAMP and `username`:** delete ONLY the specific partial/stale row **you
-> own** (`assert username` ∈ your usernames — feuer1/bfeuer00/penfever/benjaminfeuer; scope the delete to `id`+`username`). **NEVER
-> delete a complete (≥90% `Finished`) row, a newer good row, or ANY other user's row** because a partial sibling exists — that is
-> exactly the cross-user mutation that broke `zhuang1`'s eval jobs (2026-05-26). Skip a candidate whose slurm job is still RUNNING
-> (a live eval or an in-flight resume). When you can't tell which row is the partial → **STOP and surface, do not guess.**
+> **🔑 Before de-registering, apply the cross-user FK-safety rule (§Remediations):** query ALL rows for the
+> `(model × benchmark)` pair, disambiguate by `created_at`+`username`, delete ONLY your own partial/stale row.
+> **NEVER delete a complete (≥90% `Finished`) row, a newer good row, or ANY other user's row** because a partial
+> sibling exists. Skip a candidate whose slurm job is still RUNNING (a live eval or an in-flight resume).
 
-> **📐 The leaderboard's `Errors:` field = the EXACT incompleteness metric (source: `OT-Agent-Leaderboard/server/storage.ts:422-449`,
-> the `Errors: {invalidErrorCount}` badge).** "errors > 10%" is the right partial-eval test *because this field already
-> EXCLUDES the benign passthrough error types*. The formula:
-> `invalidErrorCount = Σ over stats.evals.*.exception_stats[errorType].length`, **EXCLUDING** the benign set
-> `{AgentTimeoutError, ContextLengthExceededError, SummarizationTimeout, SummarizationTimeoutError, BadRequestError,
-> NonZeroAgentExitCodeError, VerifierRuntimeError}` (those are passthrough/scored — NOT incompleteness). So
-> `VerificationNotCompletedError`, `DaytonaError`/`DaytonaValidationError`/`DaytonaRateLimitError`, and other no-reward
-> infra/verifier failures DO count. **error-fraction = `invalidErrorCount / total_attempted`; a row is an incomplete
-> partial (→ de-register + resume) iff error-fraction > 10%.** (The leaderboard badges the raw count at `>10`.)
+> **📐 The leaderboard's `Errors:` field = the EXACT incompleteness metric.** "errors > 10%" is the right partial-eval
+> test *because this field already EXCLUDES the benign passthrough error types*. **Do NOT restate the formula or the
+> BENIGN set here — compute it via the ONE authoritative utility** `OpenThoughts-Agent/scripts/database/eval_guardrail.py`
+> (`guardrail_counts(stats, planned).invalid_error_count`), the Python port of the leaderboard's guardrail
+> (`OT-Agent-Leaderboard server/storage.ts:416-449`, the `Errors: {invalidErrorCount}` badge). Hand-restating the BENIGN
+> set is how the sibling copies drifted (a wrong member). Then: **error-fraction = `invalid_error_count / total_attempted`;
+> a row is an incomplete partial (→ de-register + resume) iff error-fraction > 10%.** (The leaderboard badges the raw
+> count at `>10`.)
 > **🚩 HARD GATE (2026-06-29 user directive) — the 10% line is NOT a fuzzy barrier.** There is NO "borderline" /
 > "just over" / "close enough" discretion: error-fraction 10.1% fails exactly like 30%. A >10% eval **does not
 > belong in the database** — (a) if you are HARVESTING it, do NOT register/finalize until a resume brings
 > error-fraction ≤ 10%; (b) if the auto-pipeline ALREADY registered it, **DE-REGISTER it** (FK-safe, your own
-> row) — do NOT "flag the partial and leave it because it's already finalized," which is exactly the miss to
-> avoid. The only exception is an explicit, logged user grandfather of a specific already-pushed row.
+> row) — do NOT "flag the partial and leave it because it's already finalized." The only exception is an explicit, logged user grandfather of a specific already-pushed row.
 > ⚠️ **Do NOT re-derive this as a naive "no-reward / valid-reward<90%" count** — that wrongly folds in the benign
-> passthroughs (AgentTimeout etc., which ARE scored 0/1) and massively over-flags near-complete evals as partial. One
-> 2026-06-29 audit: 13 of my rows tripped the raw `>10` *count* but only **4** exceeded the `>10%` *fraction* (the other 9
-> were 92–96% valid → correctly KEPT; and a naive valid-reward<90% would have wrongly flagged ~197). Always use THIS formula.
+> passthroughs (AgentTimeout etc., which ARE scored 0/1) and massively over-flags near-complete evals as partial
+> (2026-06-29 audit: 13 rows tripped the raw `>10` *count* but only **4** exceeded the `>10%` *fraction*). Always use THIS formula.
 
 ### Check 4 — counting VALID trials (parse, never file-count) — STANDARD report element
 Trial dirs live at `eval_jobs/eval-<safe_model>_<safe_dataset>/<task>__<id>/result.json` (depth-1 under the
@@ -181,6 +175,16 @@ registration are normal, sanctioned operations of this skill**, not something to
 you *which* are needed so you don't redo finished work or clobber a good row. (Check-4 "re-run/resume missing
 trials" is a relaunch — see `eval-agentic-launch` — not one of the steps below.)
 
+### Cross-user FK safety — REQUIRED before EVERY write (update / delete)
+The same `(model × benchmark)` pair can have MULTIPLE `sandbox_jobs` rows — `Pending`+`Finished`, reruns, a resume
+that minted a new row, sibling `model_id`s, AND other users' rows. So before ANY mutation (`sandbox_jobs` /
+`sandbox_trial_model_usage` / `models` / `benchmarks`): **query ALL rows for the pair, disambiguate by `created_at` +
+`username`, and assert the target row is yours** (`username == me`; your usernames: feuer1/bfeuer00/penfever/
+benjaminfeuer). Scope every update/delete to `id`+`username`. **NEVER mutate or delete another user's row** — that
+is exactly the cross-user mutation that broke `zhuang1`'s eval jobs (2026-05-26). When you can't tell which row is
+the partial/yours → **STOP and surface, do not guess.** (An INSERT of a new own row is fine and never touches theirs
+— see the standing rule in §1.) The per-section snippets below each operationalize this with their own `assert`.
+
 ## 1. Manual upload + DB register — `manual_db_eval_push.py`
 Pass the **`trace_jobs/<RUN_TAG>`** path (where Harbor writes the `<task>__<id>` trial dirs), **NOT**
 `eval_jobs/<RUN_TAG>` (that only has `meta.env`). The script auto-resolves nested trial subdirs and
@@ -200,10 +204,12 @@ python scripts/database/manual_db_eval_push.py --job-dir trace_jobs/<RUN_TAG> --
 #                                         #   than registering wrong then repointing per §2b.
 ```
 
+- **⚡ STANDING RULE — a cross-user-owned (model × benchmark) pair does NOT block registration (operator, 2026-07-12).** When a gate-passing re-fire's (model, benchmark) pair is already owned by zhuang1/richard.zhuang (the original deflated row), **REGISTER A NEW `penfever` row alongside it with the corrected score — do NOT STOP, do NOT ask.** This is guardrail-compliant: the guardrail forbids DELETING/MUTATING a cross-user row, but an INSERT of a new penfever row never touches theirs (multiple rows per model×benchmark are allowed — the `crud-otagent-supabase` "multiple-entries-per-model" rule). Only escalate if a HARD unique-constraint actually rejects the INSERT (it won't — the 178 already-registered rows include zhuang-owned pairs).
+
 ### HF trace dataset — use the MEMORY-EFFICIENT uploader (don't hand-extract episodes)
 For the HF trace **dataset** itself, use the same streamed, **last-episode-per-trial** uploader the RL
 cleanup uses (see `rl-agentic-job-cleanup` §8 for the canonical invocation) — naive per-conversation extraction
-loads every episode of every trial into RAM and is brutally I/O-heavy on GPFS at eval scale (300 trials ×
+loads every episode of every trial into RAM and is I/O-heavy on GPFS at eval scale (300 trials ×
 hundreds of episode files each):
 ```bash
 # otagent env; ALWAYS in tmux; `hf upload`, NEVER `hf upload-large-folder` (deprecated + LFS-429 deadlocks)
@@ -228,11 +234,8 @@ Then check what got registered:
 c.table("sandbox_jobs").select("model_id,username").eq("id", "<JOB_ID>").execute()
 c.table("models").select("name").eq("id", "<MODEL_ID>").execute()
 ```
-If it's a numeric ID, repoint to the real model — **but FIRST the cross-user FK safety pre-check**
-(`feedback_supabase_filter_username`): you are about to UPDATE `sandbox_jobs` / `sandbox_trial_model_usage`
-and DELETE a `models` row. **Only touch rows you OWN.** If the `sandbox_jobs` row (or any FK'd
-`sandbox_trial_model_usage` row) belongs to ANOTHER user, **STOP** and surface it — do NOT repoint or delete
-it. (Mutating another user's eval rows is exactly what broke `zhuang1`'s eval jobs on 2026-05-26.)
+If it's a numeric ID, repoint to the real model — **after the cross-user FK-safety pre-check (§Remediations)**; the
+`assert job["username"] == me` in the snippet enforces it. Note the `models` DELETE only runs if no other-user row FKs it.
 ```python
 import os; me = os.environ.get("USER")
 job = c.table("sandbox_jobs").select("id,username,model_id").eq("id", "<JOB_ID>").execute().data[0]
@@ -252,14 +255,14 @@ had no entry → it fell through to the hash). **Fixed for NEW launches in `0c24
 the name from the `datasets--<org>--<name>` segment / run-dir, falling back to empty rather than a hash) — but
 legs launched BEFORE that, the auto-harvest path, and any manual `manual_db_eval_push` off such a run dir can
 all STILL land under a hash. A hash-named benchmark silently MIS-FILES the score (the leaderboard groups by
-benchmark) and spawns orphan benchmark rows. This recurred ~weekly until the fix — always verify it.
+benchmark) and spawns orphan benchmark rows. Always verify it.
 
 **Detect** (do this in §0 check-2/3 AND after any register): read the row's benchmark NAME — if it matches
 `^[0-9a-f]{32,64}$` it's mis-keyed.
 **Resolve the proper name** from the run-dir name (the leading segment IS the benchmark: `<benchmark>_<model>_<ts>`
 or `<benchmark>_a1_<model>_<ts>`) or the trace repo (`DCAgent2/<benchmark>_…`), then map to the registered id:
 `swebench-verified-random-100-folders`=`cc1aca76…` · `dev_set_v2`=`b94dfab2…` · `terminal_bench_2`=`34ab93c4…`.
-**Repoint FK-safe** (same own-rows-only rule as §2 — assert ownership, scope `id`+`username`):
+**Repoint FK-safe** (pre-check per §Remediations; the `assert` below enforces it):
 ```python
 me = ...  # your username ∈ feuer1/bfeuer00/penfever/benjaminfeuer
 job = c.table("sandbox_jobs").select("id,username,benchmark_id").eq("id","<JOB_ID>").execute().data[0]
@@ -313,12 +316,6 @@ register rule + the same cross-user FK safety); only the DATA SOURCE and the res
   **LIST of trial ids → use `len()`** (Σlen over NON-benign names / n_trials = error-fraction; same benign set as
   §0 check-4). Reward buckets under the eval key. (A minimal aggregator: gsutil cp the result.json, then sum
   `len()` over exception_stats.) `n_cache_tokens=0` in the row is the prefix-cache-off fingerprint (below).
-  - **⚠ IRIS-ONLY CONTAMINATION DISCRIMINATOR (flawed-summ / pre-2026-07-06 legs):** the TPU eval serve had NO
-    prefix caching before OT-Agent `274e93dd` (+ the TP=chips fix `aeb2e876`/`b20aa60f`), which deflated scores
-    via an AgentTimeout blow-up. So for a TPU leg ALSO gate on the **AgentTimeout RATE**: **≥~80% AgentTimeout =
-    CONTAMINATED (pre-fix, no cache) → VOID + re-fire, do NOT record**, even though AgentTimeout is otherwise a
-    benign passthrough. Clean post-fix legs run ~40% (swe) to ~68% (tb2). This discriminator is Iris-TPU-specific
-    (the GPU/SLURM harness always had prefix caching); do NOT apply it to TACC/Leonardo evals.
 - **Resume (<90% OR >10% err)** — no sbatch; **relaunch `launch_eval_iris.py` with the SAME `--job_name`** (Harbor
   resumes the incomplete/errored trials of that run dir; helpers `scripts/iris/check_resume_needed.py` +
   `check_progress.py`). **REGION-CORRECT the relaunch** (else it re-lands in eu-west4): run with BOTH

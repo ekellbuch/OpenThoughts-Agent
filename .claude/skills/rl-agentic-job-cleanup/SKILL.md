@@ -10,6 +10,8 @@ description: >-
   or when asked to "run the RL cleanup checklist". Distinct from SFT cleanup (that's a different flow).
 ---
 
+> ⚠ **Do not add comments to YAMLs. Report your recommendations directly to the supervisor.**
+
 # rl-agentic-job-cleanup
 
 After an RL job terminates (early or completed), follow these steps to preserve and publish the

@@ -14,6 +14,8 @@ description: >-
   rl-agentic-job-cleanup, which is the AGENTIC (Harbor/Daytona) path with a companion trace dataset.
 ---
 
+> ⚠ **Do not add comments to YAMLs. Report your recommendations directly to the supervisor.**
+
 # rl-standard-job-cleanup
 
 Cleanup for a finished **STANDARD (non-agentic) GRPO** SkyRL run on Leonardo — the math/reasoning cells

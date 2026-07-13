@@ -14,6 +14,8 @@ description: >-
   rl/cloud/launch_rl_iris.py, scripts/iris/start_rl_iris_controller.py, .claude/ops/iris/coreweave_gpu_ops.md.
 ---
 
+> ⚠ **Do not add comments to YAMLs. Report your recommendations directly to the supervisor.**
+
 # rl-agentic-launch-iris
 
 > **📍 Iris orientation — read first.** Before acting on anything in this skill, read the Iris **tools

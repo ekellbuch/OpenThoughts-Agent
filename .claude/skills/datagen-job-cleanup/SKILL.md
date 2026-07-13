@@ -66,11 +66,15 @@ If avg_turns ≈ 1.0 → the run failed; do NOT upload. Diagnose instead (read a
 ## 3. Upload the traces to HF penfever org
 From the `otagent` conda env — the uploader needs `google.cloud.storage` + matplotlib, which `envs/rl` lacks:
 ```bash
-# On the cluster, otagent env, source ~/secrets.env first.
+# otagent env, source secrets first. $INNER = the dir DIRECTLY containing the <task>__<id> trial dirs
+# (for a gs:// rescue that is /tmp/<job>_traces/<job>, the INNER subdir — see the gs:// trap below).
 python -m scripts.harbor.make_and_upload_trace_dataset \
   --job_dir "$INNER" \
   --repo_id penfever/<descriptive-name> \
-  --episodes last
+  --episodes last \
+  --served_model <the exact served model ref> \   # required for decodable literals
+  --include_literal_tokens \                       # REQUIRE literals (fail loud if 0 bind)
+  --single_commit                                  # ONE HF commit — avoids the 128-commit/hr 429 on big sets
 ```
 Default to the `penfever/` org and `--episodes last`. For a chunked launch, upload each chunk's trace_jobs
 to its own `_chunk{i}` repo. Public by default (per `feedback_hf_public_default`).
@@ -82,8 +86,28 @@ exported dataset carries the trainable `prompt_token_ids` / `completion_token_id
 Requirements + knobs:
 - **`--job_dir` must sit inside the experiments-dir tree** so the parent-walk reaches `…/logs/`. `$INNER` (the
   trial-containing dir) qualifies as long as the local run dir still has its sibling `logs/` (local runs do).
-  For a gs:// rescue see monitor-restore-iris / monitor-cron-sweep-iris §4a (rsync the OUTER `<job>/` so `logs/`
-  rides along, NOT just the inner trial dir).
+- **⚠ gs:// iris rescue — the INNER `<job>/` is the `--job_dir`, NOT the outer rescue root (2026-07-12 trap).**
+  You rsync the **OUTER** `gs://…/ot-agent/<job>/` → `/tmp/<job>_traces` so `logs/*_literal.jsonl` rides along
+  (per monitor-cron-sweep-iris §4a). But the trial dirs sit one level down at `/tmp/<job>_traces/<job>/<trial>`,
+  so the `--job_dir` you PASS must be **`/tmp/<job>_traces/<job>`** (the inner subdir that DIRECTLY contains the
+  `<task>__<id>` trial dirs). Passing the outer `/tmp/<job>_traces` still finds the trials by recursion so TEXT
+  rows upload, but the literal correlation keys off the trial path relative to `--job_dir` → the extra `<job>/`
+  prefix makes **0 trials bind → silent text-only dataset** (with `--include_literal_tokens` it then fails loud
+  and leaves the repo empty/partial). Always point `--job_dir` at the inner `<job>/` for a gs:// rescue. (Also:
+  `gsutil rsync` needs the local dest to EXIST — `mkdir -p /tmp/<job>_traces` before the rsync.)
+- **⚠ Big datasets → add `--single_commit` (HF 128-commits/hour cap).** The uploader commits one shard per
+  commit (~1 commit / `chunk_size`=200 rows). A multi-thousand-row set + any re-attempt blows past HF's **128
+  repo-commits/hour** limit → `429 Too Many Requests` mid-push → a **partial** dataset (only the shards that
+  committed before the 429). `--single_commit` pushes the whole dataset in ONE commit → never trips the limit.
+  Use it for any real campaign arm. (If you already 429'd, the repo may be partial or empty; wait ~1h for the
+  window to reset, then re-run with `--single_commit`.)
+- **Correlator memory (2026-07-12 fix) — one upload at a time on a RAM-limited host.** The literal correlator
+  (`scripts/harbor/literal_correlator.py`) now **streams** each `*_literal.jsonl` line-by-line (was
+  `read_text().splitlines()`, which held the whole multi-GB file as a string + a full line-list before parsing).
+  But the correlation still holds ALL parsed records (token ids) in memory for chain-reconstruction, so a big
+  arm (e.g. a 1.5 GB literal file) is inherently RAM-heavy — run **ONE upload at a time**, never two concurrent
+  (that flooded a 36 GB Mac). If even one-at-a-time OOMs, offload to a bigger box or drop `messages` from records
+  after `reconstruct_chains`.
 - A job with **no** `literal.jsonl` exports text-only, byte-identical to before (parity).
 - `--no_literal_tokens` forces text-only even when a `literal.jsonl` is present.
 - `--include_literal_tokens` now means REQUIRE: it fails loud if literals are expected but none are found (use
@@ -108,6 +132,13 @@ Requirements + knobs:
 ## 4. Verify the HF dataset is non-empty
 The repo may exist as a 0-row shell (a prior failed/partial upload, or Harbor pre-creating it); an existing
 repo is NOT proof of success. Confirm row count:
+
+> **⚠ Re-uploading over a repo that had a prior TEXT-ONLY upload (2026-07-12).** A leftover
+> `train-00000-of-00001.parquet` from the earlier text-only push has a **no-token schema** that can MASK the
+> new token-bearing shards → `count_populated_literal_rows` reads **0** even though the re-upload landed. If a
+> post-upload verify shows 0 populated literals but the uploader logged a good `Literal yield`, **delete the
+> stale text-only parquet(s) from the repo** (`huggingface_hub.HfApi().delete_file`) and re-verify. Cleaner:
+> re-upload to a **fresh repo id** to avoid stale-shard masking entirely.
 ```bash
 curl -s -H "Authorization: Bearer $HF_TOKEN" \
   "https://huggingface.co/api/datasets/penfever/<descriptive-name>" \

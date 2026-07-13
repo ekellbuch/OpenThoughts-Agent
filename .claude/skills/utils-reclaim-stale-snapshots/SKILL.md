@@ -1,5 +1,5 @@
 ---
-name: datagen-reclaim-stale-snapshots
+name: utils-reclaim-stale-snapshots
 description: >-
   Reclaim idle Daytona SNAPSHOTS org-wide to free space under the 60-snapshot cap,
   using scripts/daytona/daytona_snapshot_manager.py. Deletes only harbor__ per-
@@ -13,7 +13,7 @@ description: >-
   (for sandbox cleanup use utils-cleanup-stale-sandboxes).
 ---
 
-# datagen-reclaim-stale-snapshots
+# utils-reclaim-stale-snapshots
 
 Free Daytona **snapshot** quota by deleting `harbor__<hash>__snapshot` per-
 environment snapshots that have been **idle past a threshold**, so a blocked

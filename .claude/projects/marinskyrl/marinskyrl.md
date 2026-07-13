@@ -20,6 +20,12 @@ strict-superset SoT).
 
 ---
 
+## ⚙ CONFIG RULE (now and forever) — `n_concurrent_trials` = `2 * num_parallel_generation_workers` + 32
+
+**For EVERY skyrl RL YAML (`hpc/skyrl_yaml/**`), set `n_concurrent_trials` = `2 * num_parallel_generation_workers` + 32 — now and forever (operator directive 2026-07-13).** Apply it on authoring any new config and on any config touch; do not leave a YAML with a different ratio. (`num_parallel_generation_workers` bounds the R3 head-plasma/generation-buffer footprint; this ties the concurrent-agentic-trial cap to that worker pool at 2× + 32 headroom so the rollout offers enough concurrent episodes to keep the engines fed.) Applied across all 8 `hpc/skyrl_yaml/iris/*.yaml` on 2026-07-13 (e.g. npgw 128 → 288, npgw 16 → 64).
+
+---
+
 ## CI — the `SkyRL-GPU-E2E-CI` convergence test is DISABLED (2026-07-12); RESTORE when Marin CI can substitute
 The daily-scheduled `SkyRL-GPU-E2E-CI` (`.github/workflows/gpu_e2e_ci.yaml` → `Basic convergence test`)
 `anyscale job submit`s to **upstream SkyRL's Anyscale account**, which the `marin-community/MarinSkyRL` fork
@@ -42,6 +48,24 @@ a separate NCCL all_reduce per key. If keys differ across ranks, the per-key cal
 - **Symptom:** `Watchdog caught collective operation timeout: WorkNCCL(SeqNum=N, OpType=ALLREDUCE, NumelIn=1, NumelOut=1, Timeout(ms)=600000)` → `NCCL communicator was aborted`. The **`NumelIn=1` scalar** is the giveaway.
 - **Bug history:** burned twice on `compute_log_ratio_diagnostics` — v2 (rank-0-only gating) and v3 (per-rank early `return {}` on empty/all-padded micro-batches). v4 fix (`69294ba5`): a `_log_ratio_diag_zero_metrics()` 16-key zeros fallback used on early return + try/except at the worker call site.
 - **Rule whenever you touch `status` dict keys in `worker.py`:** (1) every rank contributes the SAME key set every iteration — no conditional skips; (2) data-dependent values that might fail get a sentinel (0.0/NaN) under the same key, never omitted; (3) wrap risky helpers in try/except with a full-keyset fallback; (4) unit-test the helper with empty / all-padded / normal input and assert `sorted(keys())` is identical.
+
+### ⚠ Do NOT fire a full-PG collective from INSIDE `ppo_train` under fully_async + R3-decentral (the 80B gs1 #288606 wedge, FIXED `68ea066e`)
+Same `NumelIn=1` fingerprint, DIFFERENT mechanism than the keyset diff above. The `seq_mean_token_sum_norm_global`
+normalizer used to compute its global denom `Z` with a `self.strategy.all_reduce(torch.tensor(local_num_seqs), op="sum")`
+(full 64-rank `default_pg`) at the TOP of `ppo_train` (`worker.py`). Under **fully_async + R3-decentral** the 64 policy
+ranks do NOT co-arrive at ppo_train's top-of-body — the staggered R3-chunk relocation (`MeshDispatch` derefs each dp
+group's `_relocate_chunk_to_node` ObjectRef at different times) means some ranks are IN ppo_train while others sit idle
+in asyncio `select` → the scalar all_reduce deadlocks (py-spy-pinned; 6 recurrences). The keyset was UNIFORM — the bug is
+**collective PARTICIPATION desync**, not a key mismatch.
+- **Fix (`68ea066e`, Option B, objective-preserving):** precompute `Z` on the **DRIVER, collective-free**
+  (`ppo_utils.compute_global_loss_denom`: `Z = ranks_per_dp_group × nonzero-adv-count(full batch) × max_seq_len`,
+  BIT-IDENTICAL to the summed reduce because MeshDispatch replicates each dp-chunk across its dp-group) in
+  `trainer.train_critic_and_policy`, stash in `data.metadata["global_loss_denom"]`; the worker READS it (no collective),
+  falls back to the legacy all_reduce only when the key is absent. Gated on `is_fully_async` → sync RL byte-identical.
+- **Durable rule:** any NEW cross-DP reduction needed for the loss/optimizer step must be hoisted to a **guaranteed
+  co-arrival point** (the driver, or a barrier every rank provably reaches) — NEVER fired inline from `ppo_train`/the
+  async loss loop, which fully_async makes a non-co-arrival section. The forward (`fwd_logprobs_values_reward`) IS a
+  co-arrival point (all ranks reach it); ppo_train's body is NOT.
 
 ---
 

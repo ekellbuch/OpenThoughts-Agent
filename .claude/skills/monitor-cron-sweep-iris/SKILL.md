@@ -138,7 +138,7 @@ clean by default. Report before/after count. This deletes ONLY idle `harbor__` e
 by harbor `auto_snapshot`) — the `--name-prefix harbor__` default guards the shared base images
 (`daytonaio/sandbox:*`, `daytona-*`, `windows-*`), which must never be deleted, and the idle threshold never hits an
 ACTIVE-recent snapshot in use by a running job. Supersedes both the old MISSING-only rule and the
-"only when a refill is blocked" gate. Full procedure: **datagen-reclaim-stale-snapshots**.
+"only when a refill is blocked" gate. Full procedure: **utils-reclaim-stale-snapshots**.
 
 ## 6. No-kill guardrail
 Never kill/restart/bounce a RUNNING job or the cluster without express permission — the ONLY exception is the §4b

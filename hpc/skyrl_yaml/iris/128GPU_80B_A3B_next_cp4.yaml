@@ -1,58 +1,3 @@
-# =============================================================================
-# 80B NAIVE-MAP CP4 — Qwen3-Next-80B-A3B-Thinking @131k — EP8×FSDP2×CP4
-# CoreWeave/Iris. ⛔ AUTHORED-BUT-DO-NOT-LAUNCH — PREDICTED GDN+CP HARD-CRASH.
-# =============================================================================
-# AUTHORED FOR: ~/Documents/experiments/active/qwen3_next_80b_naive_map_131k.
-# This is the naive map of the CP4/IB 30B geometry (30B-C = EP8×FSDP1×CP4,
-#   hpc/skyrl_yaml/iris/grid_30b_EP8_FSDP1_CP4.yaml) onto Qwen3-Next-80B-A3B-Thinking.
-#   It is the CP half of the naive-map test — authored for completeness + as the
-#   known-boundary confirmation, but *** NOT LAUNCHED THIS PASS *** (capacity + it
-#   is the PREDICTED-crash control). Launch the CP1 sibling instead
-#   (128GPU_80B_A3B_next_cp1.yaml).
-#
-# ⛔⛔ CRASH PREDICTION — GDN + CP>1 HARD-CRASHES (this WILL die at the first forward):
-#   Qwen3-Next-80B is HYBRID GatedDeltaNet (36/48 layers are GDN linear-attention).
-#   There is NO CP-aware GDN kernel. CP>1 shards the SEQUENCE dim, but the GDN
-#   attention-mask / chunked-scan path is NOT CP-aware, so the seq-shard doubling
-#   produces a SHAPE MISMATCH at the GDN mask. PROVEN on the same-family 35B
-#   (cell 35B-B, EP8×FSDP2×CP2): step-1 forward `fwd_logprobs_values_reward` →
-#   `FSDPPolicyWorkerBase.forward()` died with
-#     `RuntimeError: expanded size of the tensor (33784) must match the existing
-#      size (16892) at dim 3`   (33784 = 2 × 16892 = the CP=2 seq-shard doubling
-#      on the GatedDeltaNet attention mask; wandb state=crashed, 0 steps).
-#   At CP=4 the same failure recurs (a 4× seq-shard mismatch) at the GDN mask.
-#   This is a HARD SHAPE CRASH, not an OOM and not numerically-wrong-but-running.
-#   ⇒ CP is OFF-LIMITS for the GDN 80B until a CP-aware GDN kernel exists. The
-#   feasibility path for the 80B @131k is CP1 + (if it OOMs) context reduction.
-#
-# WHY AUTHOR IT AT ALL: it is the CP arm of "naive-map the two best 30B geometries";
-#   documenting the config + the crash prediction closes the grid cell and makes the
-#   boundary explicit for whoever later tries CP once a GDN-CP kernel lands.
-#
-# -----------------------------------------------------------------------------
-# MODEL / MEMORY / GENERATION / HPARAMS / CONTAINER-ENV: IDENTICAL to the CP1 sibling
-#   (128GPU_80B_A3B_next_cp1.yaml) — read that file's header for the full arch,
-#   memory math, divisibility, and hard-won bring-up notes. The ONLY deltas here are
-#   the policy/ref MESH (FSDP 8→2, CP 1→4) + the CP>1-mandatory trainer attn backend.
-#
-# GEOMETRY (16 CoreWeave nodes = 128 H100, colocate_all: false, disaggregated):
-#   NAIVE MAP of 30B-C: hold EP×FSDP×CP product = 64 (as the CP1 sibling does, 8×8×1),
-#   but trade FSDP for CP the way the 30B grid did (30B-A FSDP4×CP1 ↔ 30B-C FSDP1×CP4):
-#     Policy/Ref mesh: EP=8 × FSDP=2 × CP=4 = 64 policy GPU = 8 nodes.
-#     Generation:      16 engines × TP=4      = 64 gen GPU = 8 nodes (identical to CP1).
-#   Total = 128 = 16 nodes. (Would need --num-nodes 16 IF it were launched.)
-#   DIVISIBILITY (all pass — the config is VALID; it's the GDN KERNEL that crashes):
-#     * (num_experts//ep)%fsdp: 512/8=64; 64 % FSDP2 = 0 → 32 experts/GPU. VALID.
-#     * EP × FSDP × CP = 8 × 2 × 4 = 64 = policy GPU. VALID.
-#     * CP G4: padded seq_len % (2×CP=8) == 0; 131072 % 8 == 0. OK.
-#   So the SHAPE crash is NOT a divisibility bug — it is the GDN-mask CP-unawareness.
-#
-# =============================================================================
-# ⛔ NO LAUNCH COMMAND — DO NOT LAUNCH. If a CP-aware GDN kernel ever lands, this is
-#    the config to try (mirror the CP1 launch command with --num-nodes 16,
-#    --rl_config .../128GPU_80B_A3B_next_cp4.yaml, rendezvous .../80b-naive-map/cp4).
-# =============================================================================
-
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
 config_groups:
@@ -100,7 +45,7 @@ terminal_bench:
       - VerifierOutputParseError
       - VerifierRuntimeError
 
-    n_concurrent_trials: 32
+    n_concurrent_trials: 288
 
     log_level: INFO
 
@@ -137,14 +82,8 @@ terminal_bench:
     dataset_type: SFT
     cleanup: true
 
-# =============================================================================
-# Trainer configuration
-# =============================================================================
 trainer:
   strategy: fsdp2
-  # CP>1 REQUIRES torch-native ring-SDPA (rejects flash-attn varlen). This pins the
-  # TRAINER forward for the 12 full-attn layers; the vLLM GENERATION engine keeps
-  # FLASH_ATTN via env. (The 36 GDN layers are where CP>1 CRASHES — see header.)
   attn_backend: sdpa
   flash_attn: false
   use_sample_packing: false
@@ -202,13 +141,8 @@ trainer:
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
-      # MESH (CP4 map): EP8 × FSDP2 × CP4 = 64 policy GPU = 8 nodes.
-      # (num_experts//ep)%fsdp: 512/8=64; 64 % 2 = 0 → 32 experts/GPU. VALID.
-      # FSDP2 leaves more dense state per rank than the CP1 map's FSDP8 (higher host-RAM),
-      # activations maximally CP-sharded — BUT the GDN forward CRASHES before any of this matters.
       fsdp_size: 2
       expert_model_parallel_size: 8
-      # CP=4: torch-native ring-SDPA over the 131k sequence. ⛔ GDN layers are NOT CP-aware → crash.
       context_parallel_size: 4
       cp_style: ring_sdpa
       cp_rotate_method: allgather
@@ -244,9 +178,6 @@ trainer:
     max_staleness_steps: 16
     num_parallel_generation_workers: 128
 
-# =============================================================================
-# Generator configuration (vLLM) — IDENTICAL to the CP1 sibling (CP is training-only).
-# =============================================================================
 generator:
   backend: vllm
   timeout_multiplier: 1.0
@@ -258,9 +189,6 @@ generator:
   num_inference_engines: 16
   inference_engine_expert_parallel_size: 1
   inference_engine_decode_context_parallel_size: 1
-  # mp executor — REQUIRED for qwen3_next + R3 (Ray Compiled-DAG collective_rpc handshake
-  # deadlocks this arch; the 80B-jupiter-proven fix). Identical to the CP1 sibling; see its
-  # generator block for the full rationale. Requires colocate_all=false (set above).
   inference_engine_mp_backend: true
 
   n_samples_per_prompt: 8
@@ -306,9 +234,6 @@ rollout:
     num_coordinators: 4
     cpus_per_coordinator: 8
 
-# =============================================================================
-# Runtime env — IDENTICAL to the CP1 sibling.
-# =============================================================================
 extra_env:
   SKYRL_GDN_MASK_FLA: "1"
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
@@ -318,9 +243,6 @@ extra_env:
   NCCL_DEBUG: WARN
   NCCL_SOCKET_IFNAME: enp157s0np0
   NCCL_SOCKET_FAMILY: AF_INET
-  # 3600s (60 min) — kept consistent with the CP1 sibling: the 80B rank-0 full-CPU-
-  # state-dict load before the first policy-PG NCCL comm-init exceeds the old 1200s
-  # cap (v3 died there). Now HONORED by MarinSkyRL utils.py; heartbeat raised to match.
   SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "3600"
   TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "3600"
   TORCH_NCCL_ENABLE_MONITORING: "1"

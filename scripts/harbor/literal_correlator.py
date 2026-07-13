@@ -40,7 +40,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 from upath import UPath
 
@@ -86,8 +86,12 @@ class Chain:
 # --------------------------------------------------------------------------- #
 # Parsing
 # --------------------------------------------------------------------------- #
-def parse_literal_records(lines: list[str]) -> list[LiteralRecord]:
+def parse_literal_records(lines: Iterable[str]) -> list[LiteralRecord]:
     """Parse RecordProxy JSONL lines into usable :class:`LiteralRecord`s.
+
+    ``lines`` may be any iterable of strings — a list, or (preferred for the
+    multi-GB per-serve logs) a streaming file handle, so the whole file is never
+    materialized at once.
 
     Keeps only status-200 records that carry a ``literal`` block with
     ``completion_token_ids`` and a ``request.messages`` list — the minimum needed
@@ -272,8 +276,13 @@ def load_literal_records(literal_log_uri: "str | Sequence[str]") -> list[Literal
     uris = [literal_log_uri] if isinstance(literal_log_uri, str) else list(literal_log_uri)
     records: list[LiteralRecord] = []
     for uri in uris:
-        text = UPath(uri).read_text()
-        records.extend(parse_literal_records(text.splitlines()))
+        # Stream line-by-line — a per-serve literal.jsonl is multi-GB (token ids +
+        # full request messages), so `read_text().splitlines()` would hold the whole
+        # file as one string AND a full copy as a line list (~2x the file) before a
+        # single record is parsed. Iterating the open handle keeps the transient at
+        # one line while `parse_literal_records` accumulates only the kept records.
+        with UPath(uri).open("r") as fh:
+            records.extend(parse_literal_records(fh))
     return records
 
 

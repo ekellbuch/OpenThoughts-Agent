@@ -6,7 +6,7 @@ description: >-
   dropped on any session restart, so re-establish it at the start of a new session or whenever the user asks to
   restore/restart the 3h sweep/cron/monitor. Sets a /loop 3h (or equivalent recurring cron) whose task is the
   canonical sweep prompt below: status-table active/pending/completed jobs, auto-cleanup+DB-register completions,
-  diagnose+remediate failures via subagents, log to agent_logs + claude_experiments.md. The prompt block here is
+  diagnose+remediate failures via subagents, log each launch/state-change as a standalone dated file to agent_logs/. The prompt block here is
   the source of truth — copy it verbatim.
 ---
 
@@ -208,8 +208,8 @@ ACTIVELY-DEBUGGING jobs → monitor more closely than stable ones. For any FRESH
 LAUNCHING FRESH JOBS → follow the per-job-type launcher instructions in CLAUDE.md (+ the `*-launch-*` skills and
 `.claude/projects/ot-agent/ot-agent.md`). If the instructions are unclear, ASK for guidance.
 
-EXPERIMENT LOG → maintain an up-to-date, date-indexed log of experiments launched (referenced by launch command)
-in /Users/benjaminfeuer/Documents/notes/claude/claude_experiments.md.
+EXPERIMENT LOG → each launch / state change logged as a standalone dated file under
+/Users/benjaminfeuer/Documents/agent_logs/ (YYYY-MM-DD_<topic>.md) — no monodoc.
 
 STANDING CONSTRAINTS (do not violate without explicit permission): enable_db_registration stays false in YAMLs
 (manual DB register only); Daytona RUNNING RL ≤ 6 per cluster; a3 series is CONCLUDED (no launch/refill/auto-

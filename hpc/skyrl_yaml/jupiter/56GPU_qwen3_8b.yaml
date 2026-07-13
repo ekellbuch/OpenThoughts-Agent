@@ -190,7 +190,6 @@ trainer:
 
   fully_async:
     max_staleness_steps: 16
-    # ~1/2 of total concurrency (338 paired with n_concurrent_trials 675).
     num_parallel_generation_workers: 338
 
 # Generator configuration

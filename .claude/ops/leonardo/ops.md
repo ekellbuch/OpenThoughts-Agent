@@ -130,6 +130,16 @@ Since 2026-05-15, CINECA raised `kernel.yama.ptrace_scope` from `0` → **`2`** 
   - ⚠ **`memory-consumption` has NO hw-sampling mode → unusable under `ptrace_scope=2`.**
 - For wedged RL/inference: ptrace is out — rely on NCCL trace + per-rank `opCount` alignment + last-log-line-per-rank + `/proc/<pid>/{stack,environ}` (readable without ptrace). faulthandler/`SIGUSR1`-stack-dump is in-process (no ptrace) and still works if instrumented at launch.
 
+## Sweep / gather particulars (for the `monitor-cron-sweep` skill)
+Leonardo-specific triage rules the cron sweep applies each pass. The skill's cross-cluster rules (liveness check, passthrough exceptions, false-drain validation) are general; these are the Leonardo layer.
+
+- **GPFS `find`/`du` ban.** Stat-walks stall the SSH session for minutes. Locate logs via `scontrol show job <id> -o` `StdOut=`/`%Z` + depth-1 `ls`, never `find`/`du` on the GPFS scratch tree.
+- **Eval log-path trap.** If the `scontrol` `StdOut=` path doesn't exist, read `data_<jobid>.out` in the job's `%Z` workdir before judging liveness (a path mismatch, not a death).
+- **Standard-eval results JSON without `Mean:` lines is the expected shape**, not a broken run.
+- **Leonardo's binding constraint is disk QUOTA, not inodes** — ckpts/exports → `$WORK`, never the chronically-over-quota `$SCRATCH_FAST` (see WRITE-PATH MANDATE above).
+- **HF upload via the sbatch-tunnel** (login node SIGKILLs ~100s) + the fresh `~/.ssh/leonardo_daytona` step-ca cert (~12h) — full mechanics in the **HF Upload** section above.
+- **Campaign-driver (sweep tracking).** The 4 `rl_dlp` Delphi standard-GRPO cells + the **SummarizationTimeoutError-deflated re-eval campaign (a1-`<benchmark>` models)**. For flawed_summ specifically: drive off `experiments/active/flawed_summ_evals/POLICY.md` (the canonical directive) + `STATE.md` (the per-row worklist) each sweep — the gate, resume-until-registered, one-benchmark-at-a-time, snapshot-vs-sandbox reclaim + HARD caps, cluster priority, and in-flight target ALL live there; look them up, never hardcode.
+
 ---
 
 # SFT (Leonardo particulars for the `sft-launch` skill)

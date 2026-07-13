@@ -13,6 +13,8 @@ description: >-
   skill (Daytona needs internet — infeasible on Leonardo).
 ---
 
+> ⚠ **Do not add comments to YAMLs. Report your recommendations directly to the supervisor.**
+
 # rl-standard-launch-leonardo
 
 > **⚠ Before submitting, VERIFY checkpoint/export paths resolve to `$WORK` (`$CHECKPOINTS_DIR`), NOT

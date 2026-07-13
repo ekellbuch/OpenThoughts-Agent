@@ -16,6 +16,8 @@ description: >-
   .claude/ops/iris/coreweave_gpu_ops.md, .claude/skills/rl-agentic-launch-iris §8.
 ---
 
+> ⚠ **Do not add comments to YAMLs. Report your recommendations directly to the supervisor.**
+
 # rl-job-health-deep-dive
 
 A **deep, single-RL-job** health probe that ends in **one recommendation to the supervisor: `KILL` or

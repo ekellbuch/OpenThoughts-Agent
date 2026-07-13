@@ -156,7 +156,7 @@ deletes by your task set and would remove teammates' ACTIVE snapshots.
 
 When the org is at cap with **0 MISSING** (all ACTIVE) but many `harbor__` are idle
 leftovers of completed jobs, use the idle-gated reclaim (safe; spares live/teammate +
-base snapshots) via the **datagen-reclaim-stale-snapshots** skill:
+base snapshots) via the **utils-reclaim-stale-snapshots** skill:
 `daytona_snapshot_manager.py --name-prefix harbor__ --delete-stale`
 — at the stale threshold defined in `.claude/projects/daytona/daytona.md` § "How to clean stale
 snapshots" (GT — don't restate the value); the 3-hourly cron routinely reclaims 15–34/tick on the shared

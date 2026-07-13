@@ -2,13 +2,15 @@
 name: crud-purge-below-gate-evals
 description: >-
   Guardrailed DELETE of auto-registered eval `sandbox_jobs` rows that DID score but FAILED the
-  harvest gate — partial/contaminated evals (valid-complete <90%, or infra-error >10%, or
-  AgentTimeout ≥80%). These are the "DE-REGISTER candidate" rows the flawed_summ harvest defers.
+  harvest gate — partial evals (valid-complete <90% or non-benign infra-error >10%). These are the
+  "DE-REGISTER candidate" rows the flawed_summ harvest defers.
   DISTINCT from `crud-purge-stale-eval-placeholders` (that removes NEVER-populated Pending/Started
   rows; this removes rows that populated stats/metrics but are below-gate). Use when asked to remove
   "partial / below-gate / <90%-completed-without-errors" evals owned by us. The MANDATORY parts:
-  the AgentTimeout-is-BENIGN gate (a literal n_errors formula is catastrophically wrong), the
-  cross-user FK-safety pre-check, and the grandchild→child→job cascade.
+  the authoritative gate utility (`scripts/database/eval_guardrail.py` — NEVER hand-roll the BENIGN
+  set / error count), the cross-user FK-safety pre-check, the grandchild→child→job cascade, and
+  REPORTING BACK the exact purged rows (§5) so the supervisor knows which state docs (e.g. flawed_summ
+  STATE.md) to reconcile.
 ---
 
 # crud-purge-below-gate-evals
@@ -41,58 +43,45 @@ set -a; source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets fi
 
 ## 1. The gate — what makes an eval "below-gate" (removable)
 
-**Source of truth = the campaign tracker's convention** (e.g. flawed_summ
-`~/Documents/experiments/active/flawed_summ_evals/reeval_tracker.md`, the "valid-complete /
-non-benign / AgentTimeout benign" defs). Read it each run in case thresholds moved. The canonical
-gate:
+**The COUNTS come from ONE authoritative utility — do NOT hand-roll them here.**
+`OpenThoughts-Agent/scripts/database/eval_guardrail.py` is the single Python port of the leaderboard's
+guardrail (`OT-Agent-Leaderboard server/storage.ts:416-449` — the "Errors: k" badge). Hand-rolling the
+BENIGN set / error-count is exactly how this skill's old inline gate DRIFTED (a wrong BENIGN member, an
+invented AgentTimeout axis, a per-eval sum that under-counted). Use the utility:
 
-For each candidate row, with **`planned = sandbox_jobs.n_trials`** (the PLANNED count — 300 for
-swe/dev_set_v2, 267 = 89×3 for terminal_bench_2):
-
-| axis | formula | FAIL when |
-|---|---|---|
-| **valid-complete%** | `Σ stats.evals.*.n_trials` (trials that recorded a valid reward, incl. AgentTimeout→0) / `planned` | **< 90%** |
-| **non-benign%** | `Σ non-benign exception_stats` / `planned` | **> 10%** |
-| **AgentTimeout%** | `AgentTimeoutError` / `planned` | **≥ 80%** (contamination discriminator) |
-
-A row is **BELOW-GATE (DELETE)** iff it fails **ANY** axis. A row is **GOOD (KEEP)** iff it passes
-**ALL** (valid-complete ≥90% AND non-benign ≤10% AND AgentTimeout <80%).
-
-**BENIGN exceptions (do NOT count toward non-benign):**
 ```python
-BENIGN = {"AgentTimeoutError", "ContextLengthExceededError", "SummarizationTimeoutError",
-          "SummarizationError", "BadRequestError", "NonZeroAgentExitCodeError", "VerifierRuntimeError"}
-# NON-BENIGN (infra) = everything else: SandboxBuildFailedError, DaytonaAuthenticationError,
-#   DaytonaValidationError, VerificationNotCompleted, VerifierTimeoutError, ...
+import sys; sys.path.insert(0, "OpenThoughts-Agent/scripts/database")
+from eval_guardrail import guardrail_counts, passes_gate
 ```
+- `guardrail_counts(stats, planned)` → the authoritative counts: `invalid_error_count`, `is_high_errors`,
+  `is_incomplete`, `attempted_n_trials`, `planned_n_trials`.
+- `passes_gate(stats, planned, max_invalid_errors=…, min_complete_frac=…)` → `(passed, reason)`.
 
-**⚠ stats has TWO shapes — read `exception_stats`, not a bare `n_errors`:**
-- **Shape A:** top-level `stats.n_errors` == the infra-error count (exception_stats sums to it).
-- **Shape B:** `stats.evals.<key>.n_completed_trials` / `n_errored_trials`, where **`n_errored_trials`
-  INCLUDES AgentTimeout** — same field name, different semantics.
-So compute non-benign from the **`exception_stats` breakdown** (per-exception-type counts), summing
-only the non-BENIGN types. Never trust a single `n_errors` integer.
+The THRESHOLDS are a POLICY decision — read the campaign's `POLICY.md §"The gate"` each run in case they
+moved. For flawed_summ (`planned = sandbox_jobs.n_trials` = 300 swe/dev_set_v2, 267 = 89×3 tb2) the gate is
+**non-benign ≤ 10%** and **valid-complete ≥ 90%**, applied to the utility's counts:
 
 ```python
 def gate(job):
-    """Return (below_gate: bool, vc, nb, at) fractions. planned = job['n_trials']."""
+    """(below_gate: bool|None, reason: str). planned = job['n_trials']. Counting delegated to eval_guardrail."""
     planned = job.get("n_trials") or 0
-    if not planned: return (None, None, None, None)          # can't score → surface, don't delete
-    evals = (job.get("stats") or {}).get("evals") or {}
-    recorded = exc = 0
-    excby = {}                                                # exception_type -> count
-    for k, ev in evals.items():
-        recorded += ev.get("n_trials") or ev.get("n_completed_trials") or 0
-        for etype, n in (ev.get("exception_stats") or {}).items():
-            excby[etype] = excby.get(etype, 0) + n
-    at   = excby.get("AgentTimeoutError", 0)
-    nb   = sum(n for e, n in excby.items() if e not in BENIGN)
-    vc_f = recorded / planned
-    nb_f = nb / planned
-    at_f = at / planned
-    below = (vc_f < 0.90) or (nb_f > 0.10) or (at_f >= 0.80)
-    return (below, vc_f, nb_f, at_f)
+    if not planned:
+        return (None, None)                          # can't score → SURFACE, do not delete
+    passed, reason = passes_gate(
+        job.get("stats"), planned,
+        max_invalid_errors=round(0.10 * planned),    # campaign "non-benign <= 10%"
+        min_complete_frac=0.90,                       # campaign "valid-complete >= 90%"
+    )
+    return (not passed, reason)                       # below_gate == not passed
 ```
+
+Row is **BELOW-GATE (DELETE candidate)** iff `gate(job)[0]` is True; **GOOD (KEEP)** iff False; **None** =
+unscoreable → surface, never delete.
+
+> **⚠ The old inline gate had an `AgentTimeout ≥ 80%` "contamination" axis. It is NOT in the leaderboard's
+> canonical guardrail and it false-flagged valid low-scoring evals — it is DROPPED here. If the campaign
+> wants an AgentTimeout-rate discriminator back, add it as an explicit POLICY axis over `guardrail_counts`,
+> not as a hand-rolled reimplementation.**
 
 **Scope of candidates:** rows with `username IN OURS` that actually HIT the DB with results —
 `job_status='Finished'` OR non-null `stats`/`metrics`. INCLUDE `Started` rows only if they recorded
@@ -136,20 +125,21 @@ cand = [j for j in jobs if (j["job_status"]=="Finished" or j["stats"] is not Non
 # apply recency OR tracker-listed id set:
 TRACKER_IDS = {...}   # the campaign tracker's "DE-REGISTER candidate DEFERRED" ids
 recent = lambda j: age_h(j["created_at"]) <= 24*7
-scored = [(j,)+gate(j) for j in cand if recent(j) or j["id"] in TRACKER_IDS]
-below  = [j for (j,b,vc,nb,at) in scored if b is True]
-unscoreable = [j for (j,b,vc,nb,at) in scored if b is None]     # surface, do NOT delete
+scored = [(j,)+gate(j) for j in cand if recent(j) or j["id"] in TRACKER_IDS]   # (job, below, reason)
+below  = [j for (j,b,r) in scored if b is True]
+unscoreable = [j for (j,b,r) in scored if b is None]     # surface, do NOT delete
 
 # --- BOUNDARY CONTROLS: prove the gate before trusting it ---
-# pick rows just ABOVE the line and assert they are KEPT (not in `below`):
-#   e.g. 91.0% valid / 9.0% nb  -> KEEP ;  90.7% / 9.3% -> KEEP ;  73% / 19.3% -> DELETE
-# print a couple of near-boundary rows with their vc/nb/at and confirm the classification by hand.
+# pick rows just ABOVE the line and assert they are KEPT (not in `below`). Use guardrail_counts() to show
+# each near-boundary row's authoritative counts (invalid_error_count vs round(0.10*planned);
+# attempted/planned vs 0.90) and confirm the KEEP/DELETE by hand.
 
 print(f"candidates={len(scored)}  below-gate={len(below)}  unscoreable={len(unscoreable)}")
 from collections import Counter; print("below by user:", Counter(j['username'] for j in below))
-# per-row table: id | user | model | benchmark | status | vc% | nb% | at% | age
-# SANITY: if below-gate is a huge fraction of candidates (e.g. >150 or >~50%), STOP — you probably
-# counted AgentTimeout as an error. Re-check §1 BENIGN handling before ANY delete.
+# per-row table: id | user | model | benchmark | status | invalid_err/planned | attempted/planned | age | reason
+# SANITY: if below-gate is a huge fraction of candidates (e.g. >150 or >~50%), STOP — the counts look wrong.
+# The counting is the utility's (eval_guardrail); a large below-gate set means a bad THRESHOLD or scope, not
+# a hand-rolled BENIGN mistake (that class of bug is now impossible — the utility owns the BENIGN set).
 ```
 
 Then, **only after reviewing the dry-run + boundary controls**:
@@ -168,8 +158,25 @@ if DELETE:
     # re-read the KEEP-controls to confirm they are STILL PRESENT (didn't over-delete)
 ```
 
+## 5. Report back — so the supervisor can reconcile the state docs
+
+After the delete (or after the dry-run, if you were asked to stop before deleting), **REPORT the exact
+purge outcome back to the supervisor** so they know whether a campaign state document (e.g. flawed_summ
+`STATE.md`) needs updating. A purge that isn't reported back silently desyncs the tracker from the DB.
+Return, as explicit lists:
+- **PURGED (deleted):** for each row — `sandbox_jobs.id`, `username`, model, benchmark, and the gate
+  fractions (vc% / nb% / at%) that failed it, plus the cascaded child/grandchild counts.
+- **REPORTED-not-deleted (cross-user, §2):** the other-user below-gate rows you surfaced but did NOT
+  touch (id, username, model, benchmark).
+- **UNSCOREABLE / surfaced:** any row you could not score and left alone.
+
+The supervisor uses this list to flip/remove the matching `STATE.md` rows and correct the counts.
+
 ## Guardrails
 
+- **REPORT BACK the purge outcome (§5).** Always return the purged `sandbox_jobs.id`s (+ model /
+  benchmark / gate-fractions), the cross-user rows reported-not-deleted, and any unscoreable rows — the
+  supervisor needs this to reconcile the campaign state doc (e.g. flawed_summ `STATE.md`) with the DB.
 - **AgentTimeout is BENIGN.** Never count `AgentTimeoutError` (or the §1 BENIGN set) as an error. If
   your below-gate set is a large fraction of candidates, you almost certainly got this wrong — STOP.
 - **Boundary controls before deleting.** Confirm near-90% KEEP rows are classified KEEP and survive
@@ -182,8 +189,23 @@ if DELETE:
   are reviewed; after deleting, confirm targets gone AND controls survive.
 - **STOP + surface** any row you can't score (`n_trials` missing / stats shape unrecognized) rather
   than guess-deleting. Reads are free; deletes are dangerous (service-role bypasses RLS).
-- **Honor the campaign's defer pattern only if asked to.** A re-eval campaign may DEFER de-registering
-  a below-gate row until its clean re-fire lands; purge those only on an explicit request.
+- **A REGISTERED below-gate row is DE-REGISTERED, never deferred (POLICY / `eval-agentic-cleanup` HARD
+  GATE: "if the auto-pipeline ALREADY registered it, DE-REGISTER it").** "Defer" applies to the RE-EVAL
+  timing (when to re-fire), NOT to leaving a contaminating registered row in the DB — an already-registered
+  below-gate row shows on the leaderboard as `Errors: k` / a partial NOW, so remove it now; the pending /
+  in-flight re-fire re-registers a clean row later. Do NOT skip de-registering a registered below-gate row
+  because it "has a live re-fire" (that was a real bug — 8 high-error tb2/v2 rows sat registered because the
+  purge deferred them). The only genuine defer: an UNregistered below-gate leg that never hit the DB needs
+  no delete — it just re-fires. **A leaderboard HOLE (no result) is the CORRECT outcome when the only result
+  is invalid — NEVER condition de-registration on a clean sibling / valid alternative existing.** (Cross-user
+  FK safety §2 is a separate, ownership rule: still only delete OURS, never a zhuang row.)
+- **⚠ A row's DB `stats` can be OVERWRITTEN by a later re-fire of an already-registered row (the
+  `--force-reeval` duplicate trap).** So a below-gate `stats` reading may reflect a spurious *later* resume,
+  not the clean eval the row was REGISTERED from. Before de-registering a row that carries a valid registered
+  score, check whether its current `stats` came from a post-registration re-fire — if so, the registration
+  may be legitimate and the fix is to stop re-firing registered rows, not to delete. (DB `stats` and the raw
+  `result.json` DO agree on valid-complete — verified 2026-07-12; the risk is stale/overwritten stats, not a
+  lossy field.)
 
 ## Related
 
@@ -192,5 +214,5 @@ if DELETE:
   but failed the gate.
 - **`crud-otagent-supabase`** — the general read/aggregate/write skill (`get_metric` shape helper,
   ID/OOD scoring, registration). The cross-user FK-safety rule there applies to all deletes.
-- **`eval-agentic-cleanup`** + the campaign tracker (e.g. flawed_summ `reeval_tracker.md`) — where the
-  gate/discriminator convention and the "DE-REGISTER candidate" list are maintained.
+- **`eval-agentic-cleanup`** + the campaign's policy (e.g. flawed_summ `POLICY.md` §"The gate" +
+  `STATE.md`) — where the gate/discriminator convention and the "DE-REGISTER candidate" list are maintained.
