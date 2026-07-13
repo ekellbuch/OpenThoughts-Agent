@@ -6,6 +6,8 @@ import json as _json
 import re
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import List, Optional
 
@@ -40,15 +42,128 @@ def _region_prefix(region: str) -> Optional[str]:
 
 
 def gcs_bucket_for_region(region: str) -> Optional[str]:
-    """Return the cheapest GCS bucket for workers in ``region``.
+    """Return the cheapest MULTI-region weight bucket for workers in ``region``.
 
     Returns the multi-region bucket (``gs://marin-models-us`` /
     ``gs://marin-models-eu``) matching the region's continent. Returns
     None for unmapped regions — callers should fall back rather than
     silently emit a wrong bucket.
+
+    This is the WEIGHT-mirror bucket: model weights live on the durable
+    multi-region mirror and the YAML region guard (:func:`assert_yaml_regions_match_pin`)
+    validates against it. For transient OUTPUTS use
+    :func:`output_bucket_for_region` (single-region, cheaper, co-located).
     """
     prefix = _region_prefix(region)
     return _REGION_PREFIX_TO_BUCKET.get(prefix) if prefix else None
+
+
+# Exact per-region SINGLE-region output buckets for transient outputs (datagen
+# trace dirs, eval outputs, xla_cache). Single-region storage costs ~half of
+# multi-region, and the launcher pins a job to exactly one region at submit time,
+# so a co-located single-region bucket is read/write-local for the job's whole
+# lifetime. Mirrors marin's canonical map (``config/marin.yaml``
+# ``data.region_buckets`` / ``rl/placement.py:marin_prefix_for_region``),
+# duplicated here (not imported) so this module stays importable on workers that
+# only install the base OT-Agent env, not the datagen-tpu extra that pulls in
+# marin-rigging.
+#
+# Distinct from _REGION_PREFIX_TO_BUCKET (multi-region weights): outputs are
+# transient and single-region; weights are durable and multi-region. Do NOT
+# collapse the two — the weight guard must keep rejecting YAMLs whose weights
+# point outside the pinned continent.
+_REGION_TO_OUTPUT_BUCKET = {
+    "us-central1": "gs://marin-us-central1",
+    "us-central2": "gs://marin-us-central2",
+    "us-east1": "gs://marin-us-east1",
+    "us-east5": "gs://marin-us-east5",
+    "us-west4": "gs://marin-us-west4",
+    "europe-west4": "gs://marin-eu-west4",
+}
+
+
+def output_bucket_for_region(region: str) -> Optional[str]:
+    """Return the co-located SINGLE-region output bucket for ``region``.
+
+    Exact per-region lookup (no continent-prefix fallback). Returns ``None``
+    for any region without a mapped single-region bucket (e.g. ``asia-*`` or an
+    EU region other than ``europe-west4``); callers must fail-fast or drop the
+    region rather than silently emit a wrong-continent bucket.
+
+    Use this for transient outputs only. Weights use
+    :func:`gcs_bucket_for_region` (multi-region).
+    """
+    return _REGION_TO_OUTPUT_BUCKET.get(region)
+
+
+# GCP metadata endpoint that reports the instance's zone (e.g.
+# "projects/123/zones/us-east5-b"); the region is the zone minus its trailing
+# "-<letter>". Mirrors marin's canonical runtime region discovery in
+# ``rigging.filesystem.region_from_metadata`` (the source of truth), reimplemented
+# here so this module carries no hard dependency on rigging — it is imported on
+# workers that may only install the base OT-Agent env, not the datagen-tpu extra
+# that pulls in marin-rigging.
+_GCP_METADATA_ZONE_URL = (
+    "http://metadata.google.internal/computeMetadata/v1/instance/zone"
+)
+
+
+def region_from_metadata() -> Optional[str]:
+    """Return the GCP region of the CURRENT instance, or ``None`` off-GCP.
+
+    Queries the instance metadata server (the same mechanism marin's
+    ``rigging.filesystem.region_from_metadata`` uses). Returns ``None`` when the
+    metadata server is unreachable (e.g. a laptop or CI host) or reports a
+    malformed zone, so callers can distinguish "not on GCP" from "on GCP in an
+    unmapped region".
+    """
+    try:
+        req = urllib.request.Request(
+            _GCP_METADATA_ZONE_URL, headers={"Metadata-Flavor": "Google"}
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            zone = resp.read().decode().strip().split("/")[-1]
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return None
+    if "-" not in zone:
+        return None
+    return zone.rsplit("-", 1)[0]
+
+
+def region_local_output_prefix(subpath: str = "ot-agent") -> str:
+    """Return the region-local SINGLE-region output prefix for the CURRENT region.
+
+    Discovers the instance's region from the metadata server and maps it to the
+    co-located single-region output bucket via :func:`output_bucket_for_region`
+    (``gs://marin-us-east5``, ``gs://marin-eu-west4``, ...), returning
+    ``{bucket}/{subpath}``. Writing transient outputs here keeps them in the exact
+    region the job runs in, avoiding cross-region GCS egress at the cheaper
+    single-region rate.
+
+    Fails fast (rather than silently defaulting to a possibly cross-continent
+    bucket) when the region can't be determined or maps to no known bucket:
+
+    - ``RuntimeError`` if the metadata server is unreachable (not on a GCP VM).
+    - ``ValueError`` if the region has no configured bucket (e.g. ``asia-*`` or an
+      EU region other than ``europe-west4``).
+
+    Args:
+        subpath: Path segment appended after the bucket root. Defaults to the
+            ``ot-agent`` namespace all OT-Agent artifacts live under.
+    """
+    region = region_from_metadata()
+    if region is None:
+        raise RuntimeError(
+            "Cannot resolve a region-local output bucket: GCP instance metadata "
+            "is unavailable (not running on a GCP VM)."
+        )
+    bucket = output_bucket_for_region(region)
+    if bucket is None:
+        raise ValueError(
+            f"No region-local output bucket configured for region {region!r}. "
+            f"Known regions: {sorted(_REGION_TO_OUTPUT_BUCKET)}."
+        )
+    return f"{bucket}/{subpath.strip('/')}"
 
 
 _GCS_URI_RE = re.compile(r"gs://(marin-models-(?:us|eu))(?:/|$)")
@@ -196,9 +311,9 @@ def discover_region_for_tpu(
         "ORDER BY unassigned DESC, total DESC, region"
     )
     rows = _iris_query(cluster_config, sql)
-    # Drop rows for regions we can't route to a known bucket — picking
-    # one would just re-create the cross-continent problem.
-    candidates = [r for r in rows if r.get("region") and gcs_bucket_for_region(r["region"])]
+    # Drop rows for regions we can't route to a known single-region output
+    # bucket — picking one would just re-create the cross-region problem.
+    candidates = [r for r in rows if r.get("region") and output_bucket_for_region(r["region"])]
     if not candidates:
         return None, rows
     return candidates[0]["region"], rows

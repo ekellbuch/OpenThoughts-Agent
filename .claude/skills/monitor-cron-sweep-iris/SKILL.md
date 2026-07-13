@@ -112,7 +112,10 @@ job_id prefix:
   image resume in minutes; surface "relaunch on the current image to eliminate the resume tax" for a job that keeps
   paying it. ESCALATE (report as an OUTLIER worth a look, still NO auto-kill) only if the resume exceeds ~8h with a
   still-healthy engine (beyond the observed max); if there is NO healthy engine, it is the §4b zombie path.
-- **Rescue mechanics (both):** `gsutil rsync` the OUTER `gs://marin-models-{us,eu}/ot-agent/<job>/` → `/tmp/<job>_traces`
+- **Rescue mechanics (both):** resolve the job's RECORDED output prefix — never hardcode a bucket (jobs now pin
+  to single-region `gs://marin-<region>`, older jobs to the multi-region mirror):
+  `OUT=$(…/otagent/bin/python -m hpc.iris.job_output_resolver "$JOB" --cluster …/marin.yaml)` — then
+  `gsutil rsync` the OUTER `$OUT/` (`.../ot-agent/<job>/`) → `/tmp/<job>_traces`
   (the OUTER `<job>/` — carries the trial dirs AND the sibling `logs/<slug>_literal.jsonl`; do NOT rsync only the
   inner `<job>/<job>/`, which drops `logs/` and silently loses the literals for a `--record_literal` job),
   then `make_and_upload_trace_dataset.py --job_dir /tmp/<job>_traces --repo_id penfever/<slug>-qwen3.5-122b-32k-traces
@@ -124,9 +127,10 @@ job_id prefix:
 ## 5. KEEP TWO DATAGEN IN-FLIGHT (datagen only)
 If active datagen (`qwen3.5-122b-32k-%`, state 1/2/3) < 2, auto-launch the next `pending` dataset from
 `/Users/benjaminfeuer/Documents/experiments/active/datagen/qwen3.5-122b-tt/tracker.md` via the datagen launch
-template (S1, `ctx32k_verified.yaml`, `--tpu v5p-8 --preemptible`, `--gcs-output-dir gs://marin-models-us/ot-agent`
-unpinned — prefer building this off `marin_prefix()` (auto-resolves the storage root; don't hardcode the region
-bucket), see `.claude/ops/iris/coreweave_gpu_ops.md` §rendezvous, repo `penfever/<slug>-qwen3.5-122b-32k-traces`) — see **datagen-launch-iris**. Flip its tracker row to
+template (S1, `ctx32k_verified.yaml`, `--tpu v5p-8 --preemptible`; **omit `--gcs-output-dir`** so the launcher
+auto-pins a co-located **single-region** output bucket for the chosen region — passing an explicit
+`--gcs-output-dir` opts OUT of the region pin and forces that exact bucket, so only pass it to deliberately
+override; repo `penfever/<slug>-qwen3.5-122b-32k-traces`) — see **datagen-launch-iris**. Flip its tracker row to
 RUNNING. Eval jobs do NOT count toward the 2 and are never auto-launched.
 
 **Snapshot-cap hygiene — PROACTIVE every tick (2026-07-10 operator directive):** every tick, unconditionally

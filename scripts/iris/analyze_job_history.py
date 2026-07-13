@@ -67,7 +67,7 @@ from rigging.connect import IapAuth, connect, disconnect
 from rigging.credentials import iap_edge_provider
 from rigging.tunnel import open_tunnel
 
-GCS_ROOT = "gs://marin-models-us/ot-agent"
+from hpc.iris.job_output_resolver import resolve_job_output_dir
 
 
 def resolve_iris_bin() -> str:
@@ -947,15 +947,17 @@ def build_cycles(
 # ---------- GCS / harbor trial parsing ----------
 
 
-def list_trial_trajectories(job_name: str) -> list[TrialStatus]:
+def list_trial_trajectories(job_name: str, job_output_dir: str) -> list[TrialStatus]:
     """Return TrialStatus for every trial dir (with or without trajectory.json).
 
-    We do this in two passes:
+    ``job_output_dir`` is the job's recorded OUTER ``.../ot-agent/<job>`` prefix
+    (from :func:`resolve_job_output_dir`), so legacy multi-region jobs and new
+    single-region jobs both read from the correct bucket. We do this in two passes:
       (a) list trial dirs (cheap, one listing)
       (b) list trajectory.json files with mtime+size (one recursive ls)
     Then we join.
     """
-    root = f"{GCS_ROOT}/{job_name}/{job_name}"
+    root = f"{job_output_dir}/{job_name}"
 
     # (a) all trial dirs. Tolerate the dir not existing — that happens when
     # the job has never reached SERVING + harbor never wrote a single trial
@@ -1024,16 +1026,18 @@ def list_trial_trajectories(job_name: str) -> list[TrialStatus]:
     return out
 
 
-def fetch_harbor_result(job_name: str) -> dict | None:
-    """Cat <root>/<job_name>/<job_name>/result.json.
+def fetch_harbor_result(job_name: str, job_output_dir: str) -> dict | None:
+    """Cat <job_output_dir>/<job_name>/result.json.
 
-    result.json is mutated in place by harbor on a remote worker; a `gsutil cat`
-    that races a write can return a truncated payload that fails to parse. Retry
-    briefly on the transient failure modes (gsutil non-zero exit, JSONDecodeError)
-    and return None on persistent failure so the caller degrades without harbor
-    stats rather than aborting the whole run.
+    ``job_output_dir`` is the job's recorded OUTER ``.../ot-agent/<job>`` prefix
+    (from :func:`resolve_job_output_dir`). result.json is mutated in place by
+    harbor on a remote worker; a `gsutil cat` that races a write can return a
+    truncated payload that fails to parse. Retry briefly on the transient failure
+    modes (gsutil non-zero exit, JSONDecodeError) and return None on persistent
+    failure so the caller degrades without harbor stats rather than aborting the
+    whole run.
     """
-    path = f"{GCS_ROOT}/{job_name}/{job_name}/result.json"
+    path = f"{job_output_dir}/{job_name}/result.json"
     for attempt in range(HARBOR_FETCH_ATTEMPTS):
         proc = subprocess.run(["gsutil", "cat", path], capture_output=True, text=True)
         if proc.returncode == 0:
@@ -1371,6 +1375,12 @@ def analyze(
     allow_incomplete: bool,
 ) -> JobAnalysis:
     job_name = job_id.rsplit("/", 1)[-1]
+    # Resolve the job's recorded output prefix ONCE (registry-first, iris-fallback
+    # via --cluster). Legacy multi-region jobs resolve to gs://marin-models-{us,eu}
+    # and new single-region jobs to gs://marin-<region>; the GCS readers below use
+    # this exact bucket instead of a hardcoded scan root.
+    job_output_dir = resolve_job_output_dir(job_id, cluster_config=CLUSTER)
+    print(f"[{job_name}] output dir: {job_output_dir}", file=sys.stderr)
     meta = get_job_metadata(job_id)
     submitted_at = datetime.fromtimestamp(meta["submitted_at_ms"] / 1000, tz=timezone.utc)
     started_at = datetime.fromtimestamp(meta["started_at_ms"] / 1000, tz=timezone.utc)
@@ -1428,7 +1438,7 @@ def analyze(
     print(f"[{job_name}] cycles detected: {len(cycles)}", file=sys.stderr)
 
     # GCS trial inspection
-    trials = list_trial_trajectories(job_name)
+    trials = list_trial_trajectories(job_name, job_output_dir)
     non_empty = [t for t in trials if t.has_trajectory]
     print(
         f"[{job_name}] trial dirs={len(trials)}, non_empty={len(non_empty)}",
@@ -1445,7 +1455,7 @@ def analyze(
         )
 
     # Harbor result.json
-    harbor = fetch_harbor_result(job_name)
+    harbor = fetch_harbor_result(job_name, job_output_dir)
     a = JobAnalysis(
         job_id=job_id,
         job_name=job_name,

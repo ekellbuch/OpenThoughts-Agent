@@ -86,9 +86,23 @@ exported dataset carries the trainable `prompt_token_ids` / `completion_token_id
 Requirements + knobs:
 - **`--job_dir` must sit inside the experiments-dir tree** so the parent-walk reaches `…/logs/`. `$INNER` (the
   trial-containing dir) qualifies as long as the local run dir still has its sibling `logs/` (local runs do).
+- **⚠ Resolve the recorded output bucket — NEVER hardcode `gs://marin-models-{us,eu}`.** Jobs now pin to a
+  co-located **single-region** bucket (`gs://marin-us-east5`, …), while older jobs are on the multi-region
+  mirror. Resolve each job's ACTUAL recorded OUTER prefix (registry-first, iris-fallback) rather than probing
+  buckets by hand:
+  ```bash
+  JOB=<job_name>
+  OUT=$(/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python -m hpc.iris.job_output_resolver "$JOB" \
+        --cluster /Users/benjaminfeuer/Documents/marin/lib/iris/config/marin.yaml)   # e.g. gs://marin-us-east5/ot-agent/<job>
+  mkdir -p /tmp/${JOB}_traces
+  gsutil -m rsync -r "$OUT/" /tmp/${JOB}_traces/     # OUTER <job>/ — carries logs/*_literal.jsonl
+  ```
+  The resolver returns the correct bucket for both single- and multi-region jobs, so this same command rescues
+  legacy and new jobs. (`--cluster` is only consulted for the iris fallback when the job isn't in the local
+  registry; registry-launched jobs resolve with no controller round-trip.)
 - **⚠ gs:// iris rescue — the INNER `<job>/` is the `--job_dir`, NOT the outer rescue root (2026-07-12 trap).**
-  You rsync the **OUTER** `gs://…/ot-agent/<job>/` → `/tmp/<job>_traces` so `logs/*_literal.jsonl` rides along
-  (per monitor-cron-sweep-iris §4a). But the trial dirs sit one level down at `/tmp/<job>_traces/<job>/<trial>`,
+  You rsync the **OUTER** `$OUT/` (`.../ot-agent/<job>/`, resolved above) → `/tmp/<job>_traces` so
+  `logs/*_literal.jsonl` rides along (per monitor-cron-sweep-iris §4a). But the trial dirs sit one level down at `/tmp/<job>_traces/<job>/<trial>`,
   so the `--job_dir` you PASS must be **`/tmp/<job>_traces/<job>`** (the inner subdir that DIRECTLY contains the
   `<task>__<id>` trial dirs). Passing the outer `/tmp/<job>_traces` still finds the trials by recursion so TEXT
   rows upload, but the literal correlation keys off the trial path relative to `--job_dir` → the extra `<job>/`

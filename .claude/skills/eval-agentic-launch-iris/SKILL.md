@@ -245,10 +245,12 @@ Flag notes:
   model's footprint.
 - **Output mode**: by default eval outputs are **rsync'd back periodically to
   `--local-sync-dir`** while the job runs (so local eval-analysis tooling sees
-  files). Pass `--output-mode gcs --gcs-output-dir gs://marin-models-us/ot-agent`
-  to write straight to GCS instead (and, as with datagen, this opts out of the
-  region pin — use it to dodge stuck-PENDING when a TPU pool has collapsed; keep
-  the bucket in the US region).
+  files). Pass `--output-mode gcs` (and OMIT `--gcs-output-dir`) to write straight
+  to GCS instead — the launcher auto-pins a co-located **single-region** output
+  bucket (`gs://marin-us-east5/ot-agent`, …). Passing an explicit
+  `--gcs-output-dir gs://marin-models-us/ot-agent` opts OUT of the pin (and reverts
+  to the pricier multi-region bucket) — only for the stuck-PENDING dodge when a TPU
+  pool has collapsed and you want iris free to place anywhere in the US.
 - `--upload_hf_repo` pushes results to HF on completion (image `ae085bc8`+ wires
   harbor's `--export-push`); omit it if you only want local/GCS outputs.
 - `--model` is optional only when `--datagen_config` is given (model inferred);
@@ -275,7 +277,9 @@ For eval, the signal of interest is **completion + productive trial rate**
 than gen tok/s. Scores land in the synced outputs, not the analyzer sidecar:
 - default mode → `--local-sync-dir` on the launch host (point eval-analysis
   tooling at it);
-- `--output-mode gcs` → under `gs://marin-models-us/ot-agent/<job>/`.
+- `--output-mode gcs` → under the pinned single-region bucket, e.g.
+  `gs://marin-us-east5/ot-agent/<job>/` (resolve the exact recorded URI with
+  `python -m hpc.iris.job_output_resolver <job> --cluster …/marin.yaml`).
 
 Per-task progress / resume helpers live in `scripts/iris/check_progress.py` and
 `check_resume_needed.py`.
@@ -288,8 +292,10 @@ Per-task progress / resume helpers live in `scripts/iris/check_progress.py` and
 ```
 
 **Recover partial results**: eval outputs are already on the launch host
-(`--local-sync-dir`) or in GCS (`--output-mode gcs`). To re-pull a GCS job dir:
-`gsutil -m rsync -r gs://marin-models-us/ot-agent/<job>/<job>/ /tmp/<job>_eval/`.
+(`--local-sync-dir`) or in GCS (`--output-mode gcs`). To re-pull a GCS job dir,
+resolve the recorded output prefix first (single- or multi-region — never hardcode):
+`OUT=$(python -m hpc.iris.job_output_resolver <job> --cluster …/marin.yaml)` then
+`gsutil -m rsync -r "$OUT/<job>/" /tmp/<job>_eval/`.
 If HF upload didn't fire (pre-`ae085bc8` image or non-state-4 exit) and you need
 the traces on the Hub, use the same `make_and_upload_trace_dataset.py` recipe as
 in **datagen-launch-iris** against the local job dir.
@@ -300,8 +306,10 @@ not arise here. If you somehow see it, you're on the wrong (datagen) path or the
 wrong harbor config (eval configs use `force_build: true`).
 
 **Stuck PENDING**: relaunch with `--output-mode gcs --gcs-output-dir
-gs://marin-models-us/ot-agent` (unpinned) so iris places on any free TPU in the
-US region. Kill the stuck submission first only with user permission.
+gs://marin-models-us/ot-agent` (unpinned — this deliberate override drops the
+single-region pin and writes the pricier multi-region bucket) so iris places on
+any free TPU in the US region. Kill the stuck submission first only with user
+permission.
 
 ## Guardrails
 

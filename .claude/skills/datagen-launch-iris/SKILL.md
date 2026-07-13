@@ -54,7 +54,6 @@ python data/cloud/launch_tracegen_iris.py \
   --n_concurrent 64 --n_attempts 1 --health_max_attempts 600 \
   --job_name "qwen3.5-122b-32k-<slug>-${TS}" \
   --secrets-env "$DC_AGENT_SECRET_ENV" \
-  --gcs-output-dir gs://marin-models-us/ot-agent \
   --upload_hf_repo penfever/<slug>-qwen3.5-122b-32k-traces \
   --no-wait
 ```
@@ -68,15 +67,15 @@ Flag notes:
   chip count; harbor_config CLI-required). **Precedence: explicit CLI / `--datagen_config` values always
   win** over `model_config/`; a model with no entry launches byte-unchanged (logged). Edit the source
   file `model_config/<org>/<slug>.yaml`, never the generated `eval/configs/model_configs.yaml`.
-- **⚠ PREFER building `--gcs-output-dir` (and the model-mirror path) off `marin_prefix()`
-  (`rigging.filesystem` — auto-resolves the active cluster's storage root; don't hardcode the region
-  bucket); the literal below is a fallback. See `.claude/ops/iris/coreweave_gpu_ops.md` §rendezvous.**
-- **`--gcs-output-dir gs://marin-models-us/ot-agent` opts OUT of the region
-  pin** (the launcher would otherwise auto-pin to the region with the most v5p-8
-  capacity). Use it to avoid the stuck-PENDING trap when a single region's v5p-8
-  pool has collapsed — iris then places on the first free v5p-8 in any US region.
-  Keep output in the **US** multi-region bucket (matches the model bucket; never
-  read/write GCS cross-region).
+- **⚠ OMIT `--gcs-output-dir` for the normal path.** The launcher auto-pins the job to the region with the
+  most v5p-8 capacity and routes outputs to that region's co-located **single-region** bucket
+  (`gs://marin-us-east5/ot-agent`, …) — transient outputs at ~half the multi-region cost, still read/write-local
+  (`output_bucket_for_region` in `hpc/iris/regions.py`). The registry records that URI, so rescue/analyze
+  resolve it automatically (see `hpc.iris.job_output_resolver`).
+- **`--gcs-output-dir gs://marin-models-us/ot-agent` opts OUT of the region pin AND the single-region
+  routing** (it forces that exact multi-region bucket). Only pass it to deliberately override — e.g. to dodge a
+  stuck-PENDING trap when one region's v5p-8 pool has collapsed and you want iris free to place on any US
+  region. Note this reverts outputs to the pricier multi-region bucket; prefer leaving the pin on.
 - `ctx32k_verified.yaml` = verifier ON + the `release_trial_payloads_in_memory`
   flag (bounds worker host-RAM so heavy/repo-based datasets don't OOM the
   container). Use the 32k config with the 32k S1 engine.
@@ -126,7 +125,11 @@ exists before rescuing:
 killed, OOM, or pre-`ae085bc8` image). Rsync the GCS job dir local, then push:
 ```bash
 source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
-gsutil -m rsync -r gs://marin-models-us/ot-agent/<job>/<job>/ /tmp/<job>_traces/
+# Resolve the job's RECORDED output prefix (single- or multi-region) — never hardcode a bucket.
+OUT=$(/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python -m hpc.iris.job_output_resolver <job> \
+      --cluster /Users/benjaminfeuer/Documents/marin/lib/iris/config/marin.yaml)
+mkdir -p /tmp/<job>_traces
+gsutil -m rsync -r "$OUT/<job>/" /tmp/<job>_traces/
 /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python \
   /Users/benjaminfeuer/Documents/OpenThoughts-Agent/scripts/harbor/make_and_upload_trace_dataset.py \
   --job_dir /tmp/<job>_traces \

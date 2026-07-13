@@ -58,7 +58,7 @@ from hpc.iris.outputs import (
 from hpc.iris.regions import (
     assert_yaml_regions_match_pin,
     discover_region_for_tpu,
-    gcs_bucket_for_region,
+    output_bucket_for_region,
 )
 from hpc.iris.settings import (
     DEFAULT_CLUSTER_CONFIG,
@@ -346,8 +346,8 @@ class IrisLauncher:
         # set --gcs-output-dir or $OT_AGENT_GCS_OUTPUT_ROOT (i.e., the value
         # is still the cross-continent default), query iris for which
         # region has v5p/v6e capacity for this TPU spec, override the
-        # output bucket to the matching multi-region bucket, and pin the
-        # iris job to that region so preempt-retry can't cross-continent
+        # output bucket to the matching co-located SINGLE-region bucket, and
+        # pin the iris job to that region so preempt-retry can't cross-region
         # failover. Skipped on --resume-from (the existing job's bucket
         # is authoritative) and when no TPU is requested.
         args._pinned_region = None
@@ -379,7 +379,7 @@ class IrisLauncher:
                         file=sys.stderr, flush=True,
                     )
                 else:
-                    bucket = gcs_bucket_for_region(region)
+                    bucket = output_bucket_for_region(region)
                     args.gcs_output_dir = f"{bucket}/ot-agent"
                     args._pinned_region = region
                     summary = ", ".join(

@@ -41,20 +41,27 @@ after the snapshot completes) — clean the tmp mirror dir.
 
 ### Before you submit — region, disk, node shape
 
-**Region (cross-region egress is the #1 cost footgun).** Model weight buckets are
-regional: `gs://marin-models-us/...` and `gs://marin-models-eu/...`. Cross-continent
-reads are a major cost driver and project policy forbids them (`AGENTS.md`).
-- Keep **model bucket, `jobs_dir`/output bucket, and worker region in the same
-  multi-region** (all US or all EU).
-- The launcher auto-pins the job to the region with most capacity for the TPU
-  type (`hpc/iris_launch_utils.py:discover_region_for_tpu`) and routes output to
-  the matching multi-region bucket. **Static default `DEFAULT_GCS_OUTPUT_ROOT` is
-  `gs://marin-eu-west4/...`** — if you neither set `--gcs-output-dir` nor let the
-  pin run, a US placement reads EU = egress.
-- `--gcs-output-dir gs://marin-models-us/ot-agent` **opts out of region pin**
-  (places on first free worker in any US region — the fix for a collapsed
-  single-region pool, §3 stuck-PENDING) while keeping output in US multi-region.
-  Only with a US model bucket.
+**Region (cross-region egress is the #1 cost footgun).** Model **weight** buckets
+stay multi-region: `gs://marin-models-us/...` and `gs://marin-models-eu/...`
+(durable inputs). Transient **outputs** (trace dirs, eval outputs, `xla_cache`)
+now route to a co-located **single-region** bucket (`gs://marin-us-east5`,
+`gs://marin-eu-west4`, …) — ~half the multi-region cost, still read/write-local.
+Cross-continent reads are a major cost driver and project policy forbids them
+(`AGENTS.md`).
+- Keep **model weight bucket + worker region in the same multi-region** (all US or
+  all EU); the launcher handles output placement.
+- The launcher auto-pins the job to the region with most capacity for the TPU type
+  (`hpc/iris/regions.py:discover_region_for_tpu`) and routes output to that
+  region's **single-region** bucket (`output_bucket_for_region`). It records the
+  chosen output URI in the registry, so readers resolve it via
+  `hpc.iris.job_output_resolver` (never a hardcoded bucket). **Static default
+  `DEFAULT_GCS_OUTPUT_ROOT` is `gs://marin-eu-west4/...`** (single-region EU) — the
+  discovery-failed fallback; a US placement that lands here reads EU = egress, so
+  let the pin run.
+- `--gcs-output-dir gs://marin-models-us/ot-agent` **opts out of the region pin AND
+  the single-region routing** (forces that multi-region bucket; places on first
+  free worker in any US region — the fix for a collapsed single-region pool, §3
+  stuck-PENDING). A deliberate override; prefer leaving the pin on.
 
 **Local disk (~100 GB/node ceiling).** Each TPU worker node has only ~100 GB.
 - **Stream the model from GCS** (`--load-format runai_streamer`, gs:// URIs) —
@@ -140,7 +147,8 @@ verify the repo exists before any manual rescue.
   or instantly free capacity. For a fresh DATAGEN launch that won't place, the
   documented remedy is to relaunch **unpinned** with
   `--gcs-output-dir gs://marin-models-us/ot-agent` (iris places on any free US
-  worker). Kill the stuck submission only with user permission.
+  worker; note this override reverts outputs to the pricier multi-region bucket).
+  Kill the stuck submission only with user permission.
 - **⚑ PREEMPTIBLE JOBS STAY ON PREEMPTIBLE — a capacity-pending wait is NOT an
   escalation (operator, 2026-07-09).** When a `--preemptible` job (datagen OR a
   training child respawned by its coordinator) sits PENDING for hours on
@@ -271,7 +279,10 @@ keys off a local Harbor job dir (`/app/jobs/<job>`) that doesn't exist on the TP
 runtime (trials stream to GCS). Log tell:
 `[upload] Expected Harbor job directory /app/jobs/<job> does not exist; upload skipped.`
 GPU/SLURM has the local dir so upload works there; TPU is the broken path.
-Results land in **GCS only**: `gs://marin-models-us/ot-agent/<job>/<job>/`.
+Results land in **GCS only**, under the job's recorded output prefix
+`<job_output_dir>/<job>/` (single- or multi-region — resolve it with
+`python -m hpc.iris.job_output_resolver <job> --cluster …/marin.yaml`, don't
+hardcode `gs://marin-models-us`).
 - **Harvest scores from GCS**, not Supabase: `result.json` →
   `stats.evals.<id>.reward_stats` (+ `exception_stats`).
 - **Traces to the Hub:** `gsutil rsync` the GCS job dir, then
@@ -286,8 +297,10 @@ Results land in **GCS only**: `gs://marin-models-us/ot-agent/<job>/<job>/`.
 # Kill a job (ONLY with explicit user permission for a RUNNING/placed job)
 $IRIS --cluster=marin job kill /benjaminfeuer/<job>
 ```
-- **Rescue banked traces** before/after a kill if the repo didn't auto-create:
-  `gsutil -m rsync -r gs://marin-models-us/ot-agent/<job>/<job>/ /tmp/<job>/` then
+- **Rescue banked traces** before/after a kill if the repo didn't auto-create
+  (resolve the recorded output prefix — never hardcode a bucket):
+  `OUT=$(python -m hpc.iris.job_output_resolver <job> --cluster …/marin.yaml)` then
+  `gsutil -m rsync -r "$OUT/<job>/" /tmp/<job>/` then
   `scripts/harbor/make_and_upload_trace_dataset.py --job_dir /tmp/<job> --repo_id penfever/<slug>-... --episodes last --filter none --skip_register`.
 - **NEVER** `iris cluster restart` / stop / bounce the cluster without explicit
   user approval — it kills every running job. `job kill` is job-scoped (safe with

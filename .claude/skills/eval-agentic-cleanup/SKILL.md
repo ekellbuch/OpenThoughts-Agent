@@ -301,16 +301,15 @@ register rule + the same cross-user FK safety); only the DATA SOURCE and the res
   **State codes: 4=COMPLETED (terminal-good), 5=FAILED, 6=KILLED, 1/2/3=pending/running (SKIP — live).** There is
   no `-S <date>` filter; the job_id timestamp suffix (or a `created_at` column) bounds "since June 3". EXEMPT the
   `DCAgent2/*` grid/throughput/OOM measurement runs (§0 pre-gate) same as SLURM.
-- **Results live in GCS, NOT on a filesystem.** The aggregate is
-  `gs://<bucket>/ot-agent/<job>/<job>/result.json`. (The storage root resolves via `marin_prefix()` — see
-  `.claude/ops/iris/coreweave_gpu_ops.md` §rendezvous; the literal buckets below are the historical fallbacks.)
-  **⚠ CHECK BOTH BUCKETS: `gs://marin-models-us` (us-east5, the
-  intended region) AND `gs://marin-eu-west4`.** A launch-host region-discovery fallback (the marin `iris` CLI not
-  on PATH → the launcher can't discover the region → it silently writes to the static `gs://marin-eu-west4`
-  default). Verified 2026-07-07: a whole class of legs (all the flawed-summ `-rf` re-fires) landed in eu-west4 —
-  a us-east5-only audit returns "no output" FALSELY. Always `gsutil ls` both, and prefer whichever has the
-  aggregate `result.json`. (The data is valid + self-consistent, just in the wrong region — no cross-region
-  egress; harvest it where it is, don't re-run for region alone.)
+- **Results live in GCS, NOT on a filesystem.** The aggregate is `<job_output_dir>/<job>/result.json`, where
+  `<job_output_dir>` is the job's RECORDED output prefix. **Resolve it — never guess or scan buckets:**
+  `OUT=$(python -m hpc.iris.job_output_resolver <job> --cluster …/marin.yaml)` (registry-first, iris-fallback).
+  The resolver returns whatever bucket the job actually wrote to — a new single-region bucket
+  (`gs://marin-us-east5/…`), a legacy multi-region bucket (`gs://marin-models-us/…`), or the
+  `gs://marin-eu-west4` static default a region-discovery-failed launch fell back to. This replaces the old
+  "⚠ CHECK BOTH BUCKETS" probe: because the recorded URI is authoritative, a single `gsutil ls "$OUT/<job>/"`
+  finds the `result.json` regardless of region. (Data written to any of these is valid + self-consistent —
+  harvest it where the resolver points, don't re-run for region alone.)
 - **Audit the GCS `result.json`** — schema is `stats.evals.<key>` (NOT top-level `metrics`). Per eval key:
   `score = metrics[0].mean`; `n_trials` / `n_total_trials` (swe/v2=300, tb2=267); `exception_stats[<name>]` is a
   **LIST of trial ids → use `len()`** (Σlen over NON-benign names / n_trials = error-fraction; same benign set as

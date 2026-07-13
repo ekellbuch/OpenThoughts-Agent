@@ -59,6 +59,8 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
+from hpc.iris.regions import region_from_metadata, region_local_output_prefix
+
 RENDEZVOUS_FILENAME = "ray_head.json"
 
 # How long worker ranks poll for the head's rendezvous file, and how long the
@@ -138,12 +140,25 @@ def _setup_xla_cache(model: Optional[str]) -> None:
     it up. The env export reaches every subprocess we spawn (vllm serve,
     ray workers, engine cores).
 
-    No-op when the base isn't set — caller hasn't opted in to caching.
+    When the launcher did not set a base, fall back to this VM's own
+    region-local bucket resolved from instance metadata
+    (:func:`region_local_output_prefix`) — the compile cache is disposable, so
+    recomputing it against the region the job is actually running in is strictly
+    better than a cross-region default and, unlike Harbor's trace ``jobs_dir``,
+    does not need a submit-time-stable location. Stays a no-op off-GCP (no
+    metadata region) so laptop/CI runs don't fail.
+
+    Explicit ``OT_AGENT_XLA_CACHE_BASE=disabled`` opts out entirely.
     Idempotent: re-running with the same base is harmless.
     """
     base = os.environ.get("OT_AGENT_XLA_CACHE_BASE", "").strip()
-    if not base or base.lower() == "disabled":
+    if base.lower() == "disabled":
         return
+    if not base:
+        if region_from_metadata() is None:
+            return  # Off-GCP (laptop/CI): no region-local bucket to fall back to.
+        base = region_local_output_prefix("ot-agent/xla_cache")
+        _log(f"XLA cache: OT_AGENT_XLA_CACHE_BASE unset; using region-local {base}")
     cache_dir = f"{base.rstrip('/')}/{_cpu_tag()}/{_model_tag(model)}"
     os.environ["JAX_COMPILATION_CACHE_DIR"] = cache_dir
     # Also surface for vLLM-TPU's lowering passes which look at this env
