@@ -879,12 +879,98 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
         _log(f"[term-capture] upload FAILED ({exc}); emitting inline:\n{summary}")
 
 
+# --- Ray session-log -> object-store sync (added 2026-07-13) -----------------------
+# WHY: the per-actor Ray WORKER logs (/tmp/ray/session_*/logs/worker-*.{out,err},
+# raylet.out, ...) are the only place the FSDP policy / rollout actor stdout+tracebacks
+# land — the iris finelog AGGREGATES only what reaches the head, and a pod GC / eviction
+# DELETES these node-local logs with the pod, so a post-mortem loses the real per-rank
+# cause (this is the 80B gs1 host-RAM-OOM + NCCL-desync debug pain: the wedged rank's
+# worker log died with its pod). This periodically (+ on SIGTERM) uploads THIS node's
+# session logs to the object store under the job's rendezvous prefix, keyed by node id,
+# reusing the SAME fsspec/boto3 + AWS_ENDPOINT_URL creds path the rendezvous / spill /
+# term-artifact writers already use (_fs_and_path). Per-node: each pod writes its own
+# logs under <rendezvous_dir>/ray_session_logs/<node_id>/. Gate: OT_AGENT_RAY_LOG_SYNC
+# (default "1"); interval OT_AGENT_RAY_LOG_SYNC_INTERVAL_S (default 300s).
+RAY_LOG_SYNC_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # skip a single >2 GiB log (pathological)
+
+
+def sync_ray_session_logs(rendezvous_dir: str | None, node_id: str, reason: str) -> None:
+    """Upload THIS node's /tmp/ray/session_*/logs/ tree to the object store under
+    ``<rendezvous_dir>/ray_session_logs/<node_id>/<session>/``. Best-effort; never
+    raises; per-file so one bad file can't abort the rest."""
+    if not rendezvous_dir:
+        return
+    if os.environ.get("OT_AGENT_RAY_LOG_SYNC", "1") != "1":
+        return
+    import glob
+
+    log_dirs = sorted(glob.glob("/tmp/ray/session_*/logs"))
+    if not log_dirs:
+        return
+    dest_base = f"{rendezvous_dir.rstrip('/')}/ray_session_logs/{node_id}"
+    try:
+        fs, dest_path = _fs_and_path(dest_base)
+    except Exception as exc:  # noqa: BLE001 - best-effort
+        _log(f"[ray-log-sync] cannot resolve dest {dest_base} ({exc}) [{reason}]")
+        return
+    n_files = n_bytes = 0
+    for ld in log_dirs:
+        session = os.path.basename(os.path.dirname(ld))  # session_YYYY-MM-DD_...
+        for root, _dirs, files in os.walk(ld):
+            for fn in files:
+                lp = os.path.join(root, fn)
+                try:
+                    sz = os.path.getsize(lp)
+                    if sz > RAY_LOG_SYNC_MAX_FILE_BYTES:
+                        continue
+                    rel = os.path.relpath(lp, ld)
+                    fs.put(lp, f"{dest_path}/{session}/{rel}")
+                    n_files += 1
+                    n_bytes += sz
+                except Exception:  # noqa: BLE001 - skip a single unreadable/racing file
+                    continue
+    _log(
+        f"[ray-log-sync] uploaded {n_files} file(s) / {n_bytes / 1073741824.0:.2f} GiB "
+        f"-> {dest_base} [{reason}]"
+    )
+
+
+def start_ray_log_sync(rendezvous_dir: str | None, node_id: str) -> threading.Event:
+    """Start a daemon thread that periodically uploads this node's Ray session logs.
+    Returns the stop Event (set it to stop). No-op (returns a set-able event) when
+    disabled / no rendezvous dir. Fires a first upload after a short warmup so the
+    sync is confirmable during bring-up, then every OT_AGENT_RAY_LOG_SYNC_INTERVAL_S."""
+    stop = threading.Event()
+    if not rendezvous_dir or os.environ.get("OT_AGENT_RAY_LOG_SYNC", "1") != "1":
+        return stop
+    interval = int(os.environ.get("OT_AGENT_RAY_LOG_SYNC_INTERVAL_S", "300"))
+    if interval <= 0:
+        return stop
+
+    def _loop() -> None:
+        # brief warmup so Ray has created the session dir + some logs before the first push
+        if stop.wait(min(60, interval)):
+            return
+        sync_ray_session_logs(rendezvous_dir, node_id, "periodic")
+        while not stop.wait(interval):
+            sync_ray_session_logs(rendezvous_dir, node_id, "periodic")
+
+    threading.Thread(target=_loop, daemon=True, name="ray-log-sync").start()
+    _log(
+        f"[ray-log-sync] started (every {interval}s, first ~{min(60, interval)}s) -> "
+        f"{rendezvous_dir.rstrip('/')}/ray_session_logs/{node_id}"
+    )
+    return stop
+
+
 def run_head(args: argparse.Namespace, train_argv: list[str]) -> int:
     num_tasks = _num_tasks()
     head_ip = _own_ip()
     ray_port = args.ray_port
     ray_address = f"{head_ip}:{ray_port}"
+    node_id = f"rank0-{socket.gethostname()}"
     _log(f"ROLE=head rank=0/{num_tasks} head_ip={head_ip} ray_port={ray_port}")
+    ray_log_sync_stop: threading.Event | None = None
 
     # Install the SIGTERM/SIGINT handler + termination-artifact capture at the TOP of
     # bring-up (BEFORE clear_rendezvous / ray_start_head / rendezvous write), so a reap
@@ -898,6 +984,9 @@ def run_head(args: argparse.Namespace, train_argv: list[str]) -> int:
         # Capture FIRST (before teardown mutates disk/GPU state) — a SIGTERM here is
         # often a k8s eviction / OOM whose cause survives nowhere else.
         capture_termination_artifacts(args.rendezvous_dir, f"signal {signum} (head rank 0)")
+        # Flush this node's Ray session logs (per-actor worker stdout/tracebacks) before
+        # the pod is reaped — Ray's node-local logs are deleted with the pod.
+        sync_ray_session_logs(args.rendezvous_dir, node_id, f"signal {signum} (head)")
         if process is not None:
             try:
                 os.killpg(os.getpgid(process.pid), signal.SIGTERM)
@@ -922,6 +1011,10 @@ def run_head(args: argparse.Namespace, train_argv: list[str]) -> int:
 
     ray_start_head(head_ip, ray_port, spill_uri=_ray_spill_uri(args.rendezvous_dir))
     _log("Ray head bootstrap complete; entering rendezvous / cluster-join phase.")
+
+    # Start the periodic Ray session-log -> object-store sync now that the session dir
+    # exists (per-node, keyed by node id, under the job's rendezvous prefix).
+    ray_log_sync_stop = start_ray_log_sync(args.rendezvous_dir, node_id)
 
     if num_tasks > 1:
         if not args.rendezvous_dir:
@@ -959,6 +1052,10 @@ def run_head(args: argparse.Namespace, train_argv: list[str]) -> int:
     exit_code = process.wait()
     if exit_code != 0:
         capture_termination_artifacts(args.rendezvous_dir, f"driver exit_code={exit_code} (head rank 0)")
+    # Final flush of this node's Ray session logs before teardown reaps them.
+    if ray_log_sync_stop is not None:
+        ray_log_sync_stop.set()
+    sync_ray_session_logs(args.rendezvous_dir, node_id, f"driver exit_code={exit_code} (head)")
     # Signal workers to unpark, then tear down.
     if args.rendezvous_dir and num_tasks > 1:
         _set_marker(args.rendezvous_dir, DONE_FILENAME)
@@ -973,6 +1070,7 @@ def run_worker(args: argparse.Namespace) -> int:
     rank = _rank()
     num_tasks = _num_tasks()
     node_ip = _own_ip()
+    node_id = f"rank{rank}-{socket.gethostname()}"
     _log(f"ROLE=worker rank={rank}/{num_tasks} node_ip={node_ip}")
 
     if not args.rendezvous_dir:
@@ -990,6 +1088,10 @@ def run_worker(args: argparse.Namespace) -> int:
     wait_for_nodes(ray_address, num_tasks, args.cluster_join_timeout)
     _log(f"Worker rank {rank} joined Ray cluster at {ray_address}; parking until the head finishes.")
 
+    # Periodic Ray session-log -> object-store sync for THIS worker node (the FSDP/rollout
+    # actors on this node log to its local /tmp/ray session, deleted with the pod on GC).
+    ray_log_sync_stop = start_ray_log_sync(args.rendezvous_dir, node_id)
+
     stop = threading.Event()
 
     def _shutdown(signum, _frame) -> None:
@@ -997,6 +1099,8 @@ def run_worker(args: argparse.Namespace) -> int:
         # A SIGTERM on a worker node is often a k8s eviction/OOM of that node (it
         # hosts the training actors' GPUs); capture its disk/GPU state before reap.
         capture_termination_artifacts(args.rendezvous_dir, f"signal {signum} (worker rank {rank})")
+        # Flush this node's per-actor Ray worker logs before the pod is reaped.
+        sync_ray_session_logs(args.rendezvous_dir, node_id, f"signal {signum} (worker rank {rank})")
         stop.set()
 
     signal.signal(signal.SIGINT, _shutdown)
@@ -1010,6 +1114,9 @@ def run_worker(args: argparse.Namespace) -> int:
             _log(f"Worker rank {rank} saw head done-marker; shutting down.")
             break
         time.sleep(POLL_INTERVAL)
+    # Final flush of this worker node's Ray session logs before Ray teardown.
+    ray_log_sync_stop.set()
+    sync_ray_session_logs(args.rendezvous_dir, node_id, f"worker rank {rank} teardown")
     ray_stop()
     return 0
 

@@ -348,6 +348,16 @@ trainer:
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
       max_grad_norm: 0.9
+      # foreach=false: run AdamW WITHOUT the fused foreach path. Under cpu_offload the
+      # optimizer.step() executes on CPU, and foreach=True allocates full-shard-size fp32
+      # CPU TEMPORARY tensor-lists (one per param group, ~the whole master/m/v shard) for
+      # the vectorized _multi_tensor_adamw — a large transient host-RAM SPIKE at the gs1
+      # step (the confirmed 80B gs1 trigger). foreach=false uses the single-tensor path
+      # (per-param in-place, no big temporaries) → cuts the step-time host-RAM peak at a
+      # small compute cost. Merged into the AdamW ctor kwargs via optim_config.optimizer_kwargs
+      # (fsdp_strategy.py:505-507). See ~/Documents/experiments 80b naive-map tracker.
+      optimizer_kwargs:
+        foreach: false
     fsdp_config:
       # REQUIRED at 131k: 80B optimizer state → node RAM (host DDR on H100, NOT GH200 LPDDR),
       # HBM kept for the 131k activations + GDN scan. See header MEMORY MATH.
