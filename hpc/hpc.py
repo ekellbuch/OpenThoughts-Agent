@@ -1298,7 +1298,9 @@ vista = HPC(
     # non-NCCL/CPU/IO code, exited only on kill). Identical 16-node set both jobs → same rank→node map.
     # Degraded/hanging GH200 node (unlike the others here, which were single NODE_FAILs), not a config
     # bug. agent_logs/2026-07-12_tacc_axolotl32b_c634-052_straggler_nccl_timeout.md.
-    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051,c636-152,c608-042,c634-142,c641-012,c634-052",
+    # c621-102 added 2026-07-13 from job 825770 (axolotl Qwen3-32B SFT, exp _18): SLURM State NODE_FAIL
+    # + `down*` node — same class as c634-052; confirmed NODE_FAIL.
+    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051,c636-152,c608-042,c634-142,c641-012,c634-052,c621-102",
     # Runtime configuration for Ray/vLLM
     modules=["gcc/15.1.0", "cuda/12.8", "tacc-apptainer"],
     conda_activate="source $SCRATCH/miniconda3/etc/profile.d/conda.sh && conda activate $SCRATCH/miniconda3/envs/vllm_sandboxes",
