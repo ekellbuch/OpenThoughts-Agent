@@ -162,6 +162,23 @@ exclusive** (`H100x8`, one iris task per node, no co-tenants). ~**36 H100 nodes*
   picked up. Mechanism: one `start_rl_iris_controller.py` per node; rank 0 writes
   `ray_head.json` to the rendezvous, workers poll for it and join; rank 0 publishes
   `ray_head.done` on completion.
+  **⚠ Inspecting a `marin-us-east-02a` object from the Mac (2026-07-13): you CAN'T — it's
+  in-cluster-only.** The store's endpoint `AWS_ENDPOINT_URL=cwlota.com` is CoreWeave's
+  **in-cluster LOTA** address; from the laptop it just **connect-times-out** (`http://cwlota.com/...`
+  is unroutable). Sourcing the `iris-task-env` / `finelog-cw-use02a-env` secret Mac-side does NOT
+  help: the finelog secret's public CloudFlare-R2 endpoint (`…r2.cloudflarestorage.com`) is for
+  `s3://marin-na` only; `marin-us-east-02a` lives on LOTA. And a plain `aws s3 ls s3://marin-us-east-02a/…`
+  with the laptop's default creds hits **real AWS S3** → `AccessDenied` (the bucket isn't there).
+  **To list/read a `marin-us-east-02a` object, `kubectl -n iris exec` into a Running TASK pod**
+  (any of your own `iris-<user>-…` workers — it already has `AWS_*` + `cwlota.com` reach via
+  `iris-task-env`; do NOT exec into someone else's active training pod, e.g. dlwh's `…grug-train-cw…`)
+  and use **boto3 with `Config(s3={"addressing_style":"virtual"})`** — LOTA **rejects path-style**
+  (`PathStyleRequestNotAllowed`), which is boto3's default, so an unconfigured client fails even
+  in-cluster. One-liner: `kubectl -n iris exec <pod> -- python -c 'import boto3,os;from botocore.config import Config;s3=boto3.client("s3",endpoint_url=os.environ["AWS_ENDPOINT_URL"],config=Config(s3={"addressing_style":"virtual"}));print([o["Prefix"] for o in s3.list_objects_v2(Bucket="marin-us-east-02a",Prefix="<prefix>/",Delimiter="/").get("CommonPrefixes",[])])'` (subdirs are `CommonPrefixes`→`["Prefix"]`; top-level files are `Contents`→`["Key"]`).
+  (Aside — the on-disk shape of a marin/Levanter *training* checkpoint there: `<run>-<hash>/.executor_info`
+  + `checkpoints/step-N/{metadata.json, manifest.ocdbt, d/<content-addressed blobs>}` = **Orbax OCDBT /
+  TensorStore JAX** format, NOT HF transformers — no `config.json`/`*.safetensors`/`tokenizer.json`;
+  needs an explicit Levanter→HF export to become loadable by `transformers`.)
 - **The `gpu-rl` image is deps-only; source is synced at runtime.** The image
   (`ghcr.io/open-thoughts/openthoughts-agent`, pinned by **immutable `@sha256:` digest**
   in `launch_rl_iris.py:DEFAULT_RL_DOCKER_IMAGE` — NOT the floating `:gpu-rl` tag, which
