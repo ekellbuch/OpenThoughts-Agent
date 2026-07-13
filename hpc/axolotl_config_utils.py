@@ -30,7 +30,6 @@ _PLUGIN_LIGER = "axolotl.integrations.liger.LigerPlugin"
 _LF_ONLY_DROP_KEYS = {
     "overwrite_output_dir",
     "data_shared_file_system",
-    "ddp_timeout",
     "plot_loss",
     "include_num_input_tokens_seen",
     "load_best_model_at_end",
@@ -166,6 +165,11 @@ def translate_lf_to_axolotl(base_config: dict, exp_args: dict, dataset_paths, mo
         # auto_resume_from_checkpoints/resume_from_checkpoint is set; HF-Trainer's implicit
         # auto-resume that the LF path relies on does NOT apply here).
         "auto_resume_from_checkpoints", "resume_from_checkpoint",
+        # ddp_timeout -> HF TrainingArguments.ddp_timeout -> accelerate InitProcessGroupKwargs
+        # -> the c10d/NCCL collective-watchdog timeout (axolotl forwards it in causal.py). Lets a
+        # transient IB blip during a ZeRO-3 reduce-scatter self-heal instead of SIGABRT at the 600s
+        # default (env NCCL_TIMEOUT is NOT honored for this). Value mirrors the LF parity config.
+        "ddp_timeout",
     ):
         if key in base_config and base_config[key] is not None:
             ax[key] = base_config[key]

@@ -104,6 +104,14 @@ save_total_limit: 3
 # clean; 7-epoch/704-step runs exceed the 48h TACC wall and need this to finish.
 auto_resume_from_checkpoints: true
 
+# Collective-watchdog timeout (seconds), matched to the LF parity config (32k_base_32b.yaml).
+# Forwarded to HF TrainingArguments.ddp_timeout -> accelerate InitProcessGroupKwargs -> the c10d/NCCL
+# PG timeout. Effectively-infinite so a transient IB blip during a ZeRO-3 reduce-scatter/save self-heals
+# instead of SIGABRT'ing at the torch 600s default (env NCCL_TIMEOUT is NOT honored for this). A genuine
+# dead node is still caught by SLURM NODE_FAIL / the 48h wall, not this watchdog. Origin: job 825773
+# (exp _18) hung on a post-ckpt-290 reduce-scatter at 600s. Needs the translator passthrough.
+ddp_timeout: 180000000
+
 # no DB row, no MFU noise (learning-neutral).
 supabase_register: false
 mfu: false
