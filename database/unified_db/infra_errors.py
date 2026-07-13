@@ -44,6 +44,13 @@ INFRA_ERROR_TYPES = {
     "AgentEnvironmentTimeoutError",
     "VerificationNotCompletedError",
     "TrialNotScoredError",
+    # Verification-wrapper for a sandbox/toolbox failure while uploading the
+    # tests dir on the VERIFY path (harbor verifier.py wraps the underlying
+    # Daytona 401 / httpx error as AddTestsDirError). This is the leaf that
+    # surfaces after the harbor last-error-wins fix; a Daytona-side upload
+    # failure is infra (verifier could not reach the sandbox), so it must be
+    # re-run — NOT a genuine agent/task failure.
+    "AddTestsDirError",
 }
 
 
