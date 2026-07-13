@@ -87,7 +87,7 @@ trainer:
   attn_backend: sdpa
   flash_attn: false
   gradient_checkpointing: true
-  gradient_checkpointing_use_reentrant: false
+  gradient_checkpointing_use_reentrant: true
   algorithm:
     advantage_estimator: rloo_n
     use_kl_loss: false
@@ -97,9 +97,10 @@ trainer:
     loss_reduction: sequence_mean
     use_tis: true
     tis_imp_ratio_cap: 2.0
+    tito_full: true
 
   epochs: 2
-  max_steps: 80
+  max_steps: 20
   update_epochs_per_batch: 1
 
   train_batch_size: 64
@@ -139,6 +140,7 @@ trainer:
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
       max_grad_norm: 0.9
+      foreach: false
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
@@ -149,6 +151,7 @@ trainer:
       cp_rotate_method: allgather
       moe_router_replay: true
       moe_grouped_gemm: true
+      use_grouped_mm: true
       ep_comm_backend: torch
   ref:
     model:
@@ -163,6 +166,7 @@ trainer:
       cp_rotate_method: allgather
       moe_router_replay: true
       moe_grouped_gemm: true
+      use_grouped_mm: true
       ep_comm_backend: torch
 
   placement:
@@ -242,6 +246,9 @@ rollout:
 extra_env:
   SKYRL_GDN_MASK_FLA: "1"
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  SKYRL_TIS_SERVED_ID_SPLICE: "1"
+  SKYRL_POLICY_HOST_RAM_MONITOR: "1"
+  SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL: "60"
   VLLM_ATTENTION_BACKEND: FLASH_ATTN
   LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib
   NCCL_DEBUG: WARN

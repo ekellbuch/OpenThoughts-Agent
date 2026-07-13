@@ -150,35 +150,64 @@ def _run_iris(args: list[str], cluster: str, timeout: int = 180) -> subprocess.C
 
 
 def get_job_summary(job_id: str, cluster: str) -> JobStateSnapshot | None:
-    """Authoritative primary: ``iris job summary <job_id> --json``.
+    """Authoritative primary: ``iris job summary <job_id>`` (text).
+
+    NOTE: the ``--json`` option was removed from ``iris job summary`` upstream
+    (marin ``main``), so we parse the text summary instead. The text header is
+    rich enough for our fields, e.g.::
+
+        State: running  exit=0  failures=0  preemptions=0
+        Tasks: 0/16 completed  running=16
 
     Returns a snapshot, or None on a (retryable) failure. A job the controller
     has never heard of yields an error we surface as None so the caller can fall
     back to the SQL/pod path and decide "absent".
     """
+    import re
+
     last_err = ""
     for attempt in range(IRIS_ATTEMPTS):
         try:
-            proc = _run_iris(["job", "summary", job_id, "--json"], cluster)
+            proc = _run_iris(["job", "summary", job_id], cluster)
         except subprocess.TimeoutExpired:
             last_err = "timeout"
             if attempt < len(IRIS_BACKOFFS):
                 time.sleep(IRIS_BACKOFFS[attempt])
             continue
-        if proc.returncode == 0 and proc.stdout.strip().startswith("{"):
-            data = json.loads(proc.stdout)
-            state = (data.get("state") or "unspecified").lower()
+        out = proc.stdout or ""
+        m_state = re.search(r"State:\s*(\S+)", out)
+        if proc.returncode == 0 and m_state:
+            state = m_state.group(1).lower()
+
+            def _int(pat: str) -> int | None:
+                m = re.search(pat, out)
+                if not m or m.group(1) == "-":
+                    return None
+                try:
+                    return int(m.group(1))
+                except ValueError:
+                    return None
+
+            # "Tasks: <done>/<total> completed  <k=v> <k=v> ..." (trailing k=v are per-state counts)
+            task_count = completed_count = None
+            task_state_counts: dict[str, int] = {}
+            m_tasks = re.search(r"Tasks:\s*(\d+)\s*/\s*(\d+)\s*completed(.*)", out)
+            if m_tasks:
+                completed_count = int(m_tasks.group(1))
+                task_count = int(m_tasks.group(2))
+                for k, v in re.findall(r"(\w+)=(\d+)", m_tasks.group(3)):
+                    task_state_counts[k] = int(v)
             return JobStateSnapshot(
                 job_id=job_id,
                 state=state,
                 state_int=NAME_TO_INT.get(state),
-                error=data.get("error", "") or "",
-                exit_code=data.get("exit_code"),
-                failure_count=data.get("failure_count"),
-                preemption_count=data.get("preemption_count"),
-                task_count=data.get("task_count"),
-                completed_count=data.get("completed_count"),
-                task_state_counts=data.get("task_state_counts", {}) or {},
+                error="",
+                exit_code=_int(r"exit=(-?\d+|-)"),
+                failure_count=_int(r"failures=(\d+)"),
+                preemption_count=_int(r"preemptions=(\d+)"),
+                task_count=task_count,
+                completed_count=completed_count,
+                task_state_counts=task_state_counts,
                 source="summary",
             )
         last_err = (proc.stderr or proc.stdout)[-400:]
