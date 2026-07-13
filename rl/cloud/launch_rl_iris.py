@@ -201,8 +201,18 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # NO nvcc). Pull-verified: 48 layers, max 3.46 GB, 22.66 GB total. Build asserts green (flash_attn_2_cuda /
     # skyrl_train / vllm / torchtitan.ExpertParallel; baked MarinSkyRL HEAD == 272bf011; harbor 0.8.0). Expected
     # next-launch signal (NCCL_DEBUG=INFO): `NET/IB : Using [0]mlx5_0:1/IB` + `GPU Direct RDMA Enabled`.
-    "@sha256:17a46200af64fbcb05540ebedb70df9c1f32282130bffe20acc7b985cf72245e"  # noqa: E501  (gpu-rl-7d15b25a, PULLABLE; IB userspace enabled + SKYRL 272bf011)
-    # (prev: gpu-rl-cf1ecea6 @sha256:74d6d3e2 SKYRL 822221a0 engine-readiness gate; gpu-rl-1a32669c @sha256:9a96ad1f SKYRL 613e225d loop-abort+non-fatal drain; gpu-rl-f9806065 @sha256:37cdc3e6 UN-PULLABLE)
+    # gpu-rl-19bd8c5e (built 2026-07-13, kaniko gpurl-kaniko-19bd8c5e, SINGLE_SNAPSHOT=0 pullable): SKYRL_COMMIT
+    # bump 272bf011->de40d31c (penfever/working HEAD, linear descendant — safe superset). Substantive change: a
+    # LOG-CAPTURE-SAFE tqdm fallback (skyrl_train/utils/progress.py). On a non-TTY stderr (CoreWeave/Iris captured
+    # container logs, SLURM) every SkyRL progress bar (Generation Buffer / Training Step / Generating Trajectories /
+    # Evaluation) now emits THROTTLED newline-terminated loguru lines instead of invisible \r-in-place frames, so
+    # progress finally shows up in the captured job logs; delegates to real tqdm on a TTY (auto-gated by
+    # sys.stderr.isatty(), no launcher env wiring needed). wheels + harbor + rl_env_constraints UNCHANGED (fast
+    # prebuilt-wheelhouse, NO nvcc). Pull-verified: 48 layers, max 3.46 GB. Build asserts green (flash_attn_2_cuda /
+    # skyrl_train / vllm / torchtitan.ExpertParallel). NOTE: floating :gpu-rl tag was deliberately NOT moved
+    # (PUSH_FLOATING=0) — promote it after a live smoke: `crane tag ...@sha256:98adaa38... gpu-rl`.
+    "@sha256:98adaa38c6e8f57e52430d3b63829d918a7cfa7db26cf5382becb8ba022ddf19"  # noqa: E501  (gpu-rl-19bd8c5e, PULLABLE; log-capture-safe tqdm + SKYRL de40d31c)
+    # (prev: gpu-rl-7d15b25a @sha256:17a46200 IB userspace + SKYRL 272bf011; gpu-rl-cf1ecea6 @sha256:74d6d3e2 SKYRL 822221a0 engine-readiness gate; gpu-rl-1a32669c @sha256:9a96ad1f SKYRL 613e225d)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
