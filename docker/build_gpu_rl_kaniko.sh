@@ -39,6 +39,13 @@ CACHE_REPO=ghcr.io/open-thoughts/openthoughts-agent/cache
 DEST_FLOATING=ghcr.io/open-thoughts/openthoughts-agent:gpu-rl
 DEST_PINNED=ghcr.io/open-thoughts/openthoughts-agent:gpu-rl-${GITSHA}
 
+# PUSH_FLOATING=1 (default) also moves the floating :gpu-rl tag to this build.
+# Set PUSH_FLOATING=0 to push ONLY the immutable :gpu-rl-<gitsha> tag and LEAVE
+# :gpu-rl pointing where it was — use this for a build that must be smoke-tested
+# BEFORE it becomes the floating default (consumers pin the digest, not :gpu-rl).
+FLOATING_DEST_FLAG="--destination ${DEST_FLOATING}"
+if [ "${PUSH_FLOATING:-1}" != "1" ]; then FLOATING_DEST_FLAG=""; fi
+
 # --- 1. fetch crane (static binary) ---
 apt-get update -y && apt-get install -y --no-install-recommends ca-certificates curl tar
 cd /tmp
@@ -98,5 +105,5 @@ exec /kaniko/executor \
   --compressed-caching=false \
   --cache=true \
   --cache-repo="${CACHE_REPO}" \
-  --destination "${DEST_FLOATING}" \
+  $FLOATING_DEST_FLAG \
   --destination "${DEST_PINNED}"
