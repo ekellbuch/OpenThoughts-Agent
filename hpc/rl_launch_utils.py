@@ -20,6 +20,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
@@ -408,20 +409,43 @@ def resolve_rl_train_data(
             if verbose:
                 print(f"[rl_launch_utils] Running: {' '.join(cmd)}")
 
-            try:
-                result = subprocess.run(
-                    cmd,
-                    check=True,
-                    capture_output=True,
-                    text=True,
+            # A stalled HF download INSIDE extract_tasks_from_parquet (mid-download socket
+            # hang — seen 2026-07-13 on rno2a v0: ranks 3,6 had a byte-frozen `.incomplete`
+            # parquet) used to block subprocess.run FOREVER, so the node never `ray start`ed and
+            # the head hit its "Only N/8 Ray nodes joined within 1800s" gang-timeout → TERMINAL
+            # (--max-retries does NOT rescue gang-formation). This mirrors the stage_model fix
+            # (start_rl_iris_controller.py, 2026-07-13): a per-attempt timeout converts a stall
+            # into a retry; HF resumes the partial `.incomplete` shard on the next attempt, so a
+            # killed-mid-download attempt loses nothing. 600s covers a clean extract yet fits
+            # several retries inside the 1800s gang-join budget.
+            EXTRACT_ATTEMPT_TIMEOUT_S = 600
+            last_err = ""
+            for attempt in range(1, 7):
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=EXTRACT_ATTEMPT_TIMEOUT_S,
+                    )
+                    if verbose and result.stdout:
+                        print(result.stdout)
+                    break
+                except subprocess.TimeoutExpired:
+                    last_err = (f"extract_tasks_from_parquet stalled > {EXTRACT_ATTEMPT_TIMEOUT_S}s "
+                                "(mid-download socket hang); killed, retrying (HF resumes the partial shard)")
+                    print(f"[rl_launch_utils] extract attempt {attempt}/6 TIMED OUT for {data_path}: {last_err}")
+                    time.sleep(min(30, 2 ** attempt))
+                except subprocess.CalledProcessError as e:
+                    last_err = f"stdout: {e.stdout}\n  stderr: {e.stderr}"
+                    print(f"[rl_launch_utils] extract attempt {attempt}/6 failed for {data_path}:")
+                    print(f"  {last_err}")
+                    time.sleep(min(30, 2 ** attempt))
+            else:
+                raise RuntimeError(
+                    f"Failed to extract HF dataset after 6 attempts: {data_path}: {last_err}"
                 )
-                if verbose and result.stdout:
-                    print(result.stdout)
-            except subprocess.CalledProcessError as e:
-                print(f"[rl_launch_utils] ERROR extracting {data_path}:")
-                print(f"  stdout: {e.stdout}")
-                print(f"  stderr: {e.stderr}")
-                raise RuntimeError(f"Failed to extract HF dataset: {data_path}") from e
 
             # Fix permissions on extracted tasks (chmod -R a+rX)
             _fix_task_permissions(output_dir, verbose=verbose)
