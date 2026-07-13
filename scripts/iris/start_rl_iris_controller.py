@@ -208,11 +208,29 @@ def stage_model(model_path: str) -> None:
     )
     _log(f"Pre-staging model on this node (rank {_rank()}/{_num_tasks()}): {model_path}")
     last_err = ""
+    # A stalled snapshot_download (mid-download socket hang — seen 2026-07-13 on r4a/r4b:
+    # one shard's `.incomplete` byte-frozen) used to block subprocess.run FOREVER, so this
+    # retry loop never advanced, the node never `ray start`ed, and the head hit its
+    # "Only N/16 Ray nodes joined within 1800s" gang-timeout → TERMINAL (--max-retries does
+    # NOT rescue gang-formation). A per-attempt timeout converts a stall into a retry; HF
+    # resumes the partial `.incomplete` shard on the next attempt, so a killed-mid-download
+    # attempt loses nothing (a false-positive timeout on a slow-but-progressing pull just
+    # resumes too). 600s comfortably covers a clean ~160 GB pull yet fits several retries
+    # inside the 1800s gang-join budget.
+    PRESTAGE_ATTEMPT_TIMEOUT_S = 600
     for attempt in range(1, 7):
-        proc = subprocess.run(
-            [sys.executable, "-c", code, model_path, ",".join(allow_patterns)],
-            env=child_env, capture_output=True, text=True,
-        )
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", code, model_path, ",".join(allow_patterns)],
+                env=child_env, capture_output=True, text=True,
+                timeout=PRESTAGE_ATTEMPT_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            last_err = (f"snapshot_download stalled > {PRESTAGE_ATTEMPT_TIMEOUT_S}s "
+                        "(mid-download socket hang); killed, retrying (HF resumes the partial shard)")
+            _log(f"model prestage attempt {attempt}/6 TIMED OUT: {last_err}")
+            time.sleep(min(30, 2 ** attempt))
+            continue
         if proc.returncode == 0:
             local_dir = ""
             for line in proc.stdout.splitlines():
