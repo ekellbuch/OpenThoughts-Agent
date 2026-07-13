@@ -13,11 +13,16 @@
 base_model: Qwen/Qwen3-32B
 trust_remote_code: true
 
-# ZeRO-3. Offload currently OFF pending the cpu_adam toolchain fix (axolotl.md gotcha #2 —
-# offload IS achievable on this aarch64 GH200; LF does it on Jupiter).
+# ZeRO-3 WITH CPU-Adam optimizer offload — the durable step-0-OOM headroom fix. The fp32
+# optimizer state (fp32 master + momentum + variance ≈ 12 B/param for AdamW = ~384 GB for 32B,
+# sharded ~24 GB/GPU across 16 nodes) moves off HBM to CPU RAM (Vista GH200 = 188 GB/node), and
+# DeepSpeed builds the FUSED DeepSpeedCPUAdam (not a GPU FusedAdam) — see the offload deepspeed
+# json below. The old "offload pending cpu_adam toolchain fix" blocker is RESOLVED: the vista
+# hpc.py block exports CC/CXX=gcc/g++ (commit e4543faf) so DeepSpeedCPUAdam builds on aarch64
+# (axolotl.md gotcha #2; .claude/ops/tacc/ops.md aarch64 §). LF offloads on Jupiter the same way.
 # `deepspeed:` is only the ON/OFF toggle — its PATH value is IGNORED by the translator
 # (hpc/axolotl_config_utils.py: ax["deepspeed"] = deepspeed_config or hardcoded default).
-# The honored path key is `deepspeed_config:` below → shard-save variant (16-bit gather OFF).
+# The honored path key is `deepspeed_config:` below → offload + shard-save variant (16-bit gather OFF).
 deepspeed: true
 # SAVE SHARDED — gather_16bit_weights_on_model_save: false. The consolidated-16bit GATHER on
 # checkpoint save (save_steps=10) deadlocks the 16-node Vista GH200 IB fabric: the 16-way
@@ -26,7 +31,12 @@ deepspeed: true
 # save_model uses the identical gather → would hang the same way). Sharded save skips the gather
 # → RESUMABLE per-rank shards + zero_to_fp32.py; consolidate at cleanup before HF upload.
 # agent_logs/2026-07-12_tacc_axolotl32b_nccl_save_gather_hang.md.
-deepspeed_config: sft/axolotl_configs/deepspeed/zero3_bf16_shardsave.json
+# Offload + shard-save: offload_optimizer{device:cpu,pin_memory:true} moves fp32 optimizer state
+# off HBM AND an explicit optimizer{type:AdamW} block so DeepSpeed constructs DeepSpeedCPUAdam
+# (the fast fused CPU kernel) rather than accepting a client GPU FusedAdam. Keeps
+# gather_16bit_weights_on_model_save:false (the 16-node IB save-gather deadlock fix — do NOT use
+# the generic zero3_bf16_cpuoffload_*.json, which set gather:true and would re-hang the save).
+deepspeed_config: sft/axolotl_configs/deepspeed/zero3_bf16_offload_shardsave.json
 
 # NOTE: the launcher REBUILDS this datasets block from --dataset + --role_tag/--content_tag
 # at launch (hpc/axolotl_config_utils.py::_build_datasets); this in-config block is honored
@@ -62,8 +72,9 @@ sample_packing: false
 # materializes (the exact allocation that OOM'd in the ZeRO-3 backward). The
 # translator (hpc/axolotl_config_utils.py) turns this into the LigerPlugin +
 # liger_rope/liger_rms_norm/liger_glu_activation/liger_fused_linear_cross_entropy.
-# CPU offload stays OFF for this relaunch — liger alone should fit per the OOM
-# diagnosis (axolotl.md §Qwen3-32B); offload is the next lever if needed.
+# CPU-Adam optimizer offload is now ON (deepspeed_config above) — the durable headroom fix
+# for the intermittent step-0 CUDA OOM (~7 GiB headroom): liger kills the ~18 GB logit tensor,
+# offload moves the fp32 optimizer state off HBM. Both levers active.
 enable_liger_kernel: true
 
 sequence_len: 32768
