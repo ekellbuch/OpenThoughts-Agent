@@ -134,8 +134,19 @@ def test_capability_token_cache_rejects_empty_token():
 def test_inject_ingress_agent_key_sets_dummy():
     env: dict = {}
     assert inject_ingress_agent_key(env) is True
+    # Bespoke placeholder always set; legacy vars filled when absent.
+    assert env["OPENCODE_DUMMY_KEY"] == DUMMY_API_KEY
     assert env["OPENAI_API_KEY"] == DUMMY_API_KEY
     assert env["LLM_API_KEY"] == DUMMY_API_KEY
+
+
+def test_inject_ingress_agent_key_preserves_real_openai_key():
+    # A real host OPENAI_API_KEY (needed by the LLM-judge verifiers) must NOT be
+    # clobbered by the agent placeholder.
+    env: dict = {"OPENAI_API_KEY": "sk-real-judge-key"}
+    assert inject_ingress_agent_key(env) is True
+    assert env["OPENAI_API_KEY"] == "sk-real-judge-key"
+    assert env["OPENCODE_DUMMY_KEY"] == DUMMY_API_KEY
 
 
 def test_build_endpoint_meta_api_key_dormant_by_default():

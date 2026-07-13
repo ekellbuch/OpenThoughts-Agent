@@ -53,8 +53,16 @@ from typing import Callable, Dict, Optional, Protocol, Tuple
 # NOT a secret and never authenticates anything.
 DUMMY_API_KEY = "capability-url-no-auth-header"
 
-# Env vars the installed OpenAI-compatible agents read beside their base URL:
-# OPENAI_API_KEY (qwen/codex/hermes/trae/opencode) and LLM_API_KEY (openhands).
+# Bespoke placeholder var the agent's SANDBOX key is sourced from. Kept SEPARATE
+# from OPENAI_API_KEY so the launcher never clobbers the real host OPENAI_API_KEY:
+# the nemotron-gym LLM-judge verifiers render `[verifier.env] OPENAI_API_KEY` from
+# the WORKER env, so a placeholder there → every judge 401s → uniform reward 0.0
+# (2026-07-13, identity-following #29). harbor's opencode agent sources its sandbox
+# key from OPENCODE_DUMMY_KEY (see harbor agents/installed/opencode.py).
+AGENT_DUMMY_KEY_VAR = "OPENCODE_DUMMY_KEY"
+# Legacy vars other OpenAI-compatible agents read directly (qwen/codex/hermes/trae →
+# OPENAI_API_KEY, openhands → LLM_API_KEY). Filled ONLY when absent (setdefault) so a
+# real host OPENAI_API_KEY survives for the judge while keyless workers still start.
 _AGENT_KEY_ENV_VARS = ("OPENAI_API_KEY", "LLM_API_KEY")
 
 # Env var iris sets in-cluster to the externally-visible host a task should
@@ -112,15 +120,23 @@ def build_capability_api_base(ingress_host: str, endpoint_name: str, token: str)
 
 
 def inject_ingress_agent_key(env: Optional[dict] = None) -> bool:
-    """Set the inert :data:`DUMMY_API_KEY` into the agent-facing key env vars.
+    """Publish the inert :data:`DUMMY_API_KEY` for the agents WITHOUT clobbering a
+    real ``OPENAI_API_KEY``.
 
-    The capability token is in the URL path, so no real bearer is injected; this
-    only satisfies agents that refuse to start without a non-empty key. Always
-    returns True (there is no secret to be missing).
+    The capability token is in the URL path, so no real bearer is needed; agents
+    just refuse to start without a non-empty key. Sets the bespoke
+    :data:`AGENT_DUMMY_KEY_VAR` (``OPENCODE_DUMMY_KEY``) unconditionally, and only
+    *fills in* an absent ``OPENAI_API_KEY``/``LLM_API_KEY`` (``setdefault``) — so a
+    real host ``OPENAI_API_KEY`` needed by the LLM-judge verifiers is preserved.
+    Always returns True (there is no secret to be missing).
     """
     env = os.environ if env is None else env
+    # Always publish the bespoke placeholder (harbor's opencode sources it).
+    env[AGENT_DUMMY_KEY_VAR] = DUMMY_API_KEY
+    # For the legacy agent-facing key vars, only fill an ABSENT value — never
+    # overwrite a real host OPENAI_API_KEY (the LLM-judge verifiers need it).
     for var in _AGENT_KEY_ENV_VARS:
-        env[var] = DUMMY_API_KEY
+        env.setdefault(var, DUMMY_API_KEY)
     return True
 
 
