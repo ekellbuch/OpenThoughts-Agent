@@ -49,8 +49,8 @@ def test_output_bucket_for_region_known(region: str, expected: str) -> None:
     "region",
     [
         "asia-northeast1",  # unmapped continent
-        "europe-west1",     # EU region other than europe-west4 (not mapped)
-        "us-west1",         # US region we have no single-region bucket for
+        "europe-west1",  # EU region other than europe-west4 (not mapped)
+        "us-west1",  # US region we have no single-region bucket for
         "",
     ],
 )
@@ -135,8 +135,7 @@ def test_weight_guard_rejects_wrong_continent_multi_region(tmp_path: Path) -> No
     # single-region output map.)
     yaml_path = tmp_path / "cfg.yaml"
     yaml_path.write_text(
-        "vllm_server:\n"
-        "  model_path: gs://marin-models-eu/ot-agent/models/foo\n",
+        "vllm_server:\n  model_path: gs://marin-models-eu/ot-agent/models/foo\n",
         encoding="utf-8",
     )
     with pytest.raises(SystemExit, match="marin-models-us"):
@@ -146,8 +145,7 @@ def test_weight_guard_rejects_wrong_continent_multi_region(tmp_path: Path) -> No
 def test_weight_guard_accepts_matching_multi_region(tmp_path: Path) -> None:
     yaml_path = tmp_path / "cfg.yaml"
     yaml_path.write_text(
-        "vllm_server:\n"
-        "  model_path: gs://marin-models-us/ot-agent/models/foo\n",
+        "vllm_server:\n  model_path: gs://marin-models-us/ot-agent/models/foo\n",
         encoding="utf-8",
     )
     # No exception: weights on the correct continent's multi-region mirror.

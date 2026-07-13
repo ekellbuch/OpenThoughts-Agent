@@ -136,7 +136,9 @@ def test_iris_fallback_no_output_arg_fails_fast(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _stub_registry(monkeypatch, None)
-    entrypoint = '{"run_command": {"argv": ["bash", "-c", "exec python x.py --model foo"]}}'
+    entrypoint = (
+        '{"run_command": {"argv": ["bash", "-c", "exec python x.py --model foo"]}}'
+    )
     monkeypatch.setattr(
         resolver, "_iris_query", lambda cfg, sql: [{"entrypoint_json": entrypoint}]
     )
