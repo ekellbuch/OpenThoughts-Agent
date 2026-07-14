@@ -1366,10 +1366,28 @@ vista = HPC(
         # The 16->8 node shrink is the ESCALATION if this recurs (halving nodes doubles the
         # per-GPU ZeRO-3 shard on the 32B model -> OOM risk), NOT applied this round.
         # agent_logs/2026-07-14_tacc_axolotl32b_reduce_scatter_fixA.md
+        #
+        # --- Fix B (2026-07-14, operator-chosen "KEEP 16 NODES + other levers"): Fix A DIED
+        # the same way (exp _24: 831541 @ step 182, 831542 @ step ~155, IDENTICAL ZeRO-3
+        # backward `reduce_scatter_coalesced` SIGABRT on DISJOINT node sets) -> the hang is a
+        # fabric-wide intermittent collective straggler, not fixed by the IB-robustness env
+        # alone and not node/rack-specific. Operator kept 16 nodes and picked NCCL collective
+        # tuning as the secondary lever (PRIMARY = ZeRO-3 CPU offload_param, in
+        # zero3_bf16_offload_shardsave.json). Two changes here:
+        #   (1) RAISE NCCL_BUFFSIZE 4MB(default)->32MB: bigger per-channel buffers = FEWER
+        #       collective chunks per reduce_scatter = less per-collective straggler exposure.
+        #   (2) DROP NCCL_ALGO=Ring: Fix A forced Ring, but Ring is already NCCL's default for
+        #       reduce_scatter (so forcing it was ~no-op) AND Ring is the most straggler-
+        #       sensitive algo (every rank gates the ring). Let NCCL auto-select so it can
+        #       fall back off the ring topology if a rank wedges.
+        # IB robustness (timeout/retry/QPs) + the flight recorder are KEPT armed. If this STILL
+        # dies at ~step 155-190, the flight recorder can't dump on this SIGABRT abort path, so
+        # the next step is a SIGABRT-surviving per-rank arrival-timestamp capture (deeper
+        # forensics) — flagged for the supervisor, not attempted here.
         "NCCL_IB_TIMEOUT": "22",
         "NCCL_IB_RETRY_CNT": "13",
         "NCCL_IB_QPS_PER_CONNECTION": "4",
-        "NCCL_ALGO": "Ring",
+        "NCCL_BUFFSIZE": "33554432",
         "TORCH_NCCL_TRACE_BUFFER_SIZE": "20000",
         "TORCH_NCCL_DUMP_ON_TIMEOUT": "1",
         # $SCRATCH (=/scratch/10635/penfever) expands at sbatch runtime — nccl_exports uses

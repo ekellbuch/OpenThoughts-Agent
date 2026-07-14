@@ -36,6 +36,14 @@ deepspeed: true
 # (the fast fused CPU kernel) rather than accepting a client GPU FusedAdam. Keeps
 # gather_16bit_weights_on_model_save:false (the 16-node IB save-gather deadlock fix — do NOT use
 # the generic zero3_bf16_cpuoffload_*.json, which set gather:true and would re-hang the save).
+# Fix B (2026-07-14, operator-chosen "KEEP 16 NODES"): ADDED offload_param{device:cpu,pin_memory:
+# true} = FULL ds_z3_offload. Fix A had offload_optimizer only and STILL died the same way (exp _24
+# 831541 step 182 / 831542 step ~155, identical ZeRO-3 backward reduce_scatter_coalesced SIGABRT on
+# disjoint nodes = a fabric-wide intermittent collective straggler). Offloading the SHARDED params
+# to CPU too frees more HBM AND reshapes the ZeRO-3 backward collective schedule/timing (params are
+# now allgathered from CPU on demand) — the primary lever against a memory-pressure-induced straggle
+# in the backward. Accept the CPU<->GPU transfer throughput cost. Paired NCCL tuning (NCCL_BUFFSIZE
+# up, NCCL_ALGO=Ring dropped) is in the vista block of hpc/hpc.py.
 deepspeed_config: sft/axolotl_configs/deepspeed/zero3_bf16_offload_shardsave.json
 
 # NOTE: the launcher REBUILDS this datasets block from --dataset + --role_tag/--content_tag
