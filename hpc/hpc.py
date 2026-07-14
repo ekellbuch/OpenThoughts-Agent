@@ -1323,7 +1323,10 @@ vista = HPC(
         "HF_HOME": "/tmp/hf_home",
         "PYTHONFAULTHANDLER": "1",
         "NCCL_TIMEOUT": "1800",
-        "NCCL_IB_TIMEOUT": "23",
+        # Fix A (2026-07-14): 23 is above NCCL's documented max exponent (22) and gets
+        # clamped; pin 22 explicitly. Kept in sync with nccl_settings below (env_exports
+        # renders AFTER nccl_exports in universal_sft.sbatch, so this dict wins collisions).
+        "NCCL_IB_TIMEOUT": "22",
         "PYTORCH_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
     },
     library_paths={
@@ -1341,7 +1344,8 @@ vista = HPC(
     # NCCL/networking settings for SFT training (EFA networking)
     nccl_settings={
         "NCCL_PROTO": "simple",
-        "NCCL_DEBUG": "INFO",
+        # Fix A (2026-07-14): WARN, not INFO — INFO is too verbose/slow at 16-node scale.
+        "NCCL_DEBUG": "WARN",
         "FI_EFA_FORK_SAFE": "1",
         "FI_LOG_LEVEL": "1",
         "FI_EFA_ENABLE_SHM_TRANSFER": "0",
@@ -1349,7 +1353,29 @@ vista = HPC(
         "FI_EFA_TX_MIN_CREDITS": "64",
         "NCCL_TREE_THRESHOLD": "0",
         "NCCL_TIMEOUT": "1800",
-        "NCCL_IB_TIMEOUT": "23",
+        # --- Fix A (2026-07-14): NCCL/IB robustness + NCCL flight recorder for the axolotl
+        # Qwen3-32B SFT ZeRO-3 backward `reduce_scatter` NCCL hang. The c639-rack exclusion
+        # (commit 7f479d03) was FALSIFIED: leg 830658 hit the ZeRO-3 backward
+        # `__reduce_and_partition_ipg_grads` -> `reduce_scatter_coalesced` 600s NCCL
+        # `_REDUCE_SCATTER_BASE` timeout at step ~160 on FRESH NON-c639 nodes (all 16 ranks
+        # timed out on the same SeqNum=23976 -> one rank didn't arrive = intermittent IB
+        # straggler / pre-collective rank wedge). Raise IB timeout to the documented max
+        # exponent (22) + more retries, widen QPs per connection, and force the Ring
+        # collective path (the logs showed "Connected all trees"). Arm the PyTorch NCCL
+        # flight recorder so a recurrence dumps definitive per-rank collective forensics.
+        # The 16->8 node shrink is the ESCALATION if this recurs (halving nodes doubles the
+        # per-GPU ZeRO-3 shard on the 32B model -> OOM risk), NOT applied this round.
+        # agent_logs/2026-07-14_tacc_axolotl32b_reduce_scatter_fixA.md
+        "NCCL_IB_TIMEOUT": "22",
+        "NCCL_IB_RETRY_CNT": "13",
+        "NCCL_IB_QPS_PER_CONNECTION": "4",
+        "NCCL_ALGO": "Ring",
+        "TORCH_NCCL_TRACE_BUFFER_SIZE": "20000",
+        "TORCH_NCCL_DUMP_ON_TIMEOUT": "1",
+        # $SCRATCH (=/scratch/10635/penfever) expands at sbatch runtime — nccl_exports uses
+        # plain double-quoted `export K="V"` (NOT shlex.quote), and this renders after the
+        # tacc.env source. PyTorch appends the rank, writing $SCRATCH/nccl_trace_<rank>.
+        "TORCH_NCCL_DEBUG_INFO_TEMP_FILE": "$SCRATCH/nccl_trace_",
     },
     training_launcher="torchrun",
     # Job scaling (from tacc.env)
