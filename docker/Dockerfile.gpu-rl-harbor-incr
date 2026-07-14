@@ -2,43 +2,56 @@
 # =============================================================================
 # INCREMENTAL gpu-rl rebuild — last-known-good image + ONLY the harbor delta.
 # =============================================================================
-# WHY THIS EXISTS (2026-07-02): the full-rebuild combined image (gpu-rl-69634c0b,
-# @sha256:d9c7e604…) has a 16.6 GB `--single-snapshot` layer that CANNOT be pulled
-# over the CoreWeave→ghcr egress: containerd restarts the single-blob GET from 0
-# each attempt and the connection dies at 8–11 GB every time (never completes →
-# ImagePullBackOff forever). Diagnosed restart-from-0 across all 8 r4 pods.
+# WHY THIS EXISTS: a full-rebuild image can end up with a >8 GB layer that CANNOT
+# be pulled over the CoreWeave→ghcr egress (containerd restarts the single-blob
+# GET from 0 and dies mid-download → ImagePullBackOff forever). This path builds
+# FROM the last-known-good image (which is ALREADY CACHED on the CoreWeave nodes)
+# and adds ONE small RUN layer that swaps harbor to a new commit. Harbor is the
+# SOLE delta; every other baked artifact (MarinSkyRL, vLLM-fork compiled, flash-attn
+# 2.8.3, torch 2.11.0+cu128, the rl env pinned via rl_env_constraints.txt) is
+# inherited unchanged from the base, so the only layer that must pull FRESH on a
+# node is the ~MB harbor diff → the pull completes near-instantly and the large
+# base is served from the node's cache.
 #
-# FIX = build FROM the last-known-good image (gpu-rl-1af0ae2d, @sha256:d77b34dd…)
-# which is ALREADY CACHED on the CoreWeave nodes, and add ONE small RUN layer that
-# swaps harbor to the combined-fix commit. Harbor is the SOLE delta between
-# 1af0ae2d and the full combined image — both bake MarinSkyRL 39faff7d + vLLM-fork
-# 76259c63 (compiled) + flash-attn 2.8.3 + torch 2.11.0+cu128 + the rl env pinned
-# via rl_env_constraints.txt; only HARBOR_COMMIT differs (f7f51f13 → 0729a3e9). So
-# the ONLY layer that must pull FRESH on a node is the ~MB harbor diff → the pull
-# completes near-instantly and the 16.6 GB base is served from the node's cache.
+# 2026-07-13 BUILD: base = gpu-rl-19bd8c5e (@sha256:98adaa38…) — the current
+# launcher DEFAULT_RL_DOCKER_IMAGE (SINGLE_SNAPSHOT=0, PULLABLE; log-capture-safe
+# tqdm + SKYRL de40d31c + IB verbs userspace + vLLM-fork 76259c63). Swaps harbor
+# to 116666d6, which adds AgentConfig.upload_agent_logs (+ the Trial._upload_agent_logs
+# early-return gate) to kill the per-step agent-log push-back retry churn on
+# high-latency object-store environments. 116666d6 is a descendant of the prior
+# baked harbor (4ac18dc4 → … → d58043c3), so it ALSO carries the earlier Daytona
+# throughput fixes (poll(0.001), tmux-bake, cheap reaper, connection-pool cap,
+# auto_stop) — the in-image regression checks below still pass.
 # =============================================================================
-FROM ghcr.io/open-thoughts/openthoughts-agent@sha256:d77b34dd9497cc736d59f7a113c2c57c5375b4553f3e16980479a89b30c2ca9b
+FROM ghcr.io/open-thoughts/openthoughts-agent@sha256:98adaa38c6e8f57e52430d3b63829d918a7cfa7db26cf5382becb8ba022ddf19
 
 ENV RL_ENV_DIR=/opt/openthoughts/envs/rl
 
-# 0729a3e9 carries BOTH Daytona throughput fixes (it sits on top of ef42e75e):
-#   (1) ef42e75e "replace 1s exec poll with 1ms+jitter" — asyncio.sleep(0.001 + …)
-#       in _poll_response (per-exec runtime+RTT vs ceil(runtime)+1s).
-#   (2) 0729a3e9 "bake tmux+asciinema into every snapshot at BUILD time" —
-#       snapshots.py bake_agent_tooling()/_AGENT_TOOLING_LAYER → terminus-2
-#       per-episode tmux install short-circuits → kills the ~401s agent_setup /
-#       63% AgentSetupTimeout (takes effect only on a FRESH snapshot mint).
+# 116666d6 "feat(trial): add agent.upload_agent_logs flag to disable the per-step
+# log push-back" — new typed AgentConfig field `upload_agent_logs: bool = True`
+# (default preserves current behavior) + a Trial._upload_agent_logs early-return
+# gate covering both the single-step and multi-step call sites. Eliminates the
+# agentic-RL retry churn from the best-effort host→sandbox agent-log upload that
+# nothing downstream consumes. As a descendant of the prior baked harbor it also
+# carries: (a) sleep(0.001) 1ms exec poll (environment.py), and (b) tmux+asciinema
+# baked into every snapshot at BUILD time (snapshots.py bake_agent_tooling /
+# _AGENT_TOOLING_LAYER) — both asserted below so a regression fails the build.
 # --no-deps = source-only swap (does not touch the carefully-pinned rl env). The
 # base image already cleared UV_CONSTRAINT (ENV UV_CONSTRAINT="") so no constraint
 # applies here — and harbor is absent from the constraints file regardless.
-ENV HARBOR_COMMIT=0729a3e93c3679283ea560d70d03b3e4af05700c
+ENV HARBOR_COMMIT=116666d63a04f4a58a35fefd62a73d97f3e9e75b
 RUN . $RL_ENV_DIR/bin/activate && \
     uv pip install --no-deps --force-reinstall \
         "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
     python -c "import harbor, importlib.metadata as m; print('baked harbor', m.version('harbor'))" && \
+    python -c "from harbor.models.trial.config import AgentConfig; \
+assert 'upload_agent_logs' in AgentConfig.model_fields, 'UPLOAD_AGENT_LOGS FIELD MISSING (not in AgentConfig.model_fields)'; \
+import inspect, harbor.trial.trial as t; src=inspect.getsource(t.Trial._upload_agent_logs); \
+assert 'if not self.config.agent.upload_agent_logs' in src, 'UPLOAD_AGENT_LOGS GATE MISSING (no early-return in Trial._upload_agent_logs)'; \
+print('upload_agent_logs field + Trial._upload_agent_logs gate present')" && \
     python -c "import harbor, pathlib; p=pathlib.Path(harbor.__file__).parent/'environments'/'daytona'; \
 env=(p/'environment.py').read_text(); snap=(p/'snapshots.py').read_text(); \
 assert 'sleep(0.001' in env, 'POLL FIX MISSING (no 0.001 sleep in environment.py)'; \
 assert 'bake_agent_tooling' in snap and '_AGENT_TOOLING_LAYER' in snap, 'TMUX-BAKE MISSING (no bake_agent_tooling/_AGENT_TOOLING_LAYER in snapshots.py)'; \
-print('BOTH harbor fixes present in-image: poll(0.001)+tmux-bake')" && \
+print('poll(0.001)+tmux-bake regression checks still present in-image')" && \
     echo "baked harbor commit: ${HARBOR_COMMIT}"
