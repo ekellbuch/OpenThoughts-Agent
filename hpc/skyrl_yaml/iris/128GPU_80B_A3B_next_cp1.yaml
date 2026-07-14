@@ -251,7 +251,10 @@ extra_env:
   VLLM_ATTENTION_BACKEND: FLASH_ATTN
   LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib
   NCCL_DEBUG: WARN
-  NCCL_SOCKET_IFNAME: enp157s0np0
+  # Cluster-PORTABLE: exclude IB/IPoIB + virtual ifaces so NCCL's bootstrap socket auto-picks the Ethernet PF
+  # on ANY CW cluster (East's enp157s0np0 does NOT exist on rno2a → "Bootstrap: no socket interface found" NCCL
+  # death, 2026-07-14). Matches the cw-rno2a.yaml cluster default; survives PF-name variance across nodes.
+  NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"
   NCCL_SOCKET_FAMILY: AF_INET
   SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "3600"
   TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "3600"

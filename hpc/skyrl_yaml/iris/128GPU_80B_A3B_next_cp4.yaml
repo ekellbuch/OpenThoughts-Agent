@@ -88,7 +88,7 @@ trainer:
   flash_attn: false
   use_sample_packing: false
   gradient_checkpointing: true
-  gradient_checkpointing_use_reentrant: false
+  gradient_checkpointing_use_reentrant: true
   algorithm:
     advantage_estimator: rloo_n
     use_kl_loss: false
@@ -148,6 +148,7 @@ trainer:
       cp_rotate_method: allgather
       moe_router_replay: true
       moe_grouped_gemm: true
+      use_grouped_mm: true
       ep_comm_backend: torch
   ref:
     model:
@@ -162,6 +163,7 @@ trainer:
       cp_rotate_method: allgather
       moe_router_replay: true
       moe_grouped_gemm: true
+      use_grouped_mm: true
       ep_comm_backend: torch
 
   placement:
@@ -241,7 +243,9 @@ extra_env:
   VLLM_ATTENTION_BACKEND: FLASH_ATTN
   LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib
   NCCL_DEBUG: WARN
-  NCCL_SOCKET_IFNAME: enp157s0np0
+  # Cluster-PORTABLE exclusion list (auto-pick Ethernet PF on any CW cluster) — East's enp157s0np0 is absent on
+  # rno2a (NCCL "Bootstrap: no socket interface found", 2026-07-14). Matches the cw-rno2a.yaml default.
+  NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"
   NCCL_SOCKET_FAMILY: AF_INET
   SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "3600"
   TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "3600"
