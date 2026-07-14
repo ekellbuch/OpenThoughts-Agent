@@ -228,8 +228,16 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # KANIKO_CACHE=1 reused the base apt/uv/venv layers). Pull-verified: 48 layers, max 3.46 GB, 22.71 GB total. Build
     # asserts green (flash_attn_2_cuda / torch 2.11.0+cu128 / vllm 0.1.dev16611+g76259c63a / skyrl_train / torchtitan
     # ExpertParallel; baked harbor 0.8.1 commit 35fbdbcc; baked MarinSkyRL HEAD de40d31c). Floating :gpu-rl tag WAS moved (PUSH_FLOATING=1).
-    "@sha256:5e211fbf7ff416be17ce18c3ca9ef0dfedd658e0194eb4e2cad41a2a659afe28"  # noqa: E501  (gpu-rl-f9110c79, PULLABLE; harbor 35fbdbcc round-3 coordinator offload)
-    # (prev: gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2 + tilelang 0.1.9 base-build fix; gpu-rl-19bd8c5e @sha256:98adaa38 log-capture-safe tqdm; gpu-rl-7d15b25a @sha256:17a46200 IB userspace)
+    # gpu-rl-d0e4a9b8 (built 2026-07-14, kaniko job gpurl-kaniko-d0e4a9b8, SINGLE_SNAPSHOT=0 pullable): HARBOR_COMMIT
+    # bump 35fbdbcc -> d81b2f32 (round-4: async /tokenize probe OFF the coordinator loop; linear descendant of round-3 35fbdbcc).
+    # 4th incremental harbor bump in a row (round-1 55ae9e66 -> round-2 793ff3fb=318e18ce -> round-3 35fbdbcc=f9110c79 ->
+    # round-4 d81b2f32). SKYRL de40d31c (baked, unchanged vs f9110c79). wheels + rl_env_constraints UNCHANGED (fast
+    # prebuilt-wheelhouse, NO nvcc; KANIKO_CACHE=1 reused the base apt/uv/venv + torch/vLLM/flash-attn layers). Pull-verified:
+    # 48 layers, max 3.46 GB (top: 3.46/3.2/3.0/2.71/2.07). Build asserts green (flash_attn_2_cuda / torch 2.11.0+cu128 /
+    # vllm 0.1.dev16611+g76259c63a / skyrl_train / torchtitan ExpertParallel; baked harbor commit d81b2f32; baked MarinSkyRL
+    # HEAD de40d31c). Floating :gpu-rl tag WAS moved to this build (PUSH_FLOATING=1). Build wall-clock ~20m (15:48->16:09).
+    "@sha256:0fbf41e531f9df701a08030d922acbf6470d27070f9770aa83b70aa84d052d7d"  # noqa: E501  (gpu-rl-d0e4a9b8, PULLABLE; harbor d81b2f32 round-4 async tokenize offload)
+    # (prev: gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2 + tilelang 0.1.9 base-build fix; gpu-rl-19bd8c5e @sha256:98adaa38 log-capture-safe tqdm; gpu-rl-7d15b25a @sha256:17a46200 IB userspace)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
