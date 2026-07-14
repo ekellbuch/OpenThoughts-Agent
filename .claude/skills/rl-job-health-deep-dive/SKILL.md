@@ -35,6 +35,78 @@ right tool when a run is in a **new or untested setting** (new config / geometry
 > your evidence. **When in doubt, recommend NO-KILL + escalate** (a wrongly-killed healthy run wastes a whole
 > bring-up; a wrongly-kept dead one wastes one more sweep — asymmetric).
 
+## 0. THE CONTRACT — evidence-or-ERROR, exact tools, exact keys (READ FIRST)
+
+A KILL/NO-KILL verdict is only as good as the evidence under it. **A verdict you cannot back with named,
+quoted evidence is worse than useless — it looks authoritative and gets a job killed (or kept) on a guess.**
+So this skill has a THIRD verdict:
+
+> ### VERDICT: **ERROR** — return this whenever you could not obtain the evidence.
+> If a required tool fails (auth/PATH/`--config`/timeout), or a log can't be fetched or parsed, or you cannot
+> separate policy-mesh from engine GPUs, or the state-poll and the pod count disagree and you can't reconcile
+> them → **STOP and return `VERDICT: ERROR`** with (a) the exact command you ran, (b) its exact failure output,
+> (c) what evidence is therefore missing, (d) what you *did* establish. **Do NOT emit KILL/NO-KILL, do NOT
+> default to NO-KILL, and NEVER substitute a plausible-sounding guess for missing evidence.** An ERROR that says
+> "I couldn't read the engine state because `analyze_job_history` failed with X" is a USEFUL result the
+> supervisor can act on; a confident NO-KILL built on an unread log is a trap.
+
+**No verdict without its named artifact.** Every gate verdict must quote the specific evidence, by key:
+
+| Gate | KILL/NO-KILL requires you to have READ + QUOTED | If you can't get it → |
+|---|---|---|
+| A liveness | the state-poll line (`state=… pods=…`) **and** the newest phase-Timer/`global_step` line + its timestamp | ERROR |
+| B resources | per-rank `nvidia-smi` util% (policy ranks vs engine ranks, **separated**) **and** the engine `Running:/Waiting:`+`Avg generation throughput` lines | ERROR |
+| C rollouts | actual `result.json` reward values / trial `exception.txt` you opened (not a count you assumed) | ERROR |
+
+### Iris tool contract (exact working invocations — the #1 source of bad verdicts is mis-driving these)
+
+```bash
+PY=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python      # otagent env (symlinks fail in sandbox)
+IRIS=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris      # NOT marin .venv iris (broken kubernetes import)
+# KUBECONFIG is PER-CLUSTER and a HARD prereq in the SAME shell as every call:
+#   East (cw-us-east-02a): export KUBECONFIG=~/.kube/coreweave-iris-gpu
+#   rno2a (cw-rno2a):      export KUBECONFIG=~/.kube/coreweave-iris          (context marin-rn02a_RNO2A)
+```
+- **Liveness (authoritative, both clusters):** `$PY scripts/iris/watch_job_state.py /benjaminfeuer/<job> --once --json`. states: **3=running, 5=terminal/failed, 6=stopped**. "running but pods=0 / record absent" = TERMINAL.
+- **`job summary` is FLAKY on cw-rno2a** (execute_unary blips) — do NOT rely on it there; use `iris query`:
+  `$IRIS --cluster=<cw-rno2a|cw-us-east-02a> query "SELECT name, state FROM jobs WHERE name LIKE '%<slug>%' LIMIT 5"`.
+  ⚠ the jobs table has **no `submitted_at`/`failure_count` columns on some schemas** — if a column errors, drop it and re-query `name, state` only (don't abandon the query).
+- **Known tool bug — `analyze_job_history.py` region resolver:** it passes `--config <cluster-name>` to iris, which
+  wants a PATH. Pass the **config file path** as `--cluster`, e.g.
+  `--cluster /Users/benjaminfeuer/Documents/marin/lib/iris/config/cw-rno2a.yaml`, and put `$IRIS` on PATH
+  (`export PATH=/Users/benjaminfeuer/miniconda3/envs/otagent/bin:$PATH`). **It ALSO cannot resolve a pure RL job's
+  output dir** (no `--jobs-dir/--gcs-output-dir` in the baked command) → it will `LookupError`. For RL jobs, get
+  metrics from the finelog via §1b `acquire_complete_log` instead, or `iris job logs --since-ms <t> --no-tail` with
+  a BOUNDED window. If none work → `VERDICT: ERROR` (don't guess the metrics).
+- **Log volume discipline (memory `iris-log-resource-discipline`):** `iris job logs` has **no server-side grep**;
+  NEVER `iris job logs --max-lines >~200 | grep` (dumps the whole log into the Mac → OOM-drops the session). Use
+  §1b's server-side-filtered finelog fetch, or tight `--since-ms <window> --max-lines ≤200` slices.
+
+### Exact log keys to grep (know these before you read a single line)
+
+| Signal | Key (grep this) | Means |
+|---|---|---|
+| step phase timeline | `Started: '<phase>'` / `Finished: '<phase>', time cost:` | which phase is live = "how far into the step" (THE progress truth) |
+| step counter | `global_step` / `Resumed training from global_step` | a step banked only after `step` finishes |
+| **gen-buffer fill** | `Generation Buffer Progress: N/M` | rollout supply filling toward the batch; **now heartbeats even when FROZEN** (MarinSkyRL `98875d1e`+) → a repeating `N/M [Xs]` with growing elapsed + fixed N = a STALL |
+| engine serving | `Avg generation throughput: … Running: R reqs, Waiting: W` | per-engine liveness; `Running≥1/Waiting:0` at ~0 tok/s + 0% GPU = starved (see below) |
+| MoE path | `[MoE-PATH] … {grouped_mm|for_loop}` | fused kernel vs silent for-loop fallback |
+| host-RAM | `HOST_RAM_BREAKDOWN node=… cgroup=<used>/<cap>` | OOM danger window (optimizer Adam-alloc spike) |
+| crash (real) | first `Traceback`/`INTERNAL ASSERT`/`CUDA error` **by timestamp** | the primary fault (precedes the NCCL-watchdog survivor cascade) |
+| NCCL hang | `watchdog got stuck for <N> seconds` / `WorkNCCL(… ran for … before timing out` | policy-mesh collective hang (detectable ~30min via the 1800s watchdog) |
+
+### ⛔ Engine starvation is NOT a Daytona error — diagnose it LIVE, with evidence (memory `engine-starvation-not-daytona`)
+
+When engines read `Running:1/Waiting:0`, ~0 tok/s, 0% GPU and the gen-buffer stalls, **do NOT attribute it to
+Daytona / hung sandboxes / tool-tails** — that is a repeatedly-wrong default, not a diagnosis. The cause is
+almost always on the RL/serving/coordination side (rollout-coordinator dispatch not queuing work → `Waiting:0`;
+fully-async staleness/backpressure gate; vLLM scheduler state; `n_concurrent_trials` cap; the ReAct loop). To
+find WHICH, **you must diagnose while the job is ALIVE** — once it's killed, py-spy is gone and the finelog alone
+is often insufficient. On a live starvation/stall, BEFORE any KILL recommendation, capture:
+- `py-spy dump` on the **RolloutCoordinator + a policy rank + a vLLM engine** proc (`kubectl exec -n iris <pod> -c task -- /opt/openthoughts/.venv/bin/py-spy dump --pid <pid>`; find pids via `ps -eo pid,rss,comm`) → what is the coordinator/engine actually blocked ON.
+- the finelog window around the stall for `staleness`/`discard`/`n_concurrent`/dispatch keys.
+Return that evidence with the verdict. A KILL recommendation for a starvation you did not diagnose live = an ERROR-quality answer; say so rather than guessing.
+
 ## Resources you must use (don't re-derive)
 
 - **`.claude/ops/<cluster>/`** — *machine/cluster particulars*: access (kubeconfig/ssh), log-path discovery,
@@ -150,6 +222,61 @@ gates below are cluster-agnostic once you have logs + trials + a GPU view.)
 > **If `pull` returns 0 trials / no logs:** that is itself a signal, not a tool failure — usually the rank-0
 > pod is gone (terminal job → node-local trials GC'd) or was just (re)started. Cross-check with §2's state-poll
 > before concluding; a fresh launch legitimately has 0 completed trials for a while (long episodes).
+
+### 1b. Science-grade finelog parse (CoreWeave) — the AUTHORITATIVE "how far into the step + is it healthy" read
+
+`peek … pull` gives the raw finelog; for the actual **training-progress + host-RAM + MoE-path** verdict, pull the
+COMPLETE log (live ∪ R2-archive, deduped, coverage-verified) with an **RL-tuned pattern filter** — the default
+`FINELOG_CONTAINS_PATTERNS` is datagen/TPU-tuned and drops the RL signals. Reuse `analyze_job_history.py`'s
+`acquire_complete_log()` with the patterns swapped (proven 2026-07-13 on the 80B):
+
+```python
+# marin .venv python, with R2 archive creds sourced (see below) + IRIS_BIN=<otagent iris>, KUBECONFIG=cw
+import time, sys; from pathlib import Path
+sys.path.insert(0, ".../OpenThoughts-Agent/scripts/iris"); import analyze_job_history as ajh
+ajh.FINELOG_CONTAINS_PATTERNS = (         # <- RL signal set (swap per what you're chasing)
+  "Started: '", "Finished: '",            # fully_async_trainer loguru Timers → EXACT per-phase durations
+  "Resumed training from global_step",    # the step counter
+  "HOST_RAM_BREAKDOWN", "fd-monitor",     # per-minute cgroup host-RAM (fd_monitor.py)
+  "WORKER_FORWARD_ENTER", "WORKER_DRAIN_BARRIER", "R3_RESIDENT_SET",  # forward/dispatch markers
+  "[MoE-PATH]", "grouped-GEMM swap active",  # grouped_mm-vs-for-loop path (MarinSkyRL 8d1ca716+)
+  "Traceback", "INTERNAL ASSERT", "SavedTensorHooks", "ProcessGroupNCCL", "watchdog",
+  "NumelIn=1", "OOMKill", "out of memory", "CUDA error",              # crash/wedge terminal signatures
+)
+acq = ajh.acquire_complete_log("/benjaminfeuer/<job>", "cw-us-east-02a", int(time.time()*1000),
+        Path("/tmp/<job>.filtered.log"), Path("/tmp/<job>.cov.json"), refresh=True, max_gap_seconds=3600.0)
+# acq.lines = deduped, coverage-verified; acq.logs_complete asserts every attempt window is covered.
+```
+
+- **R2 archive creds are MANDATORY** (else `FileNotFoundError: bucket does not exist`): borrow from the iris-ns
+  secret `finelog-cw-use02a-env` via the base64 loop, run under the **marin `.venv` python** with
+  `IRIS_BIN=<otagent iris>`. Full procedure: **`.claude/ops/iris/finelog_r2_archive_creds.md`**. Do NOT also
+  source the LAION secrets in that shell (they clobber the R2 creds).
+- **The phase Timers are THE progress truth — not the trace count, not tqdm.** Parse the `Started: '<phase>'` /
+  `Finished: '<phase>', time cost: <s>s` pairs into a timeline: `wait_for_generation_buffer` (buffer full =
+  batch ready) → `convert_to_training_input` → `fwd_logprobs_values_reward` → `compute_advantages_and_returns`
+  → `policy_train` / `train_critic_and_policy` → `sync_weights_to_inference_engines` → `step`. "How far into the
+  step" = which phase has `Started` but no `Finished` yet. `global_step` ticks only after `step` finishes. A
+  trace-count proxy (`result.json` count) MISLEADS — 512 completed trajectories ≠ "1 step banked" if `policy_train`
+  is still running (bit us 2026-07-13).
+- **✅ tqdm bars ARE captured now** (MarinSkyRL `de40d31c`+ non-TTY newline fallback, gpu-rl `19bd8c5e`+): a `\n`
+  per update, so `Generation Buffer Progress: N/M (P%) [Xs]` / `Training Step Progress` LAND in the finelog. **And
+  a FROZEN bar now HEARTBEATS** (MarinSkyRL `98875d1e`+): the SAME `N/M` line re-emits every 15s
+  (`SKYRL_PROGRESS_HEARTBEAT_S`) with growing elapsed — so a stalled gen-buffer shows as a repeating `31/64 [Xs↑]`,
+  NOT silence (before `98875d1e` a frozen bar went silent and a wedge looked identical to a healthy idle run — this
+  is the signal that unmasks a live starvation). Still cross-check the phase Timers (`Started:`/`Finished:`) — they
+  remain the authoritative "how far into the step" truth; a runs on an OLDER image without these fixes still lacks
+  the bars, so fall back to the Timers there.
+- **Host-RAM (the 80B OOM-fix target):** parse `HOST_RAM_BREAKDOWN node=<h> cgroup=<used>/<cap> GiB` → report
+  PEAK + current vs the cgroup cap (e.g. 1700 GiB). The optimizer-step Adam-alloc spike is the danger window.
+- **MoE path:** `[MoE-PATH] experts forward via {grouped_mm|for_loop} (w1=<type>, use_grouped_mm=…)` tells you
+  whether the fused kernel actually ran or a silent per-expert for-loop fallback fired (a `fwd_logprobs` perf
+  cliff). `[MoE] grouped-GEMM swap active` only confirms the swap FLAG was read, not the forward path.
+- **Reading the exact crash:** the PRIMARY error precedes the NCCL `mesh_fsdp` watchdog cascade (the watchdogs
+  are survivors detecting a dead peer — "remote process exited or network error"). Grep for the FIRST
+  `Traceback`/`INTERNAL ASSERT`/`CUDA error` by timestamp, not the loudest NCCL line. For per-trial harbor
+  exceptions, read the R2 `trace_jobs/<trial>/exception.txt` via the pod's boto3 (`Config(s3={"addressing_style":
+  "virtual"})`, endpoint `$AWS_ENDPOINT_URL`) — the Mac lacks the CW object-store creds.
 
 ---
 
@@ -302,9 +429,12 @@ qualitative:
      (default 1) and the engine log shows `finish_weight_reload` (fix MarinSkyRL `2bb70a88`; marinskyrl doc).
    - **Agent output is COHERENT but wrong / runs out of turns** ⇒ tasks genuinely hard or the harness/verifier
      mis-set — NOT necessarily a kill; this can be a real (if low) learning signal. Read several conversations.
-   - **Every trial ends in an environment/infra exception** (`VerificationNotCompletedError` everywhere =
-     Daytona sandbox never came up / `DAYTONA_*` not forwarded; `Bearer token invalid` = auth) ⇒ infra, not
-     model — **KILL + fix the infra**, relaunch.
+   - **Every trial ends in an environment/infra exception** ⇒ infra, not model — but **name the exception from an
+     `exception.txt` you actually opened**, don't assume it. `VerificationNotCompletedError` everywhere = Daytona
+     sandbox never came up / `DAYTONA_*` not forwarded; `Bearer token invalid` = auth. Only THEN KILL + fix the
+     infra. ⚠ **Do NOT confuse this with engine STARVATION** — `Running:1/Waiting:0` + stalled gen-buffer is a
+     *dispatch/serving* problem (see §0), NOT "every trial threw a Daytona exception." Starvation ≠ Daytona; if you
+     haven't opened trial exception files showing an infra error, you have not established an infra cause.
 4. **Are TURNS completing?** in `conversation`, count `role=="assistant"` turns. `avg_turns ≈ 1` (agent makes
    one move then stops/errors) is the dead-engine / broken-loop signature; multi-turn = real agent behavior.
 5. **Are the AGENT OUTPUTS REASONABLE?** actually read 3–5 trajectories: is the model issuing sensible tool
@@ -329,7 +459,11 @@ Emit exactly one verdict to the supervisor, in this shape:
 ```
 RL-JOB-HEALTH — /benjaminfeuer/<job>  (<model>, <geometry>, <stage>)   captured: <traces dir>
 
-VERDICT: KILL | NO-KILL          confidence: high|medium|low
+VERDICT: KILL | NO-KILL | ERROR          confidence: high|medium|low
+  (ERROR = could not obtain the evidence — see §0. Give the failed command + its output + what's missing;
+   do NOT emit KILL/NO-KILL and do NOT default to NO-KILL.)
+Evidence I actually read: <the state-poll line; the per-rank util split; the engine Running/Waiting line;
+  the reward values / exception.txt — quote them. If a row is blank, the matching gate is ERROR, not PASS.>
 Restarts: <B/K burned, remaining K−B> — <none | same failure each attempt: … | transient, recovered>
 
 Gate A (liveness):   PASS|FAIL — <state-poll verdict + log-freshness + any wedge/death signature>
