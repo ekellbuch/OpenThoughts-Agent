@@ -478,22 +478,12 @@ monitor/harvest cron catch them at its >1200-count trigger).
 
 CoreWeave/Iris is **Marin's** cluster — when monitoring/triaging/updating the Marin
 GitHub issues this work touches (e.g. the RL-launch-on-Iris workflow issue,
-cluster/quota threads, upstream fixes we depend on), use the **mumwelt skills at
-`/Users/benjaminfeuer/Documents/mumwelt/mumwelt/skills/`** (invocable by name; they
-shell out to the `mum` CLI over a local offline mirror of all Marin activity — GitHub
-issues/PRs/comments, Discord, W&B, weekly summaries):
-- **`marin-context`** — search + cite Marin activity (a specific issue/PR/run, "what
-  was decided + why", who did what). The default for monitoring a Marin issue/PR's
-  state + history before commenting on or updating it.
-- **`marin-research`** — multi-subagent deep dive for broad/ambiguous "full picture of
-  X" / retro questions one query won't cover.
-- **`marin-publish`** — render a finished writeup to a linkable gist (htmlpreview) to
-  share.
+cluster/quota threads, upstream fixes we depend on), use the **mumwelt skills** over
+the local offline Marin mirror. Which skill + how to invoke = **`.claude/projects/mum/mum.md`**
+(prefer `marin-research`; `marin-context` is the faster/less-accurate lookup).
 
 These give the **context** to monitor + decide; the actual issue/PR **update** still
-goes through the `gh` CLI. Check the mirror's freshness first (the skill prompts if
-stale). They live OUTSIDE this repo (the `mumwelt` checkout), so they're a referenced
-tool, not a committed part of ot-agent.
+goes through the `gh` CLI.
 
 ## iris.oa.dev federated GPU submission (NEW 2026-07-09, operator — IN FLUX, bugs expected)
 - **New path:** submit to `iris.oa.dev` requesting GPUs; an **H100 request auto-routes to a CW cluster** via a **meta-scheduler** (a simple scheduler over the per-cluster schedulers that only decides "which cluster can I go to"). `--target-cluster <name>` pins a specific CW cluster. **Only OpenAthena accounts are authorized for CW** (we are `ben.feuer@openathena.ai` → authorized).

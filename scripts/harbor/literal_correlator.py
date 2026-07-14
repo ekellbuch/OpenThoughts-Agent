@@ -1,35 +1,26 @@
 """Correlate a worker-side RecordProxy literal.jsonl with opencode trajectories.
 
-Why this exists
----------------
 For installed agents like ``opencode`` the LLM calls happen INSIDE a Daytona
-sandbox (via ai-sdk), so harbor never sees the token IDs / logprobs. A co-located
-:class:`~harbor.literal.proxy.RecordProxy` on the iris WORKER captures them into a
-single job-global ``literal.jsonl`` (see ``hpc/literal_proxy_utils.py``). But that
-log is on a DIFFERENT machine + filesystem than the sandbox, uses a per-job
-filename, and interleaves all N concurrent trials — so opencode's in-sandbox
-merge (``populate_context_post_run``) always finds nothing and the trajectory
-steps carry only token COUNTS, never token IDs.
-
-ai-sdk hides the upstream vLLM completion id, so the trajectory has no
-``response_id`` to join on (verified empirically). This module instead correlates
-by CONTENT + COUNTS, entirely from data already logged:
+sandbox (via ai-sdk), so harbor never sees the token IDs / logprobs. A
+co-located :class:`~harbor.literal.proxy.RecordProxy` on the iris WORKER
+captures them into a single job-global ``literal.jsonl`` (see
+``hpc/literal_proxy_utils.py``). ai-sdk hides the upstream vLLM completion id,
+so the trajectory has no ``response_id`` to join on. This module correlates by
+CONTENT + COUNTS, entirely from data already logged:
 
   1. Reconstruct per-trial ordered call CHAINS from the global log by exact
      message-PREFIX extension: within a trial, opencode replays the full history
      each turn, so request_k.messages is an exact prefix of request_{k+1}.messages.
-     Distinct trials seed distinct chains (different task instruction). A record
-     that could extend two chains (duplicate task instruction) is marked ambiguous.
+     Distinct trials seed distinct chains. A record that could extend two chains
+     is marked ambiguous.
 
   2. BIND a chain to a trajectory by its exact per-step
-     ``(prompt_tokens, completion_tokens)`` sequence — ``len(prompt_token_ids)``
-     must equal the trajectory step's ``prompt_tokens`` and likewise for
-     completion. The ``agent_execution`` time window only breaks ties (never
-     forces a match), so worker/sandbox clock skew can never cause a mis-join.
+     ``(prompt_tokens, completion_tokens)`` sequence. The ``agent_execution``
+     time window only breaks ties (never forces a match).
 
   3. INJECT the token IDs / logprobs into the trajectory step metrics ONLY when
-     the per-step counts agree exactly (verify-or-skip). A wrong guess therefore
-     yields OMISSION, never corrupt training tokens.
+     the per-step counts agree exactly (verify-or-skip). A wrong guess yields
+     OMISSION, never corrupt training tokens.
 
 All functions here are pure and I/O-free except the thin ``load_*`` / ``enrich_*``
 boundary helpers, so the correlation logic is unit-testable without a live job.
@@ -267,20 +258,15 @@ def load_literal_records(literal_log_uri: "str | Sequence[str]") -> list[Literal
     """Read + parse one OR MANY (possibly gs://) literal.jsonl files into records.
 
     A preempted campaign job accumulates ONE durable ``literal.jsonl`` per serve
-    attempt (the slug carries the per-serve timestamp, so attempts do not clobber),
-    e.g. ``…_111941_literal.jsonl`` (attempt 0) + ``…_161605_literal.jsonl`` (attempt
-    1). Each trial's records live entirely in whichever serve handled it, so binding
-    is correct over the UNION of all attempts' records — pass every matched file so
-    no attempt's literals are silently dropped.
+    attempt; each trial's records live entirely in whichever serve handled it,
+    so binding is correct over the UNION of all attempts' records.
     """
     uris = [literal_log_uri] if isinstance(literal_log_uri, str) else list(literal_log_uri)
     records: list[LiteralRecord] = []
     for uri in uris:
         # Stream line-by-line — a per-serve literal.jsonl is multi-GB (token ids +
-        # full request messages), so `read_text().splitlines()` would hold the whole
-        # file as one string AND a full copy as a line list (~2x the file) before a
-        # single record is parsed. Iterating the open handle keeps the transient at
-        # one line while `parse_literal_records` accumulates only the kept records.
+        # full request messages), so iterating the open handle keeps the transient
+        # at one line while parse_literal_records accumulates only the kept records.
         with UPath(uri).open("r") as fh:
             records.extend(parse_literal_records(fh))
     return records
@@ -309,13 +295,11 @@ _LITERAL_METRIC_KEYS = ("prompt_token_ids", "completion_token_ids", "logprobs")
 def _strip_literal_metrics(trajectory: dict[str, Any]) -> int:
     """Remove any pre-existing literal token_ids/logprobs from every step's metrics.
 
-    The correlator is the SOLE authority on literal columns when active: token IDs must
-    come from the RecordProxy ``literal.jsonl`` via :func:`inject_literals`, never from
-    whatever happened to be sitting in ``trajectory.json`` (bogus/stale values, or a
-    different agent's fields). Stripping first guarantees an unbound trial contributes
-    NO literal columns rather than leaking mined trajectory-json token_ids. Returns the
-    number of steps actually modified (0 for the common opencode case, whose trajectory
-    steps carry only token COUNTS, never IDs — so no rewrite is triggered).
+    The correlator is the SOLE authority on literal columns when active: token IDs
+    must come from the RecordProxy ``literal.jsonl`` via :func:`inject_literals`,
+    never from whatever was sitting in ``trajectory.json``. Stripping first
+    guarantees an unbound trial contributes NO literal columns. Returns the number
+    of steps modified.
     """
     modified = 0
     for step in trajectory.get("steps", []):
@@ -348,12 +332,10 @@ def enrich_trajectories_with_literals(
 ) -> EnrichStats:
     """Populate opencode trajectory step metrics with proxy-captured literals.
 
-    Reconstructs per-trial chains from ``literal_log_uri`` (one file, OR the UNION of
-    every serve attempt's file for a preempted job) once, then for each trial under
-    ``job_dir`` binds its trajectory to a chain (verify-or-skip) and rewrites
-    ``agent/trajectory.json`` in place with the token IDs / logprobs. ``iter_trial_dirs``
-    is injected (harbor's pruning enumerator) to avoid importing harbor here.
-    Idempotent: re-running re-injects the same values.
+    Reconstructs per-trial chains from ``literal_log_uri`` (one file, OR the UNION
+    of every serve attempt's file for a preempted job) once, then for each trial
+    under ``job_dir`` binds its trajectory to a chain (verify-or-skip) and rewrites
+    ``agent/trajectory.json`` in place with the token IDs / logprobs. Idempotent.
     """
     records = load_literal_records(literal_log_uri)
     chains = reconstruct_chains(records)
@@ -373,9 +355,8 @@ def enrich_trajectories_with_literals(
         except (FileNotFoundError, json.JSONDecodeError, NotImplementedError):
             continue
         stats.trials += 1
-        # Strip any pre-existing literal fields FIRST so the correlator is the sole
-        # source of token columns (no trajectory-json token mining). Counts used for
-        # binding (prompt_tokens/completion_tokens) are untouched by the strip.
+        # Strip any pre-existing literal fields FIRST so the correlator is the
+        # sole source of token columns. Counts used for binding are untouched.
         stripped = _strip_literal_metrics(trajectory)
         seq = trajectory_count_sequence(trajectory)
         chain = bind_chain(chains, seq, window=_trial_window(trial_dir))
@@ -387,8 +368,8 @@ def enrich_trajectories_with_literals(
             if verbose:
                 print(f"[literal-correlator] {trial_dir.name}: enriched {n} step(s)")
         elif stripped:
-            # Unbound (or bound-but-0-injected) trial that HAD stale literal fields:
-            # persist the stripped trajectory so those bogus token_ids can't leak.
+            # Unbound trial that HAD stale literal fields: persist the stripped
+            # trajectory so those bogus token_ids can't leak.
             traj_path.write_text(json.dumps(trajectory))
             stats.trials_stripped += 1
             if verbose:
@@ -406,12 +387,10 @@ def discover_literal_logs(job_dir: str) -> list[str]:
     """Find ALL durable literal.jsonl files for a job dir (empty list if none).
 
     The proxy writes one per serve attempt to
-    ``<experiments_dir>/logs/<slug>_literal.jsonl`` (the slug carries a per-serve
-    timestamp, so a preempt-resume produces multiple non-clobbering files). The
-    export ``--job_dir`` may be that experiments_dir or a child; search the dir and a
-    few parents, and return EVERY match from the first ``logs/`` that has any — so a
-    preempted job's records are correlated over the full union, never just one
-    attempt. Returns them sorted (stable order; the union is order-independent).
+    ``<experiments_dir>/logs/<slug>_literal.jsonl``. The export ``--job_dir`` may
+    be that experiments_dir or a child; search the dir and a few parents, and
+    return EVERY match from the first ``logs/`` that has any — so a preempted
+    job's records are correlated over the full union. Returns them sorted.
     """
     cur = UPath(job_dir)
     for _ in range(4):

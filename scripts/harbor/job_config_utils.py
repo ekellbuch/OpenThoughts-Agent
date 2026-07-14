@@ -11,12 +11,9 @@ from harbor.models.metric.type import MetricType
 from scripts.harbor._harbor_compat import LocalDatasetConfig, is_local_dataset
 
 
-# Metric types that legacy OT-Agent harbor YAMLs commonly declare but which
-# the pinned harbor (``penfever/otagent-latest``) doesn't ship a built-in
-# Pydantic enum entry or factory for. We drop these silently at load time
-# rather than rewriting every harbor_yaml/* file — the eval still completes
-# without them (harbor falls back to its default Mean metric internally), and
-# downstream postprocessing recomputes drop-EI from raw rewards anyway.
+# Metric types that legacy OT-Agent harbor YAMLs declare but the pinned harbor
+# schema can't validate. Dropped silently at load time; downstream postprocessing
+# recomputes drop-EI from raw rewards.
 _UNSUPPORTED_METRIC_TYPES = frozenset({"mean-drop-ei", "accuracy-drop-ei"})
 
 

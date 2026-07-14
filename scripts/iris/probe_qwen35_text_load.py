@@ -3,26 +3,24 @@
 
 Runs INSIDE the gpu-rl image's RL venv (where MarinSkyRL `/opt/skyrl` is
 importable + transformers is the baked version). Mirrors EXACTLY the load
-sequence that `skyrl_train.model_wrapper` performs for FSDP2 policy load, so a
-clean run here de-risks the headline arch unknown (text-only backbone load +
-256-expert weight remap) BEFORE any 8-node gang is burned.
+sequence that `skyrl_train.model_wrapper` performs for FSDP2 policy load.
 
 GATE 0a (all must pass):
   (1) AutoConfig resolves `qwen3_5_moe` (transformers recognises the arch).
   (2) The checkpoint loads (text backbone) — `is_qwen3_5_vlm_shell` detects the
       multimodal shell and `unwrap_to_text_causal_lm` re-points it to the text
-      Qwen3_5MoeForCausalLM tower, dropping vision + MTP (the fb12cea fix).
-  (3) `_no_split_modules` resolves with the vision class dropped (the df8b661
-      fix) — i.e. the FSDP wrap-policy autodetect would not raise.
+      Qwen3_5MoeForCausalLM tower, dropping vision + MTP.
+  (3) `_no_split_modules` resolves with the vision class dropped — i.e. the
+      FSDP wrap-policy autodetect would not raise.
   (4) `swap_moe_blocks_to_grouped` remaps the 256-expert weights into grouped
       MoE shims with NO missing/extra-key explosion, and the swap count matches
       `count_moe_layers(text_config)` (expected 40 for qwen3_5_moe).
 
 Memory: 34.4B bf16 ~= 69 GB. On a single H100-80GB a weights-only load fits
 (no optimizer / activations here). We load on CPU first (device_map=None,
-low_cpu_mem_usage) to keep the probe device-agnostic and avoid any placement
-confound — the gate is the LOAD + REMAP keys, not a forward. The swap's
-`remap_hf_block_to_moe` does in-place `copy_` on CPU tensors, which is fine.
+low_cpu_mem_usage) to keep the probe device-agnostic — the gate is the LOAD +
+REMAP keys, not a forward. The swap's `remap_hf_block_to_moe` does in-place
+`copy_` on CPU tensors, which is fine.
 
 Exit 0 = GATE 0a GO. Non-zero = NO-GO (the message says which sub-gate failed).
 """
@@ -121,10 +119,6 @@ def main() -> int:
     # resolves on this text backbone (no "Could not find the transformer layer
     # class to wrap"), and (b) it matches the 40 decoder layers. We call the REAL
     # get_fsdp_wrap_policy with the config's pin to prove it does not raise.
-    #
-    # NOTE — earlier probe rev mis-tested the UNPINNED autodetect (raw
-    # `_no_split_modules`) and false-failed here on the vision class even though
-    # the pinned worker path is immune; this rev tests the path the config uses.
     _hr("(3) FSDP wrap-policy with the config's pin ['Qwen3_5MoeDecoderLayer'] resolves")
     nsm = getattr(model, "_no_split_modules", None)
     print(f"[probe] _no_split_modules (autodetect default, NOT used by pinned config)  {nsm}", flush=True)

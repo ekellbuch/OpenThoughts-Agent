@@ -1,0 +1,105 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# INCREMENTAL gpu-rl rebuild — the FlashQLA image + ONLY the harbor 5d248dc6 delta.
+# =============================================================================
+# GOAL: the r4f (full 80B FlashQLA) runtime — an image that has BOTH the FlashQLA
+# fused GDN tilelang kernel (GIL-releasing GDN forward, the 2h-GIL-hold fix) AND
+# the harbor 5d248dc6 per-trial S3-I/O offload (the RolloutCoordinator dispatcher
+# unblock). It is the FlashQLA image with harbor bumped 116666d6 -> 5d248dc6.
+#
+# BASE = gpu-rl-291cfef3-flashqla-tl18 (@sha256:cb65ee9f…): the FlashQLA image =
+# flash_qla 0.1.0+6ef4858 + tilelang 0.1.8 (kkt_solve gemm_v1 pin) + apache-tvm-ffi
+# 0.1.9 baked on top of the harbor-116666d6 gpu-rl base. Every baked artifact
+# (MarinSkyRL, vLLM-fork compiled 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128,
+# IB verbs userspace, the rl env pinned via the base-baked rl_env_constraints.txt,
+# flash_qla + tilelang 0.1.8) is inherited UNCHANGED. The SOLE delta = the harbor
+# source swap 116666d6 -> 5d248dc6.
+#
+# harbor 5d248dc6 = "perf(rl-coordinator): offload per-trial S3 I/O off the asyncio
+# event loop" — descends from 116666d6 via (f9cf327e -> 55ae9e66 -> 5d248dc6):
+#   - trial/trial.py: Trial._init_result() + result write via asyncio.to_thread
+#   - environments/daytona/environment.py: _sdk_download_dir() copies the local tree
+#     to the remote object store via asyncio.to_thread(_copy_local_tree_to_remote,…)
+#   - verifier/verifier.py: reward resolve via asyncio.to_thread(self._resolve_rewards)
+#   - models/trial/paths.py: TrialPaths._is_local() mkdir/chmod object-storage skip
+# All asserted in-build so a regression fails the build.
+#
+# WHY INCREMENTAL: a full rebuild can end up with a >8 GB layer that CANNOT be
+# pulled over the CoreWeave->ghcr egress (ImagePullBackOff forever). This builds
+# FROM the FlashQLA image (already pull-tested / cacheable on the nodes) and adds
+# TWO tiny RUN layers (harbor is a --no-deps source swap; the FlashQLA re-verify
+# adds no package), so the only fresh-pull layers on a node are a few-KB python diff.
+#
+# NOTE ON UV_CONSTRAINT: the FlashQLA base did NOT clear UV_CONSTRAINT (its flashqla
+# layer only cleared it inline for the tilelang downgrade), so the base still has
+# ENV UV_CONSTRAINT=/opt/openthoughts/docker/rl_env_constraints.txt (the OLD baked
+# 0.1.9 constraints file). The harbor swap is --no-deps (harbor absent from that
+# file, so no conflict) but we clear UV_CONSTRAINT inline anyway for safety, exactly
+# as the flashqla layer does — it does NOT touch tilelang / the pinned rl env.
+# =============================================================================
+FROM ghcr.io/open-thoughts/openthoughts-agent@sha256:cb65ee9fcd64f6fb954a5420b102344d9b2e86916bee6c35b3e6cad3258e5040
+
+ENV RL_ENV_DIR=/opt/openthoughts/envs/rl
+
+# --- STEP A: swap harbor 116666d6 -> 5d248dc6 (the per-trial S3-I/O offload) ---
+# --no-deps = source-only swap (does not touch the carefully-pinned rl env or the
+# FlashQLA/tilelang-0.1.8 pin). UV_CONSTRAINT= clears the base-baked 0.1.9 file.
+ENV HARBOR_COMMIT=5d248dc69927dd4facea170bbdcb0c8156b83351
+RUN . $RL_ENV_DIR/bin/activate && \
+    UV_CONSTRAINT= uv pip install --no-deps --force-reinstall \
+        "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
+    python -c "import harbor, importlib.metadata as m; print('baked harbor', m.version('harbor'))" && \
+    python -c "import importlib.metadata as m, json; du=m.distribution('harbor').read_text('direct_url.json'); print('direct_url.json:', du); \
+cid=(json.loads(du).get('vcs_info') or {}).get('commit_id',''); \
+assert cid.startswith('5d248dc6'), 'HARBOR HEAD MISMATCH: baked commit_id '+repr(cid)+' != 5d248dc6'; \
+print('harbor git HEAD in image =', cid)" && \
+    python -c "import harbor, pathlib; p=pathlib.Path(harbor.__file__).parent/'trial'/'trial.py'; \
+src=p.read_text(); \
+assert 'async def _init_result' in src, 'S3-OFFLOAD FIX MISSING (no async def _init_result in trial/trial.py)'; \
+assert 'asyncio.to_thread' in src, 'S3-OFFLOAD FIX MISSING (no asyncio.to_thread in trial/trial.py)'; \
+print('trial.py S3-offload (_init_result + asyncio.to_thread) present')" && \
+    python -c "import harbor, pathlib; p=pathlib.Path(harbor.__file__).parent/'environments'/'daytona'/'environment.py'; \
+src=p.read_text(); \
+assert 'async def _sdk_download_dir' in src, 'S3-OFFLOAD FIX MISSING (no async def _sdk_download_dir in daytona/environment.py)'; \
+assert 'asyncio.to_thread(_copy_local_tree_to_remote' in src, 'S3-OFFLOAD FIX MISSING (no to_thread(_copy_local_tree_to_remote) in _sdk_download_dir)'; \
+print('environment.py _sdk_download_dir to_thread offload present')" && \
+    python -c "import harbor, pathlib; p=pathlib.Path(harbor.__file__).parent/'verifier'/'verifier.py'; \
+src=p.read_text(); \
+assert 'asyncio.to_thread(self._resolve_rewards)' in src, 'S3-OFFLOAD FIX MISSING (no to_thread(self._resolve_rewards) in verifier.py)'; \
+print('verifier.py reward-resolve to_thread offload present')" && \
+    python -c "import harbor, pathlib; p=pathlib.Path(harbor.__file__).parent/'models'/'trial'/'paths.py'; \
+src=p.read_text(); \
+assert 'def _is_local(' in src and src.count('if not self._is_local():') >= 2, 'MKDIR-SKIP FIX MISSING (inherited _is_local guards absent in models/trial/paths.py)'; \
+print('inherited mkdir/chmod _is_local skip present')" && \
+    python -c "from harbor.models.trial.config import AgentConfig; \
+assert 'upload_agent_logs' in AgentConfig.model_fields, 'UPLOAD_AGENT_LOGS FIELD MISSING (not in AgentConfig.model_fields)'; \
+import inspect, harbor.trial.trial as t; src=inspect.getsource(t.Trial._upload_agent_logs); \
+assert 'if not self.config.agent.upload_agent_logs' in src, 'UPLOAD_AGENT_LOGS GATE MISSING (no early-return in Trial._upload_agent_logs)'; \
+print('upload_agent_logs field + Trial._upload_agent_logs gate present')" && \
+    echo "baked harbor commit: ${HARBOR_COMMIT}"
+
+# --- STEP B: re-verify FlashQLA + tilelang 0.1.8 were NOT perturbed by the swap ---
+# The harbor --no-deps swap must not have touched tilelang / flash_qla / the rl env.
+# flash_qla is an sm90-ONLY GPU-gated import: two module-scope probes run at import
+# time (get_target_compute_version()=="9.0" else it raises "FlashQLA now support sm90
+# only.", and torch.cuda.get_device_properties().multi_processor_count sizes the grid).
+# The CPU-only kaniko node has no GPU, so we STUB exactly those two probes (arch->9.0,
+# SM->132=H100) so the FULL flash_qla import graph executes on CPU — a BUILD-NODE-ONLY
+# shim (at runtime on the H100 the real device probes resolve, no stub). The
+# @tilelang.jit kernels compile lazily on first CALL (on GPU), not at import.
+RUN . $RL_ENV_DIR/bin/activate && \
+    python -c "import torch, tilelang, tilelang.contrib.nvcc, tvm_ffi, types, importlib.metadata as md; \
+tilelang.contrib.nvcc.get_target_compute_version = lambda *a, **k: '9.0'; \
+torch.cuda.get_device_properties = lambda *a, **k: types.SimpleNamespace(multi_processor_count=132); \
+import flash_qla; \
+from flash_qla import chunk_gated_delta_rule_fwd, chunk_gated_delta_rule_bwd; \
+from flash_qla.utils import l2norm; \
+assert md.version('flash_qla') == '0.1.0+6ef4858', 'FLASHQLA DIST VERSION MISMATCH: ' + md.version('flash_qla'); \
+assert flash_qla.__version__ == '0.1.0', 'FLASHQLA ATTR VERSION MISMATCH: ' + str(flash_qla.__version__); \
+assert md.version('tilelang') == '0.1.8', 'TILELANG VERSION MISMATCH (must be 0.1.8 for flash_qla kkt_solve gemm_v1): ' + md.version('tilelang'); \
+assert md.version('apache-tvm-ffi') == '0.1.9', 'APACHE-TVM-FFI VERSION MISMATCH (must be 0.1.9): ' + md.version('apache-tvm-ffi'); \
+assert callable(chunk_gated_delta_rule_fwd) and callable(chunk_gated_delta_rule_bwd) and callable(l2norm), 'FLASHQLA SYMBOLS NOT CALLABLE'; \
+print('FLASHQLA OK dist=' + md.version('flash_qla') + ' attr=' + flash_qla.__version__); \
+print('DEPS OK tilelang=' + md.version('tilelang') + ' apache-tvm-ffi=' + md.version('apache-tvm-ffi') + ' torch=' + torch.__version__); \
+print('SYMBOLS OK _build_flashqla_chunk imports resolve: chunk_gated_delta_rule_fwd, chunk_gated_delta_rule_bwd, flash_qla.utils.l2norm')" && \
+    echo "FlashQLA + tilelang 0.1.8 intact after harbor 5d248dc6 swap"

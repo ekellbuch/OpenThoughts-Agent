@@ -4,11 +4,9 @@
 This is the S3 analog of ``scripts/iris/mirror_hf_to_gcs.py``, purpose-built to SEED
 the CoreWeave object store (``s3://marin-us-east-02a``) so the RL controller's warm
 path (``start_rl_iris_controller.py::_warm_sync_model_from_s3``) can pull the model
-IN-REGION on every node instead of cold-pulling ~160 GB per node from HF Hub over the
-public internet (the flaky path behind the 80B r4a/r4b 15/16 gang-join bring-up
-failures, 2026-07-13).
+IN-REGION on every node instead of cold-pulling from HF Hub.
 
-WHY run this IN-CLUSTER on cw-us-east-02a (not the Mac): the CW pod natively carries
+Must run IN-CLUSTER on cw-us-east-02a (not the Mac): the CW pod natively carries
 BOTH HF egress AND the CW-object-store creds + ``AWS_ENDPOINT_URL`` (the iris-task-env
 Secret projected into every task pod); the Mac has neither the CW-S3 creds nor the
 bandwidth to push 160 GB. Each safetensors shard is downloaded from HF, uploaded to

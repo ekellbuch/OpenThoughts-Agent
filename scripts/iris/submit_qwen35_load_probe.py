@@ -74,10 +74,10 @@ def main() -> int:
     # A 1-GPU CPU load+remap probe needs ~80GB (34GB bf16 model + transient
     # grouped-MoE duplication). The RL-worker default 1800GB makes the pod
     # UNSCHEDULABLE under cluster contention (every node rejects on `Insufficient
-    # memory` when the big RL gangs occupy the low-overhead nodes — this stranded
-    # probe-v2 Pending 121 min). Request a modest, always-schedulable footprint;
-    # the node is still whole-node-exclusive (8 GPU) but we reserve only what the
-    # probe uses so it fits alongside other gangs.
+    # memory` when the big RL gangs occupy the low-overhead nodes). Request a
+    # modest, always-schedulable footprint; the node is still whole-node-exclusive
+    # (8 GPU) but we reserve only what the probe uses so it fits alongside other
+    # gangs.
     p.add_argument("--cpu", type=float, default=8.0)
     p.add_argument("--memory", default="256GB")
     p.add_argument("--disk", default="256GB")

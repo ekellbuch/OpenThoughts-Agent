@@ -6,14 +6,11 @@ string the tokenizer feeds the model -- with special tokens highlighted and
 every whitespace / control / non-UTF8 byte rendered with a visible glyph so a
 human can see precisely what the model is prompted with.
 
-Key design notes
-----------------
+Notes:
 * Qwen uses a byte-level BPE tokenizer (``Qwen2TokenizerFast``). The raw
   ``convert_ids_to_tokens`` pieces contain GPT-2-style sentinel characters
   (``Ġ`` for a leading space, ``Ċ`` for newline, ``ĉ`` for tab, and ``Â``/``Ã``
-  noise for the high bytes of multibyte UTF-8 sequences). Those are NOT what
-  the model "sees" semantically -- they are an artifact of mapping raw bytes
-  into a printable-unicode alphabet.
+  noise for the high bytes of multibyte UTF-8 sequences).
 * To recover the real characters for a single token we call
   ``tokenizer.convert_tokens_to_string([piece])``. This correctly reassembles
   multibyte UTF-8 (e.g. ``ĠcafÃ©`` -> `` café``, ``æĹ¥æľ¬èªŀ`` -> ``日本語``).
@@ -24,8 +21,7 @@ Key design notes
 * Explicit byte-fallback tokens of the form ``<0x0A>`` are also rendered as
   ``\\x0A`` (these appear in some Qwen vocabs for raw bytes).
 
-This module has no external dependencies beyond the standard library (the
-tokenizer object is passed in), and emits inline-CSS, dependency-free HTML.
+Emits inline-CSS, dependency-free HTML.
 """
 
 from __future__ import annotations

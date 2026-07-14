@@ -32,18 +32,6 @@ Example:
         --oracle_check \
         --timeout 600 \
         --target_repo org/validated-dataset
-
-Inspect failures:
-    export SEARCHPATH=./experiments/codeforces-GLM-4.6-traces-32ep-32k-1-2-4-dv/trace_jobs/chunk_000/2025-11-13__16-23-33
-    ls -lh "$SEARCHPATH" | wc -l
-    find "$SEARCHPATH" -type f -name "exception.txt" | wc -l
-    find "$SEARCHPATH" -type f -name "exception.txt" -print0 \
-        | tee >(while IFS= read -r -d '' file; do \
-            grep -o "harbor.trial.trial.AgentTimeoutError:" "$file"; \
-          done | wc -l > ./agenttimeoutcount.txt) \
-        | tr '\0' '\n'
-    echo "agent timeout error count:"
-    cat ./agenttimeoutcount.txt
 """
 
 from __future__ import annotations
@@ -868,10 +856,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         for task_dir in failures:
             shutil.rmtree(task_dir, ignore_errors=True)
         if harbor_job_dir is not None:
-            # Always retain the Harbor job dir (per-trial agent trajectories + verifier outputs).
-            # batch_validate_from_md.sh greps this path from the log to sync the traces into
-            # the per-dataset output dir. Never auto-delete on success — those traces are the
-            # whole point of running the smoke test.
+            # Retain the Harbor job dir (per-trial agent trajectories + verifier outputs);
+            # batch_validate_from_md.sh greps this path from the log to sync the traces.
             CONSOLE.print(
                 f"[harbor] Harbor job logs retained at [underline]{harbor_job_dir}[/underline]"
             )

@@ -1,40 +1,25 @@
 #!/usr/bin/env python3
 """Bootstrap a multi-node MarinSkyRL RL job on an iris GPU slice.
 
-This is the RL analog of ``scripts/vllm/start_vllm_iris_controller.py`` (which
-serves vLLM across a multi-host iris TPU slice). The crucial shared fact: iris
-gang-schedules a multi-node job as N coscheduled tasks — one task per whole
-node — and runs THIS SAME entrypoint on every node, injecting ``IRIS_TASK_ID``
-/ ``IRIS_NUM_TASKS`` per task. SkyRL/MarinSkyRL (skyrl-train) is Ray-native: it
-wants ONE cross-node Ray cluster and a single training driver that fans
-policy/ref/inference actors across the Ray nodes.
-
-So this script bootstraps that one cluster, then runs the driver on rank 0:
+iris gang-schedules a multi-node job as N coscheduled tasks (one per node) and
+runs THIS SAME entrypoint on every node, injecting ``IRIS_TASK_ID`` /
+``IRIS_NUM_TASKS``. This script bootstraps one cross-node Ray cluster, then
+runs the driver on rank 0:
 
 - **rank 0 (head):** ``ray start --head``; publish the head IP to a shared
   rendezvous file; wait until ``ray.nodes()`` shows all ``IRIS_NUM_TASKS``
-  nodes joined; then ``exec`` the MarinSkyRL training command (``python -m
-  <entrypoint> <hydra args>``) with ``RAY_ADDRESS`` pointing at the head, so
-  skyrl-train's ``initialize_ray`` (which calls bare ``ray.init()``) attaches
-  to the existing multi-node cluster instead of starting a fresh local one.
+  nodes joined; then ``exec`` the MarinSkyRL training command with
+  ``RAY_ADDRESS`` pointing at the head so skyrl-train's bare ``ray.init()``
+  attaches to the existing cluster.
 - **ranks 1..N-1 (workers):** read the head IP from the rendezvous, run
-  ``ray start --address=<head_ip>:<port>``, verify they joined, then BLOCK
-  until the head finishes (signalled via the rendezvous ``done`` marker) or
-  SIGTERM. They contribute their 8 H100s to the Ray cluster; the driver on
-  rank 0 schedules engine/policy workers onto them. They do NOT run the
-  training driver.
+  ``ray start --address=<head_ip>:<port>``, then BLOCK until the head's
+  ``done`` marker or SIGTERM. They contribute their 8 H100s to the Ray
+  cluster; they do NOT run the training driver.
 
-Head-IP discovery
------------------
-iris injects ``IRIS_ADVERTISE_HOST`` (the task's routable IP under
-``host_network: true`` — required for NCCL/IB on the CoreWeave slice) into
-every task, so rank 0 uses it directly as the Ray head IP. iris does NOT inject
-a peer/host list into the task env, so rank 0 publishes the head IP to a small
-rendezvous file on a shared object store the launcher passes in
-(``--rendezvous-dir`` / ``OT_AGENT_IRIS_RENDEZVOUS_DIR``). Ranks 1..N poll for
-it. The rendezvous URI may be ``gs://``, ``s3://`` (CoreWeave R2), or a shared
-local/NFS path — it is opened via ``fsspec`` so the storage backend is whatever
-the URI scheme resolves to (CoreWeave uses R2/S3, not GCS).
+Head-IP discovery: rank 0 uses iris's ``IRIS_ADVERTISE_HOST`` (routable IP
+under ``host_network: true``) and publishes it to a rendezvous file on a shared
+object store (``--rendezvous-dir``). The URI may be ``gs://``, ``s3://``, or a
+local path — opened via ``fsspec``.
 """
 
 from __future__ import annotations
@@ -57,11 +42,8 @@ DONE_FILENAME = "ray_head.done"
 def _ray_bin() -> str:
     """Resolve the ``ray`` CLI from the SAME venv as the running interpreter.
 
-    The launcher runs this controller via the RL venv python by absolute path
-    (e.g. /opt/openthoughts/envs/rl/bin/python), but iris's uv-sync setup
-    activates a DIFFERENT venv (/app/.venv) and leaves only that on $PATH — which
-    has no `ray`. So a bare `ray` command resolves to nothing (FileNotFoundError).
-    Use the `ray` binary that sits next to this interpreter; fall back to PATH.
+    iris's uv-sync activates /app/.venv on $PATH, which has no ``ray``; use the
+    binary next to this interpreter, falling back to PATH.
     """
     import shutil
 
@@ -71,21 +53,17 @@ def _ray_bin() -> str:
     found = shutil.which("ray")
     return found or "ray"
 
-# Cold GPU nodes (image pull + setup) can take several minutes to reach the
-# rendezvous, so these are generous.
+# Generous: cold GPU nodes (image pull + setup) take minutes to reach rendezvous.
 DEFAULT_RENDEZVOUS_TIMEOUT = 1800
 DEFAULT_CLUSTER_JOIN_TIMEOUT = 1800
 POLL_INTERVAL = 5
 # Tolerates clock skew between nodes and the time rank-0 needs to start Ray.
 RENDEZVOUS_FRESHNESS_SLACK = 60
-# Bound the rank-0 rendezvous PutObject: an unbounded fsspec/s3fs put can wedge the
-# head forever (no connect/read timeout), invisibly, until every worker times out at
-# the 1800s rendezvous deadline. Each attempt runs under a hard futures timeout with
-# bounded retries + backoff; final failure raises LOUD so the gang fails fast.
+# Bound the rank-0 rendezvous PutObject: unbounded fsspec/s3fs put can wedge the
+# head forever. Hard timeout per attempt + bounded retries; final failure raises.
 RENDEZVOUS_WRITE_ATTEMPTS = 5
 RENDEZVOUS_WRITE_TIMEOUT = 30  # seconds per attempt
-# Bound `ray start --head` so a hung Ray CLI fails loud (TimeoutExpired) instead of
-# silently stalling bring-up until the worker rendezvous deadline.
+# Bound `ray start --head` so a hung Ray CLI fails loud (TimeoutExpired).
 RAY_START_HEAD_TIMEOUT = 300  # seconds
 
 
@@ -96,24 +74,9 @@ def _log(msg: str) -> None:
 def stage_train_data(train_data_json: str) -> None:
     """Extract the HF task dataset(s) to this NODE's local task dir on EVERY node.
 
-    WHY THIS EXISTS (the data-starvation bug, 2026-06-26): the agentic
-    terminal_bench task dataset (e.g. ``DCAgent/exp_rpt_pymethods2test-large``) is
-    an HF *parquet* repo that must be extracted into the on-disk
-    ``$DCFT/tasks/<repo>/<instance>/{instruction.md,task.toml,...}`` layout the
-    Harbor rollout reads. ``hpc.rl_launch_utils.resolve_rl_train_data`` does that
-    extraction, but on the iris/CoreWeave path it runs only inside rank-0's
-    ``run_rl.py`` driver, writing to ``$DCFT=/opt/openthoughts/tasks`` on the HEAD
-    pod's NODE-LOCAL filesystem. CoreWeave task pods do NOT share a filesystem (no
-    SLURM-style GPFS ``$SCRATCH``), so the Ray-scheduled rollout workers on ranks
-    1..N-1 saw an empty tasks dir and every rollout died with
-    ``FileNotFoundError: .../task.toml`` -> reward always 0 (doomed, data-starved).
-
-    Fix: the controller runs on EVERY node, so stage here (before Ray bootstrap)
-    using the SAME extraction routine. CoreWeave nodes have egress, so each pod
-    fetches+extracts to the identical node-local path; the path strings rank-0's
-    dataset object ships to the workers then resolve on every pod. Idempotent
-    (``on_exist=skip`` + the stat short-circuit in ``_fix_task_permissions``), so a
-    re-run / rank-0's later run_rl re-resolve is a cheap no-op.
+    The controller runs on every node before Ray bootstrap; pods don't share a
+    filesystem, so each pod fetches+extracts the parquet repo to the identical
+    node-local path the rollout workers read. Idempotent (``on_exist=skip``).
     """
     import json as _json
 
@@ -124,18 +87,14 @@ def stage_train_data(train_data_json: str) -> None:
     if not train_data:
         return
 
-    # Reuse the exact, SLURM-proven staging logic. PYTHONPATH already includes
-    # /app (set by the launcher bootstrap), so hpc is importable.
+    # Reuse the SLURM-proven staging logic; PYTHONPATH includes /app (launcher bootstrap).
     from hpc.rl_launch_utils import resolve_rl_train_data
 
     _log(f"Staging train_data on this node (rank {_rank()}/{_num_tasks()}): {train_data}")
-    # The pod env carries HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1 (config extra_env,
-    # for the training ranks so they load the pre-staged model from the warm node-local
-    # cache). But this HF *parquet* dataset is NOT pre-cached — it must be fetched from
-    # the Hub here, so force-clear both for the extraction only (symmetric to
-    # stage_model; the ranks' env is untouched). Without this the snapshot_download
-    # inside resolve_rl_train_data dies OfflineModeIsEnabled and kills the whole gang
-    # in the controller pre-Ray phase.
+    # This HF *parquet* dataset is NOT pre-cached, so force-clear HF_HUB_OFFLINE /
+    # TRANSFORMERS_OFFLINE for the extraction only (the ranks' env is untouched).
+    # Without this the snapshot_download inside resolve_rl_train_data dies
+    # OfflineModeIsEnabled.
     saved = {k: os.environ.get(k) for k in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")}
     for k in saved:
         os.environ.pop(k, None)
@@ -152,42 +111,35 @@ def _warm_model_snapshot_hash(model_path: str) -> str:
     """Deterministic synthetic 40-hex 'commit' for the warm S3-synced snapshot dir.
 
     Offline ``from_pretrained`` / ``snapshot_download(local_files_only=True)`` resolve a
-    repo via ``<cache>/models--<org>--<name>/refs/main`` -> a ``snapshots/<hash>/`` dir;
-    with HF_HUB_OFFLINE=1 there is NO network round-trip and NO hash validation (verified
-    against huggingface_hub 0.36 — a synthetic 40-hex hash resolves identically to a real
-    commit), so a STABLE synthetic hash keyed on the repo id gives an idempotent,
-    collision-free (``otwarm:`` prefixed, never a real git sha) snapshot dir that re-syncs
-    skip-in-place on a ``--max-retries`` re-bring."""
+    repo via ``<cache>/models--<org>--<name>/refs/main`` -> a ``snapshots/<hash>/`` dir.
+    Under HF_HUB_OFFLINE=1 there is no hash validation, so a STABLE synthetic hash
+    keyed on the repo id gives an idempotent, collision-free (``otwarm:`` prefixed)
+    snapshot dir that re-syncs skip-in-place on a ``--max-retries`` re-bring.
+    """
     import hashlib
 
     return hashlib.sha1(("otwarm:" + model_path).encode()).hexdigest()
 
 
 def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
-    """In-region warm path for :func:`stage_model` (the 2026-07-13 80B bring-up fix).
-
-    WHY THIS EXISTS: the HF ``snapshot_download`` prestage pulls ~160 GB PER NODE from HF
-    Hub over the public internet, which is flaky — three 15/16 gang-join bring-up failures
-    in a day (r4a/r4b + the ``dc170428`` timeout band-aid) traced to a mid-download socket
-    hang. The CW pods natively carry creds + ``AWS_ENDPOINT_URL`` for the in-datacenter CW
-    object store (``s3://marin-us-east-02a``), so once the weights are SEEDED there once
-    (``scripts/iris/mirror_hf_to_s3.py``), each node can pull them in-region — fast +
-    reliable, zero HF egress.
+    """In-region warm path for :func:`stage_model`.
 
     Sync the FLAT weight/config/tokenizer files seeded at ``warm_source`` (an ``s3://``
     CW-object-store prefix, convention ``s3://marin-us-east-02a/models/<org>--<name>/``)
     INTO this node's HF hub cache under a synthetic-revision snapshot, so the offline FSDP
     ranks + vLLM engines resolve ``from_pretrained(<repo-id>)`` from the warm node-local
-    cache EXACTLY as they do after the HF prestage — ``model.path`` stays the repo-id, the
-    ranks are untouched. Returns True if the warm source existed + synced cleanly; False if
-    it is missing / empty / incomplete so the caller FALLS BACK to the HF ``snapshot_download``
-    prestage (today's behavior). Idempotent + resumable: size-skips files already present, so
-    a ``--max-retries`` re-bring re-validates cheaply.
+    cache — ``model.path`` stays the repo-id, the ranks are untouched.
 
-    Reuses the SAME boto3 + ``AWS_ENDPOINT_URL`` creds path the rendezvous / spill / term-
-    artifact writers use; ``_pin_boto3_s3_addressing_style`` (called before this in main())
-    already pinned virtual-hosted addressing for CW-R2, and we ALSO pass an explicit
-    botocore ``Config`` here so this call is correct even if invoked out of that order."""
+    Returns True if the warm source existed + synced cleanly; False if it is missing /
+    empty / incomplete so the caller falls back to the HF ``snapshot_download`` prestage.
+    Idempotent + resumable: size-skips files already present.
+
+    Reuses the SAME boto3 + ``AWS_ENDPOINT_URL`` creds path the rendezvous / spill /
+    term-artifact writers use; ``_pin_boto3_s3_addressing_style`` (called before this in
+    main()) already pinned virtual-hosted addressing for CW-R2, and we ALSO pass an
+    explicit botocore ``Config`` here so this call is correct even if invoked out of
+    order.
+    """
     if not warm_source or not warm_source.startswith("s3://"):
         _log(f"warm sync: warm_source {warm_source!r} is not an s3:// URI; skipping warm path")
         return False
@@ -292,31 +244,18 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
 def stage_model(model_path: str, warm_source: str | None = None) -> None:
     """Pre-download the policy model into this NODE's local HF cache on EVERY node.
 
-    WHY THIS EXISTS (the init-straggle bug, 2026-07-10): with the model resolved
-    ONLINE by HF repo-id (``trainer.policy.model.path=<org/name>``, no
-    HF_HUB_OFFLINE), each of the N*8 FSDP ranks independently pulls the ~160 GB
-    of weights from HF Hub inside ``FSDPPolicyWorkerBase.init_model``. On a
-    network-saturated cluster the per-rank variance blew out — slow ranks were
-    still in ``from_pretrained`` at 68 min while the lazy policy-PG NCCL comm-init
-    (the first fsdp2_load_full_state_dict broadcast) fired a c10d
-    ``store->get('0')`` on the fast ranks that timed out at the 20-min store
-    barrier, SIGKILLing the whole gang before global_step 1.
-
-    Fix (symmetric to ``stage_train_data``): the controller runs on EVERY node
-    before Ray bootstrap, so pre-download the weights ONCE PER NODE here (16 pulls,
-    not 128) into the node-local HF cache. The download runs in the controller's
-    pre-Ray phase where no collective barrier is active, so a slow pull can no
-    longer race the init barrier. With ``HF_HUB_OFFLINE=1`` set for the training
-    ranks (config extra_env), all 8 ranks on a node then read the pre-populated
-    node-local cache — uniform + fast, zero HF contention at init. Idempotent:
-    ``snapshot_download`` skips already-complete cached files, so a re-brought-up
-    gang (``--max-retries``) re-runs it as a cheap cache-validate.
+    The controller runs on every node before Ray bootstrap, so pre-download the
+    weights ONCE PER NODE here (N pulls, not N*8) into the node-local HF cache.
+    The download runs in the controller's pre-Ray phase where no collective
+    barrier is active. With ``HF_HUB_OFFLINE=1`` set for the training ranks
+    (config extra_env), all ranks on a node read the pre-populated cache.
+    Idempotent: ``snapshot_download`` skips already-complete cached files.
 
     The pod env carries ``HF_HUB_OFFLINE=1`` / ``TRANSFORMERS_OFFLINE=1`` for the
     ranks; this download MUST reach the Hub, so it runs ``snapshot_download`` in a
     SUBPROCESS whose env has both flags stripped (an in-process env-pop is too late —
-    huggingface_hub caches HF_HUB_OFFLINE into a module constant at import; see the
-    body). The ranks' env is untouched.
+    huggingface_hub caches HF_HUB_OFFLINE into a module constant at import). The
+    ranks' env is untouched.
     """
     if not model_path or model_path.startswith(("s3://", "gs://", "gcs://")) or os.path.isdir(model_path):
         # Nothing to pre-download: empty, an object-store URI (handled elsewhere),
@@ -324,14 +263,12 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
         _log(f"stage_model: skip (model_path={model_path!r} is empty/local/cloud)")
         return
 
-    # WARM PATH (2026-07-13): if a seeded in-region CW-S3 source exists, sync the weights
-    # from there (in-datacenter, reliable) into the node-local HF cache INSTEAD of pulling
-    # ~160 GB per node from HF Hub over the flaky public internet (the three r4a/r4b 15/16
-    # gang-join bring-up failures). On success the offline ranks + vLLM load from the warm
-    # cache exactly as after the HF prestage. On a missing/empty/incomplete source or ANY
-    # error we fall through to the HF snapshot_download prestage below (byte-identical to
-    # today). warm_source is None unless the launcher forwarded --model-warm-source, so an
-    # unconfigured launch skips this block entirely.
+    # WARM PATH: if a seeded in-region CW-S3 source exists, sync the weights from
+    # there (in-datacenter, reliable) into the node-local HF cache INSTEAD of pulling
+    # from HF Hub. On success the offline ranks + vLLM load from the warm cache as
+    # after the HF prestage. On a missing/empty/incomplete source or ANY error we fall
+    # through to the HF snapshot_download prestage below (byte-identical). warm_source
+    # is None unless the launcher forwarded --model-warm-source.
     if warm_source:
         try:
             if _warm_sync_model_from_s3(model_path, warm_source):
@@ -348,14 +285,11 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
 
     # Download in a SUBPROCESS with the offline flags stripped from ITS env. An
     # in-process os.environ.pop does NOT work here: huggingface_hub snapshots
-    # HF_HUB_OFFLINE into a module CONSTANT at IMPORT time, and the controller has
-    # already imported huggingface_hub, so clearing the env var afterward leaves the
-    # cached constant True -> snapshot_download still raises OfflineModeIsEnabled.
-    # A fresh child process re-reads the (cleaned) env at its own import. (This is
-    # exactly why stage_train_data — which shells out to a subprocess — works with the
-    # same env-pop, while stage_model, running in-process, did not: the 80b-next-cp1
-    # gang died here on 2026-07-10.) The child inherits HF_HOME/HF_HUB_CACHE, so it
-    # populates the SAME node-local cache the offline ranks then read.
+    # HF_HUB_OFFLINE into a module CONSTANT at IMPORT time, so clearing the env
+    # var afterward leaves the cached constant True -> snapshot_download raises
+    # OfflineModeIsEnabled. A fresh child process re-reads the (cleaned) env at
+    # its own import. The child inherits HF_HOME/HF_HUB_CACHE, so it populates
+    # the SAME node-local cache the offline ranks then read.
     child_env = {k: v for k, v in os.environ.items()
                  if k not in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")}
     child_env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # keep captured stderr bounded
@@ -367,15 +301,11 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     )
     _log(f"Pre-staging model on this node (rank {_rank()}/{_num_tasks()}): {model_path}")
     last_err = ""
-    # A stalled snapshot_download (mid-download socket hang — seen 2026-07-13 on r4a/r4b:
-    # one shard's `.incomplete` byte-frozen) used to block subprocess.run FOREVER, so this
-    # retry loop never advanced, the node never `ray start`ed, and the head hit its
-    # "Only N/16 Ray nodes joined within 1800s" gang-timeout → TERMINAL (--max-retries does
-    # NOT rescue gang-formation). A per-attempt timeout converts a stall into a retry; HF
-    # resumes the partial `.incomplete` shard on the next attempt, so a killed-mid-download
-    # attempt loses nothing (a false-positive timeout on a slow-but-progressing pull just
-    # resumes too). 600s comfortably covers a clean ~160 GB pull yet fits several retries
-    # inside the 1800s gang-join budget.
+    # A stalled snapshot_download (mid-download socket hang) blocks subprocess.run
+    # forever without a per-attempt timeout. HF resumes the partial `.incomplete`
+    # shard on the next attempt, so a killed-mid-download attempt loses nothing.
+    # 600s comfortably covers a clean ~160 GB pull yet fits several retries inside
+    # the 1800s gang-join budget.
     PRESTAGE_ATTEMPT_TIMEOUT_S = 600
     for attempt in range(1, 7):
         try:
@@ -444,12 +374,12 @@ def _fs_and_path(uri: str):
     discovery for the scheme (workload identity / instance creds / env keys).
 
     For ``s3://`` the CoreWeave object store (marin-us-east-02a) REQUIRES
-    virtual-hosted (hostname-based) addressing — path-style PutObject/
-    CreateMultipartUpload get rejected with ``PathStyleRequestNotAllowed``
-    (observed on the 80b-next-cp1 rendezvous + trace uploads, 2026-07-09). s3fs
-    otherwise defaults to path-style for a custom endpoint_url, so pin the
-    botocore ``addressing_style`` explicitly. The ``OT_AGENT_S3_ADDRESSING_STYLE``
-    env (default ``virtual``) allows an override for a path-only store (e.g. GCS)."""
+    virtual-hosted addressing — path-style PutObject/CreateMultipartUpload get
+    rejected with ``PathStyleRequestNotAllowed``. s3fs otherwise defaults to
+    path-style for a custom endpoint_url, so pin the botocore
+    ``addressing_style`` explicitly. The ``OT_AGENT_S3_ADDRESSING_STYLE`` env
+    (default ``virtual``) allows an override for a path-style store (e.g. GCS).
+    """
     import fsspec
 
     storage_options = None
@@ -464,28 +394,22 @@ def _pin_boto3_s3_addressing_style() -> None:
     """Pin virtual-hosted (hostname-based) S3 addressing for the boto3 code path,
     cluster-wide, via an AWS config file + ``AWS_CONFIG_FILE``.
 
-    WHY (boto3 companion to the fsspec/s3fs ``FSSPEC_S3_CONFIG_KWARGS`` + the
-    ``_fs_and_path`` rendezvous pin): the CoreWeave object store
-    (marin-us-east-02a / R2) REJECTS path-style S3 requests with
-    ``PathStyleRequestNotAllowed`` and requires virtual-hosted addressing.
-    Ray's object-spill IO workers (``ray._private.external_storage``
-    ``ExternalStorageSmartOpenImpl``) call a bare ``boto3.resource("s3")`` — with
-    NO botocore ``Config`` — in child processes WE never construct, so we cannot
-    pass ``addressing_style`` in code. botocore also has NO environment variable
-    for ``addressing_style`` (it is resolved ONLY from the shared-config file's
-    ``s3`` section; see botocore ``configprovider.py``). So we WRITE a minimal AWS
-    config file that sets ``s3.addressing_style`` and point ``AWS_CONFIG_FILE`` at
-    it. Because this runs before ``ray start`` (head + every worker) and mutates
-    ``os.environ``, every Ray subprocess / raylet IO worker / the training driver
-    inherits it and its ``boto3.resource("s3")`` picks up virtual addressing.
+    Companion to the fsspec/s3fs pin in ``_fs_and_path``: the CoreWeave object
+    store (marin-us-east-02a / R2) REJECTS path-style S3 requests with
+    ``PathStyleRequestNotAllowed``. Ray's object-spill IO workers call a bare
+    ``boto3.resource("s3")`` with NO botocore ``Config`` in child processes we
+    never construct, and botocore has NO env var for ``addressing_style`` (it is
+    resolved ONLY from the shared-config file's ``s3`` section). So we WRITE a
+    minimal AWS config file that sets ``s3.addressing_style`` and point
+    ``AWS_CONFIG_FILE`` at it. This runs before ``ray start`` (head + every
+    worker) so every Ray subprocess / raylet IO worker / the training driver
+    inherits it.
 
-    R2 credentials/region/endpoint come from env vars (``AWS_*_KEY`` /
-    ``AWS_REGION`` / ``AWS_ENDPOINT_URL``) INDEPENDENTLY of the config file, so a
-    minimal ``[default]`` profile with only the ``s3`` section does not disturb
-    credential discovery. Env-overridable via ``OT_AGENT_S3_ADDRESSING_STYLE``
-    (default ``virtual``; set ``path``/``auto`` for a path-style store). If an
-    operator already exported ``AWS_CONFIG_FILE`` (a real profile/creds file), we
-    RESPECT it and skip rather than clobber."""
+    R2 credentials/region/endpoint come from env vars independently of the config
+    file. Env-overridable via ``OT_AGENT_S3_ADDRESSING_STYLE`` (default
+    ``virtual``; set ``path``/``auto`` for a path-style store). If an operator
+    already exported ``AWS_CONFIG_FILE``, we RESPECT it and skip.
+    """
     style = os.environ.get("OT_AGENT_S3_ADDRESSING_STYLE", "virtual")
     existing = os.environ.get("AWS_CONFIG_FILE")
     if existing and os.path.exists(existing):
@@ -510,31 +434,23 @@ def _pin_boto3_s3_addressing_style() -> None:
 
 
 def ensure_fr_dump_dir() -> None:
-    """`mkdir -p` the NCCL flight-recorder dump directory on THIS node before torch init.
+    """``mkdir -p`` the NCCL flight-recorder dump directory on THIS node before torch init.
 
-    WHY THIS EXISTS (2026-07-11, /benjaminfeuer/80b-next-cp1 gs1-optimizer NCCL hang):
-    the 80B config enables the flight recorder (``TORCH_NCCL_DUMP_ON_TIMEOUT=1``) and
-    points the per-rank dump path at a JOB-SCOPED subdir via
-    ``TORCH_NCCL_DEBUG_INFO_TEMP_FILE`` / ``TORCH_FR_DUMP_TEMP_FILE`` (e.g.
-    ``/tmp/fr_dumps/<job>/nccl_fr_rank`` — torch appends the global rank). But NOTHING
-    created the parent ``/tmp/fr_dumps/<job>/``: torch's ``DebugInfoWriter`` is a plain
-    local ``std::ofstream`` that does NOT ``mkdir -p`` its parent, so on the collective
-    timeout every rank's dump SILENTLY failed to write (confirmed: the abort logged
-    ``[F711] … after attempting to dump debug info`` yet a filesystem-wide find for
-    ``nccl_fr_rank*`` on all 16 pods returned nothing) — we lost the one artifact that
-    would have fingerprinted the AWOL rank.
+    The FR dump path is set via ``TORCH_NCCL_DUMP_ON_TIMEOUT=1`` +
+    ``TORCH_NCCL_DEBUG_INFO_TEMP_FILE`` / ``TORCH_FR_DUMP_TEMP_FILE`` (a per-rank
+    FILENAME PREFIX; torch appends the global rank). torch's ``DebugInfoWriter``
+    is a plain ``std::ofstream`` that does NOT ``mkdir -p`` its parent, so on a
+    collective timeout every rank's dump silently fails to write.
 
-    This controller runs on EVERY node in the pre-Ray phase (before any FSDP/vLLM Ray
-    actor — and thus before any torch/NCCL init — on that node), and the FR dump path is
-    a NODE-LOCAL ``/tmp`` path shared by every rank/actor in this pod, so creating the
-    dir here once per node guarantees it exists before the first torch init. The dir is
-    DERIVED from the cvar (``dirname`` of the dump-path prefix), so it is robust to the
-    path changing per-job — no job name is hardcoded. Best-effort: a failure here must
-    never block bring-up (the FR dump is instrumentation, not correctness)."""
-    # TORCH_FR_DUMP_TEMP_FILE is the newer alias torch's fallback chain checks first;
-    # TORCH_NCCL_DEBUG_INFO_TEMP_FILE is the canonical name. Honor whichever is set
-    # (both to the same value in our configs). The value is a per-rank FILENAME PREFIX
-    # (torch appends the global rank), so the dir to create is its dirname.
+    This controller runs on EVERY node in the pre-Ray phase (before any
+    torch/NCCL init), so creating the dir here once per node guarantees it exists.
+    The dir is DERIVED from the cvar (``dirname`` of the dump-path prefix), so it
+    is robust to the path changing per-job. Best-effort: a failure here must never
+    block bring-up.
+    """
+    # TORCH_FR_DUMP_TEMP_FILE is the newer alias torch checks first;
+    # TORCH_NCCL_DEBUG_INFO_TEMP_FILE is the canonical name. The value is a per-rank
+    # FILENAME PREFIX (torch appends the global rank), so the dir to create is its dirname.
     dump_prefix = (
         os.environ.get("TORCH_FR_DUMP_TEMP_FILE")
         or os.environ.get("TORCH_NCCL_DEBUG_INFO_TEMP_FILE")
@@ -580,15 +496,12 @@ def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
     }
     fs, path = _fs_and_path(uri)
     # Bound the object-store PutObject with a hard per-attempt timeout via a DAEMON
-    # thread + join(timeout) + bounded retries/backoff. WHY: an unbounded s3fs/fsspec put
-    # here deterministically hangs the head (no connect/read timeout on the underlying
-    # client), and because it is invisible, every worker only discovers it at the 1800s
-    # rendezvous deadline.
-    # WHY a daemon thread and NOT a ThreadPoolExecutor: an executor's worker thread is
-    # NON-daemon, so even after we abandon a wedged put, Python's atexit `_python_exit`
-    # JOINS that thread forever at interpreter shutdown → the process can never exit →
-    # ZOMBIE (this bit CP4 v3). A daemon thread is NOT joined by `_python_exit`, so a
-    # wedged write can never block process exit; we simply abandon it after the timeout.
+    # thread + join(timeout) + bounded retries/backoff. An unbounded s3fs/fsspec put
+    # has no connect/read timeout and hangs the head invisibly. A daemon thread (NOT a
+    # ThreadPoolExecutor) is used because a non-daemon executor worker thread is JOINED
+    # by Python's atexit `_python_exit` forever at interpreter shutdown if abandoned,
+    # leaving a zombie process; a daemon thread is not joined, so a wedged write cannot
+    # block process exit.
     last_exc: BaseException | None = None
     for attempt in range(1, RENDEZVOUS_WRITE_ATTEMPTS + 1):
         t0 = time.time()
@@ -727,28 +640,18 @@ def clear_rendezvous(rendezvous_dir: str) -> None:
 # Ray port allocation on cw-us-east-02a — PIN every named system port OUTSIDE the
 # worker_ports range so Ray's own randomized agent ports can never collide with it.
 #
-# THE BUG: Ray assigns several system components (metrics_export, runtime_env_agent,
+# Ray assigns several system components (metrics_export, runtime_env_agent,
 # dashboard_agent_grpc, dashboard_agent_listen, node/object_manager) by picking a
-# RANDOM free port. By default it draws them from the SAME ephemeral zone as the
-# default worker_ports range (10002–19999), and Ray's own pre-start validation then
-# aborts the node when a random agent port lands inside worker_ports:
+# RANDOM free port from the same ephemeral zone as the default worker_ports range
+# (10002–19999), and Ray's pre-start validation aborts the node when a random agent
+# port lands inside worker_ports:
 #   ValueError: Ray component worker_ports is trying to use a port number <N>
 #   that is used by other components.
-# Observed on THREE different components across launches:
-#   - head:   metrics_export=19865        (grpmm-fix)
-#   - worker: runtime_env_agent=15731     (grpmm-fix3, head-only metrics pin in place)
-#   - worker: dashboard_agent_grpc=24543 + runtime_env_agent=28330  (grpmm-fix4)
-# grpmm-fix4 proved that merely SHIFTING worker_ports (to 20000–29999) does NOT help:
-# the random agent ports simply followed into the new range. The collision can be ANY
-# of Ray's randomized agent ports, on EITHER head or worker.
-#
-# THE FIX (deterministic, complete): keep worker_ports at Ray's DEFAULT 10002–19999
-# and PIN every agent port Ray would otherwise randomize to a fixed value in the low
-# 8xxx band — OUTSIDE 10002–19999 and distinct from gcs(6379)/dashboard(8265)/
-# client_server(10001). With no random port left to draw from the worker range, the
-# validation can never trip. Applied on BOTH head and worker (run_worker is where the
-# fix3/fix4 collisions hit). 8090 matches the repo precedent RAY_metrics_export_port=
-# 8090 in scripts/torch/kimi-k2-tracegen-run-v2.sh; the rest are adjacent free 8xxx.
+# Shifting worker_ports does NOT help — the random agent ports follow. The fix:
+# keep worker_ports at Ray's DEFAULT 10002–19999 and PIN every agent port Ray would
+# otherwise randomize to a fixed value in the low 8xxx band — OUTSIDE 10002–19999 and
+# distinct from gcs(6379)/dashboard(8265)/client_server(10001). Applied on BOTH head
+# and worker.
 RAY_METRICS_EXPORT_PORT = 8090
 RAY_RUNTIME_ENV_AGENT_PORT = 8092
 RAY_DASHBOARD_AGENT_GRPC_PORT = 8093
@@ -772,29 +675,23 @@ def _ray_port_flags() -> list[str]:
     ]
 
 
-# --- R2 object-store spilling (added 2026-06-28) -----------------------------------
-# WHY: Ray spills its object store to /tmp/ray/session*/ray_spilled_objects on LOCAL
-# disk when plasma (~95GB) overflows. The fully-async RL generator over-produces
-# rollouts during the slow (~55-min) first training step, so the spill grows ~370 G/h
-# to >1.6 TB and the kubelet EVICTS rank-0 on its ephemeral-storage limit -> gang
-# bounce. CoreWeave/iris task pods have R2 (Cloudflare S3-compatible) creds + endpoint
-# in env (AWS_ENDPOINT_URL / AWS_*_KEY / AWS_REGION=auto), and boto3 honors
-# AWS_ENDPOINT_URL natively, so we redirect Ray's spill to s3://marin-us-east-02a/... instead of
-# local disk. Validated 2026-06-28 in a running w13fix-r3 pod: with this exact config
-# Ray spilled 25 objects to R2 and 0 to /tmp (see ray._private.external_storage
-# ExternalStorageSmartOpenImpl, which does boto3.resource("s3") -> picks up the R2
-# endpoint from env). NOTE: requires boto3 in the rl env (baked into the gpu-rl image).
-# Set on the HEAD ONLY. `object_spilling_config` lives in Ray's `_system_config`, which
-# Ray REJECTS on a worker `ray start --address=...` ("System config parameters can only be
-# set on the head node" -> the worker's ray start exits 1 -> the coscheduled gang dies; this
-# bit both MoE relaunches 2026-06-28, the first runs on the boto3 image where the spill URI
-# was non-None on workers). The head's config propagates cluster-wide via GCS, and each
-# worker raylet still spills its OWN objects per-node — the smart_open backend appends
-# "_<node_id>" to the prefix at spill time so nodes never collide. So head-only is BOTH
-# required (Ray forbids it on workers) and sufficient (config + per-node suffix propagate).
-# Gate: OT_AGENT_RAY_SPILL_TO_R2 (default "1" = on); set to "0" to fall back to local
-# /tmp spilling. Spill prefix is derived per-job from --rendezvous-dir so runs and
-# task-retries within a run share one prefix without colliding across jobs.
+# --- R2 object-store spilling ----------------------------------------------------
+# Ray spills its object store to /tmp/ray/session*/ray_spilled_objects on LOCAL
+# disk when plasma overflows. The async RL generator over-produces rollouts during
+# the slow first training step, so the spill can grow past the kubelet's
+# ephemeral-storage limit and EVICT rank-0. CoreWeave task pods carry R2 (S3-compat)
+# creds + endpoint in env (AWS_ENDPOINT_URL / AWS_*_KEY / AWS_REGION=auto), so we
+# redirect Ray's spill to s3://marin-us-east-02a/... instead of local disk. Requires
+# boto3 in the rl env (baked into the gpu-rl image).
+#
+# Set on the HEAD ONLY. `object_spilling_config` lives in Ray's `_system_config`,
+# which Ray REJECTS on a worker `ray start --address=...` ("System config parameters
+# can only be set on the head node"). The head's config propagates cluster-wide via
+# GCS, and each worker raylet still spills its OWN objects per-node — the smart_open
+# backend appends "_<node_id>" to the prefix so nodes never collide.
+# Gate: OT_AGENT_RAY_SPILL_TO_R2 (default "1" = on); set to "0" for local /tmp.
+# Spill prefix is derived per-job from --rendezvous-dir so runs and task-retries
+# within a run share one prefix without colliding across jobs.
 RAY_SPILL_BUFFER_SIZE = 100 * 1024 * 1024  # 100MB multipart buffer (>=1MB recommended for remote)
 
 
@@ -806,10 +703,9 @@ def _ray_spill_uri(rendezvous_dir: str | None) -> str | None:
         return None
     if not rendezvous_dir or not rendezvous_dir.startswith("s3://"):
         return None
-    # SELF-GATE on boto3: Ray's smart_open spill backend imports boto3 directly, and it
-    # is NOT in the gpu-rl image's rl env until the Dockerfile.gpu-rl boto3 add is baked.
-    # On an image without boto3, return None -> clean fallback to local /tmp spill (no
-    # `ray start` crash). R2 spilling AUTO-ACTIVATES once the rebuilt image ships boto3.
+    # SELF-GATE on boto3: Ray's smart_open spill backend imports boto3 directly. On an
+    # image without boto3, return None -> clean fallback to local /tmp spill (no
+    # `ray start` crash). R2 spilling AUTO-ACTIVATES once the image ships boto3.
     try:
         import boto3  # noqa: F401
     except ImportError:
@@ -840,34 +736,18 @@ def _ray_spill_flags(spill_uri: str | None) -> list[str]:
     return [f"--system-config={system_config}"]
 
 
-# --- Ray cgroup-aware memory (added 2026-06-28) ------------------------------------
-# WHY: in a memory-cgroup-limited pod, Ray can read the HOST's physical RAM (~2 TB via
-# /proc/meminfo) instead of the --memory cgroup limit, and size its plasma object store
-# at the default ~30% of that (~600 GB). On top of FSDP `cpu_offload`'s params+optimizer
-# (also host RAM, OUTSIDE Ray's accounting) + the first training step's activations, that
-# overran the 1400 GiB container limit -> the OOM killer SIGKILLed an FSDP worker ->
-# NCCL-watchdog (1800s) gang death. Proven byte-exact 2026-06-28 on the 30B/35B MoE arms
-# (rank-0 cgroup memory.peak == memory.max == 1400 GiB). Fix: read the container's cgroup
-# limit and pass it to `ray start` as --memory, and BOUND the plasma store so it can't
-# balloon off a misread host figure — leaving the bulk of host RAM for cpu_offload.
+# --- Ray cgroup-aware memory ----------------------------------------------------
+# In a memory-cgroup-limited pod, Ray can read the HOST's physical RAM (~2 TB via
+# /proc/meminfo) instead of the --memory cgroup limit, and size its plasma object
+# store at the default ~30% of that (~600 GB). On top of FSDP `cpu_offload`'s
+# params+optimizer (also host RAM, OUTSIDE Ray's accounting) + the first training
+# step's activations, that overran the container limit -> the OOM killer SIGKILLed
+# an FSDP worker. Fix: read the container's cgroup limit and pass it to `ray start`
+# as --memory, and BOUND the plasma store so it can't balloon off a misread host
+# figure — leaving the bulk of host RAM for cpu_offload.
 RAY_OBJECT_STORE_CAP_GIB = 96  # bounded plasma; default can be ~30% of *detected* RAM (huge if host is misread)
 # Per-job override (env) for the plasma cap, in GiB. Default = RAY_OBJECT_STORE_CAP_GIB
-# (96) -> UNSET is byte-identical to the prior hard-coded behavior for every existing job.
-# WHY THIS EXISTS (2026-07-10, 80B v5 @98k dispatch-put stall,
-# agent_logs/2026-07-09_80b_v5_98k_nccl_wedge_kill.md "ROOT CAUSE DEFINITIVELY PINNED"):
-# the R3-resident forward dispatch (dispatch.py MeshDispatch.dispatch) ray.put()s one
-# ~4.6 GB per-dp-group chunk into the DRIVER's (head node's) local plasma. The 8 dp-group
-# chunks total only ~37 GB (fits in 96 GiB with room to spare), but at the FIRST training
-# forward the head's plasma is already ~91 GiB full of PRIOR-pipeline live objects, so the
-# store has room for only ONE more chunk: dp=0's chunk goes in + its forward pins it for
-# ~798 s; dp=1's ray.put() then blocks on eviction/R2-spill (can't evict dp=0's in-use
-# chunk) and trips the 600 s bounded-put timeout (d13c3586) -> the run dies at global_step 1.
-# Because the 8 chunks (37 GB) are NOT themselves the overflow, waving/bounding the dispatch
-# (candidate fixes b/c) does NOT help; only giving the store headroom ABOVE the ~91 GiB
-# lingering baseline does. Raising the cap to ~160 GiB clears 91+37 = 128 GiB with margin.
-# The min(., cgroup//8) OOM guard below still applies as the HARD ceiling (so a too-large
-# value is clamped, never an OOM risk); the H100 head/policy nodes have ~1.3 TB cgroup with
-# ~180 GB used by cpu_offload -> ~1 TB host headroom, so a 160 GiB plasma is safe.
+# (96). The min(., cgroup//8) OOM guard below still applies as the HARD ceiling.
 _RAY_STORE_CAP_ENV = "OT_AGENT_RAY_OBJECT_STORE_CAP_GIB"
 
 
@@ -939,8 +819,8 @@ def ray_start_head(head_ip: str, ray_port: int, spill_uri: str | None = None) ->
 
 def ray_start_worker(head_ip: str, ray_port: int, node_ip: str, spill_uri: str | None = None) -> None:
     # NOTE: do NOT pass _ray_spill_flags here — `--system-config` is head-only in Ray
-    # (see the R2-spill block comment). The head's object_spilling_config propagates to
-    # this worker's raylet via GCS; the worker still spills its own objects per-node.
+    # (see the R2-spill block comment). The head's config propagates to this worker via
+    # GCS; the worker still spills its own objects per-node.
     cmd = [
         _ray_bin(), "start",
         f"--address={head_ip}:{ray_port}",
@@ -966,14 +846,13 @@ def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int, rewrite_
     """Block until the Ray cluster reports ``expected_nodes`` alive nodes.
 
     ``rewrite_cb`` (head only): a no-arg callable invoked on every poll to RE-PUBLISH
-    the rendezvous so its ``written_at`` stays fresh. WHY: a worker pod on a cold node
-    can start >RENDEZVOUS_FRESHNESS_SLACK (60s) after the head wrote the rendezvous;
-    its ``poll_rendezvous(min_written_at=worker_start)`` then rejects the head's
-    one-shot rendezvous as "stale" and waits forever for a rewrite, while the head
-    waits forever for that 4th node — a mutual deadlock (observed: ep8 diag, task 3
-    started 3 min late on a cold node). Rewriting each poll keeps the timestamp ahead
-    of any late worker's freshness threshold without weakening the prior-ATTEMPT
-    protection (a stale file from a dead PRIOR attempt is still never refreshed).
+    the rendezvous so its ``written_at`` stays fresh. A worker pod on a cold node can
+    start >RENDEZVOUS_FRESHNESS_SLACK (60s) after the head wrote the rendezvous; its
+    ``poll_rendezvous(min_written_at=worker_start)`` would then reject the head's
+    one-shot rendezvous as "stale" and wait forever while the head waits for that node —
+    a mutual deadlock. Rewriting each poll keeps the timestamp ahead of any late worker's
+    freshness threshold without weakening the prior-ATTEMPT protection (a stale file from
+    a dead PRIOR attempt is still never refreshed).
     """
     import ray
 
@@ -1012,14 +891,13 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
     BEFORE the pod is reaped. Best-effort; never raises; bounded to finish inside
     the k8s grace period.
 
-    WHY: an iris/k8s-level termination (ephemeral-storage EVICTION, cgroup OOM,
-    VRAM OOM) sends the controller a plain SIGTERM and leaves NOTHING in the iris
+    An iris/k8s-level termination (ephemeral-storage EVICTION, cgroup OOM, VRAM
+    OOM) sends the controller a plain SIGTERM and leaves NOTHING in the iris
     finelog — and the per-node Ray logs are deleted with the pod, so the real
-    cause is unrecoverable post-mortem (seen 2026-06-28, rl-q36-35b-w13fix: rank-0
-    EVICTED for ephemeral-storage>512Gi mid-training-step; no traceback anywhere,
-    k8s event TTL'd in ~1h). This persists disk-hogs + GPU mem + df + dmesg-OOM,
-    keyed by task id, to ``<rendezvous_dir>/term_artifacts/`` so the next probe
-    reads the true cause (disk vs VRAM-OOM vs RAM-OOM)."""
+    cause is unrecoverable post-mortem. This persists disk-hogs + GPU mem + df +
+    dmesg-OOM, keyed by task id, to ``<rendezvous_dir>/term_artifacts/`` so the
+    next probe reads the true cause (disk vs VRAM-OOM vs RAM-OOM).
+    """
     if not rendezvous_dir:
         return
     import subprocess as _sp
@@ -1056,18 +934,16 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
         _log(f"[term-capture] upload FAILED ({exc}); emitting inline:\n{summary}")
 
 
-# --- Ray session-log -> object-store sync (added 2026-07-13) -----------------------
-# WHY: the per-actor Ray WORKER logs (/tmp/ray/session_*/logs/worker-*.{out,err},
+# --- Ray session-log -> object-store sync -----------------------------------------
+# The per-actor Ray WORKER logs (/tmp/ray/session_*/logs/worker-*.{out,err},
 # raylet.out, ...) are the only place the FSDP policy / rollout actor stdout+tracebacks
-# land — the iris finelog AGGREGATES only what reaches the head, and a pod GC / eviction
-# DELETES these node-local logs with the pod, so a post-mortem loses the real per-rank
-# cause (this is the 80B gs1 host-RAM-OOM + NCCL-desync debug pain: the wedged rank's
-# worker log died with its pod). This periodically (+ on SIGTERM) uploads THIS node's
-# session logs to the object store under the job's rendezvous prefix, keyed by node id,
-# reusing the SAME fsspec/boto3 + AWS_ENDPOINT_URL creds path the rendezvous / spill /
-# term-artifact writers already use (_fs_and_path). Per-node: each pod writes its own
-# logs under <rendezvous_dir>/ray_session_logs/<node_id>/. Gate: OT_AGENT_RAY_LOG_SYNC
-# (default "1"); interval OT_AGENT_RAY_LOG_SYNC_INTERVAL_S (default 300s).
+# land — the iris finelog aggregates only what reaches the head, and a pod GC / eviction
+# DELETES these node-local logs with the pod. This periodically (+ on SIGTERM) uploads
+# THIS node's session logs to the object store under the job's rendezvous prefix, keyed
+# by node id, reusing the SAME fsspec/boto3 + AWS_ENDPOINT_URL creds path the rendezvous
+# / spill / term-artifact writers already use (_fs_and_path). Per-node: each pod writes
+# its own logs under <rendezvous_dir>/ray_session_logs/<node_id>/. Gate:
+# OT_AGENT_RAY_LOG_SYNC (default "1"); interval OT_AGENT_RAY_LOG_SYNC_INTERVAL_S (300s).
 RAY_LOG_SYNC_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # skip a single >2 GiB log (pathological)
 
 
@@ -1151,9 +1027,9 @@ def run_head(args: argparse.Namespace, train_argv: list[str]) -> int:
 
     # Install the SIGTERM/SIGINT handler + termination-artifact capture at the TOP of
     # bring-up (BEFORE clear_rendezvous / ray_start_head / rendezvous write), so a reap
-    # ANYWHERE in bring-up produces the py-spy/stack/term artifact instead of dying
-    # silently. `process` is None during bring-up; the handler skips the driver kill
-    # until the training driver is launched below (closure reads the current value).
+    # ANYWHERE in bring-up produces the term artifact instead of dying silently.
+    # `process` is None during bring-up; the handler skips the driver kill until the
+    # training driver is launched below (closure reads the current value).
     process = None
 
     def _shutdown(signum, _frame) -> None:
@@ -1341,7 +1217,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help="HF repo-id of the policy model to pre-download into the node-local HF "
         "cache on EVERY node before Ray starts. Set by the launcher when the config "
         "runs HF_HUB_OFFLINE=1, so the FSDP ranks load from a warm node-local cache "
-        "instead of each racing HF Hub at init (the 80B init-straggle fix).",
+        "instead of each racing HF Hub at init.",
     )
     parser.add_argument(
         "--model-warm-source",
@@ -1351,8 +1227,8 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "populated with the model weights. When set AND --prestage-model is set, the "
         "controller SYNCS the weights from here into the node-local HF cache (fast, "
         "in-datacenter) instead of pulling them from HF Hub. Missing/empty/incomplete "
-        "source -> clean fallback to the HF snapshot_download prestage (byte-identical to "
-        "the pre-warm-path behavior). Set by the launcher (auto-derived from the repo id).",
+        "source -> clean fallback to the HF snapshot_download prestage. Set by the "
+        "launcher (auto-derived from the repo id).",
     )
     args, train_argv = parser.parse_known_args()
     # argparse leaves the `--` separator out of train_argv; strip a leading one
@@ -1377,24 +1253,19 @@ def _print_env_snapshot() -> None:
 def main() -> None:
     args, train_argv = parse_args()
     _print_env_snapshot()
-    # Pin virtual-hosted S3 addressing for the boto3 path (Ray object-spill IO
-    # workers) BEFORE any `ray start`, on head + every worker — CoreWeave R2
-    # rejects path-style with PathStyleRequestNotAllowed. Companion to the
-    # fsspec FSSPEC_S3_CONFIG_KWARGS + the _fs_and_path rendezvous pin.
+    # Pin virtual-hosted S3 addressing for the boto3 path (Ray object-spill IO workers)
+    # BEFORE any `ray start`, on head + every worker — CoreWeave R2 rejects path-style.
     _pin_boto3_s3_addressing_style()
     # Ensure the NCCL flight-recorder dump dir exists on THIS node BEFORE any torch/NCCL
-    # init (head + every worker), so a collective-timeout FR dump actually writes instead
-    # of silently failing — torch's DebugInfoWriter does not mkdir -p its parent (the
-    # 80b-next-cp1 gs1 hang lost its dump this way). See ensure_fr_dump_dir.
+    # init, so a collective-timeout FR dump actually writes. See ensure_fr_dump_dir.
     ensure_fr_dump_dir()
     # Stage the task dataset on THIS node before Ray bootstrap (head + every worker).
     # Without this, only rank-0 has the extracted tasks and the rollout workers die
-    # with FileNotFoundError on task.toml (see stage_train_data docstring).
+    # with FileNotFoundError on task.toml. See stage_train_data docstring.
     if args.train_data:
         stage_train_data(args.train_data)
     # Pre-download the policy weights into the node-local HF cache BEFORE Ray, so the
-    # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1 instead of each racing
-    # HF Hub inside init_model (the init-straggle store->get barrier kill). See stage_model.
+    # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
     if args.prestage_model:
         stage_model(args.prestage_model, warm_source=(args.model_warm_source or None))
     rank = _rank()

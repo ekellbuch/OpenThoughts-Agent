@@ -4,9 +4,8 @@ Runs the chat half directly (5 prompts x 2 models -> 10 HTML) and then drives
 the agentic half (start shim, run swe-agent if Docker+install present, collect,
 render). All HTML lands in config.OUTPUT_DIR (the foundation_models path).
 
-Because the Qwen3.5 weights require transformers>=5 (the otagent env is pinned
-to 4.57.3 and must not be disturbed), the MODEL-EXECUTING scripts should be run
-with the dedicated `tokviz-rt` interpreter:
+The Qwen3.5 weights require transformers>=5, so the MODEL-EXECUTING scripts
+should be run with the dedicated `tokviz-rt` interpreter:
 
     /Users/benjaminfeuer/miniconda3/envs/tokviz-rt/bin/python run_all.py
 

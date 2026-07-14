@@ -3,10 +3,9 @@
 
 This seeds the CW object store (``s3://marin-us-east-02a/models/<org>--<name>/``) with a
 model's weights so the RL controller's warm path can pull them IN-REGION on every node
-instead of cold-pulling ~160 GB per node from HF Hub (the flaky path behind the 80B
-r4a/r4b gang-join bring-up failures, 2026-07-13). It MUST run on cw-us-east-02a — that
-is where the object store lives and where the pod gets BOTH HF egress AND the CW-S3 creds
-+ ``AWS_ENDPOINT_URL`` (the iris-task-env Secret); the GCP TPU pools (mirror_hf_to_gcs's
+instead of cold-pulling from HF Hub. It MUST run on cw-us-east-02a — that is where the
+object store lives and where the pod gets BOTH HF egress AND the CW-S3 creds +
+``AWS_ENDPOINT_URL`` (the iris-task-env Secret); the GCP TPU pools (mirror_hf_to_gcs's
 target) cannot reach marin-us-east-02a.
 
 Reuses the exact iris-client submission machinery from ``rl.cloud.launch_rl_iris`` (same

@@ -161,14 +161,10 @@ def _eval_jobs_for_model(client, model_id: str) -> List[Dict[str, Any]]:
     sorted MOST-RECENT-FIRST by :func:`_recency_key`.
 
     Callers dedup a benchmark's multiple evals by taking the FIRST element
-    for that benchmark (``_pick_eval_pair`` / ``list_evals_for_model``), so
-    this ordering is what enforces "when a model has >1 eval on the same
-    benchmark, use the most recent one". The sort is done in Python rather
-    than via the DB ``.order`` because PostgREST's ``desc`` default is
-    NULLS FIRST, which would float a null-``ended_at`` row above a genuinely
-    newer completed eval; :func:`_recency_key` maps null → oldest to prevent
-    that. For rows with populated timestamps this reproduces the previous
-    ``ended_at`` desc order byte-for-byte.
+    for that benchmark. The sort is done in Python (not via DB ``.order``)
+    because PostgREST's ``desc`` default is NULLS FIRST, which would float a
+    null-``ended_at`` row above a genuinely newer completed eval;
+    :func:`_recency_key` maps null → oldest to prevent that.
     """
     resp = (
         client.table("sandbox_jobs")
@@ -501,10 +497,7 @@ def resolve(
             # baseline_eval_ts: prefer the BASE model's training_end
             # (when the snapshot we forked from finished training), then
             # its creation_time, then fall back to the current model's
-            # training_start. Documented bug in the original resolver was
-            # that we used model_row.training_start, which on this schema
-            # is often set to the post-RL job-end time → identical to
-            # training_end → overlay markers collapsed onto each other.
+            # training_start.
             ts_source = None
             if base_row:
                 if base_row.get("training_end"):

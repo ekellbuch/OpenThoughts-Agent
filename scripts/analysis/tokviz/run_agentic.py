@@ -56,8 +56,8 @@ BUNDLED_CONFIG_FC = SWEAGENT_REPO / "config" / "sweagent_0_7" / "07_fcalling.yam
 OVERRIDE_CONFIG = HERE / "sweagent_config.yaml"
 
 # Parser variants: (key, bundled config, output filename suffix).
-#   thought_action -> agentic_NN_<which>.html        (existing names, kept)
-#   function_calling -> agentic_NN_<which>_funccall.html  (new)
+#   thought_action -> agentic_NN_<which>.html
+#   function_calling -> agentic_NN_<which>_funccall.html
 VARIANTS = [
     ("thought_action", BUNDLED_CONFIG_TA, ""),
     ("function_calling", BUNDLED_CONFIG_FC, "_funccall"),

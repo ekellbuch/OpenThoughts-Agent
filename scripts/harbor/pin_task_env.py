@@ -233,8 +233,7 @@ def rewrite_dockerfile_with_pins(
                     except StopIteration:
                         return s
                     new_tokens: list[str] = []
-                    # We previously appended apt-mark hold for replaced names, but we now
-                    # rely solely on pkg=version and remove holds for speed/simplicity.
+                    # Rely solely on pkg=version for pinning (holds removed for speed/simplicity).
                     for i, t in enumerate(tokens):
                         if i <= idx:
                             new_tokens.append(t)

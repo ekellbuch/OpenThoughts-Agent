@@ -25,9 +25,8 @@ The pipeline maps to the four research questions:
                            summary table.
 
     Q4 (eval impact):      solve_rate_by_context  +  the Q1+Q3 outputs
-                           Did behavior shifts move trace distribution
-                           into bins that have different solve rates? If
-                           not, eval-stable behavior change is expected.
+                           Solve/timeout/error rates binned by context
+                           length.
 
 Example:
 
@@ -114,12 +113,10 @@ def _build_steps(args: argparse.Namespace) -> List[Step]:
     #
     # TWO complementary probes (each `--llm-judge-max-pairs` tasks):
     #   1. MOST-CHANGED (behavior-delta) → Q1_llm_judge_most_changed/ — the
-    #      tasks whose behavior shifted most. Biased toward where the policy
-    #      changed; answers "when behavior changed, was it for the better?"
+    #      tasks whose behavior shifted most.
     #   2. RANDOM (uniform, without replacement, DISJOINT from #1 via its
-    #      selected_tasks.json) → Q1_llm_judge_random/ — answers "did behavior
-    #      change in general?" The disjoint random draw is the unbiased control
-    #      for the most-changed sample's selection bias.
+    #      selected_tasks.json) → Q1_llm_judge_random/ — uniform control for
+    #      the most-changed sample's selection bias.
     if args.baseline_eval and args.post_rl_eval and args.llm_judge:
         mc_md = out / "Q1_llm_judge_most_changed" / "report.md"
         steps.append(
@@ -180,14 +177,6 @@ def _build_steps(args: argparse.Namespace) -> List[Step]:
                 optional=True,
             )
         )
-
-    # NOTE: Q1.rl_summary (formerly summarize_conversations on RL-time
-    # traces) is intentionally NOT a step here. summarize_conversations.py
-    # only accepts a positional JSONL path (no HF id, no --output flag),
-    # and its outputs — per-row token/turn/reward stats — are already
-    # covered by Q2.temporal_trace_analysis (binned + overall) and
-    # Q1.behavioral_delta (per-dataset macros). Re-add if a JSONL-only
-    # workflow comes back.
 
     # Q2: temporal_trace_analysis on the RL-time traces.
     if args.rl_traces:
@@ -617,7 +606,7 @@ def run(args: argparse.Namespace) -> int:
                 continue  # CLI already set; don't clobber
             setattr(args, attr, value)
             applied.append(f"--{attr.replace('_', '-')}={value}")
-        # Persist the resolver report alongside the pipeline plan for transparency.
+        # Persist the resolver report alongside the pipeline plan.
         (args.output_dir / "auto_resolve.json").write_text(
             json.dumps(
                 {

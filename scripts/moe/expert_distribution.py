@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Reference profiler for MoE expert-call distribution (Qwen3-MoE family).
 
-This is the GROUND-TRUTH baseline for MoE routing diagnostics. It runs the
-model through plain HuggingFace `transformers` and records, per layer, which
-experts the router selects for every token — completely independent of the
-vLLM capture path. Use it as the trusted reference to compare against the
-(suspect) vLLM R3-capture: if the vLLM numbers disagree with this profiler on
-the same model + inputs, the vLLM capture is wrong, not the routing.
+Runs the model through plain HuggingFace `transformers` and records, per
+layer, which experts the router selects for every token — independent of
+any vLLM capture path. Use as the trusted reference to compare against
+vLLM-side routing captures on the same model + inputs.
 
 Mechanism
 ---------
@@ -14,9 +12,7 @@ For a Qwen3-MoE model every sparse decoder layer holds a
 `Qwen3MoeSparseMoeBlock` whose `.gate` is a Linear producing the per-token
 router logits of shape (num_tokens, num_experts). We register a forward hook on
 each `.gate` and recompute the top-k expert selection exactly as the model does
-(softmax over logits -> topk). This is more robust than relying on
-`output_router_logits=True` (which only stacks logits for the aux-loss at train
-time and needs labels). If a different MoE arch is loaded we fall back to
+(softmax over logits -> topk). If a different MoE arch is loaded we fall back to
 hooking any module whose name ends in `.gate` and emits a 2-D logits tensor
 whose last dim == num_experts.
 

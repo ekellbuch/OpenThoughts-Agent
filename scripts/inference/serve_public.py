@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 """serve_public.py — front a `marin-serve` endpoint with a public Pinggy URL (vibe testing).
 
-`marin-serve` (marin#6556) stands up vLLM on an Iris TPU slice and exposes it ONLY
-through the auth-gated Iris controller proxy — reachable at
-``http://127.0.0.1:<port>/proxy/serve.<endpoint>/`` via your controller SSH tunnel,
-i.e. only to people with cluster access. This wraps that into option-1 of the
-public-endpoint discussion on marin#6545: it launches (or attaches to) marin-serve,
-parses the local dashboard URL, and opens a **Pinggy** tunnel from our endpoint bank
-in front of that local port, yielding a shareable public ``https://…a.pinggy.link``
-URL anyone on the internet can hit.
+`marin-serve` stands up vLLM on an Iris TPU slice and exposes it only through
+the auth-gated Iris controller proxy — reachable at
+``http://127.0.0.1:<port>/proxy/serve.<endpoint>/`` via your controller SSH
+tunnel, i.e. only to people with cluster access. This launches (or attaches to)
+marin-serve, parses the local dashboard URL, and opens a **Pinggy** tunnel from
+our endpoint bank in front of that local port, yielding a shareable public
+``https://…a.pinggy.link`` URL anyone on the internet can hit.
 
 It reuses ``hpc.pinggy_utils.PinggyTunnel`` for the tunnel and the
 ``notes/ot-agent/pinggy_bank.md`` pairs for the persistent URLs/tokens.
 
-⚠️  SECURITY: the public URL is UNAUTHENTICATED — it inherits the no-auth localhost
-view of the controller proxy, so your tunnel becomes the open front door. This is for
-throwaway *vibe testing*, not a production service. Mitigations baked in: a short
-default ``--timeout-hours`` (marin-serve self-stops the slice), and one-shot pinggy
-pairs you can rotate. Don't point it at anything sensitive; tear it down when done.
+⚠️  SECURITY: the public URL is UNAUTHENTICATED — it inherits the no-auth
+localhost view of the controller proxy. For throwaway vibe testing only, not a
+production service. A short default ``--timeout-hours`` (marin-serve self-stops
+the slice) and one-shot pinggy pairs you can rotate are baked in; tear it down
+when done.
 
 Examples
 --------
-  # Launch the Delphi 9.7B SFT canary (marin#6545) + a public URL, pinggy pair 1:
+  # Launch the Delphi 9.7B SFT canary + a public URL, pinggy pair 1:
   python scripts/inference/serve_public.py \
       laion/delphi-1e22-p33m67-32p07b-lr0_67-54770ae7-wc386k_lr1e5-sft \
       --tpu v6e-4 --region europe-west4 \
@@ -56,10 +55,10 @@ from hpc.pinggy_utils import PinggyConfig, PinggyTunnel  # noqa: E402
 DEFAULT_BANK = os.environ.get(
     "PINGGY_BANK", str(Path.home() / "Documents" / "notes" / "ot-agent" / "pinggy_bank.md")
 )
-# marin-serve invocation. The console script isn't registered by the marin root `uv sync`
-# (workspace-member scripts don't land in .venv/bin), so default to the module form, which
-# works whenever the marin package is importable. May be a multi-token command (shlex-split).
-# Override with --marin-serve-bin / MARIN_SERVE_BIN (e.g. an actual `marin-serve` on PATH).
+# marin-serve invocation. Default to the module form (the console script isn't
+# registered by the marin root `uv sync`); works whenever the marin package is
+# importable. May be a multi-token command (shlex-split). Override with
+# --marin-serve-bin / MARIN_SERVE_BIN (e.g. an actual `marin-serve` on PATH).
 _MARIN_PY = str(Path.home() / "Documents" / "marin" / ".venv" / "bin" / "python")
 DEFAULT_MARIN_SERVE = os.environ.get(
     "MARIN_SERVE_BIN", f"{_MARIN_PY} -m marin.inference.quick_serve_cli"
@@ -121,10 +120,10 @@ def build_marin_cmd(args) -> list[str]:
 def verify_public(persistent_url: str, base_path: str) -> tuple[bool, str]:
     """Probe the public /v1/models via the REAL Pinggy edge, bypassing local DNS.
 
-    Some ISPs (e.g. Altice/Optimum) poison ``*.a.pinggy.link`` to a dead IP, so a
-    probe using the system resolver hangs even when the tunnel is live for everyone
-    else. Resolve the edge via 1.1.1.1 and force it with ``curl --resolve`` so this
-    check reflects the tunnel's real state, not the launch host's broken DNS.
+    Some ISPs poison ``*.a.pinggy.link`` to a dead IP, so a probe using the
+    system resolver hangs even when the tunnel is live. Resolve the edge via
+    1.1.1.1 and force it with ``curl --resolve`` so this check reflects the
+    tunnel's real state, not the launch host's broken DNS.
 
     Returns (ok, detail) where ok is True iff /v1/models returns HTTP 200.
     """

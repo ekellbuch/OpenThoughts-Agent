@@ -13,7 +13,7 @@ Outputs:
 - A reward/errors vs steps plot
 
 Usage:
-    # Agentic (default — UNCHANGED behavior):
+    # Agentic (default):
     python parse_skyrl_metrics.py <log_folder> <output_folder>
     python parse_skyrl_metrics.py /path/to/logs /path/to/results --trace_jobs_dir /path/to/trace_jobs
 
@@ -143,10 +143,10 @@ def extract_standard_metrics(log_content: str) -> list[dict[str, Any]]:
 
     Standard SkyRL runs with logger=console emit one line per train step of the form:
         (skyrl_entrypoint pid=...)<ANSI> ... WANDB_MIRROR kind=train step=N metrics={...}<ANSI>
-    where the metrics dict is DOUBLE-QUOTED JSON (unlike the agentic single-quoted py-dict
-    consumed by extract_metrics_blocks). We strip ANSI codes + the Ray actor prefix, then
-    json.loads the dict. ALL present keys are kept (no hardcoded pass@k key — standard runs
-    use reward/avg_pass_at_16, but the suffix is n_samples_per_prompt-dependent).
+    where the metrics dict is DOUBLE-QUOTED JSON. We strip ANSI codes + the Ray
+    actor prefix, then json.loads the dict. ALL present keys are kept (no
+    hardcoded pass@k key — standard runs use reward/avg_pass_at_16, but the
+    suffix is n_samples_per_prompt-dependent).
 
     Returns a list of dicts (one per train step), each carrying every key in the JSON dict
     (e.g. trainer/global_step, reward/avg_raw_reward, reward/avg_pass_at_*, policy/policy_entropy,
@@ -197,14 +197,12 @@ def select_best_standard_checkpoint(
         <run_dir>/exports/global_step_<N>/policy/<weights>
         <run_dir>/latest_ckpt_global_step.txt
 
-    EMA math is lifted VERBATIM from the rl-agentic-job-cleanup skill (format-agnostic):
-      - reward = reward/avg_raw_reward, keyed by trainer/global_step, first-seen wins
+    Trailing-5 EMA selection over reward/avg_raw_reward:
+      - reward keyed by trainer/global_step, first-seen wins
       - trailing-5 EMA: alpha = 1/3; EMA_n = alpha*r_n + (1-alpha)*EMA_{n-1}, EMA_1 = r_1
       - eligible saved-aligned steps = multiples of save_every, excluding the FIRST save
         (s >= 2*save_every), pick max EMA among them
-    Differences vs agentic: the reward lines are the double-quoted standard WANDB_MIRROR
-    lines, the available-ckpt set is exports/global_step_<N>/, and selection is CAPPED at
-    latest_ckpt_global_step.txt.
+      - selection is CAPPED at latest_ckpt_global_step.txt
 
     Returns a dict with the chosen step, the EMA table, eligibility info, and diagnostics.
     """

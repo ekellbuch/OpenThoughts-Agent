@@ -35,10 +35,7 @@ except Exception:  # pragma: no cover - diagnostic script
 
 
 def _fallback_extract_reasoning_content(response: dict) -> str | None:
-    """Fallback extraction when Harbor utilities aren't available.
-
-    Mimics what Harbor's _extract_reasoning_content should do.
-    """
+    """Fallback extraction when Harbor utilities aren't available."""
     choice = response.get("choices", [{}])[0]
     message = choice.get("message", {})
 
@@ -74,7 +71,7 @@ def _fallback_format_reasoning_block(reasoning: str | None) -> str:
 
 
 def _build_messages(user_prompt: str, parser: str) -> list[dict]:
-    """Reproduce the Terminus-2 style system/user message layout."""
+    """Build Terminus-2 style system/user messages."""
     system_template = dedent(
         """\
         You are an AI assistant executing terminal-style tasks. Respond using the {parser}
@@ -374,7 +371,7 @@ def _print_comparison(results: dict[str, dict]) -> None:
             preview = reasoning[:80].replace("\n", " ") + "..." if len(reasoning) > 80 else reasoning.replace("\n", " ")
             print(f"             Preview: {preview}")
 
-    # Check for the specific bug: direct has it, harbor doesn't
+    # Compare direct vs harbor extraction
     direct_resp = results.get("direct", {})
     harbor_resp = results.get("harbor", {})
 

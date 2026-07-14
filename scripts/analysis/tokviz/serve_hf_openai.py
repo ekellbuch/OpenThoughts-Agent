@@ -9,10 +9,9 @@ The chat-completions handler accepts the standard ``messages`` array, applies
 the Qwen chat template (add_generation_prompt=True), tokenizes, runs
 ``model.generate``, and returns an OpenAI-shaped response.
 
-CRITICAL: every incoming request's *fully-templated* prompt string is appended
-to a JSONL log (config.SHIM_LOG) BEFORE generation. This captures the exact
-tokenizer-input for the agentic half, which is far more reliable than trying to
-reconstruct it from swe-agent ``.traj`` files afterward.
+Every incoming request's *fully-templated* prompt string is appended to a
+JSONL log (config.SHIM_LOG) BEFORE generation, capturing the exact
+tokenizer-input for the agentic half.
 
 Select instruct vs base model with the env var TOKVIZ_SERVE_MODEL = "instruct"
 (default) or "base", or pass --model base on the command line.
@@ -169,10 +168,8 @@ def make_app(which: str) -> FastAPI:
         templated, borrowed_tmpl = _template(messages, tools)
         prompt_ids = tok(templated, add_special_tokens=False)["input_ids"]
 
-        # Capturing the PROMPT is the whole point. Build the log record up front
-        # and write it in `finally` so that even if generation raises (or a
-        # downstream swe-agent parse of our response later fails), the exact
-        # templated prompt -- including any <tools> block -- is preserved. The
+        # Build the log record up front and write it in `finally` so the
+        # templated prompt is preserved even if generation raises. The
         # generated ids/text are filled in if generation succeeds.
         record: Dict[str, Any] = {
             "ts": time.time(),
@@ -202,11 +199,8 @@ def make_app(which: str) -> FastAPI:
                     pad_token_id=tok.pad_token_id
                     if tok.pad_token_id is not None
                     else tok.eos_token_id,
-                    # Explicit stop-token set so <|im_end|> halts generation.
-                    # Without this, generate() falls back to model.config.eos
-                    # (Qwen3.5-2B has no generation_config.json) which is NOT
-                    # <|im_end|> -> the model hallucinates a fake <tool_response>
-                    # + a 2nd <tool_call> past its own turn end. See stop_ids().
+                    # Explicit stop-token set so <|im_end|> halts generation
+                    # (model.config.eos is NOT <|im_end|>). See stop_ids().
                     eos_token_id=stop_ids(tok, model),
                 )
             gen_ids = out[0].tolist()[len(prompt_ids):]

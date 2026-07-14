@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Submit ``mirror_hf_to_gcs.py`` as an iris job for one or more HF repos.
 
-Marin has no CPU-only worker pools as of 2026-05-22 — every iris worker
-is TPU-typed — so the mirror runs on the smallest TPU slice we can ask
-for (v6e-4). The TPU sits idle; we're paying for the worker's CPU /
-RAM / network. Acceptable for a one-shot ~30-60 min mirror, but don't
-schedule this against a busy queue.
+Marin has no CPU-only worker pools — every iris worker is TPU-typed — so the
+mirror runs on the smallest TPU slice we can ask for (v6e-4). The TPU sits idle;
+we're paying for the worker's CPU / RAM / network.
 
 Usage::
 

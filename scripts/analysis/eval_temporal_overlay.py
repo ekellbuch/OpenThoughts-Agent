@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
 """Overlay eval-time reward markers on the RL-time temporal axis.
 
-Extends ``temporal_trace_analysis.py``: that script bins RL training
-traces by timestamp; this one additionally takes one or more
-post-training eval trace datasets (one per RL checkpoint) and plots
+Takes post-training eval trace datasets (one per RL checkpoint) and plots
 their summary rewards as points on the same time axis, anchored at the
 checkpoint's wall-clock time.
-
-Answers research question (3) at the time-series level: **do behavioral
-changes observed during RL persist when the policy is run on held-out
-eval tasks?** If the eval markers track the RL reward curve, the gains
-generalize. If they plateau below or diverge, the gains were either
-overfitting or non-stationary.
 
 Usage:
     python -m scripts.analysis.eval_temporal_overlay \\
@@ -91,8 +83,8 @@ def _parse_eval_spec(spec: str) -> Tuple[str, Optional[datetime], Optional[str]]
 
     The trailing ``:<iso-timestamp>`` is recognized via an anchored regex
     that accepts ``HH:MM``, ``HH:MM:SS``, ``HH:MM:SS.us``, and any of those
-    with a ``+HH:MM`` / ``Z`` UTC offset. This means the source / label
-    portion can safely contain colons too (rare, but defensible).
+    with a ``+HH:MM`` / ``Z`` UTC offset. The source / label portion can
+    safely contain colons.
 
     Examples:
       ``penfever/foo``                       → (source, None, None)
@@ -160,10 +152,8 @@ def _plot(rl_centers, rl_means, eval_markers, output_path: Path, bin_hours: floa
     if rl_centers:
         ax.plot(rl_centers, rl_means, "-o", label=f"RL-time reward (bin={bin_hours}h)", color="#36c", markersize=4)
 
-    # Group markers by timestamp so we can horizontally jitter co-located
-    # ones (a common case: baseline-eval-ts auto-resolved to the same
-    # post-RL training_end timestamp). Without jitter, the baseline marker
-    # is rendered exactly behind the post-RL marker and becomes invisible.
+    # Group markers by timestamp so co-located ones can be horizontally
+    # jittered (without jitter, overlapping markers hide each other).
     plotted = [m for m in eval_markers if m["timestamp"] is not None and m["mean_reward"] is not None]
     by_ts: Dict[datetime, List[Dict[str, Any]]] = defaultdict(list)
     for m in plotted:

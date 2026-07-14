@@ -27,24 +27,16 @@ def stop_ids(tok, model=None) -> List[int] | None:
     """Build a model-agnostic stop-token-id SET for ``generate(eos_token_id=...)``.
 
     ``model.generate()`` derives its stop token from the *generation-config /
-    model.config* eos, NOT from ``tokenizer.eos_token_id``. Qwen3.5-2B ships **no
-    ``generation_config.json``**, so generation fell back to
-    ``model.config.eos_token_id`` -- which is NOT ``<|im_end|>`` (248046). The
-    model correctly emitted ``<|im_end|>`` to end its turn, but generation didn't
-    stop: it ran to ``max_new_tokens`` and hallucinated the rest of the
-    conversation (fake ``<tool_response>``, a second ``<tool_call>``, etc.).
-
-    The set is built robustly so it works for ANY model, never narrower than what
-    the model itself intends:
+    model.config* eos, NOT from ``tokenizer.eos_token_id``. The set is built
+    so it works for ANY model, never narrower than what the model itself
+    intends:
       * the tokenizer's own ``eos_token_id``;
       * any known cross-family turn-/sequence-end special string that resolves to
         a real (non-unk) id (Qwen ``<|im_end|>``, Gemma ``<turn|>``, Llama
         ``<|eot_id|>``, ...);
       * the model's authoritative ``generation_config.eos_token_id`` (int or list)
         when a model is supplied -- e.g. Gemma 4 ships ``[1, 106, 50]`` where 106
-        is ``<turn|>``. Folding this in guarantees we never DROP the real
-        turn-ender (passing a narrower explicit set than the model's own config
-        would itself reintroduce the hallucination bug on Gemma).
+        is ``<turn|>``.
     Missing/unk ids are filtered, duplicates removed.
     """
     ids = set()

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Diff behavioral metrics + failure-mode distributions between two trace datasets.
 
-Answers research question (1): **What model behaviors are changing as a
-result of RL?** Run this with the pre-RL trace dataset (or the SFT-only
-eval traces) as ``--before`` and the post-RL trace dataset as ``--after``.
+Run with the pre-RL trace dataset (or the SFT-only eval traces) as
+``--before`` and the post-RL trace dataset as ``--after``.
 
 The script:
 - Loads both trace datasets via the shared :func:`scripts.analysis.utils.load_traces`
@@ -116,8 +115,7 @@ def summarize(label: str, traces: Sequence[Trace]) -> Summary:
             fail_set.add(task)
 
     # Behavioral feature means. For ratio fields we average per-trace ratios
-    # (None-skipping) which is more faithful than dividing sums — a trace
-    # with no tool responses shouldn't drag the error rate down to 0.
+    # (None-skipping) rather than dividing sums.
     behavioral: Dict[str, Optional[float]] = {}
     for field_name in SCALAR_BEHAVIORAL_FIELDS:
         values = [getattr(t.behavioral, field_name) for t in traces]

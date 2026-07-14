@@ -2,10 +2,6 @@
 
 Model IDs are kept here as clearly-marked constants so they are trivial to swap
 if the chosen repos ever disappear from the Hugging Face Hub.
-
-Both IDs below were VERIFIED to resolve on the Hub on 2026-05-27 via
-``huggingface_hub.model_info`` and ``AutoTokenizer.from_pretrained`` --
-no substitution was necessary.
 """
 
 from __future__ import annotations
@@ -14,7 +10,7 @@ import os
 from pathlib import Path
 
 # --------------------------------------------------------------------------- #
-# MODEL IDS  (verified present on HF Hub 2026-05-27)
+# MODEL IDS
 # --------------------------------------------------------------------------- #
 INSTRUCT_MODEL_ID = os.environ.get("TOKVIZ_INSTRUCT_MODEL", "Qwen/Qwen3.5-2B")
 BASE_MODEL_ID = os.environ.get("TOKVIZ_BASE_MODEL", "Qwen/Qwen3.5-2B-Base")

@@ -4,18 +4,16 @@
 Runs ``tests/gpu/test_e2e_moe_rl_step.py`` (Qwen1.5-MoE-A2.7B-Chat, EP=2xFSDP=2
 trainer colocated with an EP=2 vLLM engine, 4 GPUs / 1 NODE) on the prod gpu-rl
 image (torch 2.11), with the MarinSkyRL clone at /opt/skyrl checked out to a
-chosen ref (default: ac44079, the order-correct grouped-expert gather fix).
+chosen ref (default: ac44079).
 
 The test's DIRECT weight-equality gate (test_e2e_moe_rl_step.py:401-457) reads the
 trainer's post-step HF expert weights via the SAME _gather_tensor path the fix
 touches and compares byte-exact to the vLLM engine readback, for experts spanning
-BOTH EP shards. PASS = ~fp32 epsilon; the bug (scrambled experts on 2.11) shows as
-a large per-expert max-abs.
+BOTH EP shards. PASS = ~fp32 epsilon.
 
 This reuses launch_rl_iris.py's IrisClient.submit machinery (image, secrets, gang)
 but with a CUSTOM in-pod command (pytest + the skyrl-ref checkout + an explicit
-in-pod torch.__version__ echo — the test only exercises the real
-_StridedShard.is_shard()==False bug on torch 2.11).
+in-pod torch.__version__ echo).
 
 1 node only. No >2-node job. Self-terminating (the test exits, the job ends).
 
@@ -59,8 +57,8 @@ PRIORITY = "interactive"
 # `(_StridedShard, Shard)` composite), syncs into an EP=2 vLLM engine via the
 # fixed `_gather_tensor` -> `broadcast_to_inference_engines`, and asserts post-sync
 # responses match pre-sync (the synced-policy coherence gate). It does NOT run a
-# training forward, so it sidesteps the HF-eager `qwen2_moe` forward crash that
-# blocks test_e2e_moe_rl_step on this image — while exercising the SAME gather.
+# training forward, so it sidesteps the HF-eager `qwen2_moe` forward crash on this
+# image — while exercising the SAME gather.
 TEST_MODULE = "tests.gpu.test_expert_parallel_inference"
 TEST_FUNC = "test_ep_weight_sync_grouped"
 # Active vehicle: the sync-and-compare DIAGNOSTIC (no generation; value-compares the
@@ -130,8 +128,8 @@ def build_command(skyrl_ref: str | None) -> list[str]:
         f"export SKYRL_HOME={shlex.quote(SKYRL_HOME)}; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "
         f"export VLLM_USE_V1=1; "
-        # Hard-gate: STOP if the pod is not torch 2.11 (the bug is 2.11-only; a 2.9
-        # pod would pass even buggy and prove nothing).
+        # Hard-gate: STOP if the pod is not torch 2.11 (the test only exercises
+        # the bug on 2.11; a 2.9 pod would pass even buggy and prove nothing).
         f"{torch_check}"
         f"cd {shlex.quote(skyrl_train_dir)}; "
         # The test module does `import pytest` at top (only uses pytest.skip, which

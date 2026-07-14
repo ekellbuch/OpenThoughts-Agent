@@ -68,9 +68,8 @@ def generate() -> dict:
                 models[model_id] = entry
 
             # Layer 3: @profile standalones from the eval subsystem's variants.
-            # These are WHOLESALE REPLACES in load_model_registry — emitted VERBATIM
-            # (the variant fields exactly as stored, NOT base+variant). The migration
-            # stored full @profile entries verbatim for this reason.
+            # These are WHOLESALE REPLACES in load_model_registry — emitted
+            # VERBATIM (the variant fields exactly as stored, NOT base+variant).
             variants = eval_sub.get("variants") or {}
             for profile, variant_fields in variants.items():
                 if variant_fields:

@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """Copy one or more GCS prefixes into an S3-compatible bucket, one file at a time.
 
-Designed as a workaround for the missing GCS HMAC keys that vLLM's
-``runai_streamer`` requires. Iris workers have native GCS read auth via
-workload identity, and we have AWS-style S3 creds for the LAION /
-mmlaion bucket at Jülich — so we can pull from GCS (gcsfs) and push to
-S3 (boto3) in a streaming script, never holding more than one shard on
-local disk.
+Iris workers have native GCS read auth via workload identity, and we have AWS-style
+S3 creds for the LAION / mmlaion bucket at Jülich — so we pull from GCS (gcsfs) and
+push to S3 (boto3) in a streaming script, never holding more than one shard on local
+disk.
 
-Idempotent: skips files already present at the destination with a
-matching size.
+Idempotent: skips files already present at the destination with a matching size.
 
 Usage::
 

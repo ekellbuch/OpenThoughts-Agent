@@ -6,10 +6,6 @@ Invoked from the launcher's bash bootstrap *after* ``uv sync`` and
 already applied) and prints a one-line status so the iris-job log makes
 the applied state obvious.
 
-Pin-and-fork is the long-term answer for any patch that lives here for
-more than a few weeks; this script is the "ship now, deal upstream
-later" hatch.
-
 Patches currently applied
 -------------------------
 

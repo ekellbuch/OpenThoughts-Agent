@@ -91,19 +91,14 @@ def _cpu_tag() -> str:
     """Stable short tag for the host CPU, used to namespace the XLA cache.
 
     The JAX persistent compile cache hashes the HLO graph + target hardware,
-    but NOT the host CPU sub-revision. XLA's lowering passes that produce
-    host-side glue code (collectives, runtime, buffer placement) can emit
-    AVX-512 vs AVX-256 paths depending on the CPU the lowering machine had.
-    Two hosts with the SAME model+TPU but DIFFERENT CPU microarchs would
-    hash identical → one writes, the other reads → wrong-execution bug
-    (`device_put AssertionError` we hit on 2026-05-26, see
-    [[xla-persistent-cache-cross-host-poison]]).
-
-    Mitigate by namespacing the cache subdir per CPU model. Read
-    /proc/cpuinfo's ``model name`` line (the marketing string is the best
-    proxy for microarch we get without parsing CPUID), hash it. Return
-    "unknown" on platforms without /proc (mac dev hosts; safe — they'll
-    just share one "unknown" subdir, never poisoning real workers).
+    but NOT the host CPU sub-revision. XLA's lowering passes can emit AVX-512
+    vs AVX-256 host-side glue depending on the lowering machine's CPU; two
+    hosts with the SAME model+TPU but DIFFERENT CPU microarchs would hash
+    identical and poison each other's cache. Namespacing the cache subdir by
+    CPU model avoids that. Reads /proc/cpuinfo's ``model name`` line (the
+    best microarch proxy without parsing CPUID), hashes it. Returns
+    "unknown" off-GCP (laptop/CI hosts share one subdir, never poisoning
+    real workers).
     """
     try:
         with open("/proc/cpuinfo") as f:
@@ -140,16 +135,12 @@ def _setup_xla_cache(model: Optional[str]) -> None:
     it up. The env export reaches every subprocess we spawn (vllm serve,
     ray workers, engine cores).
 
-    When the launcher did not set a base, fall back to this VM's own
+    When the launcher did not set a base, falls back to this VM's own
     region-local bucket resolved from instance metadata
-    (:func:`region_local_output_prefix`) — the compile cache is disposable, so
-    recomputing it against the region the job is actually running in is strictly
-    better than a cross-region default and, unlike Harbor's trace ``jobs_dir``,
-    does not need a submit-time-stable location. Stays a no-op off-GCP (no
-    metadata region) so laptop/CI runs don't fail.
+    (:func:`region_local_output_prefix`). No-op off-GCP (no metadata
+    region) so laptop/CI runs don't fail.
 
-    Explicit ``OT_AGENT_XLA_CACHE_BASE=disabled`` opts out entirely.
-    Idempotent: re-running with the same base is harmless.
+    ``OT_AGENT_XLA_CACHE_BASE=disabled`` opts out entirely. Idempotent.
     """
     base = os.environ.get("OT_AGENT_XLA_CACHE_BASE", "").strip()
     if base.lower() == "disabled":
@@ -386,10 +377,8 @@ def build_vllm_command(args: argparse.Namespace, extra_args: List[str]) -> List[
 
     # Remote (object-store) model dir => vLLM needs the Run:ai model streamer to
     # read weights over the S3/GCS-compat endpoint. Auto-inject --load-format
-    # runai_streamer when the model is an s3://|gs:// URI and nothing already set
-    # a load-format (this is the offline pre-cache serve path; env aliases the
-    # MARIN_HMAC/LAION creds onto AWS_* in hpc.iris.env). A local HF path/id is
-    # untouched -> byte-identical to before for the normal serve path.
+    # runai_streamer when the model is an s3://|gs:// URI and no load-format is
+    # already set. A local HF path/id is untouched.
     if model.startswith(("s3://", "gs://")) and not any(
         str(a).startswith(("--load-format", "--load_format")) for a in cmd
     ):
@@ -497,9 +486,7 @@ def run_head(args: argparse.Namespace, extra_args: List[str]) -> int:
 
     # On iris task retry (preemption), the rendezvous file from a previous
     # attempt still points at a now-dead head VM. Purge it before starting
-    # the new Ray head so worker ranks don't race-read stale data. The
-    # freshness check in poll_rendezvous is the backstop; this is the
-    # primary defense.
+    # the new Ray head so worker ranks don't race-read stale data.
     if num_tasks > 1 and args.rendezvous_dir:
         clear_rendezvous(args.rendezvous_dir)
 

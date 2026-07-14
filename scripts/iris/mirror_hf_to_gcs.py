@@ -41,10 +41,7 @@ from pathlib import Path
 #
 # .py files are REQUIRED for models with `trust_remote_code=true` whose
 # config.json has an `auto_map` block pointing at e.g.
-# `configuration_<arch>.py` / `modeling_<arch>.py`. Skipping them
-# caused MiniMax-M2.7-AWQ to fail engine init with
-# "OSError: ... does not appear to have a file named configuration_minimax_m2.py"
-# on 2026-05-23.
+# `configuration_<arch>.py` / `modeling_<arch>.py`.
 INCLUDE_PATTERNS = (
     ".safetensors",
     ".json",

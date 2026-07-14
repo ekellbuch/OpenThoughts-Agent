@@ -57,7 +57,7 @@ The compute nodes are a **minimal install**; "treat bare-metal jobs as the excep
 
 Only two for now, both via Pyxis/Enroot on `beta`:
 1. **SFT with Axolotl** (aarch64 + Blackwell container).
-2. **MoE pretraining with Marin** (initialized-MoE pretrain). How the Marin team runs MoE pretraining lives in the **Marin GitHub issues** — search them via `/Users/benjaminfeuer/Documents/mumwelt`.
+2. **MoE pretraining with Marin** (initialized-MoE pretrain). How the Marin team runs MoE pretraining lives in the **Marin GitHub issues** — search the local Marin mirror via the mumwelt skills (see `.claude/projects/mum/mum.md`; prefer `marin-research`).
 
 ## Support / docs
 

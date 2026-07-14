@@ -1,23 +1,21 @@
 #!/usr/bin/env python
 """Submit the EP=8 CROSS-NODE, NON-CIRCULAR weight-vs-disk diagnostic on CoreWeave.
 
-The decisive measurement for the MoE token-salad (Class W). Brings up ONLY the FSDP
-grouped+EP policy worker at the PROD MoE factorization EP=8 x FSDP=2 = 16 GPU, laid
-out 4 nodes x 4 GPU/node so the 8 EP ranks of a group STRADDLE >=2 physical nodes
-(verified in-job, not assumed). NO inference engine, NO rollout, NO Daytona. At gs0
-(untrained base weights) it gathers layer-0's grouped experts.w1/w2/w3 via the REAL
-on-GPU ``_gather_tensor`` (= ``gather_dtensor_strided_safe`` over the
-``(_StridedShard(fsdp), Shard(ep))`` composite) and compares each expert row to the
-BASE model's on-disk HF checkpoint (``safetensors.safe_open``) — a reference path that
-NEVER touches the EP gather. NON-circular (fixes the prior EXP2 which compared two
-traversals of the SAME gather).
+Brings up ONLY the FSDP grouped+EP policy worker at the PROD MoE factorization
+EP=8 x FSDP=2 = 16 GPU, laid out 4 nodes x 4 GPU/node so the 8 EP ranks of a group
+STRADDLE >=2 physical nodes (verified in-job, not assumed). NO inference engine, NO
+rollout, NO Daytona. At gs0 (untrained base weights) it gathers layer-0's grouped
+experts.w1/w2/w3 via the REAL on-GPU ``_gather_tensor`` (=
+``gather_dtensor_strided_safe`` over the ``(_StridedShard(fsdp), Shard(ep))`` composite)
+and compares each expert row to the BASE model's on-disk HF checkpoint
+(``safetensors.safe_open``) — a reference path that NEVER touches the EP gather.
 
 Multi-node: reuses launch_rl_iris's exact submission machinery (image, leafgroup gang,
 secrets, Ray rendezvous via start_rl_iris_controller.py). The MODIFIED fsdp_worker.py
 (the new ``diag_ep8_*`` worker methods) + the diag driver are UNTRACKED local edits in
-MarinSkyRL; we do NOT push (supervisor owns commits). So we base64-inject BOTH into
-every pod's /opt/skyrl checkout before running, then rank 0 runs the diag as the Ray
-driver attached to the cross-node cluster.
+MarinSkyRL; we do NOT push. So we base64-inject BOTH into every pod's /opt/skyrl
+checkout before running, then rank 0 runs the diag as the Ray driver attached to the
+cross-node cluster.
 
 Usage:
     set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
@@ -63,8 +61,8 @@ DISK_PER_NODE = "512GB"
 SKYRL_LOCAL = Path("/Users/benjaminfeuer/Documents/MarinSkyRL/skyrl-train")
 _FSDP_WORKER = (SKYRL_LOCAL / "skyrl_train/workers/fsdp/fsdp_worker.py",
                 "skyrl_train/workers/fsdp/fsdp_worker.py")
-# fsdp_utils.py carries gather_dtensor_strided_safe (added ac44079, NOT in the baked
-# 78d83a5 image); the injected fsdp_worker imports it. Inject so the gather resolves.
+# fsdp_utils.py carries gather_dtensor_strided_safe (NOT in the baked image);
+# the injected fsdp_worker imports it. Inject so the gather resolves.
 _FSDP_UTILS = (SKYRL_LOCAL / "skyrl_train/distributed/fsdp_utils.py",
                "skyrl_train/distributed/fsdp_utils.py")
 _VLLM_ENGINE = (SKYRL_LOCAL / "skyrl_train/inference_engines/vllm/vllm_engine.py",
@@ -77,7 +75,7 @@ _RAY_WRAP = (SKYRL_LOCAL / "skyrl_train/inference_engines/ray_wrapped_inference_
 
 # Diag registry: name -> {module, inject files, default geometry}. Select with --diag.
 DIAGS = {
-    # gather-only (CLEAN, run #1): EP=8 cross-node policy gather vs disk.
+    # gather-only: EP=8 cross-node policy gather vs disk.
     "gather": {
         "module": "tests.gpu.diag_ep8_weight_disk_ref",
         "inject": [_FSDP_WORKER, _FSDP_UTILS,

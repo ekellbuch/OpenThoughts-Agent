@@ -4,14 +4,11 @@
 Fetches a trace dataset, bins rows by timestamp, and computes comparative
 statistics across time bins to track agent improvement over training.
 
-In addition to the legacy reward / turns / error-rate per-bin metrics,
-this script tracks the same behavioral features extracted by
-:mod:`scripts.analysis.behavioral_delta`: tool-call frequency, tool-error
-rate, think-token ratio, response verbosity, code-block density, and
-self-correction frequency. Each behavioral feature is rendered as its own
-small-multiple subplot on the same time axis as the reward curve, so the
-attribution question — "did reward shift because of a behavior change?" —
-becomes visually answerable in one figure.
+Tracks reward / turns / error-rate per-bin, plus the behavioral features
+extracted by :mod:`scripts.analysis.behavioral_delta`: tool-call frequency,
+tool-error rate, think-token ratio, response verbosity, code-block density,
+and self-correction frequency. Each behavioral feature is rendered as its
+own small-multiple subplot on the same time axis as the reward curve.
 """
 
 from __future__ import annotations

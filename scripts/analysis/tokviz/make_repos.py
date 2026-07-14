@@ -5,9 +5,6 @@ Each repo gets:
   * a test file that fails because of the bug,
   * an ISSUE.md describing the problem in plain language,
   * an initialized git repo with one commit (swe-agent expects a git repo).
-
-These are intentionally trivial so a 2B model has a chance, and so the whole
-thing stays fully local (no network, no Docker image build needed for setup).
 """
 
 from __future__ import annotations

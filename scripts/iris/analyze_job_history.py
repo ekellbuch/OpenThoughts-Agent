@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Pull the COMPLETE log history for an iris job and produce summary statistics.
 
-Log acquisition reads finelog directly rather than paginating ``iris job logs
---since-ms`` time windows (which were pathologically slow on long jobs). For a
-logical job we:
+Log acquisition reads finelog directly. For a logical job we:
 
   1. Enumerate the authoritative attempt/generation set from the iris controller
      SQLite (``task_attempts`` joined through ``tasks``/``jobs`` on
@@ -19,11 +17,9 @@ logical job we:
      archived it) we FAIL LOUDLY, listing the missing ``(log_key, window)``,
      unless ``--allow-incomplete`` is passed.
 
-The completeness contract is non-negotiable: the script either returns every log
-row across every attempt/generation or fails identifying the gap. The merged,
-filtered stream is cached to ``/tmp/iris_history_<job>.filtered.log`` (coverage
-result alongside in ``.coverage.json``) so re-runs are fast; ``--refresh``
-re-fetches.
+The merged, filtered stream is cached to ``/tmp/iris_history_<job>.filtered.log``
+(coverage result alongside in ``.coverage.json``) so re-runs are fast;
+``--refresh`` re-fetches.
 
 Three sections of stats are computed:
   §1 preemption count + time-to-preempt distribution

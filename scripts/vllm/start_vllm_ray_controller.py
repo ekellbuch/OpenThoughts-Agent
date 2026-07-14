@@ -66,11 +66,9 @@ def _release_torch_memory() -> None:
 def _discover_cli_flags() -> set[str]:
     cmd = [sys.executable, "-m", "vllm.entrypoints.openai.api_server", "--help"]
     try:
-        # Subprocess timeout: vllm-tpu's --help import path triggers libtpu /
-        # XLA bring-up which can hang for minutes on a cold worker. 60s is
-        # generous for the GPU vLLM (~5-10s warm) and lets us fall back to
-        # the assume-supported path before the TPU import deadlocks the
-        # whole controller.
+        # vllm-tpu's --help import path triggers libtpu/XLA bring-up which can
+        # hang for minutes on a cold worker; 60s lets us fall back to the
+        # assume-supported path before a TPU import deadlock.
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
     except Exception as exc:  # pragma: no cover - best effort
         print(
@@ -90,11 +88,9 @@ def _supported_flags() -> set[str]:
     # ``VLLM_SKIP_FLAG_DISCOVERY=1`` short-circuits the ``vllm --help`` probe.
     # The iris+TPU path sets this because importing vllm-tpu cold-bootstraps
     # libtpu inside a subprocess.run, which can hang for >5 min on the first
-    # invocation and (worse) deadlock the parent controller with no diagnostic
-    # output. The fallback "empty set" means our launcher assumes every flag
-    # is supported and emits it unconditionally. That's the right behavior
-    # for vLLM 0.20.0 (TPU) and current GPU builds — every flag the launcher
-    # emits has been in the OpenAI API server for many releases.
+    # invocation and deadlock the parent controller with no diagnostic output.
+    # The fallback "empty set" means the launcher assumes every flag it emits
+    # is supported and emits it unconditionally.
     if os.environ.get("VLLM_SKIP_FLAG_DISCOVERY") == "1":
         return set()
     return _discover_cli_flags()
@@ -103,7 +99,6 @@ def _supported_flags() -> set[str]:
 # Flags that the CUDA vLLM api_server accepts but the vLLM-TPU api_server
 # rejects with "unrecognized arguments". When VLLM_SKIP_FLAG_DISCOVERY=1 we
 # can't probe the real argparse, so we have to know these statically.
-# Verified against vllm-tpu==0.20.0 (Stage-C smoke logs, 2026-05-21).
 _TPU_UNSUPPORTED_API_SERVER_FLAGS = frozenset({
     "--ray-address",
     "--swap-space",
@@ -125,16 +120,13 @@ def _is_tpu_env() -> bool:
 
 def _flag_supported(flag: str) -> bool:
     # On TPU we cannot run the vllm --help probe (libtpu cold-bootstrap
-    # deadlocks the subprocess). We still need to filter out the few flags
-    # that the CUDA vLLM api_server accepts but the TPU one rejects — otherwise
-    # the api_server child process exits immediately with "unrecognized
-    # arguments".
+    # deadlocks the subprocess). Filter out the few flags the CUDA vLLM
+    # api_server accepts but the TPU one rejects, or the api_server child
+    # exits immediately with "unrecognized arguments".
     if _is_tpu_env() and flag in _TPU_UNSUPPORTED_API_SERVER_FLAGS:
         return False
     if os.environ.get("VLLM_SKIP_FLAG_DISCOVERY") == "1":
-        # Assume yes for everything else: every flag the launcher emits has
-        # been a stable vLLM API for several releases. See _supported_flags()
-        # docstring.
+        # Assume yes for everything else.
         return True
     return flag in _supported_flags()
 
@@ -302,8 +294,7 @@ def main() -> None:
     # iris/TPU shortcut is in effect. ``--swap-space 0`` is the prime
     # offender: CUDA vLLM accepts swap_space=0 to mean "disable CPU swap"
     # but vllm-tpu doesn't model swap at all and the CLI parser refuses
-    # the unknown flag. Same idea applies to any future TPU-incompatible
-    # knobs we might add to the GPU YAML schema.
+    # the unknown flag.
     if os.environ.get("VLLM_SKIP_FLAG_DISCOVERY") == "1":
         _TPU_UNACCEPTED = {"--swap-space"}
         filtered: List[str] = []
@@ -322,10 +313,10 @@ def main() -> None:
             filtered.append(arg)
         extra_args = filtered
 
-    # NOTE: RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES and RAY_NOSET_CUDA_VISIBLE_DEVICES
-    # must be set BEFORE the Ray cluster is started (in the sbatch template), not here.
-    # Setting them here is too late - Ray actors have already been spawned with modified
-    # CUDA_VISIBLE_DEVICES. See universal_*gen.sbatch.
+    # RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES and RAY_NOSET_CUDA_VISIBLE_DEVICES
+    # must be set BEFORE the Ray cluster is started (in the sbatch template), not
+    # here — setting them here is too late (Ray actors already spawned with
+    # modified CUDA_VISIBLE_DEVICES).
 
     print("vLLM controller environment snapshot:")
     for key in (
@@ -384,15 +375,13 @@ def main() -> None:
     if extra_args:
         print(f"  (pass-through args: {' '.join(extra_args)})")
     # Flush before Popen so the launch line lands in iris logs even if the
-    # child segfaults during startup (e.g. libtpu / XLA C++ aborts before
-    # Python has a chance to write a traceback).
+    # child segfaults during startup before Python writes a traceback.
     sys.stdout.flush()
     sys.stderr.flush()
 
     # Capture stderr to a pipe so quick startup failures get surfaced even
-    # when the parent's stdout is buffered. We tee both streams to the
-    # parent in a background thread; if Popen survives, the thread keeps
-    # streaming until the child exits.
+    # when the parent's stdout is buffered; tee both streams to the parent
+    # in a background thread until the child exits.
     process = subprocess.Popen(
         cmd,
         env=env,

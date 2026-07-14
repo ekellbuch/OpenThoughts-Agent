@@ -438,9 +438,8 @@ def _build_config_json(s3_config: Optional[S3StorageConfig]) -> str:
     Returns:
         JSON string for CONFIG_JSON environment variable.
     """
-    # Base config with correct service names
-    # IMPORTANT: Use camelCase keys to match Go struct `key` tags (used by koanf for YAML/JSON merging)
-    # The `json` tags are only used during final unmarshal, but koanf stores keys using `key` tag format
+    # Base config with correct service names.
+    # camelCase keys match the Go struct `key` tags used by koanf for YAML/JSON merging.
     config = {
         "database": {
             "postgres": {
@@ -475,10 +474,8 @@ def _build_config_json(s3_config: Optional[S3StorageConfig]) -> str:
     }
 
     if s3_config:
-        # Use external S3-compatible storage
-        # NOTE: awsS3Bucket must be endpoint + bucket, NOT with extra path suffix!
-        # JuiceFS manages its own directory structure using fsName (beta9-fs).
-        # Format: https://endpoint:port/bucket (no extra path segments)
+        # Use external S3-compatible storage.
+        # awsS3Bucket = endpoint + bucket (no extra path; JuiceFS uses fsName for internal paths).
         juicefs_bucket_url = f"{s3_config.endpoint_url}/{s3_config.bucket_name}"
 
         logger.info(f"[CONFIG] Using EXTERNAL S3 storage (not LocalStack)")
@@ -523,8 +520,8 @@ def _build_config_json(s3_config: Optional[S3StorageConfig]) -> str:
             "imagePVCName": "",  # Empty string disables the PVC mount
         }
     else:
-        # Fall back to LocalStack (for testing without external S3)
-        # NOTE: awsS3Bucket must be a FULL URL (endpoint + bucket)
+        # Fall back to LocalStack (for testing without external S3).
+        # awsS3Bucket must be a FULL URL (endpoint + bucket).
         logger.warning("[CONFIG] FALLBACK: No S3 config provided, using LocalStack defaults!")
         logger.warning("[CONFIG]   JuiceFS bucket URL: http://localstack:4566/juicefs")
         logger.warning("[CONFIG]   This will FAIL if LocalStack is not deployed!")
@@ -596,10 +593,9 @@ def deploy_beta9(
     if not build_helm_dependencies(config, dry_run):
         return False
 
-    # Build Helm values for CPU-only deployment
-    # NOTE: We inject S3 config directly into the Helm values (config section) instead of
-    # using CONFIG_JSON env var. This ensures the mounted config file has the S3 credentials.
-    # Beta9's koanf config merger wasn't properly merging CONFIG_JSON with the mounted config.
+    # Build Helm values for CPU-only deployment.
+    # S3 config is injected directly into the Helm values (config section) so the
+    # mounted config file carries the S3 credentials.
     values = {
         "gateway": {
             "replicas": 1,
@@ -627,7 +623,7 @@ def deploy_beta9(
 
     # Inject S3 config directly into the Helm values (goes into mounted config file)
     if s3_config:
-        # Format: https://endpoint:port/bucket (no extra path - JuiceFS uses fsName for internal paths)
+        # Format: endpoint/bucket (no extra path; JuiceFS uses fsName for internal paths)
         juicefs_bucket_url = f"{s3_config.endpoint_url}/{s3_config.bucket_name}"
 
         logger.info(f"[CONFIG] Using EXTERNAL S3 storage (not LocalStack)")
@@ -705,9 +701,7 @@ def deploy_beta9(
             },
         }
 
-    # Write values to a temp file and use --values instead of --set-json
-    # This avoids parsing issues with --set-json and ensures proper deep merging
-    # with the chart's values.yaml
+    # Write values to a temp file and use --values (deep-merges with the chart's values.yaml).
     if dry_run:
         logger.info(f"[DRY RUN] Would deploy with values:")
         logger.info(yaml.dump(values, default_flow_style=False))
@@ -717,7 +711,7 @@ def deploy_beta9(
     logger.info(f"  Using local chart from: {chart_path_str}")
     logger.info("  Helm install will return quickly; waiting handled separately...")
 
-    # Start background log collection for debugging (kept running for wait_for_gateway_ready)
+    # Start background log collection (kept running for wait_for_gateway_ready)
     start_log_collection(config.namespace)
 
     # Write values to temp file (Helm --values properly deep-merges with values.yaml)
@@ -791,9 +785,8 @@ def uninstall_beta9(config: Beta9Config, dry_run: bool = False) -> bool:
 def delete_namespace_pvcs(namespace: str, dry_run: bool = False) -> bool:
     """Delete all PersistentVolumeClaims in the namespace.
 
-    Helm uninstall does NOT delete PVCs by default (to protect data).
-    This function explicitly deletes all PVCs in the namespace to clean up
-    the associated GCP persistent disks.
+    Helm uninstall does NOT delete PVCs by default; this explicitly removes them
+    (and the associated GCP persistent disks).
 
     Args:
         namespace: Kubernetes namespace.
@@ -952,8 +945,7 @@ def wait_for_gateway_ready(
                         if "true" in ready_result.stdout.lower():
                             logger.info("Gateway pod is running and ready")
 
-                            # Bootstrap workspace immediately to allow workers to register
-                            # This creates the admin workspace via Authorize before workers give up
+                            # Bootstrap the admin workspace via Authorize so workers can register.
                             if not bootstrap_workspace_via_port_forward(config):
                                 logger.warning("Workspace bootstrap failed, workers may not register correctly")
                                 # Continue anyway - validation will retry
@@ -971,10 +963,7 @@ def wait_for_gateway_ready(
 
 
 def bootstrap_workspace_via_port_forward(config: Beta9Config, timeout: int = 60) -> bool:
-    """Bootstrap workspace by calling Authorize via port-forward.
-
-    This creates the admin workspace immediately after gateway becomes ready,
-    allowing workers to register successfully.
+    """Bootstrap the admin workspace via Authorize over port-forward.
 
     Args:
         config: Beta9 configuration.

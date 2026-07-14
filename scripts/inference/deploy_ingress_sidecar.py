@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""deploy_ingress_sidecar.py — one-command lifecycle for the ingress-sidecar Iris job.
+"""deploy_ingress_sidecar.py — lifecycle CLI for the ingress-sidecar Iris job.
 
-Runs on the Mac / launch host. Wraps the whole stand-up-and-keep-up lifecycle of
-the persistent, CPU-only, non-preemptible ``ingress-sidecar`` Iris job (the
-auth-gating pinggy->controller-EndpointProxy front door for Daytona sandboxes)
-into a single idempotent command.
+Runs on the Mac / launch host. Manages the persistent, CPU-only,
+non-preemptible ``ingress-sidecar`` Iris job (the auth-gating
+pinggy->controller-EndpointProxy front door for Daytona sandboxes).
 
 Subcommands:
   deploy   Idempotent stand-up. If a healthy ingress job already exists, print
@@ -105,10 +104,9 @@ def _edge_ip(host: str) -> str:
     """Resolve the pinggy edge IPv4 via public resolvers (this Mac's ISP poisons
     ``*.a.pinggy.link``).
 
-    Deliberately NOT cached: pinggy migrates a persistent subdomain's edge IP
-    over time, so a cached IP goes stale and every ``--resolve`` after a migration
-    hits a dead edge. dig is fast and reliable, so re-resolve fresh each call and
-    fall through several resolvers for robustness.
+    Not cached: pinggy migrates a persistent subdomain's edge IP over time, so a
+    cached IP goes stale after a migration. dig is fast, so re-resolve fresh
+    each call and fall through several resolvers for robustness.
     """
     host = _bare_host(host)
     for resolver in _RESOLVERS:
@@ -156,8 +154,8 @@ def curl_code(host: str, path: str, bearer: str | None = None, timeout: int = 25
 def is_public_healthy(host: str, tolerance: int = 45) -> bool:
     """True if the public /healthz returns 200 within ``tolerance`` seconds.
 
-    Tolerant window so a brief pinggy edge migration (a few seconds of 000) never
-    reads as down — the difference between a stable service and a false redeploy.
+    Tolerant window so a brief pinggy edge migration (a few seconds of 000)
+    doesn't read as down.
     """
     deadline = time.time() + tolerance
     while True:
@@ -274,8 +272,8 @@ def launch_and_verify(api_key: str, region: str, bank: str, attempts: int = 2) -
         log(f"[deploy] launched {job_id} on {url}; waiting for it to serve...")
         host = wait_for_serving(job_id)
         # The pinggy banner prints as soon as the reverse tunnel registers, but
-        # the public edge A record takes 1-3 min to propagate on a fresh bind —
-        # wait generously for real forwarding before G2 or it false-fails with 000.
+        # the public edge A record takes 1-3 min to propagate on a fresh bind;
+        # wait for real forwarding before G2 or it false-fails with 000.
         if not is_public_healthy(host, tolerance=240):
             log(f"[deploy] {url} banner printed but public /healthz never forwarded.")
         ok, detail = g2_verify(host, api_key)
@@ -316,14 +314,13 @@ def cmd_ensure(args) -> int:
     if job:
         job_id = job["job_id"]
         host = ingress_host_from_logs(job_id)
-        # Primary liveness = the iris job is RUNNING. The worker supervisor keeps
-        # the sidecar + pinggy tunnel up (restarts the tunnel on drop; fails the
-        # job if the sidecar dies), so a RUNNING job means the service is up.
-        # The Mac-side pinggy probe is intrinsically flaky here (ISP DNS poison +
-        # pinggy edge migrations that blip for a minute or two), so it is NOT a
-        # redeploy trigger on its own — only a LONG sustained outage (a genuinely
-        # wedged tunnel the supervisor could not recover) justifies nuking a
-        # running job. Daytona sandboxes resolve pinggy cleanly regardless.
+        # Primary liveness = the iris job is RUNNING. The worker supervisor
+        # keeps the sidecar + pinggy tunnel up (restarts the tunnel on drop;
+        # fails the job if the sidecar dies), so a RUNNING job means the
+        # service is up. The Mac-side pinggy probe is flaky here (ISP DNS
+        # poison + pinggy edge migrations that blip for a minute or two), so
+        # it is NOT a redeploy trigger on its own — only a LONG sustained
+        # outage justifies nuking a running job.
         if host and is_public_healthy(host, tolerance=180):
             print(f"INGRESS_HOST={host} JOB_ID={job_id} STATUS=healthy")
             return 0

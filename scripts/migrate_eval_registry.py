@@ -83,12 +83,11 @@ def migrate(dry_run: bool = False) -> None:
         base, eval_sub = _split_entry(model_id, entry)
 
         # Attach hardware variants from @profile standalones.
-        # IMPORTANT: @profile entries in the mono-file are WHOLESALE REPLACES in
-        # load_model_registry (not a merge over the bare entry). They are self-contained
-        # and can carry intrinsic fields the bare lacks (or omit intrinsic fields the bare
-        # has). So we store the FULL @profile entry verbatim as the variant — do NOT
-        # split it into intrinsic/non-intrinsic (that would lose the per-profile
-        # independence and break resolution parity).
+        # @profile entries in the mono-file are WHOLESALE REPLACES in
+        # load_model_registry (not a merge over the bare entry) — they are
+        # self-contained. Store the FULL @profile entry verbatim as the
+        # variant; do NOT split it into intrinsic/non-intrinsic (that would
+        # lose per-profile independence and break resolution parity).
         profiles = profile_entries.get(model_id, {})
         if profiles:
             variants = {}

@@ -2,36 +2,12 @@
 """
 Reap leaked Daytona sandboxes — TWO buckets:
   1. STALE-STARTED — running sandboxes idle past the threshold (orphaned active sandboxes).
-  2. TERMINAL-DEAD — ERROR / BUILD_FAILED sandboxes. These NEVER self-clear on the
-     non-snapshot (non-ephemeral, auto_delete_interval=0) eval path, and the
-     last-activity threshold structurally can't see them, so they accumulate forever
-     (org1+org2 had ~1700 dead-leaked, 2026-06-28). Reaped by default; --no-reap-dead to skip.
+  2. TERMINAL-DEAD — ERROR / BUILD_FAILED sandboxes that never self-clear on the
+     non-snapshot (non-ephemeral, auto_delete_interval=0) eval path. Reaped by
+     default; --no-reap-dead to skip.
 
 Uses the official Daytona Python SDK (`daytona` package, v0.180+). Deleting a sandbox
 INSTANCE never touches its `harbor__*` snapshot TEMPLATE, so the dead-reap is cap-safe.
-
-History:
-    * 2026-06-28 — added the TERMINAL-DEAD bucket (ERROR/BUILD_FAILED). The script
-      previously listed ONLY `states=[STARTED]` and keyed on last-activity, so it could
-      not reap the dead bucket (the dominant Leonardo-eval leak) at all.
-    * 2026-05-18 — switched from the deprecated GET /api/sandbox/paginated
-      (offset pagination) to GET /api/sandbox (cursor pagination) ahead of
-      Daytona's 2026-05-24 breaking change.
-    * 2026-05-28 — migrated from raw `requests` to the `daytona` SDK after the
-      hand-rolled query string started returning HTTP 400. Three things had
-      changed server-side post-cutover:
-        1. `states` is now a *multi*-value query param (repeated
-           `?states=started`), not a single comma-separated string.
-        2. `sort=updatedAt` is no longer a valid value — the new enum is
-           `name | cpu | memoryGib | diskGib | lastActivityAt | createdAt`
-           (use `lastActivityAt` to get the old "most-recently-active first"
-           ordering).
-        3. The `updatedAt` response field still exists for backward
-           compatibility, but `lastActivityAt` is what the freshness check
-           should hang off of going forward. We prefer `last_activity_at` and
-           fall back to `updated_at` for any pre-cutover hosts.
-      Using the SDK insulates us from future server-side wire changes — the
-      SDK is regenerated from Daytona's OpenAPI spec and tracks the API.
 
 Usage:
     # Dry run (default) — shows what would be deleted
@@ -71,14 +47,10 @@ from daytona import (
 PAGE_LIMIT = 100  # per-page fetch size; SDK pages through automatically
 DEFAULT_THRESHOLD_MINUTES = 60
 
-# Terminal-dead states: failed sandboxes that NEVER self-clear on the non-snapshot
-# (non-ephemeral, auto_delete_interval=0) eval path — the dominant leak. The
-# last-activity threshold below structurally CANNOT catch these (the script only used
-# to list STARTED), so they accumulated forever (org1+org2 had ~1700 dead leaked,
-# 2026-06-28). They are unconditionally safe to delete: terminal state ⇒ no active
-# trial, no data loss. Deleting a sandbox INSTANCE never touches its `harbor__*`
-# snapshot TEMPLATE, so this is cap-safe. Built robustly from whatever the SDK enum
-# exposes (member names have drifted across SDK versions).
+# Terminal-dead states: failed sandboxes that never self-clear on the non-snapshot
+# (auto_delete_interval=0) eval path. Terminal state ⇒ no active trial ⇒ safe to
+# delete; instance deletion never touches the `harbor__*` snapshot template (cap-safe).
+# Built robustly from whatever the SDK enum exposes (member names drift across versions).
 _DEAD_STATE_NAMES = ("ERROR", "BUILD_FAILED", "BUILDFAILED")
 DEAD_STATES = [getattr(SandboxState, n) for n in _DEAD_STATE_NAMES if hasattr(SandboxState, n)]
 
@@ -116,20 +88,12 @@ def get_api_key(env_var: str = "DAYTONA_API_KEY") -> str:
 # ---------------------------------------------------------------------------
 
 def _last_seen_ts(sb) -> str | None:
-    """Pick the freshest activity timestamp available on a Sandbox object.
-
-    Prefers `last_activity_at` (post-cutover canonical), falls back to
-    `updated_at` (pre-cutover field still present on the response).
-    """
+    """Pick the freshest activity timestamp available on a Sandbox object."""
     return getattr(sb, "last_activity_at", None) or getattr(sb, "updated_at", None)
 
 
 def list_started_sandboxes(client: Daytona) -> list:
-    """Fetch all sandboxes in 'started' state, sorted by last activity desc.
-
-    The SDK transparently handles cursor pagination; we just iterate the
-    generator.
-    """
+    """Fetch all sandboxes in 'started' state, sorted by last activity desc."""
     query = ListSandboxesQuery(
         states=[SandboxState.STARTED],
         sort=SandboxListSortField.LASTACTIVITYAT,
@@ -142,9 +106,7 @@ def list_started_sandboxes(client: Daytona) -> list:
 def list_dead_sandboxes(client: Daytona) -> list:
     """Fetch all sandboxes in terminal-dead states (ERROR / BUILD_FAILED).
 
-    These never self-clear on the non-snapshot eval path and the threshold-based
-    STARTED reap cannot see them, so they are the dominant leak. No staleness filter
-    is applied — a terminal state already means the sandbox is dead.
+    No staleness filter is applied — a terminal state already means the sandbox is dead.
     """
     if not DEAD_STATES:
         return []
@@ -231,8 +193,7 @@ def main():
     parser.add_argument(
         "--no-reap-dead",
         action="store_true",
-        help="Skip reaping terminal-dead (ERROR/BUILD_FAILED) sandboxes — by default they ARE reaped "
-             "(they never self-clear on the non-snapshot path and are the dominant leak).",
+        help="Skip reaping terminal-dead (ERROR/BUILD_FAILED) sandboxes (reaped by default).",
     )
     args = parser.parse_args()
 
@@ -246,7 +207,7 @@ def main():
     stale = find_stale_sandboxes(started, args.threshold)
     print(f"  {len(stale)} are stale (no event in >{args.threshold} min).")
 
-    # 2. DEAD bucket: terminal ERROR/BUILD_FAILED sandboxes — never self-clear, the dominant leak.
+    # 2. DEAD bucket: terminal ERROR/BUILD_FAILED sandboxes.
     dead = [] if args.no_reap_dead else list_dead_sandboxes(client)
     if not args.no_reap_dead:
         print(f"  Found {len(dead)} terminal-dead sandboxes (ERROR/BUILD_FAILED) to reap.")

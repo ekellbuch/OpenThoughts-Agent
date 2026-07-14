@@ -1,9 +1,20 @@
-# mum (marin-context corpus) — facts & gotchas
+# mum (marin corpus) — facts & gotchas
 
 Offline-queryable mirror of all Marin activity (GitHub issues/PRs/comments, Discord, W&B run metadata + final
 numbers, weekly summaries), searchable by keyword + meaning, every hit citable by URL. Learned 2026-06-29
-pulling Delphi midtraining provenance. The skill is `marin-context` at
-`/Users/benjaminfeuer/Documents/mumwelt/mumwelt/skills/marin-context/SKILL.md`; source repo `~/Documents/mumwelt`.
+pulling Delphi midtraining provenance.
+
+**Two skills query this corpus; prefer `marin-research`.**
+- **`marin-research`** — the DEFAULT, the one to use: more accurate. Decomposes a question into parallel
+  sub-searches across subagents over the corpus + weekly summaries, then synthesizes a cited answer (broad /
+  ambiguous / multi-part asks, retros, "full picture of X", literature-review-style). Skill:
+  `https://github.com/Open-Athena/mumwelt/blob/main/mumwelt/skills/marin-research/SKILL.md`
+  (local `~/Documents/mumwelt/mumwelt/skills/marin-research/SKILL.md`).
+- **`marin-context`** — the FASTER, LESS-ACCURATE single-pass version (one `mum search`/`show`); fine for a quick
+  identifier/run lookup. Local `~/Documents/mumwelt/mumwelt/skills/marin-context/SKILL.md`.
+- **`marin-publish`** — publish a finished cited answer to a private gist (htmlpreview link).
+
+Source repo `~/Documents/mumwelt`.
 
 ---
 

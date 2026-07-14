@@ -2,19 +2,14 @@
 """
 Daytona SNAPSHOT management / auditing utility.
 
-Why this exists
----------------
 A multi-dataset datagen sweep builds one per-environment Daytona snapshot per
 task-environment hash (``harbor__<hash>__snapshot``). The org has a HARD cap of
 60 snapshots. This tool gives visibility into how close we are to that cap and a
 *safe* way to reclaim stale snapshots — it ONLY audits and DELETES (reclaims).
 It never creates snapshots and never raises caps.
 
-Resource note (read this if you came from cleanup_stale_sandboxes.py)
----------------------------------------------------------------------
-Snapshots are a DIFFERENT Daytona resource from sandboxes. The sandbox API
-(``client.list(ListSandboxesQuery(...))``, sort by ``lastActivityAt``) does NOT
-transfer. Snapshots live under ``client.snapshot`` (a ``SnapshotService``):
+Snapshots are a DIFFERENT Daytona resource from sandboxes. They live under
+``client.snapshot`` (a ``SnapshotService``):
 
     client.snapshot.list(page=N, limit=M) -> PaginatedSnapshots
         .items        list[Snapshot]
@@ -32,26 +27,18 @@ Snapshot object fields (from the installed `daytona` SDK, pydantic model):
     error_reason
     created_at      datetime  (always present)
     updated_at      datetime  (always present)
-    last_used_at    Optional[datetime]   <-- LAST-USED IS EXPOSED. We use it as
-                                              the primary staleness signal and
-                                              fall back to created_at only when
-                                              it is null (snapshot never used).
+    last_used_at    Optional[datetime]   primary staleness signal; falls back to
+                                          created_at when null (snapshot never used)
     build_info, region_ids, initial_runner_id, ref
 
 Staleness
 ---------
 A snapshot is STALE when it is idle (last activity older than --stale-days) AND
 not in a protected state. Protected = BUILDING / PENDING / PULLING / REMOVING —
-the transitional states where deleting mid-build/mid-removal is unsafe. NOTE:
-'active' is NOT protected: for snapshots it is just the normal resting state of
-a built, available snapshot (not "a sandbox is running off it"), so an idle
-active snapshot is precisely the reclaim target. ERROR / BUILD_FAILED snapshots
-become deletable only once they are ALSO idle past --stale-days (a fresh error
-may still be under investigation). We never flag or delete protected states.
-
-"Idle" is measured from last_used_at when present; otherwise from created_at
-(the snapshot was built but never used). The output clearly labels which signal
-was used per row and warns in the summary if any rows fell back to created_at.
+the transitional states where deleting mid-build/mid-removal is unsafe. 'active'
+is NOT protected: for snapshots it is the normal resting state of a built,
+available snapshot, so an idle active snapshot is the reclaim target. ERROR /
+BUILD_FAILED snapshots become deletable only once also idle past --stale-days.
 
 Usage
 -----
@@ -104,16 +91,11 @@ DEFAULT_SECRETS_FILE = os.environ.get("DC_AGENT_SECRET_ENV", "")
 PAGE_LIMIT = 100  # snapshots per page when paging through the org
 
 # Snapshot states that must never be flagged or deleted: in-flight / transitional.
-# NOTE: 'active' is NOT protected. For Daytona *snapshots*, 'active' is the
-# normal resting state of a built, available snapshot — it does NOT mean a
-# sandbox is currently running off it (that's a sandbox-level concept). An
-# active snapshot that has been idle past the threshold is exactly the reclaim
-# target, so staleness for active snapshots is governed purely by idle time.
-# The transitional states below are protected because deleting mid-build or
-# mid-removal is unsafe.
+# 'active' is NOT protected — for snapshots it is the normal resting state of a
+# built, available snapshot. An idle active snapshot past the threshold is the
+# reclaim target, governed purely by idle time.
 PROTECTED_STATES = {"building", "pending", "pulling", "removing"}
-# Error-ish states we treat as candidates only when ALSO past the stale window
-# (a fresh error may be under active investigation).
+# Error-ish states eligible only when ALSO past the stale window.
 ERROR_STATES = {"error", "build_failed"}
 
 
@@ -200,9 +182,7 @@ def analyze(snapshots: list, stale_days: float, name_prefix: str = "") -> list[d
     name starts with it — the datagen/eval/RL per-environment snapshots are all
     ``harbor__<hash>__snapshot``, so the default guards the shared base/template
     images (``daytonaio/sandbox:*``, ``daytona-*``, ``windows-*``) from ever
-    being flagged: those rebuild-on-demand assumption does NOT hold for base
-    images, and deleting one breaks sandbox creation org-wide. Pass ``""`` to
-    consider every snapshot (audit only — never delete with an empty prefix).
+    being flagged. Pass ``""`` to consider every snapshot (audit only).
     """
     now = datetime.now(timezone.utc)
     threshold_seconds = stale_days * 86400.0

@@ -95,7 +95,7 @@ def main():
     print()
 
     # =========================================================================
-    # PHASE 1: Raw datasets (no preprocessing) — should show double-think bug
+    # PHASE 1: Raw datasets (no preprocessing)
     # =========================================================================
     print("=" * 80)
     print("PHASE 1: RAW datasets → encode_multiturn (NO preprocessing)")
@@ -128,7 +128,7 @@ def main():
             break  # first matching row per dataset
 
     # =========================================================================
-    # PHASE 2: Preprocessed datasets — should fix the bug
+    # PHASE 2: Preprocessed datasets
     # =========================================================================
     print("\n" + "=" * 80)
     print("PHASE 2: RAW datasets → prep_for_thinking → encode_multiturn")
@@ -180,7 +180,7 @@ def main():
     preprocessed = preprocess_messages(messages_no_think)
     encode_and_report(template, tokenizer, preprocessed, "Preprocessed no-think")
 
-    # 3b: Think tags without newlines (the format that causes the bug)
+    # 3b: Think tags without newlines (raw format)
     print("\n--- 3b: Think tags WITHOUT newlines (raw format) ---")
     messages_no_nl = [
         {"role": "user", "content": "Hello."},

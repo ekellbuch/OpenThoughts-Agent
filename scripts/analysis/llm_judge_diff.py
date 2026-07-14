@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """LLM-judge pairwise comparison of baseline vs post-RL same-task traces.
 
-Answers research question (3) qualitatively: **what specifically changed
-between a baseline trace and a post-RL trace on the same task?** The
-behavioral_delta script gives macro counts (think tokens up, tool calls
-down, etc.); this step uses GPT-5 to give a human-readable judgment per
+Uses GPT-5 to give a human-readable judgment per same-task before/after
 pair, with tags drawn from a small fixed vocabulary so we can aggregate.
 
 Per pair, the judge returns:
@@ -19,9 +16,8 @@ Per pair, the judge returns:
     }
 
 Pairs are selected from same-task before/after pairs ranked by the
-behavioral-delta magnitude (largest-delta first — those are most likely
-to surface meaningful differences). Results are cached per (task, before-
-trial, after-trial) so re-runs are cheap.
+behavioral-delta magnitude (largest-delta first). Results are cached per
+(task, before-trial, after-trial) so re-runs are cheap.
 
 The LLM client uses ``ajudge.llms.litellm_llm.LiteLLM`` if available, with
 a graceful fallback to direct OpenAI SDK calls if ajudge is not
@@ -156,10 +152,9 @@ Reply with ONLY the JSON object. No prose before or after.
 def _trace_text(trace: Trace, max_chars: int) -> str:
     """Compact, judge-friendly transcript: ``[role] content`` per line.
 
-    Truncates from the MIDDLE — we keep the start (task framing, initial
-    plan) and end (final answer / failure) because the middle is usually
-    the most redundant. If the trace is shorter than the budget, no
-    truncation happens.
+    Truncates from the MIDDLE: keeps the start (task framing, initial plan)
+    and end (final answer / failure). If the trace is shorter than the
+    budget, no truncation happens.
     """
     messages = trace.raw.get("messages") or trace.raw.get("conversations") or []
     if not isinstance(messages, list):
@@ -277,8 +272,7 @@ def _pair_cache_key(task: str, before: Trace, after: Trace, model: str) -> str:
     """Stable cache key for a (task, before-trial, after-trial, model) tuple.
 
     Uses the trial identifier when available, falling back to a hash of the
-    conversation text. This lets re-runs reuse judgments unless the
-    underlying traces change.
+    conversation text.
     """
     def _trial_id(t: Trace) -> str:
         raw = t.raw or {}

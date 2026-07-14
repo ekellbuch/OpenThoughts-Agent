@@ -21,11 +21,8 @@ _EPISODE_PATTERN = re.compile(r"(\d+)")
 # Behavioral pattern detectors
 # ---------------------------------------------------------------------------
 #
-# These regexes detect agent-trace behavioral features used by behavioral_delta
-# and temporal_trace_analysis. The patterns are deliberately generous: this is
-# observational analysis, not exact accounting. False positives are acceptable
-# as long as they apply equally to before/after datasets (so the *delta* is
-# still meaningful).
+# Regexes that detect agent-trace behavioral features used by behavioral_delta
+# and temporal_trace_analysis.
 
 # OpenAI/Anthropic-style structured tool_calls live on the message dict itself
 # (msg["tool_calls"]). The OT-Agent trace format embeds them as
@@ -135,11 +132,7 @@ class BehavioralFeatures:
 
 
 def _count_tokens_local(text: str, encoder) -> int:
-    """Token count helper that tolerates a missing encoder.
-
-    Duplicates ``count_tokens`` body to avoid a forward-declaration ordering
-    headache: ``count_tokens`` is defined later in this module.
-    """
+    """Token count helper that tolerates a missing encoder."""
     if not text:
         return 0
     if encoder is not None:
@@ -249,10 +242,9 @@ def extract_behavioral_features(
     if features.tool_responses:
         features.tool_error_rate = features.tool_errors / features.tool_responses
 
-    # Premature stop: trace ended on an assistant turn (rather than a tool
-    # response). For agentic loops, ending without a final tool call is a
-    # proxy for the model giving up mid-task. Note this is a weak signal —
-    # some legitimate completions DO end on an assistant message.
+    # Premature stop: trace ended on an assistant turn rather than a tool
+    # response. A weak signal — some legitimate completions DO end on an
+    # assistant message.
     features.premature_stop = last_role == "assistant"
 
     return features

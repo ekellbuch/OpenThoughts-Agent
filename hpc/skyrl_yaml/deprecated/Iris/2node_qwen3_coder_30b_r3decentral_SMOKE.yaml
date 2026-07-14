@@ -37,7 +37,7 @@ terminal_bench:
       - RewardFileEmptyError
       - VerifierOutputParseError
       - VerifierRuntimeError
-    n_concurrent_trials: 48
+    n_concurrent_trials: 64
     log_level: INFO
     enable_reward_shaping: false
     collect_rollout_details: true

@@ -2,41 +2,18 @@
 """
 Export traces from a Harbor job directory into a Hugging Face dataset and upload it.
 
-This is a SINGLE streaming path. It enumerates trial directories
-NON-RECURSIVELY-stat'd (via Harbor's pruning ``iter_trial_dirs`` os.walk —
-never ``root.rglob("*")``), processes trials in chunks, writes each chunk as a
-parquet shard, uploads that shard to the HF dataset repo IMMEDIATELY via an
+Single streaming path: enumerates trial directories non-recursively (via Harbor's
+pruning ``iter_trial_dirs`` os.walk), processes trials in chunks, writes each chunk
+as a parquet shard, uploads that shard to the HF dataset repo IMMEDIATELY via an
 additive ``HfApi.upload_file`` commit, then DROPS the shard from disk and frees
-the in-process Arrow/datasets buffers. Peak RAM is bounded to roughly one chunk,
-NOT the whole dataset — this avoids the ~150 GB balloon that OOM-killed prior
-trace uploads.
+the in-process Arrow/datasets buffers. Peak RAM is bounded to roughly one chunk.
 
-Why per-shard incremental upload (not one ``upload_folder`` at the end)?
-- The previous implementation accumulated EVERY parquet shard in a local temp
-  dir and only uploaded them in ONE ``upload_folder`` commit at the very end.
-  That had two failure modes: (1) an OOM/crash before the final upload left
-  ZERO shards on the hub (the whole run was lost — exactly what happened on
-  explore-tis-untrunc), and (2) the per-chunk ``Dataset.from_list`` + ``.map``
-  + ``.to_parquet`` cycle leaks memory-mapped Arrow tables and HF ``datasets``
-  cache files that are never released, so RSS still climbed monotonically
-  across hundreds of chunks even though the live row buffer was bounded.
-- The fix pushes each shard as its own additive commit and immediately frees
-  the chunk (``del`` the Dataset, ``gc.collect()``, release the pyarrow memory
-  pool, and discard the per-chunk HF datasets cache dir). A mid-run failure now
-  leaves all already-pushed shards intact + resumable, and peak RSS tracks
-  ``chunk_size`` × row-size flat across shards.
+Each shard is an additive hub commit, so a mid-run failure leaves prior shards
+intact + resumable. Registration is a separate, ORTHOGONAL post-upload step
+controlled by ``--skip_register``:
 
-The UPLOAD mechanism is ALWAYS this streaming path — it does NOT depend on
-whether the dataset is registered in Supabase. Registration is a separate,
-ORTHOGONAL post-upload step controlled by ``--skip_register``:
-
-- No flag (default)  -> stream-upload, THEN register the finished HF repo in
-  Supabase (datagen path: the trace dataset IS the artifact).
-- ``--skip_register``  -> stream-upload only, no Supabase registration (RL path:
-  the trace dataset rides along, but the RL *model* is registered separately).
-
-Crucially, ``--skip_register`` can no longer change the upload mechanism or
-cause the old git-LFS OOM — it only toggles the Supabase registration step.
+- No flag (default)  -> stream-upload, THEN register the finished HF repo in Supabase.
+- ``--skip_register``  -> stream-upload only, no Supabase registration (RL path).
 
 Examples:
 
@@ -342,12 +319,10 @@ def _install_inline_subagent_merger() -> None:
         trajectory_file: Path, run_metadata: Dict[str, Any], embed_tools_in_conversation: bool = True,
         include_literal_tokens: bool = False,
     ) -> List[Dict[str, Any]]:
-        # `include_literal_tokens` accepted for signature-compat with harbor's
-        # extract_conversations_from_trajectory (export_traces always forwards it since the
-        # trace-literal merge). This inline-subagent-merger reimplements extraction and does NOT
-        # emit literal token columns — that plumbing belongs to the opencode literal-traces runtime
-        # (not yet wired). For non-literal uploads (terminus-2 datagen) it is a no-op; accepting it
-        # here unblocks all trace uploads, which currently crash with `unexpected keyword argument`.
+        # Accept include_literal_tokens for signature-compat with harbor's
+        # extract_conversations_from_trajectory. This inline-subagent-merger
+        # reimplements extraction and does NOT emit literal token columns
+        # (that plumbing belongs to the opencode literal-traces runtime).
         _ = include_literal_tokens
         try:
             trajectory_data = json.loads(trajectory_file.read_text())
@@ -396,11 +371,10 @@ def _install_harbor_patches(include_literal_tokens: bool = False) -> None:
     """Install the Harbor monkeypatches used by the streaming exporter.
 
     The inline-subagent-merger patch reimplements ``extract_conversations_from_trajectory``
-    and does NOT emit the literal token columns. So when ``include_literal_tokens``
-    is requested we SKIP that patch and let Harbor's native (literal-aware)
-    extraction run, which lifts ``step.metrics.{prompt_token_ids,completion_token_ids,
-    logprobs}`` into parallel columns. Default (no literal) installs all patches, so
-    the terminus-2 / non-literal upload path is byte-identical.
+    and does NOT emit the literal token columns. When ``include_literal_tokens`` is
+    requested we SKIP that patch and let Harbor's native (literal-aware) extraction
+    run, which lifts ``step.metrics.{prompt_token_ids,completion_token_ids,logprobs}``
+    into parallel columns.
     """
     _install_safe_episode_guard()
     _install_dataset_sanitizer()
@@ -443,11 +417,8 @@ def _finalize_chunk(ds):
 def _iter_trial_dirs_nonrecursive(traces_utils, root: Path) -> Iterator[Path]:
     """Yield trial dirs using Harbor's PRUNING os.walk enumeration.
 
-    Harbor's ``iter_trial_dirs`` uses ``os.walk`` with in-place pruning of
-    ``dirnames`` once a trial dir is found — it NEVER descends into a trial's
-    ~20-30 inner files and NEVER does ``root.rglob("*")``. This keeps the cost
-    at O(directory skeleton) instead of O(every file), which is what GPFS-hangs
-    on large runs.
+    ``iter_trial_dirs`` prunes ``dirnames`` once a trial dir is found, so it
+    never descends into a trial's inner files — cost is O(directory skeleton).
     """
     yield from traces_utils.iter_trial_dirs(root, recursive=True)
 
@@ -513,12 +484,9 @@ def _collect_trial_rows(
 def _release_arrow_memory() -> None:
     """Force-free Arrow + Python buffers so per-chunk RSS does not accumulate.
 
-    HF ``datasets`` (``Dataset.from_list`` + ``.map`` + ``.to_parquet``) leaves
-    memory-mapped Arrow tables and writer buffers alive that the pyarrow memory
-    pool does NOT return to the OS on its own. Across hundreds of chunks this
-    is the dominant monotonic-RSS leak even when the live row buffer is bounded.
-    We explicitly run a GC pass and release the default pyarrow memory pool's
-    unused blocks after every chunk.
+    HF ``datasets`` leaves memory-mapped Arrow tables and writer buffers alive
+    that the pyarrow memory pool does NOT return to the OS on its own. Runs a
+    GC pass and releases the default pyarrow memory pool's unused blocks.
     """
     gc.collect()
     try:
@@ -551,18 +519,13 @@ def _literal_token_features():
 def _pin_literal_token_columns(ds, rows: List[Dict[str, Any]]):
     """Rebuild the literal token columns from ``rows`` with an EXPLICIT nested type.
 
-    ``Dataset.from_list`` and the finalize ``.map()`` passes infer feature types from each
-    chunk's leading rows, so a chunk whose first rows carry no literals infers a null/empty
-    type for these columns and silently DROPS the token lists of every *other* row in the
-    chunk (the "whole shards missing literals" data-loss bug: correlation enriches N trials
-    but only the rows in literal-leading chunks survive to parquet).
-
-    The chunk pipeline (``from_list`` + order-preserving, non-filtering ``.map()`` passes)
-    never reorders or drops rows, so ``ds[i]`` corresponds to ``rows[i]``. We therefore
-    rebuild the three columns straight from the source ``rows`` with a pinned type as the LAST
-    step before writing — bypassing inference entirely. Every literal-job shard then carries
-    the columns with a stable schema (present-but-empty for a chunk with zero enriched rows,
-    rather than absent), and enriched rows keep their tokens regardless of chunk ordering.
+    ``Dataset.from_list`` and the finalize ``.map()`` passes infer feature types
+    from each chunk's leading rows, so a chunk whose first rows carry no
+    literals infers a null/empty type and silently DROPS the token lists of
+    every other row in the chunk. The chunk pipeline never reorders or drops
+    rows, so ``ds[i]`` corresponds to ``rows[i]``; we rebuild the three columns
+    straight from ``rows`` with a pinned type as the LAST step before writing,
+    bypassing inference entirely.
     """
     feats = _literal_token_features()
 
@@ -626,12 +589,7 @@ def _flush_chunk_to_parquet(
 
 
 def _upload_shard(api, repo_id: str, shard_path: Path) -> None:
-    """Push ONE shard as its own additive commit, then remove it locally.
-
-    Each shard lands independently — a mid-run failure leaves the
-    already-pushed shards intact and resumable rather than losing the whole
-    run (the old end-only ``upload_folder`` lost everything on any crash).
-    """
+    """Push ONE shard as its own additive commit, then remove it locally."""
     path_in_repo = f"data/{shard_path.name}"
     # Test seam: when set, copy the shard to a local dir instead of hitting the
     # Hub (lets the subprocess path be exercised offline without real creds).
@@ -668,15 +626,12 @@ def _process_one_shard_in_subprocess(
 ) -> int:
     """Worker body: collect this batch's rows, write + upload ONE shard, return row count.
 
-    This runs in a FRESH process (multiprocessing ``spawn``). The collection
-    path (Harbor's ``collect_conversations_from_trial`` + the ``datasets``
-    ``from_list``/``.map``/``to_parquet`` cycle) accumulates per-row native
-    memory that ``gc.collect()`` + ``pyarrow.release_unused()`` do NOT reliably
-    return to the OS — empirically ~1 GB per 200-row shard, climbing linearly
-    until OOM on a 24k-row run. Doing each shard in its own process makes the
-    OS reclaim ALL of that on process exit, so parent RSS stays flat at roughly
-    one chunk regardless of how leaky the per-chunk libraries are. The parent
-    only ever holds a list of trial-dir path strings.
+    Runs in a FRESH process (multiprocessing ``spawn``). The collection path
+    accumulates per-row native memory that ``gc.collect()`` +
+    ``pyarrow.release_unused()`` do NOT reliably return to the OS; doing each
+    shard in its own process makes the OS reclaim ALL of that on process exit,
+    so parent RSS stays flat at roughly one chunk. The parent only ever holds a
+    list of trial-dir path strings.
     """
     from huggingface_hub import HfApi  # type: ignore
 
@@ -719,9 +674,8 @@ def _process_one_shard_in_subprocess(
 def _run_shard_subprocess(kwargs: Dict[str, Any]) -> int:
     """Run one shard in a spawned subprocess and return its row count.
 
-    On any subprocess crash (including OOM-kill of the child, which no longer
-    takes down the parent) we raise so the caller can decide. Because shards
-    are additive commits, a crash leaves prior shards intact.
+    A subprocess crash (including OOM-kill of the child) raises so the caller
+    can decide; shards are additive commits, so a crash leaves prior shards intact.
     """
     import multiprocessing as mp
 
@@ -752,12 +706,10 @@ def stream_export_and_upload(
     """Single streaming path: enumerate trials, write parquet shards, upload via HfApi.
 
     Memory is bounded to roughly one ``chunk_size`` worth of TRIALS at any time.
-    The parent process only enumerates trial directories (cheap, pruned os.walk)
-    and batches their path strings; each batch's collect + parquet-write +
-    upload happens in a FRESH spawned subprocess that exits afterward, so the OS
-    reclaims the per-chunk native-memory leak (Harbor collection + ``datasets``
-    Arrow buffers) that gc/pyarrow-release alone do NOT free. Peak parent RSS is
-    flat across shards. Each shard is an additive hub commit, so a mid-run
+    The parent only enumerates trial directories and batches their path strings;
+    each batch's collect + parquet-write + upload happens in a FRESH spawned
+    subprocess that exits afterward, so the OS reclaims the per-chunk
+    native-memory leak. Each shard is an additive hub commit, so a mid-run
     failure leaves prior shards intact + resumable. Returns the total row count.
     """
     from huggingface_hub import HfApi  # type: ignore
@@ -833,15 +785,9 @@ def stream_export_and_upload(
 def register_trace_dataset_in_supabase(repo_id: str, dataset_type: str = "SFT") -> None:
     """Register an already-uploaded trace dataset repo in Supabase.
 
-    This is the ORTHOGONAL post-upload step. It runs against the FINISHED HF
-    repo (``register_hf_dataset`` reads the dataset's metadata back from the HF
-    API), so it is completely decoupled from the streaming upload mechanism —
-    it cannot affect peak memory and cannot trigger the old git-LFS OOM. It is
-    invoked by ``main()`` only when ``--skip_register`` is NOT passed.
-
-    This reuses the same registration logic the legacy
-    ``data.commons.upload_traces_to_hf`` default branch used, but called as a
-    clean separate step rather than entangled with the upload.
+    Runs against the FINISHED HF repo, completely decoupled from the streaming
+    upload mechanism. Invoked by ``main()`` only when ``--skip_register`` is
+    NOT passed.
     """
     try:
         from database.unified_db.utils import register_hf_dataset  # type: ignore
@@ -884,10 +830,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--skip_register",
         action="store_true",
-        help="Upload only; do NOT register the dataset in Supabase. This flag "
-        "controls ONLY registration — the (always-streaming, memory-safe) upload "
-        "path is identical either way. RL cleanup passes this (the model is "
-        "registered separately); datagen omits it (the dataset is the artifact).",
+        help="Upload only; do NOT register the dataset in Supabase. Controls ONLY "
+        "registration — the streaming upload path is identical either way.",
     )
     p.add_argument(
         "--private",
@@ -909,12 +853,10 @@ def _parse_args() -> argparse.Namespace:
         "--include_literal_tokens",
         action="store_true",
         help="REQUIRE literal token columns (prompt_token_ids / completion_token_ids / "
-        "logprobs). Literals are now auto-included whenever a literal.jsonl is "
-        "discoverable (see --literal_log / sibling <job_dir>/logs/*literal.jsonl), so "
-        "this flag is only needed to FAIL LOUD when literals are expected but none are "
-        "found (e.g. a job that should have run with --record_literal). It never "
-        "downgrades: a job with no literal.jsonl and no --include_literal_tokens exports "
-        "text-only, byte-identical to before.",
+        "logprobs). Literals are auto-included whenever a literal.jsonl is "
+        "discoverable; this flag FAILS LOUD when literals are expected but none are "
+        "found. Never downgrades: a job with no literal.jsonl and no "
+        "--include_literal_tokens exports text-only, byte-identical to before.",
     )
     p.add_argument(
         "--no_literal_tokens",
@@ -953,12 +895,10 @@ def _parse_args() -> argparse.Namespace:
 
 PROVENANCE_FILENAME = "tokenizer_provenance.json"
 
-# The literal token columns (prompt_token_ids / completion_token_ids) are only
-# decodable with the EXACT tokenizer the serving engine used. A same-family
-# tokenizer (e.g. a stock Qwen3 for a Qwen3.5 checkpoint) shares low-id
-# digit/whitespace/structure tokens but has a different merge table + vocab
-# size, so word tokens decode to garbage. This template records the one that
-# works so consumers never have to reverse-engineer it.
+# The literal token columns are only decodable with the EXACT tokenizer the
+# serving engine used (a same-family tokenizer has a different merge table +
+# vocab size, so word tokens decode to garbage). This template records the one
+# that works.
 _DECODE_RECIPE_TEMPLATE = """\
 The `prompt_token_ids` / `completion_token_ids` / `logprobs` columns are the
 verbatim tokens the serving engine emitted, stored PER AGENT STEP as a
@@ -985,10 +925,8 @@ def read_served_model_name_from_literals(literal_logs: Sequence[str]) -> Optiona
 
     Reads only the FIRST non-empty line of the first literal log (streamed, so a
     multi-hundred-MB gs:// log is not slurped) and returns its ``literal.model``
-    field — the served-model-name vLLM echoed. This is secondary provenance (it is
-    the served-endpoint id, not necessarily the tokenizer repo), captured so the
-    stamp records what the engine actually reported alongside the authoritative
-    ``served_model`` ref. Returns None if unreadable.
+    field. Secondary provenance alongside the authoritative ``served_model`` ref.
+    Returns None if unreadable.
     """
     from upath import UPath  # lazy: fsspec/upath is only needed on the literal path
 
@@ -1084,10 +1022,8 @@ def write_tokenizer_provenance(api, repo_id: str, provenance: Dict[str, Any]) ->
 def count_populated_literal_rows(table) -> int:
     """Number of rows whose ``prompt_token_ids`` column is non-empty (a pyarrow Table).
 
-    Post-upload sanity check for the rescue path: a job that HAD a ``literal.jsonl``
-    must land >0 such rows; 0 means the literals silently dropped somewhere. Returns 0
-    when the column is absent entirely. Pure (operates on an already-loaded table) so
-    it is unit-testable and reusable from a skill's post-upload snippet.
+    Post-upload sanity check: a job that HAD a ``literal.jsonl`` must land >0
+    such rows. Returns 0 when the column is absent entirely.
     """
     if "prompt_token_ids" not in table.column_names:
         return 0
@@ -1107,13 +1043,10 @@ def resolve_literal_inclusion(
     per-serve ``*_literal.jsonl`` files are ALL correlated (never just one):
       - ``--no_literal_tokens`` -> ``(False, [])`` (forced text-only).
       - else resolve ``[literal_log]`` (explicit) or auto-discover ALL sibling
-        ``<job_dir>/logs/*_literal.jsonl`` (also a few parents; gs:// ok):
-          - found -> ``(True, [<uris>])`` (favor: default-on WHEN PRESENT).
+        ``<job_dir>/logs/*_literal.jsonl``:
+          - found -> ``(True, [<uris>])``.
           - not found and ``--include_literal_tokens`` (REQUIRE) -> SystemExit.
-          - not found otherwise -> ``(False, [])`` (parity: byte-identical text-only).
-
-    GLOBAL INVARIANT: a job with no discoverable literal.jsonl and no force flag is
-    text-only, exactly as before this change.
+          - not found otherwise -> ``(False, [])`` (text-only, byte-identical to pre-literal).
     """
     from scripts.harbor.literal_correlator import discover_literal_logs
 
@@ -1144,10 +1077,9 @@ def main() -> None:
 
     # Step 0 — literal-token correlation (opencode + --record_literal). The
     # RecordProxy captured token IDs / logprobs into a job-global literal.jsonl on
-    # the worker (not visible to the in-sandbox agent), so populate them into the
-    # per-trial trajectory step metrics here, BEFORE export. Verify-or-skip: only
-    # steps whose token COUNTS match a correlated record are enriched, so a wrong
-    # join omits rather than corrupts. No-op for non-literal jobs.
+    # the worker; populate them into the per-trial trajectory step metrics here,
+    # BEFORE export. Verify-or-skip: only steps whose token COUNTS match a
+    # correlated record are enriched. No-op for non-literal jobs.
     include_literal_tokens, literal_logs = resolve_literal_inclusion(
         str(job_dir),
         literal_log=args.literal_log,
@@ -1175,9 +1107,8 @@ def main() -> None:
             f"{stats.trials_stripped} stripped; {stats.chains} chains "
             f"({stats.ambiguous_chains} ambiguous)."
         )
-        # Fail loud: a literal-bearing job that bound ZERO trials is a regression, not a
-        # valid dataset — never silently ship a text-only-looking dataset for a job whose
-        # whole point was the literals. A partial yield (>0) reports and proceeds.
+        # Fail loud: a literal-bearing job that bound ZERO trials is a regression —
+        # never silently ship a text-only-looking dataset for a literal job.
         if stats.trials > 0 and stats.trials_enriched == 0:
             raise SystemExit(
                 f"[trace-export] Literal correlation bound 0/{stats.trials} trials from "
@@ -1192,7 +1123,7 @@ def main() -> None:
     # --single_commit: stage every shard on local disk (reuse the per-shard subprocess's
     # TRACE_EXPORT_FAKE_UPLOAD_DIR seam so it writes-to-disk instead of committing to the
     # Hub), then push the whole folder in ONE upload_folder commit below. Sidesteps HF's
-    # per-repo 128-commits/hour limit that the per-shard path trips on >128-shard datasets.
+    # per-repo 128-commits/hour limit on >128-shard datasets.
     single_commit_dir = None
     if args.single_commit:
         single_commit_dir = tempfile.mkdtemp(prefix="trace_single_commit_")
@@ -1230,9 +1161,7 @@ def main() -> None:
     )
 
     # Step 1b — stamp tokenizer/model provenance so the literal token columns are
-    # self-service decodable. Only meaningful when literals are included; token IDs
-    # are useless to a consumer who cannot map them back to text with the EXACT
-    # served-model tokenizer. Warn loud if literals shipped without a --served_model
+    # self-service decodable. Warn loud if literals shipped without a --served_model
     # ref (the columns are still valid, just harder to decode later).
     if include_literal_tokens:
         from huggingface_hub import HfApi  # type: ignore
@@ -1251,9 +1180,7 @@ def main() -> None:
         )
         write_tokenizer_provenance(HfApi(), args.repo_id, provenance)
 
-    # Step 2 — ORTHOGONAL post-upload Supabase registration, gated only by
-    # --skip_register. This runs against the finished HF repo and cannot affect
-    # the upload's memory profile.
+    # Step 2 — ORTHOGONAL post-upload Supabase registration, gated by --skip_register.
     if args.skip_register:
         print(
             "[trace-export] --skip_register set: upload only, NOT registering "

@@ -6,21 +6,10 @@ a line on every state transition, and exit with a clear terminal verdict the
 moment the job leaves RUNNING (succeeded / failed / killed / worker_failed /
 unschedulable) **OR disappears from the cluster entirely**.
 
-Why this exists
----------------
-The prior monitor watched log-line *content* — it grepped rank-0 logs for the
-strings ``EPDIAG_FWD1`` / ``DEADLOCK`` / ``TERMINAL``. A clean termination,
-eviction, preemption, or an early crash that never prints one of those strings
-makes the content-watch see no matching line, so the supervising agent goes idle
-believing the job is "still running" while the job + its pods have already left
-the cluster. (Confirmed against ``/benjaminfeuer/rl-131k-cpdcp2r3``: it ended in
-state ``killed`` / "Terminated by user" with 0 pods on the cluster — a clean
-termination the content-watch could never have caught.)
-
-The fix is to poll the **authoritative iris job state**, not log content. The
-iris controller retains terminal job records after the pods are reaped, so even
-a job that has fully vanished from k8s still reports its terminal state via
-``iris job summary``. That is the signal this tool watches.
+Polls the authoritative iris job state, not log content: the iris controller
+retains terminal job records after the pods are reaped, so even a job that has
+fully vanished from k8s still reports its terminal state via ``iris job
+summary``.
 
 Authoritative state source
 ---------------------------
@@ -257,8 +246,7 @@ def count_live_pods(job_id: str) -> int | None:
     Requires KUBECONFIG to point at the cluster (e.g. ~/.kube/coreweave-iris-gpu).
     Returns the pod count, or None if kubectl is unavailable / errors. iris job
     pods are named after the job's short id (last path segment); a vanished job
-    has 0. This is the explicit cross-check for the case the content-watch
-    missed: pods gone but no terminal log string ever printed.
+    has 0.
     """
     short = job_id.rstrip("/").rsplit("/", 1)[-1]
     try:

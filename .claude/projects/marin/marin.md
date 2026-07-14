@@ -7,18 +7,14 @@ Executor → lazy `ArtifactStep`/`Artifact` system, post-#6649), `marinskyrl/` (
 
 ---
 
-## ✅ ACCEPTED BEST PRACTICE — publish a PERMANENT research artifact as a static webpage (PR #6816 + #7084)
+## Publish a permanent research artifact as a static webpage (PR #6816 + #7084)
 
-**When to use this:** whenever you have a **permanent, shareable research artifact that is a static webpage**
-— an analysis site, a results dashboard, a paper-companion page, a self-contained HTML report — and you want a
-**durable public URL** that is also **code-fetchable**. This is the sanctioned marin mechanism; prefer it over
-ad-hoc GitHub gists or session-scoped claude.ai Artifacts **for anything meant to persist**. (claude.ai
-Artifacts stay fine for ephemeral/interactive session output; this is for the durable record.)
+The sanctioned marin mechanism for a **durable public URL** to a permanent, shareable, code-fetchable static
+webpage (analysis site, results dashboard, paper-companion page, self-contained HTML report).
 
-**The mechanism:** `marin.publish.sites.publish_site()` (module `lib/marin/src/marin/publish/sites.py`) + the
-CLI wrapper `scripts/ops/publish_site.py`. It uploads a single HTML file OR a multi-file directory (SPA — it
-preserves relative paths; the dir must contain `index.html`) to a public GCS bucket and registers it for
-discovery.
+**Mechanism:** `marin.publish.sites.publish_site()` (module `lib/marin/src/marin/publish/sites.py`) + the CLI
+wrapper `scripts/ops/publish_site.py`. Uploads a single HTML file OR a multi-file directory (SPA — preserves
+relative paths; the dir must contain `index.html`) to a public GCS bucket and registers it for discovery.
 
 **Canonical invocation (CLI):**
 ```bash
@@ -33,10 +29,10 @@ uv run scripts/ops/publish_site.py <report.html | ./site_dir/> \
 **Python:** `from marin.publish.sites import publish_site; site = publish_site(source, user=…, slug=…,
 version=…, title=…, summary="")` → `site.path` = the `gs://` dir.
 
-**Where it lands / the public URL** (deterministic, address-by-convention — no separate registry lookup needed):
+**Where it lands / the public URL** (deterministic, address-by-convention — no separate registry lookup):
 - Object: `gs://marin-public/<user>/<slug>/<version>/index.html` (+ a sibling `.artifact.json` record).
 - **Public URL:** `https://storage.googleapis.com/marin-public/<user>/<slug>/<version>/index.html` (served
-  `text/html`). Constants live in `sites.py`: `PUBLIC_BUCKET="marin-public"`,
+  `text/html`). Constants in `sites.py`: `PUBLIC_BUCKET="marin-public"`,
   `PUBLIC_URL_BASE="https://storage.googleapis.com/marin-public"`.
 - Helpers: `site_uri(user, slug, version)` → the `gs://` dir; `site_url(user, slug, version)` → the public URL;
   `site_name(user, slug)` → the record name (`sites/<user>/<slug>`).
@@ -52,22 +48,20 @@ version=…, title=…, summary="")` → `site.path` = the `gs://` dir.
   overwrites. **Bump the `--version` (CalVer) to keep an immutable prior copy.** Treat a published version as
   frozen; new results → new version.
 - **`index.json` is non-atomic** (read-modify-write) — avoid concurrent publishes racing the same index.
-- **Use origin/main (needs #7084):** the Content-Type fix ("write site objects via `fs.open` so Content-Type
-  sticks", commit `45c875c85`) landed AFTER the initial #6816 (`6328c663a`) — pull recent `main` or pages may
-  serve with the wrong MIME type.
+- **Use origin/main:** the Content-Type fix ("write site objects via `fs.open` so Content-Type sticks",
+  PR #7084) landed AFTER the initial #6816 — pull recent `main` or pages may serve with the wrong MIME type.
 - **Not everything is publishable:** `render_cluster_report` was deliberately NOT migrated (it can contain
   copyrighted corpus text) — do not publish raw corpus/eval text this way without a copyright check.
 - **Requires** the marin repo env + GCS write auth to `gs://marin-public` (public-read bucket).
 
 **Reference:** `docs/tutorials/publish-analysis-site.md` in the marin repo; PR #6816 (issue #6802) + #7084.
-Worked examples already live: `.../held/datakit-sidebyside/2026.07.01/`, `.../ahmad/delphi-midtraining/2026.07.01/`.
 
 ---
 
 ## Execution & artifacts — the ArtifactStep system (authority: `marin-executor/`)
 
-marin's pipeline/execution layer, and the substrate the publish mechanism above rides on.
-**⚠ The eager content-addressed `Executor` + `ExecutorStep` are RETIRED (PR #6649)** — replaced by lazy typed
+marin's pipeline/execution layer, and the substrate the publish mechanism above rides on. **The eager
+content-addressed `Executor` + `ExecutorStep` are RETIRED (PR #6649)** — replaced by lazy typed
 **`ArtifactStep`**s (`marin.execution.lazy`): explicit **`name@version`** (CALVER) addressing instead of an
 md5-of-the-config-tree, typed **`Artifact`** outputs (`LevanterCheckpoint`, `TokenizedCache`, …), with identity
 (`build_config(ctx)`, pure over a `StepContext`) separated from execution (compute rides `remote(fn,
@@ -80,7 +74,6 @@ resources=…)`, not the graph node).
   identity/graph layer, `srun` = execution layer on non-Fray clusters;
 - the legacy GCS `.executor_info` layout still used to recover OLD executor-launched runs (Delphi midtrains).
 
-**Connection to the best practice above:** `publish_site` records each page as a typed `Artifact`, so a
-published site is code-fetchable by its deterministic address via `Artifact.raw_load(site_uri(user, slug,
-version))` — the *same* typed-artifact system, no separate registry lookup. (See also `levanter/` — the JAX
-training engine most `ArtifactStep`s drive — and `marinskyrl/` — the SkyRL RL fork.)
+`publish_site` records each page as a typed `Artifact`, so a published site is code-fetchable by its
+deterministic address via `Artifact.raw_load(site_uri(user, slug, version))` — the *same* typed-artifact system,
+no separate registry lookup.

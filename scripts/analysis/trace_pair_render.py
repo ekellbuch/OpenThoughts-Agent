@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """Render same-task trace pairs side-by-side for human inspection.
 
-Answers research question (3): **Do behavioral changes persist in post-RL
-eval traces?** The macro deltas from ``behavioral_delta.py`` say *what*
-shifted; this script surfaces *what those shifts look like in practice*.
-
 For each task present in both datasets, picks one representative trial
 from each side (highest reward, then most recent) and renders both
 conversations as columns in a single HTML page.
 
-Layout features (vs. the original raw-dump renderer):
+Layout features:
 - Each pair starts with a **diff summary card** — reward delta, turn
   delta, tool-call delta, think-token delta — laid out side by side.
 - Messages render inside ``<details>`` blocks (collapsible). The

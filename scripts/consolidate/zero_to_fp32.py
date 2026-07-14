@@ -82,7 +82,6 @@ def get_model_state_file(checkpoint_dir, zero_stage):
 
 
 def get_checkpoint_files(checkpoint_dir, glob_pattern):
-    # XXX: need to test that this simple glob rule works for multi-node setup too
     ckpt_files = sorted(glob.glob(os.path.join(checkpoint_dir, glob_pattern)), key=natural_keys)
 
     if len(ckpt_files) == 0:
@@ -253,15 +252,13 @@ def _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero
     param_shapes = zero_model_states[0].param_shapes
 
     # Reconstruction protocol:
-    #
-    # XXX: document this
 
     if debug:
         for i in range(world_size):
             for j in range(len(fp32_flat_groups[0])):
                 print(f"{FP32_FLAT_GROUPS}[{i}][{j}].shape={fp32_flat_groups[i][j].shape}")
 
-    # XXX: memory usage doubles here (zero2)
+    # memory usage doubles here (zero2)
     num_param_groups = len(fp32_flat_groups[0])
     merged_single_partition_of_fp32_groups = []
     for i in range(num_param_groups):
@@ -279,8 +276,7 @@ def _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero
         print(f"Need {wanted_numel} numels in {wanted_params} params.")
 
     # params
-    # XXX: for huge models that can't fit into the host's RAM we will have to recode this to support
-    # out-of-core computing solution
+    # for huge models that can't fit into the host's RAM this would need out-of-core support
     total_numel = 0
     total_params = 0
     for shapes, full_single_fp32_vector in zip(param_shapes, merged_single_partition_of_fp32_groups):
@@ -456,8 +452,7 @@ def _zero3_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero
         print(f"Trainable params: Need {wanted_numel} numels in {wanted_params} params.")
 
     # params
-    # XXX: for huge models that can't fit into the host's RAM we will have to recode this to support
-    # out-of-core computing solution
+    # for huge models that can't fit into the host's RAM this would need out-of-core support
     offset = 0
     total_numel = 0
     total_params = 0
