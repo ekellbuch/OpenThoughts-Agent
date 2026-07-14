@@ -60,6 +60,43 @@ export KUBECONFIG=~/.kube/coreweave-iris-gpu         # REQUIRED — the CoreWeav
 
 ---
 
+## Sibling CoreWeave GPU cluster: `cw-rno2a` (RNO2A / Reno) — 512 H100, added 2026-07 (marin PR #6909)
+
+A **second, larger** CoreWeave GPU cluster is now live alongside `cw-us-east-02a`. Same
+KubernetesProvider / Kueue-gang model; different region, kubeconfig, and node shape.
+
+- **Fleet:** **64× `gd-8xh100ib-i128` (8× H100-80GB + IB each) = 512 H100** + 1 `turin-gp-l`
+  CPU controller node (65 nodes total). The H100 pool is **pinned fully warm**
+  (`buffer_slices: 64` = the whole reservation stays provisioned even when idle) — so a
+  gang admits without a cold node-provision wait. **4× the East cluster (which is ~36 nodes / ~256 GPU).**
+- **Access — DIFFERENT kubeconfig + context from East (don't reuse East's):**
+  - `KUBECONFIG=~/.kube/coreweave-iris` (NOTE: **no `-gpu` suffix** — East is `~/.kube/coreweave-iris-gpu`).
+    This is a 5-context file (a fresh `…-july-token` covering East/West/rno2a/oa-*); perms 600.
+  - `kube_context: marin-rn02a_RNO2A` → endpoint `https://208261-6670debc.k8s.rno2a.coreweave.com`.
+  - Query nodes/pods exactly like East: `KUBECONFIG=~/.kube/coreweave-iris kubectl --context marin-rn02a_RNO2A get nodes`.
+  - Namespace `iris` (controller `iris-controller-*` + `finelog-cw-rno2a-*` both run there).
+- **Cluster config** = `lib/iris/config/cw-rno2a.yaml` (on marin **origin/main**). ⚠ To drive it
+  via the `iris` SDK the **local marin clone must be on `main`** (or a branch carrying the new
+  `IrisClusterConfig` schema) — an older clone's pydantic **rejects** the new fields
+  (`kube_context`, `external_object_storage_endpoint`, `checkpoint_interval_seconds`,
+  `signing_key`, `trusted_cidrs`) → `extra_forbidden` at config-load. Direct `kubectl` (above)
+  works regardless. Object store: `object_storage_endpoint: http://cwlota.com`,
+  `external_object_storage_endpoint: https://cwobject.com`. Finelog server: `finelog deploy up cw-rno2a`.
+- **⚠ NCCL bring-up gotcha (do NOT carry East's value over):** the RNO2A bring-up bug (marin
+  **#6940**, fixed 2026-07-04) was a wrong `NCCL_SOCKET_IFNAME` (`=enp90s0np0`) that broke
+  multi-node NCCL bootstrap (`Bootstrap: no socket interface found`). The **correct socket
+  interface is cluster-specific** — a port of our RL configs (which set `NCCL_SOCKET_IFNAME`)
+  must use the rno2a-correct PF, not `cw-us-east-02a`'s. Also fixed: **#6950** (128k grug-MoE
+  gangs hung on first-step NCCL collective — bad IB leaf-group 71). Both closed; but **large-gang
+  MoE stability is still being shaken out** by the marin team (several `jaxpp-rno2a-*` W&B runs
+  crashed ~2026-07-10) — treat a first big multi-node run here as UNTESTED (deep-dive it).
+- **Ownership:** this is a **marin-team** reservation (rjpower/dlwh/Rafal Wojdyla run grug/jaxpp
+  MoE experiments on it). Not our dedicated cluster — coordinate before parking a large long run.
+- **Status snapshot (2026-07-13):** 512 H100 / 64 nodes **entirely idle** (0 GPUs in use; only
+  controller + finelog pods in `iris`). Verified via the `kubectl … get pods -A` GPU-request tally.
+
+---
+
 ## Hardware (node shape)
 
 CoreWeave `cw-us-east-02a` node = **8× H100-80GB + InfiniBand**, requested **whole-node
@@ -294,9 +331,15 @@ $IRIS --cluster cw-us-east-02a job logs /benjaminfeuer/<job> --since-ms <submitt
 (e.g. on dead `rl-131k-cpdcp2r3-v2` one `--no-tail --since-ms <submit>` recovered all
 2275 lines spanning the full 10:09:08 → 10:16:21 lifetime, revealing the rank-0 fatal
 `ModuleNotFoundError: No module named 'torchtitan'` in `fsdp_utils.py:667 apply_ep` —
-the MoE EP path needs torchtitan, not in the gpu-rl image.) The analyzer takes
-`--cluster` + `--iris-bin` (auto-resolves the cw-capable iris) so it works for cw out of
-the box.
+the MoE EP path needs torchtitan, not in the gpu-rl image.)
+
+**⚠ Poll / tooling pitfalls (esp. cw-rno2a + pure-RL jobs) — learned 2026-07-14:**
+- **`job summary` is FLAKY on cw-rno2a** (intermittent `execute_unary` controller blips). Drive rno2a liveness through `iris query` / `watch_job_state.py --once` instead; retry-or-fall-back rather than trusting one `job summary` failure.
+- **jobs-table columns are the `*_ms` names** (`submitted_at_ms`, `started_at_ms`, `finished_at_ms`, `error`, `exit_code`) — a bare `submitted_at`/`failure_count` errors `no such column`. If a `query` column errors, drop it and re-select `name, state` (don't abandon the query).
+- **`analyze_job_history.py` does NOT "just work" for cw-rno2a or pure-RL jobs** (supersedes the older "works out of the box" note):
+  - Region resolver passes `--config <cluster-name>` to iris, which wants a PATH → it errors `Path 'cw-rno2a' does not exist`. Workaround: pass the config YAML **path** as `--cluster` (e.g. `--cluster /Users/benjaminfeuer/Documents/marin/lib/iris/config/cw-rno2a.yaml`) AND put the cw iris on PATH (`export PATH=/Users/benjaminfeuer/miniconda3/envs/otagent/bin:$PATH`).
+  - Even then it **cannot resolve a pure-RL job's output dir** (no `--jobs-dir`/`--gcs-output-dir` in the baked command) → `LookupError`. It is built for jobs with a GCS trace/output dir. **For RL-job metrics, fetch the finelog directly** via `iris job logs --since-ms <submitted_at_ms> --no-tail` (bounded) instead.
+- **`iris job logs` has NO server-side grep** (only `--since-ms`/`--since-seconds`/`--max-lines`/`--tail`). Never `--max-lines >~200 | grep` a long job into the Mac (OOM-crash risk — see §Monitoring & debugging practices / the log-resource-discipline memory). Bound every fetch with a tight `--since-ms` window + `--max-lines`.
 
 ---
 
