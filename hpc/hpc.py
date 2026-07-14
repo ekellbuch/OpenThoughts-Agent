@@ -1300,7 +1300,14 @@ vista = HPC(
     # bug. agent_logs/2026-07-12_tacc_axolotl32b_c634-052_straggler_nccl_timeout.md.
     # c621-102 added 2026-07-13 from job 825770 (axolotl Qwen3-32B SFT, exp _18): SLURM State NODE_FAIL
     # + `down*` node — same class as c634-052; confirmed NODE_FAIL.
-    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051,c636-152,c608-042,c634-142,c641-012,c634-052,c621-102",
+    # c639-[...] (WHOLE RACK, 32 nodes) added 2026-07-14 (operator-authorized): the axolotl Qwen3-32B SFT
+    # chain died FOUR consecutive times whenever it landed on the c639 rack (829050/051/052/053, each ~2h in,
+    # ZeRO-3 backward `reduce_scatter` NCCL SIGABRT with only c639 nodes exiting 1; 829053 showed the
+    # straggler pre-failure signature — step time ballooning 1.2→100+ s/it). Per-node exclusion wasn't
+    # converging (multiple c639 nodes implicated across runs), so the whole rack is excluded as a class.
+    # Expanded/validated on Vista: `scontrol show hostnames` yields exactly the 32 existing c639 nodes.
+    # agent_logs/2026-07-14_tacc_axolotl32b_c639_rack_exclude_freshrelaunch.md.
+    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051,c636-152,c608-042,c634-142,c641-012,c634-052,c621-102,c639-[001-002,011-012,021-022,031-032,041-042,051-052,061-062,071-072,081-082,091-092,101-102,111-112,121-122,131-132,141-142,151-152]",
     # Detect + expose the CUDA math_libs (sbsa) lib dir on LIBRARY_PATH/LD_LIBRARY_PATH
     # so DeepSpeed's JIT cpu_adam op links `-lcurand` (libcurand.so lives under
     # math_libs/<ver>/targets/sbsa-linux/lib on this aarch64 install, NOT cuda/lib64).
