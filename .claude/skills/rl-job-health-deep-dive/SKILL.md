@@ -54,19 +54,22 @@ worse than useless** — it looks authoritative and gets a job killed (or kept) 
 | B resources | per-rank GPU util **with policy ranks separated from engine ranks**, **and** the engine subscription line (running vs waiting vs the serving cap) | ERROR |
 | C rollouts | actual reward values / trial exception files you OPENED (not a count you assumed) | ERROR |
 
-### ⛔ Engine starvation is NOT a Daytona error (methodology — do not re-diagnose as Daytona)
+### ⛔ Engine under-subscription is NEVER Daytona / duty-cycle / tools (methodology — memory `engine-starvation-not-daytona`)
 
-When engines read as under-subscribed/idle and the generation buffer stalls, **do NOT attribute it to Daytona /
-hung sandboxes / tool-tails** — that is a repeatedly-wrong default, not a diagnosis (operator-confirmed; memory
-`engine-starvation-not-daytona`). The cause is almost always on the RL/serving/coordination side — **rollout
-concurrency too low to keep the engines fed** is the first hypothesis, not the last (the fix is scaling
-`n_concurrent_trials` + `num_parallel_generation_workers` together — the *mechanics + math live in*
-`.claude/projects/marinskyrl/marinskyrl.md`, the "Saturating vLLM engines in agentic fully_async RL" section). You
-establish the real cause with **live evidence** (§ Gate B), and you **diagnose it while the job is ALIVE** — once
-it's killed, py-spy is gone and the logs alone are often insufficient. On a live starvation/stall, BEFORE any KILL
-recommendation, capture the coordinator/engine/policy py-spy stacks (mechanics: `.claude/ops/iris/…`) and report
-what dispatch is blocked on. A KILL recommendation for a starvation you did not diagnose live is ERROR-quality —
-say so rather than guessing.
+When engines read under-subscribed/idle (`Running` low, `Waiting=0`, KV≈0, ⅓-TDP power) and the generation buffer
+stalls, the cause is **NEVER** a Daytona error, the **agentic duty cycle**, "rollouts parked in tool-execution," or
+"waiting on tools" (operator-corrected repeatedly — **we are NOT tool-bottlenecked**; do not float any of these).
+The cause is in the **gen→dispatch→train pipeline**, and you find it by MEASURING it — read the memory
+`engine-starvation-not-daytona` for the candidate list and then measure, on the LIVE job:
+- **the RolloutCoordinator dispatch cores** — are the `num_coordinators` (K) coordinator processes CPU/GIL-pegged on
+  `submit_batch`/`gather`/post-gather shaping? (py-spy / top them.) → dispatcher-bound → the lever is K, not n/npgw.
+- **staleness/backpressure** — is generation throttled by `max_staleness_steps` because `policy_train` is the slow
+  phase (training-bound)?
+- **issued-vs-scheduled** — are `generate()` calls reaching the engine but `Waiting` stays 0 (engines drain
+  instantly)? → the bottleneck is upstream dispatch rate, not engine capacity.
+(The saturation-READ tuple + "SM-util% is a trap" in marinskyrl's "Saturating vLLM engines" section is still valid;
+its CAUSAL "raise concurrency to beat the duty cycle" story is REFUTED — see the caveat there.) Diagnose while the
+job is ALIVE (py-spy dies with it). A verdict on a starvation you did not measure live is ERROR-quality — say so.
 
 ---
 
