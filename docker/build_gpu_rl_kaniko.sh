@@ -40,6 +40,12 @@ SINGLE_SNAPSHOT="${SINGLE_SNAPSHOT:-1}"
 if [ "$SINGLE_SNAPSHOT" = "1" ]; then SNAPSHOT_FLAG="--single-snapshot"; else SNAPSHOT_FLAG=""; fi
 
 CACHE_REPO=ghcr.io/open-thoughts/openthoughts-agent/cache
+# KANIKO_CACHE=1 (default) reuses cached RUN layers from CACHE_REPO (the ~3 h nvcc
+# reuse on the full-build path). Set KANIKO_CACHE=0 to FORCE every RUN to execute
+# fresh (no cache read/write) — use when you need the in-build asserts to actually
+# run + print (e.g. verifying an incremental FlashQLA layer's tilelang pin), rather
+# than kaniko silently extracting a previously-cached layer.
+if [ "${KANIKO_CACHE:-1}" = "0" ]; then CACHE_FLAGS="--cache=false"; else CACHE_FLAGS="--cache=true --cache-repo=${CACHE_REPO}"; fi
 DEST_FLOATING=ghcr.io/open-thoughts/openthoughts-agent:gpu-rl
 DEST_PINNED=ghcr.io/open-thoughts/openthoughts-agent:gpu-rl-${GITSHA}
 
@@ -109,7 +115,6 @@ exec /kaniko/executor \
   --skip-unused-stages \
   $SNAPSHOT_FLAG \
   --compressed-caching=false \
-  --cache=true \
-  --cache-repo="${CACHE_REPO}" \
+  $CACHE_FLAGS \
   $FLOATING_DEST_FLAG \
   --destination "${DEST_PINNED}"

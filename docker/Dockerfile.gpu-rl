@@ -608,7 +608,7 @@ RUN . $RL_ENV_DIR/bin/activate && \
 #     session-create failure no longer aborts a trial. The currently-running 80B pod's
 #     baked harbor 0.8.0 (d58043c3) LACKS this. Also carries the OPENCODE_DUMMY_KEY sandbox
 #     key fix. --no-deps source-only swap → wheel cache-key + rl_env_constraints unchanged.
-ENV HARBOR_COMMIT=4ac18dc4571f59f590973697472325a1dd48bff4
+ENV HARBOR_COMMIT=793ff3fbdbcc0ca16f82fa7c920e48d7a4c60096
 RUN . $RL_ENV_DIR/bin/activate && \
     uv pip install --no-deps --force-reinstall \
         "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
