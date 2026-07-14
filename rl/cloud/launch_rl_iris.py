@@ -475,15 +475,11 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--trials-dir", "--trials_dir", dest="trials_dir", default="auto",
         help="Where Harbor writes per-trial agentic-RL rollout artifacts "
-             "(terminal_bench_config.trials_dir). 'auto' (default) = "
-             "s3://marin-us-east-02a/iris/<job_name>/trace_jobs — a DURABLE path the cw-us-east-02a "
-             "pods reach via auto-injected creds, so rollouts survive pod GC and are inspectable "
-             "post-hoc. 'local'/'off' = keep the config default (node-local "
-             "/app/experiments/<run>/trace_jobs, EPHEMERAL — lost on GC, no shared FS/PVC). Or pass "
-             "an explicit s3://, gs://, or path URI. NOTE: cw uses s3://marin-us-east-02a (CW "
-             "object store; R2 s3://marin-na is no longer reachable — store moved 2026-07-05, "
-             "marin c7caecc95a), NOT gs://; "
-             "ignored if you already set terminal_bench_config.trials_dir via --skyrl_override.",
+             "(terminal_bench_config.trials_dir). 'auto' (default) = the durable shared store at "
+             "s3://marin-us-east-02a/iris/<job_name>/trace_jobs (pods reach it via auto-injected "
+             "creds; inspectable post-hoc). 'local'/'off' = keep the config default (node-local "
+             "/app/experiments/<run>/trace_jobs). Or pass an explicit s3://, gs://, or path URI. "
+             "Ignored if you already set terminal_bench_config.trials_dir via --skyrl_override.",
     )
 
     # --- Iris submission args (mirror launch_eval_iris.py / IrisLauncher) ---
@@ -837,12 +833,11 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     for override in (args.skyrl_override or []):
         train_cmd.extend(["--skyrl_override", override])
 
-    # Durable Harbor rollout artifacts. The default (config trials_dir: null) resolves to a
-    # node-local path on the rank-0 pod (/app/experiments/<run>/trace_jobs); cw-us-east-02a has
-    # no shared FS/PVC and GCs pods on terminal, so those per-trial rollouts are lost when the
-    # job ends. Point terminal_bench_config.trials_dir at a remote R2 URI (the cluster injects
-    # working R2 creds, same store as the rendezvous) so rollouts persist + are inspectable
-    # post-hoc. Skip if the user opted out (--trials-dir local) or already set it explicitly.
+    # Durable Harbor rollout artifacts. The config default (trials_dir: null) resolves to a
+    # node-local path on the rank-0 pod (/app/experiments/<run>/trace_jobs); point
+    # terminal_bench_config.trials_dir at the durable shared store (s3://, creds auto-injected)
+    # so rollouts persist + are inspectable post-hoc. Skip if the user opted out
+    # (--trials-dir local) or already set it explicitly.
     trials_dir = (args.trials_dir or "auto").strip()
     user_set_trials = any("terminal_bench_config.trials_dir=" in o for o in (args.skyrl_override or []))
     if trials_dir.lower() not in ("local", "off", "none", "") and not user_set_trials:
@@ -862,10 +857,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # slow-but-not-hung head prestage completes before the workers give up + kill the gang.
     if args.rendezvous_timeout is not None:
         controller_cmd.extend(["--rendezvous-timeout", str(args.rendezvous_timeout)])
-    # Per-NODE task-dataset staging. On a multi-node iris/CoreWeave slice each task
-    # pod has its OWN node-local filesystem ($DCFT=/opt/openthoughts in the gpu-rl
-    # image) — there is NO shared scratch like SLURM's GPFS. run_rl.py's
-    # resolve_rl_train_data() extracts the HF task dataset to /opt/openthoughts/tasks/
+    # Per-NODE task-dataset staging. run_rl.py's resolve_rl_train_data() extracts the
+    # HF task dataset to the node-local $DCFT=/opt/openthoughts/tasks/ (gpu-rl image),
     # but it runs ONLY on rank 0 (the head), so the Ray-scheduled rollout workers on
     # ranks 1..N-1 find an empty tasks dir and every rollout dies with
     # FileNotFoundError: .../task.toml -> reward always 0 (data-starved, doomed run).
