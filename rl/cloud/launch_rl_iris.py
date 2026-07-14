@@ -211,8 +211,18 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # prebuilt-wheelhouse, NO nvcc). Pull-verified: 48 layers, max 3.46 GB. Build asserts green (flash_attn_2_cuda /
     # skyrl_train / vllm / torchtitan.ExpertParallel). NOTE: floating :gpu-rl tag was deliberately NOT moved
     # (PUSH_FLOATING=0) — promote it after a live smoke: `crane tag ...@sha256:98adaa38... gpu-rl`.
-    "@sha256:98adaa38c6e8f57e52430d3b63829d918a7cfa7db26cf5382becb8ba022ddf19"  # noqa: E501  (gpu-rl-19bd8c5e, PULLABLE; log-capture-safe tqdm + SKYRL de40d31c)
-    # (prev: gpu-rl-7d15b25a @sha256:17a46200 IB userspace + SKYRL 272bf011; gpu-rl-cf1ecea6 @sha256:74d6d3e2 SKYRL 822221a0 engine-readiness gate; gpu-rl-1a32669c @sha256:9a96ad1f SKYRL 613e225d)
+    # gpu-rl-318e18ce (built 2026-07-14, kaniko gpurl-kaniko-318e18ce, SINGLE_SNAPSHOT=0 pullable): HARBOR_COMMIT
+    # bump -> 793ff3fb (round-2 per-turn coordinator-offload harbor fix). ALSO unbreaks the base build: reverts
+    # docker/rl_env_constraints.txt tilelang 0.1.8->0.1.9. Commit 291cfef3 had wrongly pinned the BASE constraint
+    # to 0.1.8 ("tilelang is FlashQLA-only"), but the vLLM fork's requirements/cuda.txt REQUIRES tilelang==0.1.9,
+    # so the rl-stage `uv pip install -r requirements/cuda.txt` under UV_CONSTRAINT died "tilelang==0.1.9 and
+    # tilelang==0.1.8 unsatisfiable" (first attempt gpurl-kaniko-6697dd20 FAILED here). The 0.1.8 pin belongs ONLY
+    # in the FlashQLA incremental layer (clears UV_CONSTRAINT + re-downgrades on top). SKYRL de40d31c (baked,
+    # unchanged vs 19bd8c5e). wheels UNCHANGED (fast prebuilt-wheelhouse, NO nvcc). Pull-verified: 48 layers, max
+    # 3.46 GB. Build asserts green (flash_attn_2_cuda / skyrl_train / vllm / torchtitan.ExpertParallel; baked harbor
+    # 0.8.1 commit 793ff3fb; baked MarinSkyRL HEAD de40d31c). Floating :gpu-rl tag WAS moved to this build (PUSH_FLOATING=1).
+    "@sha256:35fbf8156dce15dfa0b2e41faadb743ef1821049aed6308be0304e2505126626"  # noqa: E501  (gpu-rl-318e18ce, PULLABLE; harbor 793ff3fb round-2 + tilelang 0.1.9 base-build fix)
+    # (prev: gpu-rl-19bd8c5e @sha256:98adaa38 log-capture-safe tqdm + SKYRL de40d31c; gpu-rl-7d15b25a @sha256:17a46200 IB userspace + SKYRL 272bf011; gpu-rl-cf1ecea6 @sha256:74d6d3e2 SKYRL 822221a0)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
