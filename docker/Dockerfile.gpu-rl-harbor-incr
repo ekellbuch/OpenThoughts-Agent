@@ -13,37 +13,52 @@
 # node is the ~MB harbor diff → the pull completes near-instantly and the large
 # base is served from the node's cache.
 #
-# 2026-07-13 BUILD: base = gpu-rl-19bd8c5e (@sha256:98adaa38…) — the current
-# launcher DEFAULT_RL_DOCKER_IMAGE (SINGLE_SNAPSHOT=0, PULLABLE; log-capture-safe
-# tqdm + SKYRL de40d31c + IB verbs userspace + vLLM-fork 76259c63). Swaps harbor
-# to 116666d6, which adds AgentConfig.upload_agent_logs (+ the Trial._upload_agent_logs
-# early-return gate) to kill the per-step agent-log push-back retry churn on
-# high-latency object-store environments. 116666d6 is a descendant of the prior
-# baked harbor (4ac18dc4 → … → d58043c3), so it ALSO carries the earlier Daytona
-# throughput fixes (poll(0.001), tmux-bake, cheap reaper, connection-pool cap,
-# auto_stop) — the in-image regression checks below still pass.
+# 2026-07-14 BUILD: base = gpu-rl-19bd8c5e (@sha256:98adaa38…) — the current
+# launcher DEFAULT_RL_DOCKER_IMAGE that the 30B rno2a RL runs use (SINGLE_SNAPSHOT=0,
+# PULLABLE; log-capture-safe tqdm + SKYRL de40d31c + IB verbs userspace + vLLM-fork
+# 76259c63). Swaps harbor to 55ae9e66, which adds the TrialPaths.mkdir()/chmod_dir()
+# skip-on-object-storage guard (`_is_local()`): on s3://.../gs:// trial_dirs the
+# per-trial mkdir/chmod are pure blocking cloud round-trips that serialized the
+# RolloutCoordinator asyncio dispatch loop (live py-spy rno2a v0f n=675: 2/4
+# coordinators pegged at 100% single-core in paths.mkdir on s3fs, engines under-fed)
+# → unblocks the RolloutCoordinator dispatch loop. 55ae9e66 is a descendant of the
+# prior baked harbor (4ac18dc4 → 116666d6 → f9cf327e → 55ae9e66), so it ALSO carries
+# upload_agent_logs + the earlier Daytona throughput fixes (poll(0.001), tmux-bake,
+# cheap reaper, connection-pool cap, auto_stop) — the in-image regression checks
+# below still pass.
 # =============================================================================
 FROM ghcr.io/open-thoughts/openthoughts-agent@sha256:98adaa38c6e8f57e52430d3b63829d918a7cfa7db26cf5382becb8ba022ddf19
 
 ENV RL_ENV_DIR=/opt/openthoughts/envs/rl
 
-# 116666d6 "feat(trial): add agent.upload_agent_logs flag to disable the per-step
-# log push-back" — new typed AgentConfig field `upload_agent_logs: bool = True`
-# (default preserves current behavior) + a Trial._upload_agent_logs early-return
-# gate covering both the single-step and multi-step call sites. Eliminates the
-# agentic-RL retry churn from the best-effort host→sandbox agent-log upload that
-# nothing downstream consumes. As a descendant of the prior baked harbor it also
-# carries: (a) sleep(0.001) 1ms exec poll (environment.py), and (b) tmux+asciinema
-# baked into every snapshot at BUILD time (snapshots.py bake_agent_tooling /
-# _AGENT_TOOLING_LAYER) — both asserted below so a regression fails the build.
+# 55ae9e66 "perf(trial-paths): skip mkdir/chmod on object-storage trial_dir
+# (dispatcher unblock)" — adds TrialPaths._is_local() and guards both
+# TrialPaths.mkdir() and chmod_dir() on it: object storage has no real directories
+# and no POSIX mode bits, so mkdir/chmod there are wasted BLOCKING cloud round-trips
+# on the RolloutCoordinator dispatch loop. Local FS behavior byte-identical. As a
+# descendant of 116666d6 / d58043c3 it also carries: (a) AgentConfig.upload_agent_logs
+# + the Trial._upload_agent_logs early-return gate, (b) sleep(0.001) 1ms exec poll
+# (environment.py), and (c) tmux+asciinema baked into every snapshot at BUILD time
+# (snapshots.py bake_agent_tooling / _AGENT_TOOLING_LAYER) — all asserted below so a
+# regression fails the build.
 # --no-deps = source-only swap (does not touch the carefully-pinned rl env). The
 # base image already cleared UV_CONSTRAINT (ENV UV_CONSTRAINT="") so no constraint
 # applies here — and harbor is absent from the constraints file regardless.
-ENV HARBOR_COMMIT=116666d63a04f4a58a35fefd62a73d97f3e9e75b
+ENV HARBOR_COMMIT=55ae9e66688f52ba9dc40ab859d21cd5522d35b0
 RUN . $RL_ENV_DIR/bin/activate && \
     uv pip install --no-deps --force-reinstall \
         "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
     python -c "import harbor, importlib.metadata as m; print('baked harbor', m.version('harbor'))" && \
+    python -c "import importlib.metadata as m, json; du=m.distribution('harbor').read_text('direct_url.json'); print('direct_url.json:', du); \
+cid=(json.loads(du).get('vcs_info') or {}).get('commit_id',''); \
+assert cid.startswith('55ae9e66'), 'HARBOR HEAD MISMATCH: baked commit_id '+repr(cid)+' != 55ae9e66'; \
+print('harbor git HEAD in image =', cid)" && \
+    python -c "import harbor, pathlib; p=pathlib.Path(harbor.__file__).parent/'models'/'trial'/'paths.py'; \
+src=p.read_text(); \
+assert 'def _is_local(' in src, 'MKDIR-SKIP FIX MISSING (no _is_local() in models/trial/paths.py)'; \
+assert 'no real directories' in src, 'MKDIR-SKIP FIX MISSING (no \"no real directories\" guard comment in paths.py)'; \
+assert src.count('if not self._is_local():') >= 2, 'MKDIR-SKIP GATE MISSING (fewer than 2 _is_local() guards in mkdir/chmod_dir)'; \
+print('object-storage mkdir/chmod skip guard (_is_local) present in models/trial/paths.py')" && \
     python -c "from harbor.models.trial.config import AgentConfig; \
 assert 'upload_agent_logs' in AgentConfig.model_fields, 'UPLOAD_AGENT_LOGS FIELD MISSING (not in AgentConfig.model_fields)'; \
 import inspect, harbor.trial.trial as t; src=inspect.getsource(t.Trial._upload_agent_logs); \
