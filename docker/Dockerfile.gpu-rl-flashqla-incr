@@ -1,0 +1,81 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# INCREMENTAL gpu-rl rebuild — last-known-good image + ONLY the FlashQLA delta.
+# =============================================================================
+# GOAL (Stage 1 of the 80B GIL-hold fix): bake the FlashQLA fused GatedDeltaNet
+# (GDN) tilelang kernel into the gpu-rl image so `SKYRL_GDN_FLASHQLA=1` engages a
+# fused, GIL-RELEASING GPU kernel instead of the pure-torch chunk-recurrence
+# Python loop (`torch_chunk_gated_delta_rule`) that holds the GIL ~2h and killed
+# the Qwen3-Next-80B RL run at gs1 (36 GDN layers × ~55k sequential Python
+# iterations/forward @ 98k ctx → HeartbeatMonitor SIGABRT). MarinSkyRL already
+# has the enable path (`SKYRL_GDN_FLASHQLA=1` → engage_flashqla →
+# _build_flashqla_chunk imports `chunk_gated_delta_rule_fwd`,
+# `chunk_gated_delta_rule_bwd` from `flash_qla` + `l2norm` from `flash_qla.utils`,
+# in skyrl_train/models/qwen3_next_gdn.py). The ONLY missing piece is the
+# `flash_qla` package itself — its deps (tilelang 0.1.9, apache-tvm-ffi 0.1.9)
+# are ALREADY baked in the base rl env (docker/rl_env_constraints.txt).
+#
+# WHY INCREMENTAL: a full rebuild can end up with a >8 GB layer that CANNOT be
+# pulled over the CoreWeave→ghcr egress (ImagePullBackOff forever). This builds
+# FROM the last-known-good image (already cached on the nodes) and adds ONE tiny
+# RUN layer (flash_qla is pure-python — no ext_modules, no nvcc), so the only
+# fresh-pull layer on a node is a few-KB python diff.
+#
+# 2026-07-13 BUILD: base = gpu-rl-b7783998 (@sha256:c8ae0808…) — the harbor-116666d6
+# image (agent-log push-back churn fix) which is a descendant of the launcher
+# DEFAULT_RL_DOCKER_IMAGE gpu-rl-19bd8c5e (@sha256:98adaa38…). Basing here keeps
+# BOTH the churn fix AND FlashQLA. Every other baked artifact (MarinSkyRL, vLLM-fork
+# compiled 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128, IB verbs userspace, the
+# rl env pinned via rl_env_constraints.txt incl. tilelang 0.1.9 + apache-tvm-ffi
+# 0.1.9) is inherited UNCHANGED — FlashQLA is the SOLE delta.
+#
+# PROVENANCE: flash_qla 0.1.0+6ef4858 (QwenLM/FlashQLA git 6ef4858 — the
+# "fix-l2norm-dtype" merge, 2026-05-07). Pure-python; install_requires
+# torch>=2.8 (have 2.11), tilelang==0.1.8, apache-tvm-ffi==0.1.9. We install
+# --no-deps so the base's tilelang 0.1.9 (a patch bump over the pinned 0.1.8) and
+# tvm-ffi 0.1.9 are KEPT, and the in-build import assert below GATES that
+# flash_qla imports cleanly under tilelang 0.1.9. FlashQLA is self-contained (no
+# working fla needed; fla 0.5.0 is masked/broken).
+# =============================================================================
+FROM ghcr.io/open-thoughts/openthoughts-agent@sha256:c8ae0808d90ec96417214c4b18ff779c8b0a1e4cac27dee3600e5af64c1de708
+
+ENV RL_ENV_DIR=/opt/openthoughts/envs/rl
+
+# FlashQLA fused GDN tilelang kernel. --no-deps = do NOT let it pull tilelang==0.1.8
+# (base already has 0.1.9) or touch the carefully-pinned rl env. QLA_VERSION_SUFFIX
+# forces the dist version to the exact provenance string 0.1.0+6ef4858 regardless of
+# whether the VCS checkout's .git survives into the build backend.
+#
+# IN-BUILD VERIFICATION (the build-assert = the gate; kaniko fails the build on a
+# non-zero RUN, and --destination push is terminal, so a green build = a pushed,
+# import-verified image):
+#   - flash_qla is an sm90-ONLY, GPU-GATED import: two module-scope probes run at
+#     `import flash_qla` time — (1) tilelang.contrib.nvcc.get_target_compute_version()
+#     must == "9.0" (else it raises "FlashQLA now support sm90 only."), and
+#     (2) torch.cuda.get_device_properties().multi_processor_count is read to size the
+#     kernel grid. Both need a physical GPU / arch, which the CPU-only kaniko build
+#     node does NOT have. So the assert STUBS exactly those two probes (arch→"9.0",
+#     SM count→132 = H100) so the FULL flash_qla import graph (all hopper kernel
+#     modules + tilelang.jit decorations + utils) executes on CPU. This is a
+#     BUILD-NODE-ONLY shim: at RUNTIME on the H100, get_target_compute_version() finds
+#     the real device (its path-3 GPU probe returns "9.0") and get_device_properties()
+#     returns the real SM count, so engage_flashqla's import in qwen3_next_gdn.py needs
+#     NO stub. The @tilelang.jit kernels compile lazily on first CALL (on GPU), not at
+#     import, so nothing is JIT-compiled here.
+ENV FLASHQLA_COMMIT=6ef4858b5446e05bd461d9658d877e548182dbcb
+RUN . $RL_ENV_DIR/bin/activate && \
+    QLA_VERSION_SUFFIX="+6ef4858" uv pip install --no-deps \
+        "flash_qla @ git+https://github.com/QwenLM/FlashQLA.git@${FLASHQLA_COMMIT}" && \
+    python -c "import torch, tilelang, tilelang.contrib.nvcc, tvm_ffi, types, importlib.metadata as md; \
+tilelang.contrib.nvcc.get_target_compute_version = lambda *a, **k: '9.0'; \
+torch.cuda.get_device_properties = lambda *a, **k: types.SimpleNamespace(multi_processor_count=132); \
+import flash_qla; \
+from flash_qla import chunk_gated_delta_rule_fwd, chunk_gated_delta_rule_bwd; \
+from flash_qla.utils import l2norm; \
+assert md.version('flash_qla') == '0.1.0+6ef4858', 'FLASHQLA DIST VERSION MISMATCH: ' + md.version('flash_qla'); \
+assert flash_qla.__version__ == '0.1.0', 'FLASHQLA ATTR VERSION MISMATCH: ' + str(flash_qla.__version__); \
+assert callable(chunk_gated_delta_rule_fwd) and callable(chunk_gated_delta_rule_bwd) and callable(l2norm), 'FLASHQLA SYMBOLS NOT CALLABLE'; \
+print('FLASHQLA OK dist=' + md.version('flash_qla') + ' attr=' + flash_qla.__version__); \
+print('DEPS OK tilelang=' + md.version('tilelang') + ' apache-tvm-ffi=' + md.version('apache-tvm-ffi') + ' torch=' + torch.__version__); \
+print('SYMBOLS OK _build_flashqla_chunk imports resolve: chunk_gated_delta_rule_fwd, chunk_gated_delta_rule_bwd, flash_qla.utils.l2norm')" && \
+    echo "baked flash_qla commit: ${FLASHQLA_COMMIT}"

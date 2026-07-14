@@ -10,7 +10,11 @@
 #   DOCKER_USER_ID  ghcr user (penfever)
 #   DOCKER_TOKEN    a GitHub PAT with write:packages (NOT the Docker Hub dckr_pat_)
 #   GITSHA          OT-Agent commit sha for the immutable :gpu-rl-<gitsha> tag
-set -euxo pipefail
+# SECURITY: NO `set -x` here — command-tracing would echo DOCKER_TOKEN (the ghcr PAT)
+# and the base64 `AUTH` into the R2-persisted finelog. Tracing is re-enabled AFTER the
+# token is consumed (the config.json write below), so the build steps are traced but the
+# secret never is.
+set -euo pipefail
 
 : "${DOCKER_USER_ID:?}"
 : "${DOCKER_TOKEN:?}"
@@ -65,6 +69,8 @@ AUTH=$(printf '%s:%s' "$DOCKER_USER_ID" "$DOCKER_TOKEN" | base64 | tr -d '\n')
 cat > "$DOCKER_CONFIG/config.json" <<EOF
 {"auths":{"ghcr.io":{"auth":"${AUTH}"}}}
 EOF
+unset AUTH
+set -x  # ghcr PAT is now consumed — safe to trace the build steps below (token never traced)
 
 # --- 3.5. populate docker/wheelhouse/ for the prebuilt-wheelhouse (no-nvcc) path ---
 # The iris /app bundle has a 25 MB cap, so the ~900 MB prebuilt wheels CANNOT ride
