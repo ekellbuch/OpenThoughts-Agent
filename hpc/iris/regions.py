@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json as _json
+import csv
 import re
 import shutil
 import subprocess
@@ -250,14 +250,25 @@ def assert_yaml_regions_match_pin(yaml_paths: List[Path], pinned_region: str) ->
         )
 
 
+# iris interleaves glog lines (`I20260714 06:33:46 ... Establishing tunnel`,
+# `Resolved cluster ...`) into the query output stream; drop them before CSV
+# parsing. All glog lines start with a severity letter + 8-digit date.
+_IRIS_LOG_LINE_RE = re.compile(r"^[IWEF]\d{8}\s")
+
+
 def _iris_query(cluster_config: str, sql: str, timeout: int = 30) -> List[dict]:
     """Run a SQL query against the iris controller, return parsed rows.
 
-    Shells out to the ``iris query -f json`` CLI rather than wrangling
-    the connectrpc client directly: it handles tunnel setup, auth, and
-    the protobuf round-trip for us. ``shutil.which`` picks up the iris
-    binary from whichever venv the launcher is running in (e.g. the
-    otagent conda env on the launch host).
+    Shells out to the ``iris query -f csv`` CLI rather than wrangling the
+    connectrpc client directly: it handles tunnel setup, auth, and the
+    protobuf round-trip for us. ``shutil.which`` picks up the iris binary
+    from whichever venv the launcher is running in (e.g. the otagent conda
+    env on the launch host).
+
+    Uses ``-f csv`` (not ``-f json``): the marin iris CLI only supports
+    ``[table|csv]``, so ``-f json`` fails outright and silently defeats
+    region discovery (falling back to a non-co-located static bucket →
+    cross-region writes).
     """
     iris_bin = shutil.which("iris")
     if iris_bin is None or not Path(iris_bin).exists():
@@ -265,16 +276,21 @@ def _iris_query(cluster_config: str, sql: str, timeout: int = 30) -> List[dict]:
             "iris CLI not found on PATH; run from the Marin/Iris launch "
             "environment before using dynamic region discovery."
         )
-    cmd = [iris_bin, "--config", str(cluster_config), "query", "-f", "json", sql]
+    cmd = [iris_bin, "--config", str(cluster_config), "query", "-f", "csv", sql]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(
             f"iris query failed (rc={result.returncode}): {result.stderr.strip()}"
         )
-    out = result.stdout.strip()
-    if not out:
+    # Keep only CSV content: skip blank lines and any interleaved glog lines.
+    lines = [
+        line
+        for line in result.stdout.splitlines()
+        if line.strip() and not _IRIS_LOG_LINE_RE.match(line)
+    ]
+    if not lines:
         return []
-    return _json.loads(out)
+    return list(csv.DictReader(lines))
 
 
 def discover_region_for_tpu(
