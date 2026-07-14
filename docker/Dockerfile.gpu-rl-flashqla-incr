@@ -11,9 +11,14 @@
 # has the enable path (`SKYRL_GDN_FLASHQLA=1` → engage_flashqla →
 # _build_flashqla_chunk imports `chunk_gated_delta_rule_fwd`,
 # `chunk_gated_delta_rule_bwd` from `flash_qla` + `l2norm` from `flash_qla.utils`,
-# in skyrl_train/models/qwen3_next_gdn.py). The ONLY missing piece is the
-# `flash_qla` package itself — its deps (tilelang 0.1.9, apache-tvm-ffi 0.1.9)
-# are ALREADY baked in the base rl env (docker/rl_env_constraints.txt).
+# in skyrl_train/models/qwen3_next_gdn.py). The missing piece is the `flash_qla`
+# package itself PLUS a tilelang PIN: flash_qla 6ef4858 was authored against
+# tilelang 0.1.8, and its `kkt_solve` tilelang kernel calls `tl.language.gemm_v1`,
+# which tilelang 0.1.9 RENAMED to `gemm_op` → the runtime kernel compile dies
+# `tilelang.language has no attribute 'gemm_v1'` under the base's 0.1.9. So this
+# layer DOWNGRADES tilelang 0.1.9 → 0.1.8 (apache-tvm-ffi stays 0.1.9). tilelang
+# is FlashQLA-ONLY in this image (nothing else in MarinSkyRL/vLLM imports it), so
+# the downgrade is safe.
 #
 # WHY INCREMENTAL: a full rebuild can end up with a >8 GB layer that CANNOT be
 # pulled over the CoreWeave→ghcr egress (ImagePullBackOff forever). This builds
@@ -26,25 +31,39 @@
 # DEFAULT_RL_DOCKER_IMAGE gpu-rl-19bd8c5e (@sha256:98adaa38…). Basing here keeps
 # BOTH the churn fix AND FlashQLA. Every other baked artifact (MarinSkyRL, vLLM-fork
 # compiled 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128, IB verbs userspace, the
-# rl env pinned via rl_env_constraints.txt incl. tilelang 0.1.9 + apache-tvm-ffi
-# 0.1.9) is inherited UNCHANGED — FlashQLA is the SOLE delta.
+# rl env pinned via rl_env_constraints.txt, apache-tvm-ffi 0.1.9) is inherited
+# UNCHANGED. The delta = FlashQLA + the tilelang 0.1.9→0.1.8 downgrade it needs.
+# NOTE: the BASE has the OLD rl_env_constraints.txt baked at
+# /opt/openthoughts/docker/rl_env_constraints.txt (tilelang==0.1.9) and UV_CONSTRAINT
+# points at it, so the tilelang install below must CLEAR the constraint (UV_CONSTRAINT=)
+# to avoid a ==0.1.8-vs-==0.1.9 conflict. (The local rl_env_constraints.txt is already
+# 0.1.8 for future FULL builds; this incremental image rides the base's baked 0.1.9.)
 #
 # PROVENANCE: flash_qla 0.1.0+6ef4858 (QwenLM/FlashQLA git 6ef4858 — the
 # "fix-l2norm-dtype" merge, 2026-05-07). Pure-python; install_requires
-# torch>=2.8 (have 2.11), tilelang==0.1.8, apache-tvm-ffi==0.1.9. We install
-# --no-deps so the base's tilelang 0.1.9 (a patch bump over the pinned 0.1.8) and
-# tvm-ffi 0.1.9 are KEPT, and the in-build import assert below GATES that
-# flash_qla imports cleanly under tilelang 0.1.9. FlashQLA is self-contained (no
-# working fla needed; fla 0.5.0 is masked/broken).
+# torch>=2.8 (have 2.11), tilelang==0.1.8, apache-tvm-ffi==0.1.9. We FIRST downgrade
+# tilelang 0.1.9→0.1.8 (flash_qla's pinned version; 0.1.9's gemm_v1→gemm_op rename
+# breaks the kkt_solve kernel compile at runtime), keeping apache-tvm-ffi at 0.1.9,
+# then install flash_qla --no-deps so it can't re-touch the pinned rl env. The
+# in-build import assert below GATES that flash_qla imports cleanly AND that
+# tilelang is exactly 0.1.8. FlashQLA is self-contained (no working fla needed;
+# fla 0.5.0 is masked/broken).
 # =============================================================================
 FROM ghcr.io/open-thoughts/openthoughts-agent@sha256:c8ae0808d90ec96417214c4b18ff779c8b0a1e4cac27dee3600e5af64c1de708
 
 ENV RL_ENV_DIR=/opt/openthoughts/envs/rl
 
-# FlashQLA fused GDN tilelang kernel. --no-deps = do NOT let it pull tilelang==0.1.8
-# (base already has 0.1.9) or touch the carefully-pinned rl env. QLA_VERSION_SUFFIX
-# forces the dist version to the exact provenance string 0.1.0+6ef4858 regardless of
-# whether the VCS checkout's .git survives into the build backend.
+# FlashQLA fused GDN tilelang kernel.
+# STEP A — downgrade tilelang 0.1.9→0.1.8 (flash_qla 6ef4858's pinned version; the
+#   base's 0.1.9 renamed tl.language.gemm_v1→gemm_op, breaking the kkt_solve kernel
+#   compile at RUNTIME). `UV_CONSTRAINT=` clears the base-baked constraint file
+#   (which pins ==0.1.9) so ==0.1.8 doesn't conflict; `--no-deps` + `--reinstall`
+#   swap ONLY the tilelang wheel and leave apache-tvm-ffi 0.1.9 + everything else
+#   untouched. A hard version assert gates the downgrade.
+# STEP B — install flash_qla --no-deps so it can't re-touch the pinned rl env.
+#   QLA_VERSION_SUFFIX forces the dist version to the exact provenance string
+#   0.1.0+6ef4858 regardless of whether the VCS checkout's .git survives into the
+#   build backend.
 #
 # IN-BUILD VERIFICATION (the build-assert = the gate; kaniko fails the build on a
 # non-zero RUN, and --destination push is terminal, so a green build = a pushed,
@@ -64,6 +83,12 @@ ENV RL_ENV_DIR=/opt/openthoughts/envs/rl
 #     import, so nothing is JIT-compiled here.
 ENV FLASHQLA_COMMIT=6ef4858b5446e05bd461d9658d877e548182dbcb
 RUN . $RL_ENV_DIR/bin/activate && \
+    UV_CONSTRAINT= uv pip install --no-deps --reinstall-package tilelang "tilelang==0.1.8" && \
+    python -c "import importlib.metadata as md; \
+tl_v = md.version('tilelang'); tvm_v = md.version('apache-tvm-ffi'); \
+assert tl_v == '0.1.8', 'TILELANG NOT DOWNGRADED TO 0.1.8: ' + tl_v; \
+assert tvm_v == '0.1.9', 'APACHE-TVM-FFI DRIFTED OFF 0.1.9: ' + tvm_v; \
+print('TILELANG DOWNGRADE OK tilelang=' + tl_v + ' apache-tvm-ffi=' + tvm_v)" && \
     QLA_VERSION_SUFFIX="+6ef4858" uv pip install --no-deps \
         "flash_qla @ git+https://github.com/QwenLM/FlashQLA.git@${FLASHQLA_COMMIT}" && \
     python -c "import torch, tilelang, tilelang.contrib.nvcc, tvm_ffi, types, importlib.metadata as md; \
@@ -74,8 +99,11 @@ from flash_qla import chunk_gated_delta_rule_fwd, chunk_gated_delta_rule_bwd; \
 from flash_qla.utils import l2norm; \
 assert md.version('flash_qla') == '0.1.0+6ef4858', 'FLASHQLA DIST VERSION MISMATCH: ' + md.version('flash_qla'); \
 assert flash_qla.__version__ == '0.1.0', 'FLASHQLA ATTR VERSION MISMATCH: ' + str(flash_qla.__version__); \
+assert md.version('tilelang') == '0.1.8', 'TILELANG VERSION MISMATCH (must be 0.1.8 for flash_qla kkt_solve gemm_v1): ' + md.version('tilelang'); \
+assert str(getattr(tilelang, '__version__', '0.1.8')).startswith('0.1.8'), 'TILELANG ATTR VERSION MISMATCH: ' + str(getattr(tilelang, '__version__', None)); \
+assert md.version('apache-tvm-ffi') == '0.1.9', 'APACHE-TVM-FFI VERSION MISMATCH (must be 0.1.9): ' + md.version('apache-tvm-ffi'); \
 assert callable(chunk_gated_delta_rule_fwd) and callable(chunk_gated_delta_rule_bwd) and callable(l2norm), 'FLASHQLA SYMBOLS NOT CALLABLE'; \
 print('FLASHQLA OK dist=' + md.version('flash_qla') + ' attr=' + flash_qla.__version__); \
 print('DEPS OK tilelang=' + md.version('tilelang') + ' apache-tvm-ffi=' + md.version('apache-tvm-ffi') + ' torch=' + torch.__version__); \
 print('SYMBOLS OK _build_flashqla_chunk imports resolve: chunk_gated_delta_rule_fwd, chunk_gated_delta_rule_bwd, flash_qla.utils.l2norm')" && \
-    echo "baked flash_qla commit: ${FLASHQLA_COMMIT}"
+    echo "baked flash_qla commit: ${FLASHQLA_COMMIT}, tilelang pinned 0.1.8"
