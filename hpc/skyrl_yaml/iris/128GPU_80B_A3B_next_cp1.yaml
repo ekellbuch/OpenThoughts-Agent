@@ -86,7 +86,7 @@ trainer:
   strategy: fsdp2
   use_sample_packing: false
   gradient_checkpointing: true
-  gradient_checkpointing_use_reentrant: false
+  gradient_checkpointing_use_reentrant: true
   algorithm:
     advantage_estimator: rloo_n
     use_kl_loss: false
@@ -146,6 +146,7 @@ trainer:
       context_parallel_size: 1
       moe_router_replay: true
       moe_grouped_gemm: true
+      use_grouped_mm: true
       ep_comm_backend: torch
   ref:
     model:
@@ -158,6 +159,7 @@ trainer:
       context_parallel_size: 1
       moe_router_replay: true
       moe_grouped_gemm: true
+      use_grouped_mm: true
       ep_comm_backend: torch
 
   placement:
@@ -251,7 +253,7 @@ extra_env:
   NCCL_SOCKET_IFNAME: enp157s0np0
   NCCL_SOCKET_FAMILY: AF_INET
   SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "3600"
-  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "3600"
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "14400"
   TORCH_NCCL_ENABLE_MONITORING: "1"
   TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
   TORCH_FR_BUFFER_SIZE: "20000"
