@@ -350,6 +350,13 @@ class IrisLauncher:
         # pin the iris job to that region so preempt-retry can't cross-region
         # failover. Skipped on --resume-from (the existing job's bucket
         # is authoritative) and when no TPU is requested.
+        #
+        # Discovery is MANDATORY in this branch: if it errors or finds no
+        # mapped region, we RAISE rather than silently fall back to the static
+        # cross-continent default — that silent fallback previously placed a
+        # TPU in one continent while pinning output to a bucket in another,
+        # causing cross-region egress. To opt out, pass an explicit
+        # --gcs-output-dir (which sets user_set_output and skips this block).
         args._pinned_region = None
         user_set_output = bool(
             os.environ.get("OT_AGENT_GCS_OUTPUT_ROOT")
@@ -364,34 +371,35 @@ class IrisLauncher:
             try:
                 region, rows = discover_region_for_tpu(args.cluster_config, accelerator.primary_tpu)
             except Exception as exc:
-                print(
-                    f"[iris] Region discovery failed ({exc}); falling back to "
-                    f"static default {DEFAULT_GCS_OUTPUT_ROOT}. Cross-region "
-                    "egress possible if iris schedules outside that bucket's "
-                    "region.",
-                    file=sys.stderr, flush=True,
+                raise RuntimeError(
+                    f"Region discovery failed ({exc}). Refusing to fall back to the static "
+                    f"default {DEFAULT_GCS_OUTPUT_ROOT}: iris would place the TPU wherever it has "
+                    "capacity while output stays pinned to that fixed bucket, causing cross-region "
+                    "egress. Fix region discovery (e.g. iris CLI query-format compatibility) or "
+                    "pass an explicit --gcs-output-dir to opt out of the pin."
+                ) from exc
+            if region is None:
+                candidates = [r.get("region") for r in rows if r.get("region")]
+                raise RuntimeError(
+                    f"No region with a co-located single-region output bucket has "
+                    f"--tpu={accelerator.primary_tpu} capacity (regions seen: {candidates or 'none'}). "
+                    f"Refusing the static {DEFAULT_GCS_OUTPUT_ROOT} fallback to avoid cross-region "
+                    "egress. Wait for capacity in a mapped region, or pass an explicit "
+                    "--gcs-output-dir to opt out of the pin."
                 )
-            else:
-                if region is None:
-                    print(
-                        f"[iris] No workers visible for --tpu={accelerator.primary_tpu}; falling "
-                        f"back to static default {DEFAULT_GCS_OUTPUT_ROOT}.",
-                        file=sys.stderr, flush=True,
-                    )
-                else:
-                    bucket = output_bucket_for_region(region)
-                    args.gcs_output_dir = f"{bucket}/ot-agent"
-                    args._pinned_region = region
-                    summary = ", ".join(
-                        f"{r['region']}: {r.get('unassigned', 0)} warm / "
-                        f"{r.get('total', 0)} total"
-                        for r in rows if r.get('region')
-                    )
-                    print(
-                        f"[iris] Region pin: --tpu={accelerator.primary_tpu} → {region} "
-                        f"(bucket {bucket}). Capacity: {summary or 'none reported'}.",
-                        flush=True,
-                    )
+            bucket = output_bucket_for_region(region)
+            args.gcs_output_dir = f"{bucket}/ot-agent"
+            args._pinned_region = region
+            summary = ", ".join(
+                f"{r['region']}: {r.get('unassigned', 0)} warm / "
+                f"{r.get('total', 0)} total"
+                for r in rows if r.get('region')
+            )
+            print(
+                f"[iris] Region pin: --tpu={accelerator.primary_tpu} → {region} "
+                f"(bucket {bucket}). Capacity: {summary or 'none reported'}.",
+                flush=True,
+            )
 
         # Fail-fast on cross-region YAML model paths. Iris just pinned the
         # job to a region; if a YAML hardcodes a GCS bucket in the wrong
