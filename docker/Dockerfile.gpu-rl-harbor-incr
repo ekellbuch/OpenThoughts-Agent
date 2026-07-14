@@ -16,49 +16,59 @@
 # 2026-07-14 BUILD: base = gpu-rl-19bd8c5e (@sha256:98adaa38…) — the current
 # launcher DEFAULT_RL_DOCKER_IMAGE that the 30B rno2a RL runs use (SINGLE_SNAPSHOT=0,
 # PULLABLE; log-capture-safe tqdm + SKYRL de40d31c + IB verbs userspace + vLLM-fork
-# 76259c63). Swaps harbor to 55ae9e66, which adds the TrialPaths.mkdir()/chmod_dir()
-# skip-on-object-storage guard (`_is_local()`): on s3://.../gs:// trial_dirs the
-# per-trial mkdir/chmod are pure blocking cloud round-trips that serialized the
-# RolloutCoordinator asyncio dispatch loop (live py-spy rno2a v0f n=675: 2/4
-# coordinators pegged at 100% single-core in paths.mkdir on s3fs, engines under-fed)
-# → unblocks the RolloutCoordinator dispatch loop. 55ae9e66 is a descendant of the
-# prior baked harbor (4ac18dc4 → 116666d6 → f9cf327e → 55ae9e66), so it ALSO carries
-# upload_agent_logs + the earlier Daytona throughput fixes (poll(0.001), tmux-bake,
-# cheap reaper, connection-pool cap, auto_stop) — the in-image regression checks
-# below still pass.
+# 76259c63). Swaps harbor to 5d248dc6 = "perf(rl-coordinator): offload per-trial S3
+# I/O off the asyncio event loop" — the COMPLETE dispatcher-unblock fix. It descends
+# from 55ae9e66 (the TrialPaths.mkdir/chmod object-storage skip) and additionally
+# moves the whole per-trial trial-lifecycle S3/object-store I/O (result/config
+# write, verifier reward resolve, sandbox→remote directory downloads) off the shared
+# RolloutCoordinator event loop via asyncio.to_thread, so the synchronous fsspec/s3fs
+# round-trips no longer serialize generate() dispatch (the measured bottleneck: live
+# py-spy rno2a v0f n=675 showed coordinators pegged at 100% single-core in the S3 I/O
+# on the event loop). 5d248dc6 is a descendant of the prior baked harbor chain
+# (4ac18dc4 → 116666d6 → f9cf327e → 55ae9e66 → 5d248dc6), so it ALSO carries the
+# mkdir/chmod skip + upload_agent_logs + earlier Daytona throughput fixes (poll(0.001),
+# tmux-bake) — all asserted below so a regression fails the build.
 # =============================================================================
 FROM ghcr.io/open-thoughts/openthoughts-agent@sha256:98adaa38c6e8f57e52430d3b63829d918a7cfa7db26cf5382becb8ba022ddf19
 
 ENV RL_ENV_DIR=/opt/openthoughts/envs/rl
 
-# 55ae9e66 "perf(trial-paths): skip mkdir/chmod on object-storage trial_dir
-# (dispatcher unblock)" — adds TrialPaths._is_local() and guards both
-# TrialPaths.mkdir() and chmod_dir() on it: object storage has no real directories
-# and no POSIX mode bits, so mkdir/chmod there are wasted BLOCKING cloud round-trips
-# on the RolloutCoordinator dispatch loop. Local FS behavior byte-identical. As a
-# descendant of 116666d6 / d58043c3 it also carries: (a) AgentConfig.upload_agent_logs
-# + the Trial._upload_agent_logs early-return gate, (b) sleep(0.001) 1ms exec poll
-# (environment.py), and (c) tmux+asciinema baked into every snapshot at BUILD time
-# (snapshots.py bake_agent_tooling / _AGENT_TOOLING_LAYER) — all asserted below so a
-# regression fails the build.
+# 5d248dc6 offloads the per-trial S3 I/O off the RolloutCoordinator asyncio loop:
+#   - trial/trial.py: Trial._init_result() + result write via asyncio.to_thread
+#   - environments/daytona/environment.py: _sdk_download_dir() copies the local tree
+#     to the remote object store via asyncio.to_thread(_copy_local_tree_to_remote,…)
+#   - verifier/verifier.py: reward resolve via asyncio.to_thread(self._resolve_rewards)
+# Inherits from 55ae9e66 the TrialPaths._is_local() mkdir/chmod object-storage skip.
 # --no-deps = source-only swap (does not touch the carefully-pinned rl env). The
 # base image already cleared UV_CONSTRAINT (ENV UV_CONSTRAINT="") so no constraint
 # applies here — and harbor is absent from the constraints file regardless.
-ENV HARBOR_COMMIT=55ae9e66688f52ba9dc40ab859d21cd5522d35b0
+ENV HARBOR_COMMIT=5d248dc69927dd4facea170bbdcb0c8156b83351
 RUN . $RL_ENV_DIR/bin/activate && \
     uv pip install --no-deps --force-reinstall \
         "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
     python -c "import harbor, importlib.metadata as m; print('baked harbor', m.version('harbor'))" && \
     python -c "import importlib.metadata as m, json; du=m.distribution('harbor').read_text('direct_url.json'); print('direct_url.json:', du); \
 cid=(json.loads(du).get('vcs_info') or {}).get('commit_id',''); \
-assert cid.startswith('55ae9e66'), 'HARBOR HEAD MISMATCH: baked commit_id '+repr(cid)+' != 55ae9e66'; \
+assert cid.startswith('5d248dc6'), 'HARBOR HEAD MISMATCH: baked commit_id '+repr(cid)+' != 5d248dc6'; \
 print('harbor git HEAD in image =', cid)" && \
+    python -c "import harbor, pathlib; p=pathlib.Path(harbor.__file__).parent/'trial'/'trial.py'; \
+src=p.read_text(); \
+assert 'async def _init_result' in src, 'S3-OFFLOAD FIX MISSING (no async def _init_result in trial/trial.py)'; \
+assert 'asyncio.to_thread' in src, 'S3-OFFLOAD FIX MISSING (no asyncio.to_thread in trial/trial.py)'; \
+print('trial.py S3-offload (_init_result + asyncio.to_thread) present')" && \
+    python -c "import harbor, pathlib; p=pathlib.Path(harbor.__file__).parent/'environments'/'daytona'/'environment.py'; \
+src=p.read_text(); \
+assert 'async def _sdk_download_dir' in src, 'S3-OFFLOAD FIX MISSING (no async def _sdk_download_dir in daytona/environment.py)'; \
+assert 'asyncio.to_thread(_copy_local_tree_to_remote' in src, 'S3-OFFLOAD FIX MISSING (no to_thread(_copy_local_tree_to_remote) in _sdk_download_dir)'; \
+print('environment.py _sdk_download_dir to_thread offload present')" && \
+    python -c "import harbor, pathlib; p=pathlib.Path(harbor.__file__).parent/'verifier'/'verifier.py'; \
+src=p.read_text(); \
+assert 'asyncio.to_thread(self._resolve_rewards)' in src, 'S3-OFFLOAD FIX MISSING (no to_thread(self._resolve_rewards) in verifier.py)'; \
+print('verifier.py reward-resolve to_thread offload present')" && \
     python -c "import harbor, pathlib; p=pathlib.Path(harbor.__file__).parent/'models'/'trial'/'paths.py'; \
 src=p.read_text(); \
-assert 'def _is_local(' in src, 'MKDIR-SKIP FIX MISSING (no _is_local() in models/trial/paths.py)'; \
-assert 'no real directories' in src.lower(), 'MKDIR-SKIP FIX MISSING (no \"no real directories\" guard comment in paths.py)'; \
-assert src.count('if not self._is_local():') >= 2, 'MKDIR-SKIP GATE MISSING (fewer than 2 _is_local() guards in mkdir/chmod_dir)'; \
-print('object-storage mkdir/chmod skip guard (_is_local) present in models/trial/paths.py')" && \
+assert 'def _is_local(' in src and src.count('if not self._is_local():') >= 2, 'MKDIR-SKIP FIX MISSING (inherited _is_local guards absent in models/trial/paths.py)'; \
+print('inherited mkdir/chmod _is_local skip present')" && \
     python -c "from harbor.models.trial.config import AgentConfig; \
 assert 'upload_agent_logs' in AgentConfig.model_fields, 'UPLOAD_AGENT_LOGS FIELD MISSING (not in AgentConfig.model_fields)'; \
 import inspect, harbor.trial.trial as t; src=inspect.getsource(t.Trial._upload_agent_logs); \
