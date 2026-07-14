@@ -298,7 +298,7 @@ tensorboard-data-server==0.7.2
 tensorboard==2.20.0
 tensordict==0.13.0
 tiktoken==0.13.0
-tilelang==0.1.9
+tilelang==0.1.8
 tokenizers==0.22.2
 toml==0.10.2
 torch-c-dlpack-ext==0.1.5
