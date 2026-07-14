@@ -236,8 +236,20 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # 48 layers, max 3.46 GB (top: 3.46/3.2/3.0/2.71/2.07). Build asserts green (flash_attn_2_cuda / torch 2.11.0+cu128 /
     # vllm 0.1.dev16611+g76259c63a / skyrl_train / torchtitan ExpertParallel; baked harbor commit d81b2f32; baked MarinSkyRL
     # HEAD de40d31c). Floating :gpu-rl tag WAS moved to this build (PUSH_FLOATING=1). Build wall-clock ~20m (15:48->16:09).
-    "@sha256:0fbf41e531f9df701a08030d922acbf6470d27070f9770aa83b70aa84d052d7d"  # noqa: E501  (gpu-rl-d0e4a9b8, PULLABLE; harbor d81b2f32 round-4 async tokenize offload)
-    # (prev: gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2 + tilelang 0.1.9 base-build fix; gpu-rl-19bd8c5e @sha256:98adaa38 log-capture-safe tqdm; gpu-rl-7d15b25a @sha256:17a46200 IB userspace)
+    # gpu-rl-b397b82a (built 2026-07-14, kaniko job gpurl-kaniko-b397b82a, SINGLE_SNAPSHOT=0 pullable): HARBOR_COMMIT
+    # bump d81b2f32 -> 101b1400 (round-5: 645d1074 global-caches the vLLM context-limit /v1/models probe [kills the
+    # per-instance sync GET on the coordinator loop — the dominant v0j saturation blocker] + 101b1400 replaces litellm
+    # with openai.AsyncOpenAI on the completions hot path [executor-free; retires ~440 LOC of FD-leak monkeypatches];
+    # linear descendant of round-4 d81b2f32). 5th incremental harbor bump in a row (round-1 55ae9e66 -> round-2
+    # 793ff3fb=318e18ce -> round-3 35fbdbcc=f9110c79 -> round-4 d81b2f32=d0e4a9b8 -> round-5 101b1400). SKYRL de40d31c
+    # (baked, unchanged vs d0e4a9b8). wheels + rl_env_constraints UNCHANGED (fast prebuilt-wheelhouse, NO nvcc;
+    # KANIKO_CACHE=1 reused the base apt/uv/venv + torch/vLLM/flash-attn layers). litellm is RETAINED (==1.90.0) for
+    # harbor's off-path utilities — it is no longer on the completions hot path, so the harbor install still succeeds.
+    # Pull-verified: 48 layers, max 3.46 GB (top: 3.46/3.2/3.0/2.71/2.07). Build asserts green (flash_attn_2_cuda /
+    # torch 2.11.0+cu128 / vllm 0.1.dev16611+g76259c63a / skyrl_train / torchtitan ExpertParallel; baked harbor commit
+    # 101b1400; harbor==0.8.1; baked MarinSkyRL HEAD de40d31c). Floating :gpu-rl tag WAS moved to this build (PUSH_FLOATING=1). Build wall-clock ~20m.
+    "@sha256:bac11e44bae788f12516ebebb89fe2a1286ba5ca86da2ea70554fcfc101f98bd"  # noqa: E501  (gpu-rl-b397b82a, PULLABLE; harbor 101b1400 round-5 ctx-limit global-cache + AsyncOpenAI)
+    # (prev: gpu-rl-d0e4a9b8 @sha256:0fbf41e5 harbor d81b2f32 round-4 async tokenize offload; gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2 + tilelang 0.1.9 base-build fix; gpu-rl-19bd8c5e @sha256:98adaa38 log-capture-safe tqdm; gpu-rl-7d15b25a @sha256:17a46200 IB userspace)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
