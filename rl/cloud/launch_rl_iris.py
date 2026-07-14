@@ -221,8 +221,15 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # unchanged vs 19bd8c5e). wheels UNCHANGED (fast prebuilt-wheelhouse, NO nvcc). Pull-verified: 48 layers, max
     # 3.46 GB. Build asserts green (flash_attn_2_cuda / skyrl_train / vllm / torchtitan.ExpertParallel; baked harbor
     # 0.8.1 commit 793ff3fb; baked MarinSkyRL HEAD de40d31c). Floating :gpu-rl tag WAS moved to this build (PUSH_FLOATING=1).
-    "@sha256:35fbf8156dce15dfa0b2e41faadb743ef1821049aed6308be0304e2505126626"  # noqa: E501  (gpu-rl-318e18ce, PULLABLE; harbor 793ff3fb round-2 + tilelang 0.1.9 base-build fix)
-    # (prev: gpu-rl-19bd8c5e @sha256:98adaa38 log-capture-safe tqdm + SKYRL de40d31c; gpu-rl-7d15b25a @sha256:17a46200 IB userspace + SKYRL 272bf011; gpu-rl-cf1ecea6 @sha256:74d6d3e2 SKYRL 822221a0)
+    # gpu-rl-f9110c79 (built 2026-07-14, kaniko job gpurl-kaniko-f9110c79, SINGLE_SNAPSHOT=0 pullable): HARBOR_COMMIT
+    # bump 793ff3fb -> 35fbdbcc (round-3 per-turn coordinator-offload harbor fix; linear descendant of round-2 793ff3fb).
+    # 3rd incremental harbor bump in a row (round-1 55ae9e66 -> round-2 793ff3fb=318e18ce -> round-3 35fbdbcc). SKYRL
+    # de40d31c (baked, unchanged vs 318e18ce). wheels + rl_env_constraints UNCHANGED (fast prebuilt-wheelhouse, NO nvcc;
+    # KANIKO_CACHE=1 reused the base apt/uv/venv layers). Pull-verified: 48 layers, max 3.46 GB, 22.71 GB total. Build
+    # asserts green (flash_attn_2_cuda / torch 2.11.0+cu128 / vllm 0.1.dev16611+g76259c63a / skyrl_train / torchtitan
+    # ExpertParallel; baked harbor 0.8.1 commit 35fbdbcc; baked MarinSkyRL HEAD de40d31c). Floating :gpu-rl tag WAS moved (PUSH_FLOATING=1).
+    "@sha256:5e211fbf7ff416be17ce18c3ca9ef0dfedd658e0194eb4e2cad41a2a659afe28"  # noqa: E501  (gpu-rl-f9110c79, PULLABLE; harbor 35fbdbcc round-3 coordinator offload)
+    # (prev: gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2 + tilelang 0.1.9 base-build fix; gpu-rl-19bd8c5e @sha256:98adaa38 log-capture-safe tqdm; gpu-rl-7d15b25a @sha256:17a46200 IB userspace)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
