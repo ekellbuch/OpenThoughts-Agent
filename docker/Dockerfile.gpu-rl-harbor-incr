@@ -56,7 +56,7 @@ print('harbor git HEAD in image =', cid)" && \
     python -c "import harbor, pathlib; p=pathlib.Path(harbor.__file__).parent/'models'/'trial'/'paths.py'; \
 src=p.read_text(); \
 assert 'def _is_local(' in src, 'MKDIR-SKIP FIX MISSING (no _is_local() in models/trial/paths.py)'; \
-assert 'no real directories' in src, 'MKDIR-SKIP FIX MISSING (no \"no real directories\" guard comment in paths.py)'; \
+assert 'no real directories' in src.lower(), 'MKDIR-SKIP FIX MISSING (no \"no real directories\" guard comment in paths.py)'; \
 assert src.count('if not self._is_local():') >= 2, 'MKDIR-SKIP GATE MISSING (fewer than 2 _is_local() guards in mkdir/chmod_dir)'; \
 print('object-storage mkdir/chmod skip guard (_is_local) present in models/trial/paths.py')" && \
     python -c "from harbor.models.trial.config import AgentConfig; \
