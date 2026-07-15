@@ -181,6 +181,43 @@ learning.
 
 ---
 
+## §4b. Per-trial duty-cycle breakdown (sandbox-churn quantification) — OPTIONAL DEEP PROBE
+
+Run this when an agentic RL job shows an **engine sawtooth** (inference `Running` peaks then troughs) and you must
+decide whether each trial's throughput is capped by **LLM generation** vs **sandbox-lifecycle churn** vs
+**tool-exec** vs **error/retry** — i.e. to put NUMBERS behind (or refute) a "sandbox churn" claim, or to size the
+inference-subscription lever. **Never assert "sandbox churn" from the sawtooth alone** (memory
+`engine-starvation-not-daytona`); no numbers → this is `ERROR`-quality per §0, say so.
+
+**Source + discipline:** the clean per-trial breakdown is each trial's `result.json` `TimingInfo` (NOT finelog).
+The reusable recipe — the `result.json` field-to-phase map, the duty-cycle fraction math, and the lease-race /
+burst≠churn checks (it's a **harbor** trial artifact) — is in **`projects/harbor/harbor.md` §"Per-trial `TimingInfo`
+duty-cycle recipe"**. On cw-rno2a the trials bucket is in-cluster-only, so aggregate **in-pod** and transfer
+**aggregates only** — the cluster-specific `kubectl exec` + boto3 access + trials path is in
+**`ops/iris/coreweave_gpu_ops.md` §Observability** ("Per-trial `TimingInfo` duty-cycle read"). Read only a bounded
+sample (newest ~200 for the duty cycle, ~500 for error/re-provision tails). This obeys the no-big-dump rule (a few
+hundred small JSON reads, not a log stream).
+
+**Compute + read (per trial, then median + p10/p90/max):**
+- **frac LLM-gen / total** and **frac NOT-LLM / total** (the duty-cycle overhead); **frac tool-exec / total**;
+  **frac sandbox-lifecycle / total** = (`environment_setup` + teardown-gap) / total = the **sandbox-churn tax**.
+- **Interpretation:** **LLM-gen ≫ sandbox** (e.g. ~89% vs <1%) → the refill burst is **LLM-turn-bound, not churn**;
+  the inference-subscription lever is `n_concurrent_trials` / generation-buffer depth (feed more trials to the
+  engines), **NOT sandbox optimization**. A **material sandbox fraction** (create/teardown >~10%, or an
+  `environment_setup` heavy >10 s tail) = real re-provision churn → carry the numbers to the verdict.
+- **Lease / release-race check:** count trials with `verifier.finished_at > finished_at` — **expected 0** (harbor
+  runs verifier before finalize; the shielded stop/delete follows). Non-zero = release-race signature. Teardown gap
+  (`finished_at − last-phase-finish`) is sub-second on a clean run.
+- **"Burst ≠ churn" rule:** bucket the exception breakdown by ~10-min `LastModified` slot. A **time-clustered**
+  DaytonaAuth/401 spike (concentrated in one slot, absent before/after) is the **transient server-side 401 flake**
+  (the `_sandbox_exec` hot-path missing a retry wrap — same root cause as the eval side), NOT steady-state sandbox
+  lifecycle and NOT a lease race — report it as transient, do not KILL for it. Only a *steady* per-slot error rate
+  is a standing fault.
+
+*(Reference measurement + numbers: `agent_logs/2026-07-15_per-trial-dutycycle-measurement.md`.)*
+
+---
+
 ## §5. Deliver ONE recommendation
 
 ```

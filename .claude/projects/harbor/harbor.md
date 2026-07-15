@@ -55,6 +55,67 @@ asciinema recorder). Load-bearing behaviors:
 
 ---
 
+## Per-trial `TimingInfo` duty-cycle recipe (result.json — reusable across clusters)
+
+Every harbor trial writes a **`result.json`** (`TrialResult`, `models/trial/result.py`) into its trial dir, and
+the coordinator uploads it to the run's `.../trace_jobs/<trial>/result.json`. It carries per-phase `TimingInfo`
+blocks — this is the clean, authoritative source for a per-trial **duty-cycle breakdown** (LLM-gen vs tool-exec vs
+sandbox-lifecycle vs verifier vs error/retry). It is a **harbor trial artifact** (schema + fields are defined and
+written by harbor: `TimingInfo` in `models/trial/result.py:13`, phases set in `trial/trial.py`,
+`api_request_times_msec` emitted by `agents/terminus_2/terminus_2.py:2153`) — NOT a MarinSkyRL/SkyRL artifact — so
+the recipe is cluster-agnostic and lives here; only the per-cluster *access* to the trials bucket is
+cluster-specific (see `.claude/ops/<cluster>/`).
+
+**Why this and not finelog:** harbor logs at INFO but emits **no per-phase timing log lines**, and
+`analyze_job_history.py` can't resolve a pure-RL job's output dir → finelog is the wrong source for a duty-cycle
+read. Aggregate `result.json` instead.
+
+**⚠ Discipline — aggregates only, never pull raw trials to the Mac.** Read only a **bounded sample** (newest ~200
+by `LastModified` for the steady-state duty cycle; ~500 for error / re-provision tails) and print only the computed
+medians/percentiles/fractions. Never sync raw `result.json`/trial dirs or a log stream to the laptop (memory
+`iris-log-resource-discipline`). When the trials bucket is in-cluster-only (e.g. CoreWeave LOTA), aggregate
+**in-pod** and transfer only the numbers — the in-pod `kubectl exec` + boto3 access detail is the cluster-specific
+half (`.claude/ops/iris/coreweave_gpu_ops.md` §Observability).
+
+**`result.json` field → phase map** (each phase is a `TimingInfo {started_at, finished_at}`, UTC ISO):
+
+| Field (path) | Phase | Duration |
+|---|---|---|
+| `started_at` / `finished_at` | **Trial total wall** | `finished_at − started_at` |
+| `environment_setup` | **Sandbox create** | `TimingInfo` dur |
+| `agent_setup` | agent setup | `TimingInfo` dur |
+| `agent_execution` | **LLM-gen + tool-exec (combined)** | `TimingInfo` dur |
+| `verifier` | verifier | `TimingInfo` dur |
+| `agent_result.metadata.api_request_times_msec` | **LLM-gen ONLY** (list of per-call msec) | `Σ list ÷ 1000` → s |
+| `agent_result.metadata.n_episodes` / `len(api_request_times_msec)` | turns / LLM-calls | count |
+| `exception_info.exception_type` | error class (bare Python class name) | — |
+
+Derived phases:
+- **Tool-exec (+ agent loop)** = `agent_execution_dur − LLM-gen` (the non-LLM part of the agent loop).
+- **Teardown (stop/delete) + sched gap** = `finished_at − max(phase.finished_at)`. The shielded
+  `_stop_agent_environment` `stop(delete=…)` runs in cleanup **AFTER** `finished_at` (`trial/trial.py`), so clean
+  teardown shows as this residual (sub-second on a healthy run).
+
+**Duty-cycle fraction math** (per trial, then median + p10/p90/max over the sample):
+- **frac LLM-gen** = LLM-gen / total; **frac NOT-LLM** = 1 − that (the duty-cycle overhead).
+- **frac tool-exec** = tool-exec / total.
+- **frac sandbox-lifecycle (the "sandbox-churn tax")** = (`environment_setup` + teardown-gap) / total.
+- **Interpretation:** **LLM-gen ≫ sandbox** (e.g. ~89% vs <1%) ⇒ throughput is **LLM-turn-bound, not sandbox
+  churn** — the lever is `n_concurrent_trials` / generation-buffer depth, NOT sandbox optimization. A **material
+  sandbox fraction** (create/teardown >~10%, or an `environment_setup` heavy >10 s tail) = real re-provision churn.
+- **Lease / release-race check:** count trials with `verifier.finished_at > finished_at` — **expected 0** (verifier
+  runs before finalize; the shielded stop/delete follows). Non-zero = release-race signature.
+- **"Burst ≠ churn" rule:** bucket the exception breakdown by ~10-min `LastModified` slot. A **time-clustered**
+  DaytonaAuth/401 spike (one slot, absent before/after) is the **transient server-side 401 flake** (the
+  `_sandbox_exec` hot-path missing a retry wrap), NOT steady-state sandbox lifecycle and NOT a lease race. Only a
+  *steady* per-slot error rate is a standing fault.
+
+*(Reference measurement + numbers: `agent_logs/2026-07-15_per-trial-dutycycle-measurement.md`; durable artifact
+copy: `experiments/active/rno2a-30b-coder-throughput/DUTY_CYCLE_ANALYSIS.md`. v0l = 89% LLM-gen / 11% tool-exec /
+~0.45% sandbox-lifecycle.)*
+
+---
+
 ## Literal-token trace datasets (opencode datagen)
 
 Canonical reference for the `--record_literal` opencode trace datasets and their downstream SFT use. Applies to the opencode-131k campaign (`penfever/<task>-qwen3.5-122b-131k-opencode-traces`) and any future literal datagen.

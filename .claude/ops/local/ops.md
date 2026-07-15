@@ -1,6 +1,6 @@
 # Local (this Mac) — ops
 
-The control machine: launches, uploads, Supabase queries, code edits, and analysis run from here; clusters do the GPU work. Sync discipline is commit→push→`git pull` on the cluster (see `.claude/projects/marinskyrl/marinskyrl.md`). Captured 2026-06-14 — re-probe specs if acting on this months later.
+The control machine: launches, uploads, Supabase queries, code edits, and analysis run from here; clusters do the GPU work. Sync discipline is commit→push→`git pull` on the cluster (see `.claude/projects/marinskyrl/marinskyrl.md`). Re-probe specs if acting on this months later.
 
 ## System
 - **macOS 26.5.1** (25F80), **Apple M4 Max** (`Mac16,5`), **arm64**.
@@ -8,8 +8,8 @@ The control machine: launches, uploads, Supabase queries, code edits, and analys
 - **No local NVIDIA GPU.** All CUDA/training/vLLM-serving runs on clusters; MPS is for tiny smoke tests only. Treat the Mac as CPU-only for ML.
 
 ## Disk
-- Single 926 GB APFS container, **~194 GB free** (Data volume 79% full, ~710 GB used) — 2026-07-15.
-- **⚠ Read free space from the `Avail` COLUMN, or `df -h /System/Volumes/Data` — NOT `df -h /`'s Size.** `/` is the sealed **System** volume (~12 GB used); its `Size` (926 GB) is the whole shared APFS container, so computing "free = Size − Used" gives a ~720 GB OVER-estimate (it ignores the Data volume's ~710 GB). The true free is the shared `Avail` (194 GB); the 20-GB-prune threshold is measured against THAT.
+- Single 926 GB APFS container. **Check free space with `df -h /System/Volumes/Data` (the `Avail` column).**
+- **⚠ Do NOT use `df -h /`'s `Size`.** `/` is the sealed **System** volume; its `Size` is the whole shared APFS container, so computing "free = Size − Used" over-estimates massively. The true free is the Data volume's `Avail`; the 20-GB-prune threshold is measured against THAT.
 - **Reducible hogs (du -sh):** `~/Documents/experiments/traces` (RL rollout traces — prune per-experiment ONLY after HF upload is confirmed, never blanket `rm`), `~/.cache/huggingface` (safe `rm -rf`, re-downloads on demand), `~/Library/Caches`. Prune the HF cache first if free drops toward ~50 GB.
 - **Do NOT pull large model weights / trace datasets to the Mac** — stage on cluster scratch. Local is code + notes + logs only.
 
@@ -36,10 +36,10 @@ All editable-installed into the relevant conda env; **edit here, commit, push, t
 - **`vllm/`** — inference-engine fork (`mlfoundations/vllm`). Currently on `feuer/dcp-gqa-lse-fix`. Local clone is ground truth; **built from source on each cluster (per-arch) from the committed fork** (or baked into a SIF) — **never** rsync working-tree edits or hand-patch. Some envs run vanilla vLLM. See `.claude/projects/vllm/`.
 
 ## Other local paths
-> **All paths here live under `/Users/benjaminfeuer/Documents/`, NOT inside the `OpenThoughts-Agent` repo.** Always reference them by ABSOLUTE path — a bare relative `agent_logs/` / `experiments/` / `notes/` resolves against the current working directory, which for a subagent or launcher is usually the repo checkout, so it silently writes the wrong place (this is how logs leaked into `OpenThoughts-Agent/agent_logs/`). Hand any of these to a subagent by full path.
-- **`/Users/benjaminfeuer/Documents/agent_logs/`** — dated investigation/post-mortem logs, `YYYY-MM-DD_<topic>.md` (~109 files). Write a dated entry when diagnosing a genuine FAILED job (per the cron-sweep skill). Absolute path, always — NOT the repo's `OpenThoughts-Agent/agent_logs/`.
+> **All paths here live under `/Users/benjaminfeuer/Documents/`, NOT inside the `OpenThoughts-Agent` repo.** Always reference them by ABSOLUTE path — a bare relative `agent_logs/` / `experiments/` / `notes/` resolves against the current working directory (usually the repo checkout for a subagent or launcher) and silently writes the wrong place. Hand any of these to a subagent by full path.
+- **`/Users/benjaminfeuer/Documents/agent_logs/`** — dated investigation/post-mortem logs, `YYYY-MM-DD_<topic>.md`. Write a dated entry when diagnosing a genuine FAILED job (per the cron-sweep skill). Absolute path, always — NOT the repo's `OpenThoughts-Agent/agent_logs/`.
 - **`experiments/`** — per-experiment working state, one subdir per series with its own tracker(s). See `.claude/ops/experiments/ops.md`.
-- **`notes/`** — private knowledge base (~17 subdirs: `RL/`, `marin/`, `harbor/`, `llama-factory/`, `vllm/`, `ot-agent/`, `jsc/`, `nvidia/`, `scaling_laws_papers/`, …). SoT for several things the `.claude/` docs mirror (MiniMax datagen tracker, pinggy bank). Per-cluster notes: `notes/leonardo.md`, `notes/jsc/`, `notes/perlmutter` (in `ot-agent/`).
+- **`notes/`** — private knowledge base (subdirs: `RL/`, `marin/`, `harbor/`, `llama-factory/`, `vllm/`, `ot-agent/`, `jsc/`, `nvidia/`, `scaling_laws_papers/`, …). SoT for several things the `.claude/` docs mirror (MiniMax datagen tracker, pinggy bank). Per-cluster notes: `notes/leonardo.md`, `notes/jsc/`, `notes/perlmutter` (in `ot-agent/`).
 - **Runtime secrets** — path, key inventory, and load snippet live in `.claude/secret.md` (set `$DC_AGENT_SECRET_ENV` to point at it; `~/secrets.env` on clusters). Load so a subprocess inherits the vars:
   ```bash
   set -a; source "$DC_AGENT_SECRET_ENV"; set +a

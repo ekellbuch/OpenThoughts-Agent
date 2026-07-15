@@ -341,6 +341,18 @@ the MoE EP path needs torchtitan, not in the gpu-rl image.)
   - Even then it **cannot resolve a pure-RL job's output dir** (no `--jobs-dir`/`--gcs-output-dir` in the baked command) → `LookupError`. It is built for jobs with a GCS trace/output dir. **For RL-job metrics, fetch the finelog directly** via `iris job logs --since-ms <submitted_at_ms> --no-tail` (bounded) instead.
 - **`iris job logs` has NO server-side grep** (only `--since-ms`/`--since-seconds`/`--max-lines`/`--tail`). Never `--max-lines >~200 | grep` a long job into the Mac (OOM-crash risk — see §Monitoring & debugging practices / the log-resource-discipline memory). Bound every fetch with a tight `--since-ms` window + `--max-lines`.
 
+**Per-trial `TimingInfo` duty-cycle read — CoreWeave in-pod access (recipe lives in the harbor project doc):**
+The reusable recipe — the `result.json` `TimingInfo` field→phase map, the duty-cycle fraction math, the
+lease-race / burst≠churn checks, and the aggregates-only discipline — is a **harbor trial artifact**, so it lives in
+**`.claude/projects/harbor/harbor.md` §"Per-trial `TimingInfo` duty-cycle recipe"**. Only the cluster-specific
+*access* to the trials bucket is here:
+- **Trials bucket is in-cluster-only from the Mac** (`marin-us-east-02a`, LOTA — see §Scheduling), so **aggregate
+  IN-POD and transfer aggregates only** (never sync raw trials/logs to the Mac).
+- **Trials path:** `s3://marin-us-east-02a/iris/<run-name>/trace_jobs/<trial>/{config.json,result.json,agent/,artifacts/,verifier/}`. The `<run-name>` dir is set from `trainer.run_name` (e.g. `rno2a-30b-coder-v0l`) — NOT the config's literal `terminal_bench.trials_dir` (the coordinator rewrites it). Discover it by listing `iris/` in the bucket and matching the job name.
+- **In-pod S3 access:** `kubectl --context marin-rn02a_RNO2A -n iris exec <task-pod> -c task -- python -c '...'` using boto3 with `endpoint_url="http://cwlota.com"` + `Config(s3={"addressing_style":"virtual"})` (LOTA rejects path-style, same as §Scheduling). List `result.json` keys with one paginated `list_objects_v2` over `.../trace_jobs/`, sort by `LastModified` desc, read the newest ~200 (steady-state duty cycle) / ~500 (error + re-provision tails); print only computed medians/percentiles.
+
+Then apply the harbor.md recipe to the fetched `result.json` fields.
+
 ---
 
 ## Binding gotchas
