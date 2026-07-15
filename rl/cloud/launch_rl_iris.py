@@ -248,8 +248,22 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # Pull-verified: 48 layers, max 3.46 GB (top: 3.46/3.2/3.0/2.71/2.07). Build asserts green (flash_attn_2_cuda /
     # torch 2.11.0+cu128 / vllm 0.1.dev16611+g76259c63a / skyrl_train / torchtitan ExpertParallel; baked harbor commit
     # 101b1400; harbor==0.8.1; baked MarinSkyRL HEAD de40d31c). Floating :gpu-rl tag WAS moved to this build (PUSH_FLOATING=1). Build wall-clock ~20m.
-    "@sha256:bac11e44bae788f12516ebebb89fe2a1286ba5ca86da2ea70554fcfc101f98bd"  # noqa: E501  (gpu-rl-b397b82a, PULLABLE; harbor 101b1400 round-5 ctx-limit global-cache + AsyncOpenAI)
-    # (prev: gpu-rl-d0e4a9b8 @sha256:0fbf41e5 harbor d81b2f32 round-4 async tokenize offload; gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2 + tilelang 0.1.9 base-build fix; gpu-rl-19bd8c5e @sha256:98adaa38 log-capture-safe tqdm; gpu-rl-7d15b25a @sha256:17a46200 IB userspace)
+    # gpu-rl-e03896b7 (built 2026-07-15, kaniko job gpurl-kaniko-e03896b7, SINGLE_SNAPSHOT=0 pullable): HARBOR_COMMIT
+    # bump 101b1400 -> f4a6b1a0 (round-6: offload the AsyncOpenAI raw-JSON parse OFF the coordinator asyncio loop —
+    # orjson + asyncio.to_thread in lite_llm._acreate_chat_raw). Live py-spy on the running 30B v0k coordinator pinned
+    # inline json.loads of the raw vLLM body at 84% of GIL-held samples as the batch-of-8 rollout-supply SAWTOOTH root
+    # cause (TIS forces logprobs+return_token_ids so vLLM echoes prompt_token_ids every turn -> O(context) parse/turn,
+    # ~10-30ms GIL-hold that stalls every co-resident trial's dispatch -> engines drain). Fix: orjson (3-10x faster,
+    # shrinks the hold) parsed via to_thread (interleaves per-trial parses). orjson is now an EXPLICIT rl-image dep
+    # (added `uv pip install orjson`; harbor installs --no-deps so it must be added here) — harbor falls back to stdlib
+    # json when orjson is absent (non-RL images) or when it rejects a body (non-finite -Infinity logprobs), so
+    # byte-fidelity is preserved and non-RL harbor is a no-op. Scoped to the OpenAI-compat _acreate_chat_raw path only;
+    # native litellm fallback untouched. SKYRL de40d31c (baked, unchanged). wheels + rl_env_constraints UNCHANGED (fast
+    # prebuilt-wheelhouse, NO nvcc). Pull-verified: 48 layers, max 3.46 GB (top: 3.46/3.2/3.0/2.71/2.07). Build asserts
+    # green (kaniko state=succeeded exit 0, ~25m; asserts run inside the build so success == flash_attn_2_cuda /
+    # skyrl_train / vllm / torchtitan.ExpertParallel import OK). baked harbor commit f4a6b1a0.
+    "@sha256:e8b48241b548da570a319ff421e72787692ee87dae2408c99a2d0c6794186177"  # noqa: E501  (gpu-rl-e03896b7, PULLABLE; harbor f4a6b1a0 round-6 orjson parse-offload)
+    # (prev: gpu-rl-b397b82a @sha256:bac11e44 harbor 101b1400 round-5 ctx-limit global-cache + AsyncOpenAI; gpu-rl-d0e4a9b8 @sha256:0fbf41e5 harbor d81b2f32 round-4 async tokenize offload; gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2 + tilelang 0.1.9 base-build fix; gpu-rl-19bd8c5e @sha256:98adaa38 log-capture-safe tqdm)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
