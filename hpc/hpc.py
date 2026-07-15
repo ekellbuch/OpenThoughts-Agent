@@ -1391,10 +1391,20 @@ vista = HPC(
         # dies at ~step 155-190, the flight recorder can't dump on this SIGABRT abort path, so
         # the next step is a SIGABRT-surviving per-rank arrival-timestamp capture (deeper
         # forensics) — flagged for the supervisor, not attempted here.
+        #
+        # --- Fix B REVERT of NCCL_BUFFSIZE ONLY (2026-07-15): the 16-node full-CPU-offload
+        # relaunch 832852 (exp _25, clean nodes c638-072/082) OOM'd at the FIRST backward
+        # (ZeRO-3 reduce_scatter CUDA OOM, "Cuda failure 2 out of memory"). The SAME 16-node
+        # full-offload config had TRAINED to checkpoint-150 (job 832095) BEFORE Fix B raised
+        # NCCL_BUFFSIZE 4MB->32MB (8x). A 32MB NCCL buffer allocates per-peer/per-channel HBM;
+        # at 16-node scale that enlarged footprint tipped the previously-fitting config into
+        # OOM. Revert JUST NCCL_BUFFSIZE (back to the torch/NCCL ~4MB default by removing it);
+        # KEEP the IB-robustness settings (IB_TIMEOUT/RETRY_CNT/QPS_PER_CONNECTION) + the
+        # flight recorder (those address the straggler, not HBM) and KEEP the node exclusions.
+        # agent_logs/2026-07-15_axolotl-32b-nccl-buffsize-revert.md
         "NCCL_IB_TIMEOUT": "22",
         "NCCL_IB_RETRY_CNT": "13",
         "NCCL_IB_QPS_PER_CONNECTION": "4",
-        "NCCL_BUFFSIZE": "33554432",
         "TORCH_NCCL_TRACE_BUFFER_SIZE": "20000",
         "TORCH_NCCL_DUMP_ON_TIMEOUT": "1",
         # $SCRATCH (=/scratch/10635/penfever) expands at sbatch runtime — nccl_exports uses
