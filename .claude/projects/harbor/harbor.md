@@ -11,6 +11,32 @@ specifics live alongside this in `ops.md`; this is the architecture/facts overvi
 
 ---
 
+## Contributing to this fork (marin-community fork workflow)
+
+Harbor is a **marin-community shared fork** — code contributions follow the **marin-community fork contribution workflow** (shared with `MarinSkyRL`, `evalchemy`), which is DIFFERENT from OT-Agent's:
+
+1. **Read `AGENTS.md` first.** Before editing any file, read the repo's `AGENTS.md` / `AGENTS-core.md` and obey it — env/dev setup, test + lint entry points, PR norms.
+2. **Follow the marin style conventions.** Run the repo's marin-style lint/format/type gate (e.g. `uv run infra/pre-commit.py --all-files --fix`, `ty check`) and match its vendored-tree / marin-style checks.
+3. **Dev on a FRESH branch → PR into `main`.** Never commit directly to `main` or a long-lived branch; cut one fresh feature branch per change and PR it into `main`. Keep it small — PR-per-change, no more mega-consolidation PRs going forward.
+4. **Iterate on the PR until ALL tests are green.** Push fixes to the PR branch until every required CI check passes (marin-precommit, marin-style-sync, tests, …); diagnose + fix CI failures, never force past them.
+5. **Do NOT self-merge — return for approval.** A SUBAGENT never merges a marin-community PR. Open it (green), then return to the SUPERVISOR, who surfaces it to the HUMAN for final approval + merge. (Shared upstream → human-in-the-loop on the merge; some of these repos allow same-author self-merge, which is exactly why this rule exists.)
+
+Plus the standing norm: **no `Co-Authored-By` / self-crediting commit trailers** (the repo's AGENTS.md forbids them) — use the **`agent-generated` PR label** + the repo's PR-body format instead.
+
+**Scope:** this applies ONLY to the marin-community shared forks (harbor, MarinSkyRL, evalchemy). **OT-Agent (`OpenThoughts-Agent` `penfever/working`) and the vllm fork keep their CURRENT norms** — the agent may commit + push + self-merge, and the `Co-Authored-By` / `Claude-Session` trailers stay.
+
+---
+
+## OT-Agent's harbor pin (`@main`, not a branch)
+
+Three OT-Agent files pin harbor and must stay in sync: `pyproject.toml` (`harbor[daytona] @ git+…marin-community/harbor.git@main`), `docker/Dockerfile.gpu-rl` (`ENV HARBOR_COMMIT=<sha>` + `--force-reinstall`), and `docker/Dockerfile.tpu` (same `HARBOR_COMMIT` mechanism). `uv.lock` is the RUNTIME gate on the iris workers (they `uv sync --frozen`), so a harbor bump is a `uv lock --upgrade-package harbor` + commit, not only an image rebuild; the Dockerfile `HARBOR_COMMIT` pin is a secondary image-consistency measure.
+
+- **Pin is `@main`** (changed 2026-07-15, was `@penfever/working`). Harbor now follows the marin-fork workflow (fresh-branch → PR → `main`), so `@main` tracks the reviewed/merged state and `penfever/working` drifts/retires.
+- **Why not a mergeable branch:** harbor's repo has **auto-delete-head-branch ON**, so a squash-merge (PR #6) auto-DELETED `penfever/working`, which broke every `@penfever/working` pin (OT-Agent CI went red until the branch was recreated @ `805726bf`). **Do not re-pin OT-Agent to a mergeable/deletable branch.** `@main` cannot be auto-deleted.
+- The `pyproject.toml` branch pin resolves to main's floating HEAD; the Dockerfiles pin the concrete `HARBOR_COMMIT` sha (bump it to main's current HEAD on each rebuild).
+
+---
+
 ## Environment backends — `src/harbor/environments/`
 
 Selected per-run (`--trace_env`/`--harbor_env`, or the YAML `environment.type`); lazy-loaded via
@@ -110,7 +136,7 @@ Derived phases:
   `_sandbox_exec` hot-path missing a retry wrap), NOT steady-state sandbox lifecycle and NOT a lease race. Only a
   *steady* per-slot error rate is a standing fault.
 
-*(Reference measurement + numbers: `agent_logs/2026-07-15_per-trial-dutycycle-measurement.md`; durable artifact
+*(Reference measurement + numbers: `/Users/benjaminfeuer/Documents/agent_logs/2026-07-15_per-trial-dutycycle-measurement.md`; durable artifact
 copy: `experiments/active/rno2a-30b-coder-throughput/DUTY_CYCLE_ANALYSIS.md`. v0l = 89% LLM-gen / 11% tool-exec /
 ~0.45% sandbox-lifecycle.)*
 

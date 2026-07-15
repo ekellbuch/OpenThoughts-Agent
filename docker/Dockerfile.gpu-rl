@@ -557,7 +557,7 @@ RUN . $RL_ENV_DIR/bin/activate && \
 
 # (4b) Pin harbor to a COMMIT (deterministic image). The OT-Agent project dep
 # (pyproject.toml) installs harbor from a FLOATING branch
-# (marin-community/harbor@penfever/working), which is left floating for the rest
+# (marin-community/harbor@main), which is left floating for the rest
 # of the stack — but for THIS image we re-install harbor at an immutable commit so
 # the build is reproducible and we KNOW which harbor is baked.
 #   f7f51f13 = "Merge feuer/silence-litellm-spam: suppress litellm Provider List
@@ -615,7 +615,11 @@ RUN . $RL_ENV_DIR/bin/activate && \
 #     an explicit RL-image dep (harbor installs --no-deps so it must be added here; harbor
 #     falls back to stdlib json when orjson is absent). --no-deps source-only swap → wheel
 #     cache-key + rl_env_constraints unchanged.
-ENV HARBOR_COMMIT=f4a6b1a060ff15cb6fa02eb7a34f3200f2cd0b2a
+#   - 22d75039 = harbor main HEAD (2026-07-15). PR #6 squash-merged the consolidated
+#     penfever/working state (incl. f4a6b1a0's orjson off-loop parse) into main.
+#     Harbor development now lands via fresh-branch->main, so we pin main's HEAD sha
+#     (was f4a6b1a0 on the retiring penfever/working branch).
+ENV HARBOR_COMMIT=22d75039694db5c223797d5eec75b5c1ae975ac6
 RUN . $RL_ENV_DIR/bin/activate && \
     uv pip install orjson && \
     uv pip install --no-deps --force-reinstall \

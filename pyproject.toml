@@ -19,7 +19,7 @@ dependencies = [
     "datasets>=2.0.0",
     "supabase>=2.22.3",
     "python-dotenv>=1.0.0",
-    "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@penfever/working",
+    "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@main",
     "dynamic-semaphore @ git+https://github.com/penfever/dynamic-semaphore",
     "google-cloud-storage",
     "h5py",
