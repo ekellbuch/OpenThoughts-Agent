@@ -8,7 +8,9 @@ The control machine: launches, uploads, Supabase queries, code edits, and analys
 - **No local NVIDIA GPU.** All CUDA/training/vLLM-serving runs on clusters; MPS is for tiny smoke tests only. Treat the Mac as CPU-only for ML.
 
 ## Disk
-- Single 926 GB internal volume, **~188 GB free** (Data 80% full, ~707 GB used) at capture.
+- Single 926 GB APFS container, **~194 GB free** (Data volume 79% full, ~710 GB used) — 2026-07-15.
+- **⚠ Read free space from the `Avail` COLUMN, or `df -h /System/Volumes/Data` — NOT `df -h /`'s Size.** `/` is the sealed **System** volume (~12 GB used); its `Size` (926 GB) is the whole shared APFS container, so computing "free = Size − Used" gives a ~720 GB OVER-estimate (it ignores the Data volume's ~710 GB). The true free is the shared `Avail` (194 GB); the 20-GB-prune threshold is measured against THAT.
+- **Reducible hogs (du -sh):** `~/Documents/experiments/traces` (RL rollout traces — prune per-experiment ONLY after HF upload is confirmed, never blanket `rm`), `~/.cache/huggingface` (safe `rm -rf`, re-downloads on demand), `~/Library/Caches`. Prune the HF cache first if free drops toward ~50 GB.
 - **Do NOT pull large model weights / trace datasets to the Mac** — stage on cluster scratch. Local is code + notes + logs only.
 
 ## Homebrew
