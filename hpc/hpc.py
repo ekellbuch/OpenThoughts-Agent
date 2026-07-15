@@ -1307,7 +1307,14 @@ vista = HPC(
     # converging (multiple c639 nodes implicated across runs), so the whole rack is excluded as a class.
     # Expanded/validated on Vista: `scontrol show hostnames` yields exactly the 32 existing c639 nodes.
     # agent_logs/2026-07-14_tacc_axolotl32b_c639_rack_exclude_freshrelaunch.md.
-    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051,c636-152,c608-042,c634-142,c641-012,c634-052,c621-102,c639-[001-002,011-012,021-022,031-032,041-042,051-052,061-062,071-072,081-082,091-092,101-102,111-112,121-122,131-132,141-142,151-152]",
+    # c637-042,c638-101,c638-102,c638-112 added 2026-07-15: the exp _25 chain (832095/096/097/098) died
+    # substantially on these nodes — 832096/098 at C10d rendezvous bring-up (DistNetworkError, c638-101
+    # broken-pipe = node/network fault, never trained); 832097 reached the BACKWARD then SIGABRT (deepspeed
+    # fp16 backward, rank 9 @ c637-042); 832095 OOM'd on resume @ c638-102/112. The 16-node full-CPU-offload
+    # config HAS trained (checkpoint-150 banked = 150 steps) → the failures are substantially node-flakiness,
+    # so exclude these 4 and resume from checkpoint-150 on clean nodes (operator: KEEP 16 nodes + full offload;
+    # do NOT shrink to 32). agent_logs/2026-07-15_axolotl-32b-relaunch-nodeexclude.md.
+    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051,c636-152,c608-042,c634-142,c641-012,c634-052,c621-102,c637-042,c638-101,c638-102,c638-112,c639-[001-002,011-012,021-022,031-032,041-042,051-052,061-062,071-072,081-082,091-092,101-102,111-112,121-122,131-132,141-142,151-152]",
     # Detect + expose the CUDA math_libs (sbsa) lib dir on LIBRARY_PATH/LD_LIBRARY_PATH
     # so DeepSpeed's JIT cpu_adam op links `-lcurand` (libcurand.so lives under
     # math_libs/<ver>/targets/sbsa-linux/lib on this aarch64 install, NOT cuda/lib64).
