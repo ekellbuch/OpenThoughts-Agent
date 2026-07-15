@@ -206,6 +206,24 @@ HF upload). `deepspeed:` in the source YAML is only the ON/OFF toggle — the ho
 Superseded stale note (2026-06-25 — kept for provenance): "No prebuilt wheel for torch
 2.11+cu128 on aarch64; v0.6.4 needs a torch 2.9.0 downgrade; decision = use SDPA."
 
+### SFT on GH200 — HBM is marginal; 3 gotchas that look like config bugs but aren't
+1. **HBM is right at the edge for 32B ZeRO-3 @ seq 32k on 96GB** — it fits ONLY with full CPU-offload
+   (params+optimizer), and every MB counts. **⚠ NCCL env tuning costs HBM: raising `NCCL_BUFFSIZE`
+   (4MB→32MB) tipped this config into a first-backward CUDA-OOM that masqueraded as a recurring
+   "step ~155-190 reduce_scatter death wall"** (killed every leg; reverting `NCCL_BUFFSIZE` to default →
+   trained clean past step 200, job 832899). **Rule: keep `NCCL_BUFFSIZE` at default on HBM-marginal SFT;
+   when a backward OOMs, suspect a recent NCCL-env bump BEFORE the config.** (Alt for speed/headroom:
+   32-node no-offload — 2× nodes, but ~2× faster steps + HBM slack.)
+2. **Lustre breaks advisory FileLocks under N-way concurrency** (ENOLCK / ESTALE): any framework that
+   `flock()`s on shared `$SCRATCH` *before* dist-init (axolotl loads datasets pre-dist-init; the HF
+   `datasets` builder also locks) hangs/fails at 16-way. Fix = **pretokenize once** into a shared path +
+   a **lock-free persistent-sentinel** (all ranks `load_from_disk`, no flock) — NOT node-local-everything
+   (does N× redundant tokenize + can desync-deadlock at "Generating split").
+3. **c10d rendezvous flakes on some GH200 nodes** (transient `DistNetworkError`/`RendezvousConnectionError`
+   at bring-up — seen on c637/c638) → add the offenders to the sbatch `--exclude` / `node_exclusion_list`
+   (`hpc/hpc.py`); the `afterany` chain auto-retries a transient. Distinguish from the OOM above: rendezvous
+   dies in the first ~5 min pre-training; OOM dies ~2 min into the first backward.
+
 ### Building the vLLM wheel from source (otagent env, aarch64 + Hopper sm_90)
 
 **Proven recipe (2026-06-25, job 787093, node i614-011, fork `mlfoundations/vllm` @ `76259c63a`).**
