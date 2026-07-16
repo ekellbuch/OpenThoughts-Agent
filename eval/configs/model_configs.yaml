@@ -313,7 +313,7 @@ models:
     max_model_len: 32768
     swap_space: 32
     trust_remote_code: true
-    extra_args: --enable-prefix-caching
+    extra_args: --enable-prefix-caching --dtype bfloat16 --kv-cache-dtype fp8
   laion/Sera-4.5A-Full-T1-v2-10000__Qwen3-8B:
     trust_remote_code: true
     tool_call_parser: hermes

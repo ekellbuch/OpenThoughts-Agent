@@ -5,21 +5,25 @@
 # resolving via the _patterns.yaml `3[02]B` rule (TP=4, intra-node NVLink), UNCHANGED.
 #
 # Vista = 1x GH200 (96GB) per node, whole-node, TP=1 (multi-node TP/PP vLLM serve is NOT wired
-# into eval/tacc/eval_harbor.sbatch — `#SBATCH --nodes 1`, direct single-node launch). The dense
-# 32B (~64GB bf16) FITS at TP=1, but at gpu-mem 0.90 only ~20.5GB is left for KV -> "Maximum
-# concurrency for 32768 tokens/req: 2.56x", so vLLM caps at ~3-4 in-flight generations while
-# harbor already sends N_CONCURRENT=8 (KV-CAPACITY-bound, NOT batch-starved: observed Running
-# 3-4 / Waiting 3-5, KV usage 79-98%). The throughput lever is therefore KV capacity, applied
-# at LAUNCH via --gpu-memory-util (0.90->0.95 gives ~25GB KV -> ~3.2x concurrency).
+# into eval/tacc/eval_harbor.sbatch). The dense 32B (~64GB bf16) FITS at TP=1, but with bf16 KV
+# at gpu-mem 0.90 only ~20.5GB is left for KV -> "Maximum concurrency 2.56x" at 32k, so vLLM
+# caps at ~3-4 in-flight generations while harbor sends N_CONCURRENT=8 (KV-CAPACITY-bound, NOT
+# batch-starved: observed Running 3-4 / Waiting 3-5, KV 79-98%).
 #
-# fp8 KV cache (~2x KV -> ~5x concurrency) was TRIED and is BLOCKED on Vista's otagent env:
-# --kv-cache-dtype fp8 forces an inductor/Triton JIT compile that (1) uses `nvc` which rejects
-# `-Wno-psabi` (fixable via TRITON_CC=gcc, cf. .claude/ops/tacc/ops.md aarch64 JIT note), then
-# (2) needs nvcc/CUDA_HOME which the conda env lacks (would need a `cuda/12.8` module load, with
-# cu128 version-skew risk against the from-source vLLM wheel). Verified via gh-dev canaries
-# 836866 (nvc/-Wno-psabi) + 836885 (nvcc-not-found). Enabling fp8 here requires wiring that
-# gcc+cuda JIT toolchain into the eval serve env (blast-radius-contained to fp8-only) — a scoped
-# follow-up, not shipped. Keep bf16 KV.
+# fp8 KV cache ~halves per-token KV bytes -> ~2x concurrent decode streams, feeding the conc-8
+# ceiling. --dtype bfloat16 keeps weights/activations bf16; ONLY the KV cache is fp8.
+# VALIDATED on Vista aarch64 via gh-dev canary 836949 (gpu-mem 0.94): fp8 KV serves the 32B
+# clean under VLLM_COMPILE (no --enforce-eager) with FlashInfer sampling -> KV 198,768 tokens /
+# 24.26 GiB, "Maximum concurrency 6.07x" (vs bf16@0.90's 84,032 tokens / 2.56x = 2.37x more).
+#
+# ⚠ fp8 KV forces inductor/Triton + flashinfer JIT compiles that hit Vista's aarch64 toolchain
+# (nvc rejects -Wno-psabi; flashinfer link needs libcudart). These are ALREADY satisfied by the
+# eval sbatch serve env (eval/tacc/eval_harbor.sbatch:146 `module load gcc/13.2.0 cuda/12.8`
+# + :154 `LD_LIBRARY_PATH=$CONDA_PREFIX/lib`) — gcc makes Triton use gcc not nvc, and the cuda
+# module + conda lib provide nvcc/libcudart. So fp8 needs NO sbatch change, ONLY this config
+# knob; a BARE-env serve fails (canaries 836866/836885/836940 = incomplete env, 836949 = full
+# env green). Launch with --gpu-memory-util 0.94. NB: fp8 KV is a small numeric shift vs bf16 KV
+# — revert to just `--enable-prefix-caching` if strict bf16-KV paper parity is required.
 model: laion/Qwen3-32B-OpenThoughts-Agent-SFT-10K-axolotl-step250
 subsystems:
   eval:
@@ -29,4 +33,4 @@ subsystems:
         max_model_len: 32768
         swap_space: 32
         trust_remote_code: true
-        extra_args: --enable-prefix-caching
+        extra_args: --enable-prefix-caching --dtype bfloat16 --kv-cache-dtype fp8
