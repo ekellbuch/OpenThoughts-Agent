@@ -388,6 +388,60 @@ Log-content greps (`scripts/iris/analyze_job_history.py`) are for sel_rows / EPD
 throughput **science only** — never for liveness/terminal detection. (The launch
 HOW-TO's §8 carries the full monitoring rule.)
 
+**⚠ Empty job-state ≠ still-running — the `jobs` table is PRUNED, not a durable
+ledger. Absence-after-existence is TERMINAL; never hand-roll a `state IN (4,5,6)`
+watcher.** A completion watcher that polls `iris query "SELECT state FROM jobs WHERE
+job_id='...'"` and only fires on a terminal `state` (4 SUCCEEDED / 5 FAILED / 6 KILLED)
+will **poll forever past a real completion**: the controller's background pruner DELETES
+a terminal job's row, so once pruned the query returns an **EMPTY result** (no `state`
+row) and the terminal case never matches. Empty ≠ "still running" — it means "no record",
+which for a job you have already seen means **"finished + aged out."** (`job summary`
+reads the same DB, so it too returns "no record" once the row is pruned — this is
+consistent, not a summary-vs-query discrepancy.)
+- **Pruning mechanics (marin `lib/iris/src/iris/cluster/controller/`):** the pruner
+  (`pruner.py:_prune_terminal_jobs`) runs every `prune_interval` (**1 h**,
+  `controller.py:236`) and deletes terminal jobs older than `job_retention` (**7 days**
+  default, `controller.py:239`; **no override in `lib/iris/config/cw-us-east-02a.yaml`**).
+  **BUT a FEDERATED job ages out sooner + less predictably:** `find_prunable_job`
+  (`reads.py:488-505`) excludes non-local rows (`jobs.cluster == 'local'`,
+  `types.py:107`) from the 7-day time-prune — a federated job's parent-side **mirror row
+  is instead deleted the moment the PEER issues a tombstone** (`federation_changelog.tombstone=1`,
+  `schema.py:641`) that federation-sync mirrors. A job submitted via the `iris.oa.dev`
+  meta-scheduler (parent-minting → routed to a peer CW cluster) is exactly this case: its
+  row can vanish right after the peer prunes it, well inside a 7-day window. (This is how a
+  ~120 s SQL-state watcher silently missed a Grug HF-export completion — the job finished,
+  published, aged out, and the watcher polled an empty row forever.)
+- **ROBUST recipe:**
+  1. **Prefer `watch_job_state.py` — it already handles absence-as-terminal.** Its order
+     is `job summary` → `query` fallback → if BOTH have no record **AND** `kubectl` reports
+     **0 pods**, it returns `state="absent"` (`is_terminal=True`, exit **2**). It never reads
+     an empty row as "running." **REQUIRES a correct `KUBECONFIG`** (`~/.kube/coreweave-iris-gpu`
+     for cw-us-east-02a; the **peer's** kubeconfig for a federated job whose pods live on the
+     peer) — if kubectl can't run, `count_live_pods` returns `None`, `get_job_state` RAISES a
+     *transient* error, and the watch loop **keeps waiting** (absence can't be confirmed). Export
+     the right kubeconfig, and for `--once`/`watch` do NOT pass `--no-pods` when you need the
+     absent verdict.
+  2. **If you must hand-roll:** treat the row present with a terminal `state` **OR the row
+     ABSENT (empty result) with 0 live pods** as terminal→inspect. Never treat empty as "keep
+     waiting."
+- **⚠ `absent` proves the job ENDED, not that it SUCCEEDED** — the terminal state (4/5/6) was
+  pruned along with the row, so a watcher that raced the prune learns only "gone." For a
+  pass/fail verdict either read the state **inside** the retention window, or use the artifact
+  signal below.
+- **✅ Artifact-producing jobs (HF export, s3/gcs write) — watch the ARTIFACT directly; it is
+  the ground-truth completion signal AND it is DURABLE (the job row is not).** For an HF
+  export, poll the repo/revision existence rather than the ephemeral job-state:
+  ```bash
+  PY=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python
+  $PY -c 'from huggingface_hub import HfApi; import sys; print(HfApi().repo_exists(sys.argv[1]))' <repo_id>
+  # stricter — require the expected files landed (not just an empty repo shell):
+  $PY -c 'from huggingface_hub import HfApi; import sys; print(HfApi().list_repo_files(sys.argv[1], revision="main"))' <repo_id>
+  ```
+  For an s3/gcs object write, poll the object path exists (for `marin-us-east-02a`, in-pod
+  boto3 with the LOTA `virtual` addressing style — see §Scheduling). Prefer the artifact watch
+  for these jobs: it fires on the thing you actually want (artifact published), it is immune to
+  job-row aging, and it works even after the job-state has been pruned to `absent`.
+
 **Finelog retains the FULL job log** — retrievable by **time-window pagination** with
 the cw-capable iris binary (`/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris`).
 The only real truncation is `--tail`'s line cap; `--since-ms <submitted_at_ms> --no-tail`
