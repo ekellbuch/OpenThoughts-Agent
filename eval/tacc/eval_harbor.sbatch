@@ -72,7 +72,14 @@ N_CONCURRENT="${EVAL_N_CONCURRENT:-32}"
 # rate (count in result.json outcomes; >~10% of attempted trials = the storm is
 # back). If 16 stays clean, push higher; revert toward 8 ONLY if the storm
 # demonstrably recurs at 16. Override per-run via EVAL_TACC_N_CONCURRENT_CEILING.
-TACC_N_CONCURRENT_CEILING="${EVAL_TACC_N_CONCURRENT_CEILING:-16}"
+#
+# REVERTED 16 -> 8 (2026-07-16): the throughput diagnosis on the axolotl-32B
+# ID-eval legs showed conc-16 is GPU-BOUND, not env-build-bound — a single GH200
+# serving the 32B at TP=1 saturates at ~4-5 concurrent in-flight generations, so 16
+# concurrent Daytona trials just queue behind the vLLM engine (oversubscribed, no
+# throughput gain, wasted sandbox lifetime). Back to 8 to match the serve ceiling.
+# Override per-run via EVAL_TACC_N_CONCURRENT_CEILING.
+TACC_N_CONCURRENT_CEILING="${EVAL_TACC_N_CONCURRENT_CEILING:-8}"
 if [ "$N_CONCURRENT" -gt "$TACC_N_CONCURRENT_CEILING" ]; then
     echo "Vista concurrency ceiling: capping N_CONCURRENT $N_CONCURRENT -> $TACC_N_CONCURRENT_CEILING"
     N_CONCURRENT="$TACC_N_CONCURRENT_CEILING"
