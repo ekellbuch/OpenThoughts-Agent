@@ -6,17 +6,20 @@
 #
 # Vista = 1x GH200 (96GB) per node, whole-node, TP=1 (multi-node TP/PP vLLM serve is NOT wired
 # into eval/tacc/eval_harbor.sbatch — `#SBATCH --nodes 1`, direct single-node launch). The dense
-# 32B (~64GB bf16) FITS at TP=1, but at the sbatch default gpu-mem 0.90 only ~20.5GB is left for
-# KV -> "Maximum concurrency for 32768 tokens/req: 2.56x", so vLLM caps at ~3-4 in-flight
-# generations while harbor already sends N_CONCURRENT=8 (KV-CAPACITY-bound, NOT batch-starved:
-# observed Running 3-4 / Waiting 3-5, KV usage 79-98%).
+# 32B (~64GB bf16) FITS at TP=1, but at gpu-mem 0.90 only ~20.5GB is left for KV -> "Maximum
+# concurrency for 32768 tokens/req: 2.56x", so vLLM caps at ~3-4 in-flight generations while
+# harbor already sends N_CONCURRENT=8 (KV-CAPACITY-bound, NOT batch-starved: observed Running
+# 3-4 / Waiting 3-5, KV usage 79-98%). The throughput lever is therefore KV capacity, applied
+# at LAUNCH via --gpu-memory-util (0.90->0.95 gives ~25GB KV -> ~3.2x concurrency).
 #
-# fp8 KV cache ~halves per-token KV bytes -> ~2x the concurrent decode streams on the same GPU,
-# enough to feed the conc-8 Vista ceiling. `--dtype bfloat16` keeps weights/activations bf16;
-# ONLY the KV cache is fp8 (the proven pairing — cf. the GLM entries in
-# eval/configs/baseline_model_configs_minimal.yaml). NB: fp8 KV introduces a small numeric shift
-# vs a bf16-KV serve; acceptable for throughput on an otherwise-non-viable eval. Revert this
-# extra_args (back to just `--enable-prefix-caching`) if strict bf16-KV paper parity is required.
+# fp8 KV cache (~2x KV -> ~5x concurrency) was TRIED and is BLOCKED on Vista's otagent env:
+# --kv-cache-dtype fp8 forces an inductor/Triton JIT compile that (1) uses `nvc` which rejects
+# `-Wno-psabi` (fixable via TRITON_CC=gcc, cf. .claude/ops/tacc/ops.md aarch64 JIT note), then
+# (2) needs nvcc/CUDA_HOME which the conda env lacks (would need a `cuda/12.8` module load, with
+# cu128 version-skew risk against the from-source vLLM wheel). Verified via gh-dev canaries
+# 836866 (nvc/-Wno-psabi) + 836885 (nvcc-not-found). Enabling fp8 here requires wiring that
+# gcc+cuda JIT toolchain into the eval serve env (blast-radius-contained to fp8-only) — a scoped
+# follow-up, not shipped. Keep bf16 KV.
 model: laion/Qwen3-32B-OpenThoughts-Agent-SFT-10K-axolotl-step250
 subsystems:
   eval:
@@ -26,4 +29,4 @@ subsystems:
         max_model_len: 32768
         swap_space: 32
         trust_remote_code: true
-        extra_args: --enable-prefix-caching --dtype bfloat16 --kv-cache-dtype fp8
+        extra_args: --enable-prefix-caching
