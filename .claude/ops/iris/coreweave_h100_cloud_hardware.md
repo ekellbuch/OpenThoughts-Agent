@@ -75,7 +75,8 @@ H100x8 node totals:
   policy nodes is still possible at 131k + EP8 + offload (observed on a 30B run); reduce
   `n_concurrent` / the rollout-worker count if it recurs.
 - **sm_90** everywhere → from-source builds (vLLM fork, flash-attn) target
-  `TORCH_CUDA_ARCH_LIST="9.0"` (baked in the gpu-rl image; see `build-gpu-rl-image-iris`).
+  `TORCH_CUDA_ARCH_LIST="9.0"` (baked in the gpu-rl image; canonical build in
+  **MarinSkyRL** `docker/Dockerfile.gpu-rl` + `docker/build_gpu_rl_kaniko.sh` — see `build-gpu-rl-image-iris`).
 
 ## Cross-reference
 - **Access / scheduling / KUBECONFIG / build / monitoring** → `coreweave_gpu_ops.md`.

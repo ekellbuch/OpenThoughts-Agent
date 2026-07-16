@@ -11,8 +11,8 @@ HOW-TO (flag set, config-authoring rules, bring-up checklist) lives in the
 > **self-contained MarinSkyRL launcher** `cloud/iris/launch_rl_iris.py` (repo
 > `~/Documents/MarinSkyRL`, on `main` / any branch containing `cloud/iris/`), invoked as
 > **`python -m cloud.iris.launch_rl_iris`** with `--rl_config cloud/iris/configs/<cfg>.yaml`.
-> The old OT-Agent copy `python -m rl.cloud.launch_rl_iris` (`~/Documents/OpenThoughts-Agent/rl/cloud/launch_rl_iris.py`)
-> is **FROZEN / deprecated** (pending deletion) — do not launch from it. The env, kubeconfig,
+> The old OT-Agent copy `python -m rl.cloud.launch_rl_iris` has been **REMOVED** — launch only
+> from the MarinSkyRL module above. The env, kubeconfig,
 > secrets, priority bands, node cap, rendezvous, and Daytona particulars below are unchanged;
 > only the repo + module path + config location change. Validated end-to-end 2026-07-16
 > (1-node Qwen3-8B FSDP2 smoke reached training via the MarinSkyRL launcher). The controller
@@ -564,9 +564,9 @@ monitor/harvest cron catch them at its >1200-count trigger).
 - **Code (canonical, MarinSkyRL `cloud/iris/`):** `cloud/iris/launch_rl_iris.py` (launcher,
   digest pin, `extra_env` forwarding, AWS_* warning), `cloud/iris/start_rl_iris_controller.py`
   (the per-node Ray rendezvous controller), `cloud/iris/run_rl.py` + `cloud/iris/rl_config_translation.py`
-  (in-pod config parse → Hydra args), `cloud/iris/configs/*.yaml` (recipes). The OT-Agent copies
+  (in-pod config parse → Hydra args), `cloud/iris/configs/*.yaml` (recipes). The former OT-Agent copies
   (`rl/cloud/launch_rl_iris.py`, `scripts/iris/start_rl_iris_controller.py`, `scripts/iris/tilelang_cache_sync.py`)
-  are FROZEN/deprecated pending deletion.
+  have been removed — MarinSkyRL `cloud/iris/` is the sole home.
 - **Standing constraints** (≤6 RUNNING RL/cluster, `enable_db_registration: false`, a3
   CONCLUDED, Daytona snapshot caps HARD, never kill a RUNNING job / `iris cluster
   restart` without permission) — see `CLAUDE.md §Always` + the launch skill §7.
@@ -585,6 +585,6 @@ goes through the `gh` CLI.
 ## iris.oa.dev federated GPU submission (NEW 2026-07-09, operator — IN FLUX, bugs expected)
 - **New path:** submit to `iris.oa.dev` requesting GPUs; an **H100 request auto-routes to a CW cluster** via a **meta-scheduler** (a simple scheduler over the per-cluster schedulers that only decides "which cluster can I go to"). `--target-cluster <name>` pins a specific CW cluster. **Only OpenAthena accounts are authorized for CW** (we are `ben.feuer@openathena.ai` → authorized).
 - **Auth:** the new path needs `iris login` with the openathena.ai gmail (kludgy OAuth). **Iris REJECTS jobs submitted via the OLD-STYLE SSH TUNNEL** (to keep legacy non-OA users off CW).
-- **Our EXISTING paths still work (operator + validated 2026-07-09):** the current CW submission (`rl/cloud/launch_rl_iris.py` → `bundle.controller.tunnel()` + `KUBECONFIG=~/.kube/coreweave-iris-gpu`) and the marin-TPU eval submission (`launch_eval_iris` `--cluster=marin`) — 80B **v5** launched + a **TPU eval refill (r438)** both succeeded via the existing path this session, so we are NOT being rejected. `iris.oa.dev` is an EASIER path that becomes the default as bugs are fixed; NOT mandatory yet.
+- **Our EXISTING paths still work (operator + validated 2026-07-09):** the current CW submission (MarinSkyRL `cloud/iris/launch_rl_iris.py` → `bundle.controller.tunnel()` + `KUBECONFIG=~/.kube/coreweave-iris-gpu`) and the marin-TPU eval submission (`launch_eval_iris` `--cluster=marin`) — 80B **v5** launched + a **TPU eval refill (r438)** both succeeded via the existing path this session, so we are NOT being rejected. `iris.oa.dev` is an EASIER path that becomes the default as bugs are fixed; NOT mandatory yet.
 - ⚠ **Known-rough (operator, 2026-07-09):** (1) NO queuing at the main server yet — an H100 request WITHOUT `--target-cluster` is RANDOMLY dispatched to a CW cluster (fix pending: hold at main until a cluster reports enough free GPUs) → on the new path ALWAYS pass an explicit cluster; (2) log-forwarding slow (finelog push pending, ~that night); (3) a long tail of rollout bugs.
 - **Our exposure:** we always pass an explicit `--cluster=cw-us-east-02a` (RL) / `--cluster=marin` (TPU-eval), so the random-routing does NOT hit us; SLURM clusters (Leonardo/TACC) don't touch iris. **⚠ OPEN:** confirm whether our `bundle.controller.tunnel()` submission IS the rejected "old-style SSH tunnel" — recent submissions succeeded, so evidently a DIFFERENT (still-valid) mechanism; watch the next submission for an auth/tunnel rejection → if so, migrate the launchers to `iris login` + `iris.oa.dev`. (Serving ingress already uses `iris.oa.dev/proxy/t/*` — see `iris_ingress.md`.)

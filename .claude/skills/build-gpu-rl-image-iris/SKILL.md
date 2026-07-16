@@ -18,6 +18,8 @@ description: >-
 
 # build-gpu-rl-image-iris
 
+> **🚚 Canonical copy relocating to MarinSkyRL** — this skill now lives at `.agents/skills/build-gpu-rl-image-iris/SKILL.md` in MarinSkyRL (PR https://github.com/marin-community/MarinSkyRL/pull/16, pending maintainer merge). This OT-Agent copy is KEPT until that PR merges (no invocation gap); delete it once merged.
+
 > **📍 Iris orientation — read first.** Before acting on anything in this skill, read the Iris **tools
 > catalog** (`.claude/ops/iris/iris_tools.md`) and the Iris **ops directory** (`.claude/ops/iris/` — the
 > CoreWeave GPU particulars in `coreweave_gpu_ops.md`, the TPU `marin` particulars in `iris_job_lifecycle.md`).

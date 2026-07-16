@@ -42,6 +42,9 @@ is consumed by every datagen/eval launch (`data/cloud/launch_tracegen_iris.py`, 
 > build choice. So this skill omits all the gpu-rl wheel-cache machinery. For the shared kaniko mechanics
 > (WHY kaniko not buildkit, the crane-export trick, ghcr creds, `SINGLE_SNAPSHOT=0` layering), the sibling
 > **`build-gpu-rl-image-iris`** skill is the deep reference — read its §1/§2 once; they apply verbatim here.
+> (The gpu-rl build files themselves are canonical in **MarinSkyRL** — `docker/Dockerfile.gpu-rl` +
+> `docker/build_gpu_rl_kaniko.sh` — not OT-Agent; only the TPU build `docker/Dockerfile.tpu` +
+> `docker/build_tpu_kaniko.sh` is OT-Agent-local.)
 
 ---
 

@@ -39,27 +39,13 @@ Reaches the **rank-0 pod** of a running agentic-RL job and reads its `trace_jobs
 ## Tier 2 — RL runtime (load-bearing; you don't invoke it by hand)
 
 ### `start_rl_iris_controller.py` — the per-node multi-node RL bootstrap
-iris runs **this same entrypoint on every node** of a gang (injecting `IRIS_TASK_ID`/`IRIS_NUM_TASKS`/`IRIS_ADVERTISE_HOST` per task). It bootstraps ONE cross-node Ray cluster: **rank 0** `ray start --head` → publishes head IP to the rendezvous file → waits for all nodes to join → `exec`s the MarinSkyRL driver with `RAY_ADDRESS` set; **ranks 1..N-1** read the head IP from the rendezvous, `ray start --address=…`, contribute their 8 H100s, and block until rank 0 writes the `done` marker.
+Canonical copy lives in **MarinSkyRL `cloud/iris/start_rl_iris_controller.py`** (invoked by `python -m cloud.iris.launch_rl_iris`). iris runs **this same entrypoint on every node** of a gang (injecting `IRIS_TASK_ID`/`IRIS_NUM_TASKS`/`IRIS_ADVERTISE_HOST` per task). It bootstraps ONE cross-node Ray cluster: **rank 0** `ray start --head` → publishes head IP to the rendezvous file → waits for all nodes to join → `exec`s the MarinSkyRL driver with `RAY_ADDRESS` set; **ranks 1..N-1** read the head IP from the rendezvous, `ray start --address=…`, contribute their 8 H100s, and block until rank 0 writes the `done` marker.
 - **Rendezvous:** `ray_head.json` / `ray_head.done` under `--rendezvous-dir` (`OT_AGENT_IRIS_RENDEZVOUS_DIR`); opened via `fsspec` so `gs://` / `s3://` (CoreWeave CW object store `marin-us-east-02a`) / NFS all work. Pins ALL Ray agent ports outside the worker range (fixes the nondeterministic port-collision).
-- **Invoked by** the RL launcher — you never type it directly; edit it locally (rides the `/app` upload, no image rebuild). **⚠ Cutover 2026-07-16:** the CANONICAL controller for RL launches is now **MarinSkyRL `cloud/iris/start_rl_iris_controller.py`**, invoked by `python -m cloud.iris.launch_rl_iris` (run from the MarinSkyRL repo). The OT-Agent copy `scripts/iris/start_rl_iris_controller.py` is **FROZEN/deprecated** and retained only because the Tier-3 diagnostic probes below still import it; it will be deleted once those are ported or retired.
+- **Invoked by** the RL launcher — you never type it directly; edit it in MarinSkyRL locally (rides the `/app` upload, no image rebuild). (The old OT-Agent copy `scripts/iris/start_rl_iris_controller.py` and its one-shot MoE/EP bring-up probes have been REMOVED — the MarinSkyRL port is the sole home; author new bring-up probes against `cloud/iris/` in MarinSkyRL.)
 
 ---
 
-## Tier 3 — one-shot diagnostics & smokes (MoE/EP bring-up de-risking)
-
-Single-purpose probes that reuse `launch_rl_iris`'s submit machinery (image digest, gang, secrets, rendezvous) with a custom in-pod command. Reach for these when **de-risking a new MoE/EP arm before burning a full multi-node gang**, not on a routine sweep.
-
-| Script | What it proves | Scale |
-|---|---|---|
-| `submit_qwen35_load_probe.py` → `probe_qwen35_text_load.py` | **GATE 0a** for Qwen3.6-35B-A3B (`qwen3_5_moe`): AutoConfig resolves the arch, the VL-shell unwraps to the text tower (drops vision+MTP), `_no_split_modules` resolves, and the 256-expert `swap_moe_blocks_to_grouped` remaps with no missing/extra keys (expect 40 swaps). The probe is the in-pod payload; the `submit_*` wrapper runs it as a 1-node gpu-rl job at a chosen `--skyrl-ref`. | 1 node (uses 1 GPU) |
-| `submit_ep_sync_gpu_smoke.py` | The EP MoE **weight-sync** fix: runs `tests/gpu/test_e2e_moe_rl_step.py` (Qwen1.5-MoE-A2.7B, EP=2×FSDP=2 trainer colocated with an EP=2 vLLM engine) — byte-exact trainer↔engine expert-weight equality across both EP shards on torch 2.11. `--skyrl-ref` (default `ac44079`), `--baked` for the fail-before baseline. | 1 node / 4 GPU, self-terminating |
-| `submit_ep8_disk_ref_diag.py` | The **MoE token-salad (Class W)** decisive measurement: brings up ONLY the FSDP grouped+EP policy worker at prod EP=8×FSDP=2 (4 nodes×4 GPU so EP ranks straddle ≥2 nodes), gathers layer-0 grouped experts via the real on-GPU `_gather_tensor`, compares each row to the on-disk HF base checkpoint (non-circular — fixes the prior same-gather EXP2). No engine/rollout/Daytona. Base64-injects the untracked diag `fsdp_worker.py` edits into each pod (no push). | 4 nodes × 4 GPU |
-
-> These carry **untracked local MarinSkyRL edits** they base64-inject into the pod (supervisor owns commits — they deliberately do NOT push). Treat them as experiment scaffolding, not first-class tracked tooling.
-
----
-
-## Tier 4 — TPU-cluster data plumbing (the `marin` cluster, NOT CoreWeave)
+## Tier 3 — TPU-cluster data plumbing (the `marin` cluster, NOT CoreWeave)
 
 Weight-mirroring helpers for the **Google TPU** Iris (`marin`) — staging model weights between HF, GCS, and the LAION/Jülich S3 so vLLM's `runai_streamer` (needs real S3 + GCS HMAC keys it doesn't have) can read them. Each is a `mirror_*` worker + a `launch_*` iris-job submitter.
 
@@ -77,5 +63,5 @@ Invoked from the TPU launcher's bash bootstrap **after `uv sync`, before the wor
 
 ## Cross-reference
 - **Access / hardware / scheduling (GPU):** `coreweave_gpu_ops.md` (incl. the full-log pagination recipe + the liveness=state-poll rule these tools implement).
-- **Launch procedure (GPU RL):** the `rl-agentic-launch-iris` skill; canonical launcher **MarinSkyRL `cloud/iris/launch_rl_iris.py`** (`python -m cloud.iris.launch_rl_iris`, run from `~/Documents/MarinSkyRL`). The OT-Agent `rl/cloud/launch_rl_iris.py` is frozen/deprecated (2026-07-16 cutover).
+- **Launch procedure (GPU RL):** the `rl-agentic-launch-iris` skill; canonical launcher **MarinSkyRL `cloud/iris/launch_rl_iris.py`** (`python -m cloud.iris.launch_rl_iris`, run from `~/Documents/MarinSkyRL`). The OT-Agent `rl/cloud/launch_rl_iris.py` copy has been removed.
 - **TPU job lifecycle / hardware:** `iris_job_lifecycle.md`, `iris_google_tpu_cloud_hardware.md`, `iris_eval_fixed_snapshot_template_scoping.md`.
