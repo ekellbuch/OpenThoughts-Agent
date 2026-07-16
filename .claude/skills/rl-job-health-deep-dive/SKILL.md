@@ -54,13 +54,12 @@ worse than useless** — it looks authoritative and gets a job killed (or kept) 
 | B resources | per-rank GPU util **with policy ranks separated from engine ranks**, **and** the engine subscription line (running vs waiting vs the serving cap) | ERROR |
 | C rollouts | actual reward values / trial exception files you OPENED (not a count you assumed) | ERROR |
 
-### ⛔ Engine under-subscription is NEVER Daytona / duty-cycle / tools (methodology — memory `engine-starvation-not-daytona`)
+### ⛔ Engine under-subscription is NEVER Daytona / duty-cycle / tools
 
 When engines read under-subscribed/idle (`Running` low, `Waiting=0`, KV≈0, ⅓-TDP power) and the generation buffer
 stalls, the cause is **NEVER** a Daytona error, the **agentic duty cycle**, "rollouts parked in tool-execution," or
 "waiting on tools" (operator-corrected repeatedly — **we are NOT tool-bottlenecked**; do not float any of these).
-The cause is in the **gen→dispatch→train pipeline**, and you find it by MEASURING it — read the memory
-`engine-starvation-not-daytona` for the candidate list and then measure, on the LIVE job:
+The cause is in the **gen→dispatch→train pipeline**, and you find it by MEASURING it, on the LIVE job:
 - **the RolloutCoordinator dispatch cores** — are the `num_coordinators` (K) coordinator processes CPU/GIL-pegged on
   `submit_batch`/`gather`/post-gather shaping? (py-spy / top them.) → dispatcher-bound → the lever is K, not n/npgw.
 - **staleness/backpressure** — is generation throttled by `max_staleness_steps` because `policy_train` is the slow
@@ -130,8 +129,11 @@ signatures**.
 
 **Gate A verdict:** DEAD/TERMINAL (state-poll failed/absent, 0 pods) → nothing to kill; report the root-cause
 traceback + transient-vs-deterministic. WEDGED (running + a real hang signature + stale logs, no benign
-explanation) → lean KILL (but if it's a *starvation* wedge, capture the live py-spy first — §0). ALIVE + fresh →
-Gate B.
+explanation) → lean KILL (but if it's a *starvation* wedge, capture the live py-spy first — §0). **A py-spy
+barrier-snapshot + a lone NCCL `Watchdog … ran for N ms` LOG LINE is NOT a wedge by itself** — a real tripped
+watchdog ABORTS the process, so require pod-restarts==0 + an actual abort/terminal state + stalled FRESH logs (all
+nodes) and reconcile the cited timeout against the run's timeline before calling wedge (the CW py-spy command + this
+caveat: `ops/iris/…` §Monitoring & debugging practices). ALIVE + fresh → Gate B.
 
 ---
 
@@ -174,6 +176,18 @@ weight-sync/geometry fault — check `SKYRL_W13_RELOAD_BRACKET`; genuine infra e
 exception file you OPENED, don't assume**; ⚠ engine STARVATION is a §3 dispatch problem, NOT "every trial threw a
 Daytona exception") → **`projects/harbor`** + **`projects/marinskyrl`** + `ops/iris/…` §Daytona.
 
+> **⚠ 100% `AddTestsDirError` on a known-good dataset = a CONTAINER problem, not the dataset.** When every rollout
+> batch fails `AddTestsDirError` ("Failed to add tests directory to environment") on a fresh/bespoke image but the
+> dataset has run cleanly across prior experiments, the Daytona **sandbox is never built** (`self._sandbox is None`
+> → "Sandbox not found. Please build the environment first.") and the verifier's `upload_dir` into the missing
+> sandbox is what surfaces as `AddTestsDirError`. Root cause is usually **container TRANSITIVE-dep drift**, NOT
+> Harbor and NOT the data: `harbor[daytona]` installed without `--no-deps` lets the Daytona SDK + its transitives
+> (e.g. `websockets`, litellm) re-resolve against a changed base env (a transformers/megatron bump), breaking
+> sandbox-create vs the last-good image. Diff the failing image's Daytona-path deps against the last-good working
+> image, pin them back, and **validate sandbox-CREATE cheaply (a 1-pod throwaway that actually instantiates the
+> sandbox) — an import smoke is NOT enough (the break is at create, not import) — before any GPU relaunch.** Prove
+> any single-variable hypothesis (e.g. "wrong Harbor") with hard evidence before rebuilding on it.
+
 **Gate C verdict:** incoherent/all-reward-0 from a serving/sync/verifier fault on a new geometry, or a path that
 yields zero learning signal with no transient explanation → lean KILL (+ the fix). Trials completing with some
 non-zero rewards, or coherent multi-turn attempts on genuinely-hard tasks even at low pass-rate → NO-KILL,
@@ -186,8 +200,7 @@ learning.
 Run this when an agentic RL job shows an **engine sawtooth** (inference `Running` peaks then troughs) and you must
 decide whether each trial's throughput is capped by **LLM generation** vs **sandbox-lifecycle churn** vs
 **tool-exec** vs **error/retry** — i.e. to put NUMBERS behind (or refute) a "sandbox churn" claim, or to size the
-inference-subscription lever. **Never assert "sandbox churn" from the sawtooth alone** (memory
-`engine-starvation-not-daytona`); no numbers → this is `ERROR`-quality per §0, say so.
+inference-subscription lever. **Never assert "sandbox churn" from the sawtooth alone**; no numbers → this is `ERROR`-quality per §0, say so.
 
 **Source + discipline:** the clean per-trial breakdown is each trial's `result.json` `TimingInfo` (NOT finelog).
 The reusable recipe — the `result.json` field-to-phase map, the duty-cycle fraction math, and the lease-race /

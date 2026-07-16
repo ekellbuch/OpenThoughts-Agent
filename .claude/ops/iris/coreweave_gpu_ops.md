@@ -331,9 +331,17 @@ production > interactive > batch; a higher band preempts a lower one.
 - **Non-batch (`interactive`/`production`) → the ~24-node soft cap applies** across ALL my non-batch CW
   jobs combined (these contend with / preempt other tenants, so keep the footprint bounded; 24 is the
   current operator-set value — treat the latest authorization as binding).
-- **Accounting:** sum only **non-batch** node usage against the ~24 cap; batch jobs don't count. The
-  cross-cluster-move authorization + the `NCCL_SOCKET_IFNAME` portability trap still apply (see the
-  `cw-cluster-move-node-cap` memory).
+- **Accounting:** sum only **non-batch** node usage against the ~24 cap; batch jobs don't count.
+- **Cross-cluster moves are autonomous.** Relocate a job between `cw-us-east-02a` and `cw-rno2a` freely when one
+  cluster is packed and the other has room (East fills with larger teammate runs while rno2a's 65 nodes sit
+  near-empty; a job gated `SchedulingGated` for hours on one admits in seconds on the other). Placement is
+  launch-flag-level (`--cluster` / `--cluster-config` / `--rendezvous-dir`); the rl_config is mostly
+  cluster-agnostic. **Before any move, grep the config for hardcoded interface/PF/host/region values in
+  `extra_env`.** The trap is **`NCCL_SOCKET_IFNAME`**: East's Ethernet PF `enp157s0np0` does not exist on rno2a,
+  so a hardcoded PF dies upstream of everything with NCCL `Bootstrap: no socket interface found`. Use the
+  cluster-PORTABLE exclusion list `"^ibs,ibp,lo,docker,veth,cilium,lxc"` (matches cw-rno2a.yaml's default;
+  auto-picks Ethernet on either cluster) instead of a hardcoded PF. Kubeconfigs: East
+  `~/.kube/coreweave-iris-gpu` (`--cluster=cw-us-east-02a`), rno2a `~/.kube/coreweave-iris` (`--cluster=cw-rno2a`).
 - **⚑ Priority preemption now actually WORKS (marin #7207 + #7206, merged 2026-07-16) — this is what makes
   "batch yields to everyone" true.** BEFORE #7207 it did NOT: multi-host gangs are admitted through Kueue (pods
   held `SchedulingGated` until the whole Workload admits), so the native kube-scheduler PriorityClass preemption
@@ -533,6 +541,18 @@ monitor/harvest cron catch them at its >1200-count trigger).
   never run WITHOUT the fix → never proved the 8k config reproduces the 131k wedge). A
   slower GUARANTEED repro beats a fast UNCERTAIN one; reduced configs are for SPEED of
   a *proven* repro only.
+- **py-spy forensic on a wedged/hung job — capture BEFORE the kill.** A kill destroys the only live evidence of a
+  hang (NCCL flight-recorder dumps are lost to pod GC), so on a suspected deadlock / collective-desync, py-spy the
+  stuck ranks first, then recommend the kill with the stacks as evidence. VERIFIED working on CoreWeave despite
+  `ptrace_scope=1` (the `task` container carries `CAP_SYS_PTRACE`):
+  `kubectl exec -n iris <pod> -c task -- /opt/openthoughts/.venv/bin/py-spy dump --pid <ray::skyrl_entrypoint PID>`.
+  Dump several ranks to `agent_logs/`, and compare a LEADING vs LAGGING rank to pin which rank is stuck in which
+  collective (the desync source). **A py-spy snapshot is NOT a wedge verdict:** ranks at `dist.barrier()` while
+  others are mid-`forward`, plus a single NCCL `Watchdog caught collective … ran for N ms` LOG LINE, does not prove
+  a terminal deadlock — a real tripped watchdog ABORTS the process (pod crash/restart). Require pod-restarts==0 +
+  an actual abort/terminal state + stalled FRESH logs (all nodes) before calling wedge, and reconcile any cited
+  timeout against the run's own timeline (a 3600 s collective can't predate the phase it is in). On Leonardo py-spy
+  is BLOCKED (`ptrace_scope=2`) — use another forensic.
 
 ## Cross-reference
 
