@@ -59,6 +59,7 @@ from hpc.iris.regions import (
     assert_yaml_regions_match_pin,
     discover_region_for_tpu,
     output_bucket_for_region,
+    region_from_output_bucket,
 )
 from hpc.iris.settings import (
     DEFAULT_CLUSTER_CONFIG,
@@ -342,14 +343,29 @@ class IrisLauncher:
         args.output_mode = output_mode
         validate_output_args(args, output_mode, accelerator_kind=accelerator.kind)
 
+        # Resolve --resume-from up front: the recorded job's output bucket is
+        # authoritative for BOTH the harbor identity (routed below) and the region
+        # pin. Forward region discovery is skipped on resume (we don't re-discover a
+        # region for an existing job), so we derive the pin from that bucket instead.
+        resume_target = getattr(args, "resume_from", None)
+        resume_prev = get_latest_by_job_name(resume_target) if resume_target else None
+        if resume_target and resume_prev is None:
+            raise SystemExit(
+                f"--resume-from {resume_target!r}: no record found in "
+                f"{LOCAL_PATHS.state}/iris_jobs.db. Available recent jobs:\n"
+                "  python -c 'from hpc.iris_job_registry import list_all; "
+                "[print(r.job_name) for r in list_all(limit=20)]'"
+            )
+
         # Dynamic region discovery + pin. When the user did NOT explicitly
         # set --gcs-output-dir or $OT_AGENT_GCS_OUTPUT_ROOT (i.e., the value
         # is still the cross-continent default), query iris for which
         # region has v5p/v6e capacity for this TPU spec, override the
         # output bucket to the matching co-located SINGLE-region bucket, and
         # pin the iris job to that region so preempt-retry can't cross-region
-        # failover. Skipped on --resume-from (the existing job's bucket
-        # is authoritative) and when no TPU is requested.
+        # failover. On --resume-from we don't re-discover (the existing job's
+        # bucket is authoritative) but we DO pin to that bucket's region so a
+        # resumed single-region job can't be re-placed cross-region either.
         #
         # Discovery is MANDATORY in this branch: if it errors or finds no
         # mapped region, we RAISE rather than silently fall back to the static
@@ -365,7 +381,7 @@ class IrisLauncher:
         if (
             output_mode == "gcs"
             and not user_set_output
-            and not getattr(args, "resume_from", None)
+            and not resume_target
             and accelerator.is_tpu
         ):
             try:
@@ -400,6 +416,20 @@ class IrisLauncher:
                 f"(bucket {bucket}). Capacity: {summary or 'none reported'}.",
                 flush=True,
             )
+        elif resume_target and output_mode == "gcs":
+            # Resume skips forward discovery, but a resumed job that writes to a
+            # SINGLE-region bucket must still be pinned to that bucket's region so a
+            # preempt-retry can't be re-placed cross-region (egressing every write).
+            # Legacy multi-region buckets (marin-models-{us,eu}) map to None -> stay
+            # unpinned: any in-continent placement is read/write-local there.
+            resumed_region = region_from_output_bucket(resume_prev.gcs_output_dir)
+            if resumed_region:
+                args._pinned_region = resumed_region
+                print(
+                    f"[iris] Resume region pin: {resumed_region} "
+                    f"(from recorded bucket {resume_prev.gcs_output_dir}).",
+                    flush=True,
+                )
 
         # Fail-fast on cross-region YAML model paths. Iris just pinned the
         # job to a region; if a YAML hardcodes a GCS bucket in the wrong
@@ -424,16 +454,8 @@ class IrisLauncher:
         # harbor's _maybe_init_existing_job (job.py:203) finds existing
         # trial results and skips them. We stash the old harbor identity
         # on the args namespace so subclass build_task_command can read it.
-        resume_target = getattr(args, "resume_from", None)
         if resume_target:
-            prev = get_latest_by_job_name(resume_target)
-            if prev is None:
-                raise SystemExit(
-                    f"--resume-from {resume_target!r}: no record found in "
-                    f"{LOCAL_PATHS.state}/iris_jobs.db. Available recent jobs:\n"
-                    "  python -c 'from hpc.iris_job_registry import list_all; "
-                    "[print(r.job_name) for r in list_all(limit=20)]'"
-                )
+            prev = resume_prev
             ts = time.strftime("%Y%m%d-%H%M%S")
             args.job_name = getattr(args, "job_name", None) or f"{prev.job_name}-resume-{ts}"
             args._harbor_job_name_override = prev.job_name

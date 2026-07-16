@@ -96,6 +96,24 @@ def output_bucket_for_region(region: str) -> Optional[str]:
     return _REGION_TO_OUTPUT_BUCKET.get(region)
 
 
+def region_from_output_bucket(gcs_uri: Optional[str]) -> Optional[str]:
+    """Inverse of :func:`output_bucket_for_region`: the single-region for a gs:// URI.
+
+    Returns the region whose co-located single-region output bucket is the prefix of
+    ``gcs_uri`` (e.g. ``gs://marin-us-central1/ot-agent/...`` -> ``"us-central1"``).
+    Returns ``None`` for a legacy multi-region bucket (``gs://marin-models-{us,eu}``)
+    or any URI not under a mapped single-region bucket — callers should leave such a
+    job UNPINNED, since a multi-region bucket is read/write-local anywhere in its
+    continent (a cross-region placement egresses nothing there).
+    """
+    if not gcs_uri:
+        return None
+    for region, bucket in _REGION_TO_OUTPUT_BUCKET.items():
+        if gcs_uri == bucket or gcs_uri.startswith(bucket + "/"):
+            return region
+    return None
+
+
 # GCP metadata endpoint that reports the instance's zone (e.g.
 # "projects/123/zones/us-east5-b"); the region is the zone minus its trailing
 # "-<letter>". Mirrors marin's canonical runtime region discovery in
