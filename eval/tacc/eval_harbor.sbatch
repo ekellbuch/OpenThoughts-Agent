@@ -160,12 +160,36 @@ if [ -f "$DC_AGENT_SECRET_ENV" ]; then
     source "$DC_AGENT_SECRET_ENV"
 fi
 
-# --- Daytona API key (3:1 weighted: 3/4 org2, 1/4 org1) — same orgs as Leonardo ---
+# --- Detect the harbor config's agent (host-run terminus-2 vs installed agent) ---
+# terminus-2/oracle/nop run the LLM call ON the compute node (localhost vLLM);
+# installed agents (opencode, openhands, ...) run their CLI INSIDE the Daytona
+# sandbox and must reach the served model over a public tunnel. This flag gates
+# every installed-agent-only addition below (strict-DATA Daytona key, pinggy
+# tunnel, opencode routing) so the terminus-2 path stays byte-identical.
+CFG_AGENT_NAME=$(python -c "
+import yaml
+with open('$HARBOR_CONFIG') as f:
+    cfg = yaml.safe_load(f)
+agents = cfg.get('agents', [])
+print(agents[0].get('name', 'terminus-2') if agents else 'terminus-2')
+" 2>/dev/null || echo "terminus-2")
+case "$CFG_AGENT_NAME" in
+    terminus|terminus-1|terminus-2|terminus-kira|oracle|nop) IS_INSTALLED_AGENT=false ;;
+    *) IS_INSTALLED_AGENT=true ;;
+esac
+echo "Harbor config agent: $CFG_AGENT_NAME (installed_agent=$IS_INSTALLED_AGENT)"
+
+# --- Daytona API key — same orgs as Leonardo (org1=DAYTONA_API_KEY, org2=DATA) ---
 # Keys come from the secrets env (sourced above as $DC_AGENT_SECRET_ENV) — NEVER hardcode.
-# The two eval orgs are DAYTONA_API_KEY (org1) + DAYTONA_DATA_API_KEY (org2).
 DAYTONA_KEY_ORG1="${DAYTONA_API_KEY:?DAYTONA_API_KEY unset — source the secrets env ($DC_AGENT_SECRET_ENV) before launch}"
 DAYTONA_KEY_ORG2="${DAYTONA_DATA_API_KEY:?DAYTONA_DATA_API_KEY unset — source the secrets env ($DC_AGENT_SECRET_ENV) before launch}"
-if (( RANDOM % 4 == 0 )); then
+if [ "$IS_INSTALLED_AGENT" = true ]; then
+    # Installed-agent evals (opencode) use STRICT 100% DATA org (org2) per the
+    # per-experiment DATA policy. Gated on the installed-agent path so the running
+    # terminus-2 evals keep their historical 3:1 org2:org1 load-spread unchanged.
+    export DAYTONA_API_KEY="$DAYTONA_KEY_ORG2"
+    echo "Selected Daytona org: org2/DATA (strict, installed-agent) (${DAYTONA_API_KEY:0:12}...)"
+elif (( RANDOM % 4 == 0 )); then
     export DAYTONA_API_KEY="$DAYTONA_KEY_ORG1"
     echo "Selected Daytona org: org1 (${DAYTONA_API_KEY:0:12}...)"
 else
@@ -222,6 +246,11 @@ cleanup() {
     echo "Cleaning up..."
     if [ -n "${VLLM_PID:-}" ]; then
         kill "$VLLM_PID" 2>/dev/null || true
+    fi
+    # Installed-agent pinggy tunnel (opencode) — kill the retry-loop + its ssh.
+    if [ -n "${PINGGY_PID:-}" ]; then
+        kill "$PINGGY_PID" 2>/dev/null || true
+        pkill -P "$PINGGY_PID" 2>/dev/null || true
     fi
     echo "Cleanup done."
 }
@@ -477,6 +506,73 @@ fi
 
 echo "[DEBUG] EXTRA_HARBOR_ARGS=$EXTRA_HARBOR_ARGS"
 
+# ==============================================================================
+# Installed-agent (opencode) ingress: pinggy tunnel + model routing (ADDITIVE)
+# ------------------------------------------------------------------------------
+# opencode runs its CLI INSIDE the Daytona sandbox and calls the served model
+# over a PUBLIC URL. Vista compute nodes have direct egress but no public
+# INGRESS, so we expose the local vLLM (localhost:8000) via a pinggy SSH tunnel
+# and route the agent at it (OPENAI_BASE_URL + OPENCODE_DUMMY_KEY; harbor
+# registers the `vllm` provider via @ai-sdk/openai-compatible). Ported from
+# eval/jupiter/eval_harbor.sbatch:1013-1188 minus proxychains (Vista = direct
+# egress). Gated on IS_INSTALLED_AGENT so the terminus-2 host-agent path (used by
+# the running axolotl evals) is byte-identical — this whole block is skipped for
+# terminus-2. Runs for BOTH new-job and resume dispatches below.
+# ==============================================================================
+if [ "$IS_INSTALLED_AGENT" = true ]; then
+    if [ -z "${EVAL_PINGGY_URL:-}" ] || [ -z "${EVAL_PINGGY_TOKEN:-}" ]; then
+        echo "[pinggy] FATAL: installed agent '$CFG_AGENT_NAME' needs a public tunnel to vLLM, but EVAL_PINGGY_URL/EVAL_PINGGY_TOKEN are unset."
+        echo "[pinggy] Pass --pinggy_persistent_url + --pinggy_token to the listener. Refusing to waste compute."
+        exit 1
+    fi
+    echo "[pinggy] Starting SSH tunnel to ${EVAL_PINGGY_URL} (vLLM port 8000)..."
+    PINGGY_LOG="$DCFT/eval/tacc/logs/pinggy_${SLURM_JOB_ID}.log"
+    bash -c "while true; do ssh -p 443 \
+        -R0:localhost:8000 \
+        -o StrictHostKeyChecking=no \
+        -o ServerAliveInterval=30 \
+        -o ExitOnForwardFailure=yes \
+        ${EVAL_PINGGY_TOKEN}@pro.pinggy.io; \
+        sleep 10; done" > "$PINGGY_LOG" 2>&1 &
+    PINGGY_PID=$!
+    echo "[pinggy] Started with PID $PINGGY_PID (log: $PINGGY_LOG)"
+    # Stabilize (SSH establish)
+    for _pg in $(seq 1 5); do
+        sleep 1
+        if ! kill -0 "$PINGGY_PID" 2>/dev/null; then
+            echo "[pinggy] ERROR: tunnel process died during startup"
+            cat "$PINGGY_LOG" 2>/dev/null || true
+            exit 1
+        fi
+    done
+    TUNNEL_URL="https://${EVAL_PINGGY_URL}"
+    # Verify the sandbox-facing URL actually reaches OUR vLLM (direct egress on
+    # Vista; no proxychains). Retry for pinggy DNS / vLLM-readiness lag.
+    _verified=false
+    for _vt in $(seq 1 12); do
+        if curl -sk --connect-timeout 5 "${TUNNEL_URL}/v1/models" 2>/dev/null | grep -q "object"; then
+            echo "[pinggy] Connectivity verified: $TUNNEL_URL (attempt $_vt)"
+            _verified=true
+            break
+        fi
+        sleep 5
+    done
+    if [ "$_verified" = false ]; then
+        echo "[pinggy] FATAL: connectivity test failed after 12 attempts (60s)."
+        echo "[pinggy] Installed-agent fires require a working tunnel; refusing to waste compute."
+        echo "[pinggy] Last 20 lines of $PINGGY_LOG:"
+        tail -20 "$PINGGY_LOG" 2>/dev/null || true
+        exit 1
+    fi
+    # opencode routing: `vllm/<served_id>` provider + baseURL/key from env
+    # (harbor agents/installed/opencode.py _build_register_config_command). The
+    # served id is $MODEL (build_vllm_cmd --served-model-name defaults to $MODEL).
+    export OPENAI_BASE_URL="${TUNNEL_URL}/v1"
+    export OPENCODE_DUMMY_KEY="${OPENCODE_DUMMY_KEY:-capability-url-no-auth-header}"
+    export OPENAI_API_KEY="${OPENAI_API_KEY:-$OPENCODE_DUMMY_KEY}"
+    echo "[opencode] routing: model=vllm/$MODEL OPENAI_BASE_URL=$OPENAI_BASE_URL"
+fi
+
 if [ -d "$RUN_DIR" ] && [ -f "$RUN_DIR/config.json" ]; then
     echo "Found existing job dir, resuming: $RUN_DIR"
     # --- Refresh api_base in config.json to the LIVE serve node before resume ---
@@ -548,6 +644,36 @@ PY
     harbor jobs resume \
         -p "$RUN_DIR" \
         "${RESUME_FILTER_FLAGS[@]}"
+elif [ "$IS_INSTALLED_AGENT" = true ]; then
+    echo "Starting new job (installed agent: $CFG_AGENT_NAME)"
+    # harbor's `jobs start` IGNORES --model unless --agent is ALSO passed (and
+    # --agent would WIPE the YAML agents[] — see cli/jobs.py:1213), so inject the
+    # runtime model_name into a config copy and run WITHOUT --agent/--model. The
+    # `vllm/<served>` provider + OPENAI_BASE_URL/OPENCODE_DUMMY_KEY (exported by
+    # the tunnel block above) route opencode at our served vLLM.
+    RUNTIME_HARBOR_CONFIG="/tmp/harbor_opencode_${SLURM_JOB_ID}.yaml"
+    python - "$HARBOR_CONFIG" "$RUNTIME_HARBOR_CONFIG" "vllm/$MODEL" <<'PY'
+import sys, yaml
+src, dst, model = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(src) as f:
+    cfg = yaml.safe_load(f)
+if not cfg.get("agents"):
+    raise SystemExit(f"FATAL: no agents[] in harbor config {src}")
+cfg["agents"][0]["model_name"] = model
+with open(dst, "w") as f:
+    yaml.dump(cfg, f, default_flow_style=False)
+print(f"injected model_name={model} into {dst}")
+PY
+    echo "[opencode] runtime harbor config: $RUNTIME_HARBOR_CONFIG"
+    harbor jobs start \
+        -p "$DATASET_PATH" \
+        --n-concurrent "$N_CONCURRENT" \
+        --env "daytona" \
+        --n-attempts 3 \
+        --job-name "$RUN_TAG" \
+        --jobs-dir "$EVAL_JOBS_DIR" \
+        --config "$RUNTIME_HARBOR_CONFIG" \
+        $EXTRA_HARBOR_ARGS
 else
     echo "Starting new job"
     harbor jobs start \
