@@ -23,8 +23,27 @@ description: >-
 > CoreWeave GPU particulars in `coreweave_gpu_ops.md`, the TPU `marin` particulars in `iris_job_lifecycle.md`).
 > They carry the binding access/preamble/gotchas and the helper-script inventory the steps below rely on.
 
+> **⛔ CANONICAL BUILD MOVED TO MarinSkyRL — uv IS the ground truth (de-drift 2026-07-16).** The canonical
+> gpu-rl build is now **MarinSkyRL `docker/Dockerfile.gpu-rl`** (+ `docker/build_gpu_rl_kaniko.sh`,
+> `docker/build_wheels.sh`, `docker/README.gpu-rl-wheelcache.md`), built from the MarinSkyRL repo root. That
+> Dockerfile builds the RL env **PURELY from `uv sync --frozen`** against **`skyrl-train/pyproject.toml` +
+> `skyrl-train/uv.lock`** (the single source of truth) — **there is NO `rl_env_constraints.txt` and NO
+> `UV_CONSTRAINT`/`uv pip install --constraint` step**. The lock, resolved at torch 2.11.0+cu128
+> (nccl-cu12 2.28.9), IS the constraint; the only post-sync steps are `--no-deps` swaps of the compiled
+> vLLM-fork + flash-attn wheels and a `git+` harbor install (dependency-agnostic).
+>
+> **Everything BELOW that describes the OT-Agent `docker/Dockerfile.gpu-rl` + `docker/rl_env_constraints.txt`
+> + `ENV UV_CONSTRAINT=…` paradigm (esp. §5 item 4, §8 provenance, §9 "EVERY rebuild MUST pin the rl-stage
+> deps") is the FROZEN LEGACY SHADOW — do NOT apply it to a new build.** The pin-the-transitive-set discipline
+> that the constraint file provided is now discharged by `uv.lock` (`uv sync --frozen` reproduces the exact
+> transitive set by construction — no float possible, no side-file to regenerate). The OT-Agent RL-image build
+> files are pending deletion once MarinSkyRL's `Dockerfile.gpu-rl` (currently on the megatron branch) lands on
+> `main` with `build_wheels.sh` + `README.gpu-rl-wheelcache.md` ported. Read the MarinSkyRL Dockerfile header
+> comments for the current build recipe.
+
 > **⚠ Local clone = ground truth (CLAUDE.md §Always).** ALL Dockerfile / build-script edits go in the local
-> Mac checkout on `penfever/working` → commit → (push). **The iris job bundles the LOCAL workspace to `/app`**
+> Mac checkout (MarinSkyRL for the RL image; the canonical build reads MarinSkyRL's uv.lock) → commit → (push).
+> **The iris job bundles the LOCAL workspace to `/app`**
 > via `git ls-files --cached --others --exclude-standard` (respects `.gitignore`; reads WORKING-TREE content,
 > so uncommitted *tracked* edits ARE included — you do NOT have to commit/push before a build), so a local edit
 > takes effect on the next build immediately. Never hand-edit on a remote / leave divergent state / patch-by-rsync.

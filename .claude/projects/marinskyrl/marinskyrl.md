@@ -18,6 +18,22 @@ memories.
 
 ---
 
+## Contributing to this fork (marin-community fork workflow)
+
+MarinSkyRL is a **marin-community shared fork** — code contributions follow the **marin-community fork contribution workflow** (shared with `harbor`, `evalchemy`), which is DIFFERENT from OT-Agent's:
+
+1. **Read `AGENTS.md` first.** Before editing any file, read the repo's `AGENTS.md` / `AGENTS-core.md` and obey it — env/dev setup, test + lint entry points, PR norms.
+2. **Follow the marin style conventions.** Run the repo's marin-style lint/format/type gate (e.g. `uv run infra/pre-commit.py --all-files --fix`, `ty check`) and match its vendored-tree / marin-style checks.
+3. **Dev on a FRESH branch → PR into `main`.** Never commit directly to `main` or a long-lived branch; cut one fresh feature branch per change and PR it into `main`. Keep it small — PR-per-change, no more mega-consolidation PRs going forward.
+4. **Iterate on the PR until ALL tests are green.** Push fixes to the PR branch until every required CI check passes (marin-precommit, marin-style-sync, tests, …); diagnose + fix CI failures, never force past them.
+5. **Do NOT self-merge — return for approval.** A SUBAGENT never merges a marin-community PR. Open it (green), then return to the SUPERVISOR, who surfaces it to the HUMAN for final approval + merge. (Shared upstream → human-in-the-loop on the merge; some of these repos allow same-author self-merge, which is exactly why this rule exists.)
+
+Plus the standing norm: **no `Co-Authored-By` / self-crediting commit trailers** (the repo's AGENTS.md forbids them) — use the **`agent-generated` PR label** + the repo's PR-body format instead.
+
+**Scope:** this applies ONLY to the marin-community shared forks (harbor, MarinSkyRL, evalchemy). **OT-Agent (`OpenThoughts-Agent` `penfever/working`) and the vllm fork keep their CURRENT norms** — the agent may commit + push + self-merge, and the `Co-Authored-By` / `Claude-Session` trailers stay.
+
+---
+
 ## Config rules
 
 ### `n_concurrent_trials` vs `num_parallel_generation_workers` — heuristic, NOT a law
@@ -32,7 +48,7 @@ The 2:1 idea only models head-plasma footprint + "keep engines fed"; it ignores 
 
 Per-engine `Running` sawtoothing PEAK(=engine cap)→TROUGH 1 with `Waiting=0` + KV near-floor (period ~30–90 s) is the gen-buffer's **backpressure working as designed** — NOT a supply bug, NOT parse-bound, NOT under-provisioned workers. **The one decider: `timing/wait_for_generation_buffer`.** ≈0 (e.g. 0.0009 s) ⇒ the training consumer NEVER waits for rollouts ⇒ generation is OFF the critical path ⇒ the trough is benign and the run is compute/policy_train-bound. Confirm it with: gen buffer sitting FULL at its cap most of the step (`Saved N generation buffer items`, N=`maxsize`=npgw), `staleness_mean` ≪ cap, `discard_rate 0` — the bulk of the `npgw` workers are parked in `await buffer.put()`; only a residual cohort drives the engines, and their agentic turns are phase-correlated within a group → instantaneous demand beats 1↔cap instead of averaging out. The weight-sync `pause_generation` barrier fires once per step (not at the sawtooth period).
 - **`npgw < n_concurrent_trials` is NOT a starve.** `npgw × n_samples_per_prompt ≫ n_concurrent_trials` (e.g. 338×8=2704 ≫ 675) → the Harbor orchestrator can always be kept full; the submission/staleness gate is disabled, so the only live throttle is the buffer cap. **Raising npgw does NOT lift the trough** — generation is already ahead; more workers only deepen the buffer.
-- **When a cheaper-training architecture flips the run inference-bound, the levers in order:** (1) `harbor.n_concurrent_trials` — the real engine-demand knob (subscription ≈ concurrent_trials × per-trial LLM duty cycle); (2) per-trial DUTY CYCLE — trials spend most wall-time in Daytona tool-exec, not awaiting the LLM (see §"Engine saturation in agentic fully_async RL" — the harbor poll-loop floor, fixed `ef42e75e`; + sandbox reuse). **NOT** npgw / `max_staleness_steps` / `max_buffered_groups` (those bound off-policy lead depth, not instantaneous engine subscription). Evidence: `agent_logs/2026-07-15_async-inference-sawtooth-rootcause.md`.
+- **When a cheaper-training architecture flips the run inference-bound, the levers in order:** (1) `harbor.n_concurrent_trials` — the real engine-demand knob (subscription ≈ concurrent_trials × per-trial LLM duty cycle); (2) per-trial DUTY CYCLE — trials spend most wall-time in Daytona tool-exec, not awaiting the LLM (see §"Engine saturation in agentic fully_async RL" — the harbor poll-loop floor, fixed `ef42e75e`; + sandbox reuse). **NOT** npgw / `max_staleness_steps` / `max_buffered_groups` (those bound off-policy lead depth, not instantaneous engine subscription). Evidence: `/Users/benjaminfeuer/Documents/agent_logs/2026-07-15_async-inference-sawtooth-rootcause.md`.
 
 ### Hydra struct — every run-YAML key must be declared in `ppo_base_config.yaml`
 
@@ -124,7 +140,7 @@ Same `NumelIn=1` fingerprint, DIFFERENT mechanism than the keyset diff. Under **
 
 ---
 
-## Runtime knobs — now FLAGS on the iris RL launcher (`rl/cloud/launch_rl_iris.py`)
+## Runtime knobs — now FLAGS on the iris RL launcher (`cloud/iris/launch_rl_iris.py`, MarinSkyRL — canonical since the 2026-07-16 cutover; the OT-Agent `rl/cloud/launch_rl_iris.py` copy is frozen/deprecated)
 
 The `SKYRL_*` runtime knobs are first-class CLI flags (argparse group "MarinSkyRL runtime knobs"). The env var is retained as an override — precedence is **env/`extra_env` > flag > code default**. Every flag defaults to *unspecified*, so an all-defaults launch injects `{}` and the pod env is byte-identical to before; a config's `extra_env:` still wins over a flag. Footgun defaults were flipped ON so a config that FORGETS the line is now safe.
 
@@ -255,13 +271,16 @@ A point-in-time `nvidia-smi` SM-util reads **84–89% even when the engine is id
 
 ### Daytona ORG routing
 
-The agentic-RL grid must run on the **dedicated RL org (`DAYTONA_RL_API_KEY`, DataCompRL)**, NOT the shared `DAYTONA_API_KEY` (eval/datagen) org — the shared org's control plane self-saturates and throttles the eval campaign. The iris RL launcher re-sources `secrets.env` after any shell `export` (`hpc/iris/env.py`: file overrides shell), so a pre-launch `export DAYTONA_API_KEY=$DAYTONA_RL_API_KEY` is CLOBBERED — use the committed **`--daytona-api-key-env DAYTONA_RL_API_KEY`** flag (`rl/cloud/launch_rl_iris.py`, c6001bc1). VERIFY in-pod: `kubectl exec … printenv DAYTONA_API_KEY | sha1sum` == the RL key hash (NOT the shell before launch).
+The agentic-RL grid must run on the **dedicated RL org (`DAYTONA_RL_API_KEY`, DataCompRL)**, NOT the shared `DAYTONA_API_KEY` (eval/datagen) org — the shared org's control plane self-saturates and throttles the eval campaign. The iris RL launcher re-sources `secrets.env` after any shell `export` (`cloud/iris/secrets_env.py`: file overrides shell), so a pre-launch `export DAYTONA_API_KEY=$DAYTONA_RL_API_KEY` is CLOBBERED — use the committed **`--daytona-api-key-env DAYTONA_RL_API_KEY`** flag (MarinSkyRL `cloud/iris/launch_rl_iris.py`; originally OT-Agent c6001bc1). VERIFY in-pod: `kubectl exec … printenv DAYTONA_API_KEY | sha1sum` == the RL key hash (NOT the shell before launch).
 
 ---
 
-## CI — the `SkyRL-GPU-E2E-CI` convergence test is DISABLED; RESTORE when Marin CI can substitute
+## CI — the old `SkyRL-GPU-E2E-CI` was REPLACED upstream by `marin-nightly.yaml` (resolved 2026-07-15)
 
-The daily-scheduled `SkyRL-GPU-E2E-CI` (`.github/workflows/gpu_e2e_ci.yaml` → `Basic convergence test`) `anyscale job submit`s to **upstream SkyRL's Anyscale account**, which the `marin-community/MarinSkyRL` fork has no `ANYSCALE_CLI_TOKEN`/`WANDB_API_KEY` for → every scheduled run fast-fails (~30s) at CLI auth (NOT a signal about our changes). The `schedule:` cron is disabled (kept `workflow_dispatch`); the disable must land on **`main`** to take effect. **RESTORE** the `schedule:` trigger once a Marin-owned GPU-E2E CI exists.
+**RESOLVED.** Upstream `main` (#2 `e1cc7d51`, "Adopt marin-style, restore PR CI, and add a nightly single-H100 GRPO gate") **DELETED** the old `.github/workflows/gpu_e2e_ci.yaml` (and `gpu_ci.yaml`) and added **`marin-nightly.yaml`** — a Marin-owned single-H100 GRPO nightly gate — plus restored PR CI (`cpu_ci.yaml`, `cpu_skyrl_tx.yaml`). This is the Marin-owned GPU CI the old note was waiting on.
+
+- The prior fork problem: the old `SkyRL-GPU-E2E-CI` (`gpu_e2e_ci.yaml` → `Basic convergence test`) `anyscale job submit`ed to **upstream SkyRL's Anyscale account**, which the `marin-community/MarinSkyRL` fork had no `ANYSCALE_CLI_TOKEN`/`WANDB_API_KEY` for → every scheduled run fast-failed (~30s) at CLI auth. We'd disabled its `schedule:` cron (`b1e4a362`).
+- **On merging `main` into `penfever/working` (merge commit `0d101151`, 2026-07-15): took the upstream deletion** — the modify/delete conflict on `gpu_e2e_ci.yaml` (our disable vs upstream delete) resolved by deleting the file (our disable-workaround is subsumed). No `schedule:` to restore anymore; the nightly GPU gate is `marin-nightly.yaml`.
 
 ---
 

@@ -2,7 +2,8 @@
 name: rl-agentic-launch-iris
 description: >-
   Launch / relaunch agentic MarinSkyRL (SkyRL GRPO) RL on Marin's Iris / CoreWeave GPU cluster
-  (cw-us-east-02a, 8x H100-80GB + InfiniBand per node) via `python -m rl.cloud.launch_rl_iris` + the
+  (cw-us-east-02a, 8x H100-80GB + InfiniBand per node) via `python -m cloud.iris.launch_rl_iris`
+  (run from the MarinSkyRL repo root; canonical since the 2026-07-16 cutover off the frozen OT-Agent copy) + the
   gpu-rl Docker image (NO Apptainer SIF). Covers the dense 8B FSDP2 arms (seqnorm + TIS) and the
   MoE 30B-A3B arms (CP + DCP=2 + R3 @ 131k) — the exact launcher flag set (`--rl_config`, `--model_path`,
   `--train_data`, `--num-nodes`, `--rendezvous-dir`, `--job-name`, `--priority`, `--cpu`, `--max-retries`),
@@ -10,8 +11,9 @@ description: >-
   load-bearing top-level `extra_env:` forwarding, disaggregated placement + explicit `num_inference_engines`,
   SIF→Docker env translation), and the bring-up gotchas learned this week (`--cpu 48`, `--max-retries ≥1`).
   Use when asked to launch / relaunch an agentic SkyRL RL run on Iris / CoreWeave. Cluster access/hardware
-  particulars live in .claude/ops/iris/coreweave_gpu_ops.md (this skill defers to it). Reference:
-  rl/cloud/launch_rl_iris.py, scripts/iris/start_rl_iris_controller.py, .claude/ops/iris/coreweave_gpu_ops.md.
+  particulars live in .claude/ops/iris/coreweave_gpu_ops.md (this skill defers to it). Reference (canonical,
+  MarinSkyRL repo): cloud/iris/launch_rl_iris.py, cloud/iris/start_rl_iris_controller.py, cloud/iris/configs/,
+  .claude/ops/iris/coreweave_gpu_ops.md.
 ---
 
 > ⚠ **Do not add comments to YAMLs. Report your recommendations directly to the supervisor.**
@@ -29,8 +31,11 @@ description: >-
 > NOT push-then-pull-on-a-cluster here (there is no Iris clone to pull). Still **never** hand-edit on a
 > remote, leave divergent state, or patch-by-rsync. Bake this into every subagent you dispatch.
 
-Agentic RL on Iris runs through **`python -m rl.cloud.launch_rl_iris`** (MarinSkyRL / SkyRL, GRPO, FSDP2 or
-MoE-EP). Each rollout is a real **Harbor** agent episode against a **Daytona** sandbox (the `terminal_bench`
+Agentic RL on Iris runs through **`python -m cloud.iris.launch_rl_iris`** — the self-contained MarinSkyRL
+launcher (`cloud/iris/`), run **from the MarinSkyRL repo root** (`~/Documents/MarinSkyRL`, on `main` / any
+branch containing `cloud/iris/`). This is canonical since the **2026-07-16 cutover** off the now-frozen
+OT-Agent copy `python -m rl.cloud.launch_rl_iris` (do not use that one). (SkyRL, GRPO, FSDP2 or
+MoE-EP.) Each rollout is a real **Harbor** agent episode against a **Daytona** sandbox (the `terminal_bench`
 generator). The target is Marin's **CoreWeave `cw-us-east-02a`** cluster — **8x H100-80GB + InfiniBand per
 node**, whole-node exclusive, gang/leafgroup-coscheduled (NOT SLURM, NOT TPU). The **gpu-rl Docker image IS
 the runtime** — there is no Apptainer SIF and no `hpc.launch`.
@@ -51,11 +56,12 @@ launch HOW-TO (flag set, config-authoring rules, bring-up checklist). The TPU-ce
 > deps-only/source-synced model, and the binding `--cpu 48` / `--max-retries` gotchas). Read it once; this
 > section keeps only what you type to launch.
 
-Launch from the local Mac, **otagent py3.12 conda env**:
+Launch from the local Mac, **otagent py3.12 conda env**, **from the MarinSkyRL repo root**:
 ```bash
+cd ~/Documents/MarinSkyRL                              # `-m cloud.iris.launch_rl_iris` resolves from here; must be on main (or a cloud/iris branch)
 source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"   # HF_TOKEN, WANDB_*, DAYTONA_* (forwarded into the pod)
 export KUBECONFIG=~/.kube/coreweave-iris-gpu           # the CoreWeave GPU cluster kubeconfig (see ops doc)
-# otagent python = /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python (symlinks fail in the sandbox)
+# otagent python = /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python (symlinks fail in the sandbox); the `iris` SDK is installed in this env
 ```
 - **Confirm access** before submitting (synchronous `iris`/`kubectl` only — never background them; commands
   + the ~36-node H100 headroom check are in the ops doc's "Verify access").
@@ -63,7 +69,7 @@ export KUBECONFIG=~/.kube/coreweave-iris-gpu           # the CoreWeave GPU clust
   `--cluster-config` only if it moved.
 - **gpu-rl image:** deps-only (RL venv `/opt/openthoughts/envs/rl` + vLLM fork + MarinSkyRL editable
   `/opt/skyrl` + harbor), **pinned by immutable `@sha256:` digest** in
-  `rl/cloud/launch_rl_iris.py:DEFAULT_RL_DOCKER_IMAGE` (NOT the floating `:gpu-rl` tag — it stale-caches).
+  `cloud/iris/launch_rl_iris.py:DEFAULT_RL_DOCKER_IMAGE` (NOT the floating `:gpu-rl` tag — it stale-caches).
   Source is synced at runtime so first-party edits live without a rebuild; **bump the digest** on an image
   rebuild (full rationale in the ops doc).
 
@@ -71,9 +77,10 @@ export KUBECONFIG=~/.kube/coreweave-iris-gpu           # the CoreWeave GPU clust
 
 Lifted from the validated config headers (each iris config's header carries its own ready-to-run command):
 ```bash
+cd ~/Documents/MarinSkyRL   # canonical launcher repo (on main / a cloud/iris branch)
 source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
-python -m rl.cloud.launch_rl_iris \
-  --rl_config hpc/skyrl_yaml/iris/<cfg>.yaml \
+python -m cloud.iris.launch_rl_iris \
+  --rl_config cloud/iris/configs/<cfg>.yaml \
   --model_path <hf-id> \
   --train_data '["<HF-repo-or-harbor-task-set>"]' \
   --num-nodes N \
@@ -92,7 +99,7 @@ are 8x H100 — also FORCES policy/ref gpus-per-node, see §4), `--cpu 48` (NOT 
 exist), `--no-wait` (submit + detach; without it the launcher streams logs and a `KeyboardInterrupt`
 terminates the job). Flag glossary:
 
-- **`--rl_config`** — repo-relative path under `hpc/skyrl_yaml/iris/`. It must exist on the synced `/app`
+- **`--rl_config`** — repo-relative path under `cloud/iris/configs/` (MarinSkyRL). It must exist on the synced `/app`
   workspace; the launcher resolves an absolute path back to repo-relative and fails fast if it's outside the
   repo. (`--rl-config` hyphenated alias also accepted; same for `--model-path`/`--train-data` etc.)
 - **`--model_path`** — HF id (e.g. `Qwen/Qwen3-8B`, `Qwen/Qwen3-Coder-30B-A3B-Instruct`). CoreWeave nodes
@@ -145,25 +152,40 @@ terminates the job). Flag glossary:
 `--num-nodes = total_GPUs_in_config / 8`. Derive the GPU budget from the yaml
 (`policy_num_nodes`, `ref_num_nodes`, `num_inference_engines × inference_engine_tensor_parallel_size`):
 
-| Config (`hpc/skyrl_yaml/iris/…`) | Model | Layout | GPUs → `--num-nodes` |
+| Config (`cloud/iris/configs/…`, MarinSkyRL) | Model | Layout | GPUs → `--num-nodes` |
 |---|---|---|---|
-| `56GPU_seqnorm_tis.yaml` | dense 8B (seqnorm + TIS) | disaggregated: 1 node policy/ref + 48×TP1 engines | 56 → **7** |
-| `grid_30b_EP8_FSDP2_CP2.yaml` | **Qwen3-Coder-30B-A3B (MoE)** | disaggregated: 4 nodes policy (EP8×FSDP2×CP2=32) + 4×TP8/DCP2 engines | 64 → **8** |
-| `64GPU_35B_A3B.yaml` | **Qwen3.6-35B-A3B (MoE)** — CANONICAL 35B | disaggregated: 4 nodes policy (EP4×FSDP8×CP1=32) + 8×TP4/EP4 engines | 64 → **8** |
+| `56GPU_qwen3_8b.yaml` | dense 8B (seqnorm + TIS) | disaggregated: 1 node policy + 1 node ref + 48×TP1 engines | 56 → **7** |
+| `32GPU_qwen3_coder_30b_a3b_ep4.yaml` | **Qwen3-Coder-30B-A3B (MoE)** — CANONICAL 30B (EP4) | disaggregated (EP4) | 32 → **4** |
 
-- **Smoke first.** The dedicated launcher-validation smoke `smoke_seqnorm_tis.yaml` (toy-scale 8B, same
-  seqnorm+TIS code path, ≥2 steps in minutes at `--num-nodes 1`) was **retired in the 2026-07-08 config
-  reorg** — no dedicated toy smoke config currently survives. Until one is re-added, validate the launcher /
+- **Config parity note (2026-07-16 cutover):** only these two configs were carried into MarinSkyRL
+  `cloud/iris/configs/` (32GPU EP4 is the canonical 30B per commit `127e7b41`, which deprecated the
+  superseded 30B/80B variants). The OT-Agent `hpc/skyrl_yaml/iris/` still holds `64GPU_qwen3_6_35b_a3b.yaml`
+  + `128GPU_80B_A3B_next_cp{1,4}.yaml`; if you need one of those, **port it into `cloud/iris/configs/` first**
+  (copy + confirm any referenced asset — e.g. a chat-template jinja — is present in the MarinSkyRL tree; see §4)
+  rather than reaching back into the frozen OT-Agent copy.
+- **Smoke first.** No dedicated toy smoke config ships in `cloud/iris/configs/`. Validate the launcher /
   a new image digest via `--dry-run` (confirm the resolved hydra args) plus a short real arm before a full run.
+  A `--num-nodes 1` colocated FSDP2 8B smoke was used to validate the cutover (2026-07-16); author an
+  equivalent throwaway `cloud/iris/configs/*.yaml` (colocate_all, small max_steps, `trace_upload.enabled: false`)
+  if you need a live bring-up check.
 - The dense-8B model is typically `Qwen/Qwen3-8B` (or a `laion/…` 8B); the MoE arm is
   `Qwen/Qwen3-Coder-30B-A3B-Instruct`. Common train sets: `DCAgent/exp_rpt_pymethods2test-large`, etc.
 - These iris configs are **ports of the Jupiter prod configs** (same experiment) — the header of each iris
   config documents exactly what was carried verbatim vs. changed (geometry + env translation). Read it.
 
-## 4. Config-authoring rules for `hpc/skyrl_yaml/iris/`
+## 4. Config-authoring rules for `cloud/iris/configs/` (MarinSkyRL)
 
 Porting a Jupiter (Apptainer SIF) config to Iris (Docker) — the load-bearing rules:
 
+- **Every referenced FILE ASSET must exist in the MarinSkyRL tree (self-containment).** In-pod, `run_rl.py`
+  parses the config from `/app` (the synced MarinSkyRL workspace, `PROJECT_ROOT`), and the trainer opens
+  asset paths relative to `/app`. A `generator.engine_init_kwargs.custom_chat_template_chat_completion_path`
+  (e.g. `chat_templates/qwen3_thinking_acc.jinja2`) is `open()`ed directly — a MISSING file is a hard
+  `FileNotFoundError` at vLLM engine init. The `chat_templates/qwen3_thinking_acc.jinja2` asset (thinking-
+  accumulation template with `reasoning_content` splicing) lives at the **MarinSkyRL repo root**
+  `chat_templates/` — **NOT** the same as the simpler `skyrl-train/examples/terminal_bench/qwen3_thinking_acc.jinja2`
+  (do not substitute; they differ). When porting any OT-Agent config, copy its referenced assets into the
+  MarinSkyRL tree at the config-relative path. (This was the one gap found + fixed at the 2026-07-16 cutover.)
 - **NO `container:` / SIF / apptainer / conda / binds / pydeps block.** The gpu-rl image IS the container
   (RL venv `/opt/openthoughts/envs/rl`, MarinSkyRL `/opt/skyrl`, workspace synced to `/app`). The launcher +
   `start_rl_iris_controller.py` wire all of that; none of it belongs in the cluster-agnostic SkyRL/Hydra yaml.
@@ -191,7 +213,7 @@ Porting a Jupiter (Apptainer SIF) config to Iris (Docker) — the load-bearing r
     salad; fixed MarinSkyRL `2bb70a88`). Swap-inert on triton/dense → byte-identical there, so just leave it
     on; do NOT set `0` except to reproduce the old bug. Bring-up check: engine log shows
     `initialize_layerwise_reload` / `finish_weight_reload`. Detail: marinskyrl project doc +
-    `agent_logs/2026-06-27_coreweave_moe_ep_garbage_debug_cycle.md`.
+    `/Users/benjaminfeuer/Documents/agent_logs/2026-06-27_coreweave_moe_ep_garbage_debug_cycle.md`.
   - **HARDCODE** `LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib` (the RL conda prefix) — **NOT
     `$CONDA_PREFIX/lib`**: the launcher injects env as literal k8s values and **k8s does NOT shell-expand
     `$VAR`**, so a literal `$CONDA_PREFIX/lib` is a broken path.
@@ -227,7 +249,7 @@ Porting a Jupiter (Apptainer SIF) config to Iris (Docker) — the load-bearing r
   (`host_network: true` for NCCL/IB) → the N-task gang is admitted **atomically** (all N whole nodes granted,
   or the job queues). At submit you'll see `replicas=N, coscheduling=leafgroup`, then the pods sit
   **SchedulingGated** (normal Kueue gang pre-admit) until admitted.
-- **One controller runs on every node** (`scripts/iris/start_rl_iris_controller.py`); iris injects
+- **One controller runs on every node** (`cloud/iris/start_rl_iris_controller.py`); iris injects
   `IRIS_TASK_ID` / `IRIS_NUM_TASKS` / `IRIS_ADVERTISE_HOST` per task. **Rank 0** starts the Ray head, writes
   the head IP to the rendezvous file (`ray_head.json` under `--rendezvous-dir`), waits for all N nodes to
   join, then runs the MarinSkyRL driver (`run_rl.py`) with `RAY_ADDRESS` set so SkyRL's bare `ray.init()`
@@ -237,7 +259,7 @@ Porting a Jupiter (Apptainer SIF) config to Iris (Docker) — the load-bearing r
 
 ## 6. Bring-up gotchas LEARNED (the pre-flight checklist)
 
-These were paid for this week (`agent_logs/2026-06-25_coreweave_131k_cpdcp2r3_resume.md`) — apply them up front:
+These were paid for this week (`/Users/benjaminfeuer/Documents/agent_logs/2026-06-25_coreweave_131k_cpdcp2r3_resume.md`) — apply them up front:
 
 - **`--cpu 48`, NOT 64.** CoreWeave nodes are ~128 cores but carry ~64–68 cores of persistent
   system/daemonset overhead, so at the **64 default only ~2/32 nodes have ≥64 free cores** → an N-node

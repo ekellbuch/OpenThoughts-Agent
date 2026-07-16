@@ -2,10 +2,23 @@
 
 Cluster particulars for the **GPU RL path** on Marin's Iris: the CoreWeave
 `cw-us-east-02a` H100 cluster (8× H100-80GB + InfiniBand per node), driven via
-`python -m rl.cloud.launch_rl_iris` + the `gpu-rl` Docker image. This is the
-ACCESS/HARDWARE/SCHEDULING reference; the launch HOW-TO (flag set, config-authoring
-rules, bring-up checklist) lives in the **`rl-agentic-launch-iris`** skill — ops =
-particulars, skill = procedure.
+`python -m cloud.iris.launch_rl_iris` (run **from the MarinSkyRL repo root**) + the
+`gpu-rl` Docker image. This is the ACCESS/HARDWARE/SCHEDULING reference; the launch
+HOW-TO (flag set, config-authoring rules, bring-up checklist) lives in the
+**`rl-agentic-launch-iris`** skill — ops = particulars, skill = procedure.
+
+> **⚠ Launcher moved (cutover 2026-07-16).** The canonical live entry point is now the
+> **self-contained MarinSkyRL launcher** `cloud/iris/launch_rl_iris.py` (repo
+> `~/Documents/MarinSkyRL`, on `main` / any branch containing `cloud/iris/`), invoked as
+> **`python -m cloud.iris.launch_rl_iris`** with `--rl_config cloud/iris/configs/<cfg>.yaml`.
+> The old OT-Agent copy `python -m rl.cloud.launch_rl_iris` (`~/Documents/OpenThoughts-Agent/rl/cloud/launch_rl_iris.py`)
+> is **FROZEN / deprecated** (pending deletion) — do not launch from it. The env, kubeconfig,
+> secrets, priority bands, node cap, rendezvous, and Daytona particulars below are unchanged;
+> only the repo + module path + config location change. Validated end-to-end 2026-07-16
+> (1-node Qwen3-8B FSDP2 smoke reached training via the MarinSkyRL launcher). The controller
+> + helper scripts (`start_rl_iris_controller.py`, `tilelang_cache_sync.py`, `run_rl.py`,
+> config translation) are now `cloud/iris/*` in MarinSkyRL, synced to `/app`;
+> `PYTHONPATH=/app:/opt/skyrl/skyrl-train` (skyrl-train stays baked in the image at `/opt/skyrl`).
 
 > **Scope — this is the GPU cloud, not the TPU cloud.** The rest of `.claude/ops/iris/`
 > (`iris_job_lifecycle.md`, `iris_google_tpu_cloud_hardware.md`,
@@ -24,10 +37,17 @@ particulars, skill = procedure.
 
 Launch from the **local Mac**, **otagent py3.12 conda env**
 (`/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python` — symlinks fail in the
-sandbox; use the full interpreter path). There is **no cluster login / no SSH** — you
-talk to the cluster through the `iris` SDK over a controller tunnel, and the launcher
-uploads your **local** workspace to `/app` (a local commit takes effect on the next
-launch immediately — there is no Iris clone to pull).
+sandbox; use the full interpreter path), **`cd ~/Documents/MarinSkyRL`** first (the
+`-m cloud.iris.launch_rl_iris` module resolves from the MarinSkyRL repo root; the
+`iris` SDK itself is installed in the otagent env). The local MarinSkyRL checkout must
+be on **`main`** (or a branch that contains `cloud/iris/`) — the current working branch
+`feuer/megatron-backend-transformers5` does NOT have the port. There is **no cluster
+login / no SSH** — you talk to the cluster through the `iris` SDK over a controller
+tunnel, and the launcher uploads your **local MarinSkyRL** workspace to `/app` (a local
+commit takes effect on the next launch immediately — there is no Iris clone to pull).
+The runtime is self-contained: `/app` provides `cloud.iris.*` + configs; `skyrl_train`
+imports from the baked `/opt/skyrl` (swap with `--skyrl-ref`). No OpenThoughts-Agent
+workspace is uploaded any more.
 
 **Pre-launch preamble:**
 ```bash
@@ -75,6 +95,7 @@ KubernetesProvider / Kueue-gang model; different region, kubeconfig, and node sh
   - `kube_context: marin-rn02a_RNO2A` → endpoint `https://208261-6670debc.k8s.rno2a.coreweave.com`.
   - Query nodes/pods exactly like East: `KUBECONFIG=~/.kube/coreweave-iris kubectl --context marin-rn02a_RNO2A get nodes`.
   - Namespace `iris` (controller `iris-controller-*` + `finelog-cw-rno2a-*` both run there).
+  - **⚠ SECRET-BEARING kubectl (all iris clusters):** `kubectl describe pod <task-pod>` and `kubectl get pod <task-pod> -o yaml` dump `IRIS_JOB_ENV` — i.e. the pod's **live API keys** (`DAYTONA_*`, `HF_TOKEN`, `WANDB_API_KEY`, `OPENAI_API_KEY`, …) — into their output. Do NOT run `describe`/`-o yaml` on a task pod when you only need state; use `kubectl … get pods` (state) or read ONE var by name via `kubectl -n iris exec <pod> -- printenv <VAR>` (never echo the value). Bake this bound into subagent prompts — a leaked `describe` puts secrets in a transcript.
 - **Cluster config** = `lib/iris/config/cw-rno2a.yaml` (on marin **origin/main**). ⚠ To drive it
   via the `iris` SDK the **local marin clone must be on `main`** (or a branch carrying the new
   `IrisClusterConfig` schema) — an older clone's pydantic **rejects** the new fields
@@ -128,7 +149,7 @@ exclusive** (`H100x8`, one iris task per node, no co-tenants). ~**36 H100 nodes*
   external `libnccl-net.so`/OFI plugin is needed on Mellanox IB — the "Could not find
   libnccl-net.so" health-probe line is BENIGN.** Expected on-launch signal with `NCCL_DEBUG=INFO`:
   `NET/IB : Using [0]mlx5_0:1/IB` + `GPU Direct RDMA Enabled` (was
-  `NET/Socket : Using [0]enp157s0np0:…`). Ref: `agent_logs/2026-07-08_gpu-rl-ib-enable.md`.
+  `NET/Socket : Using [0]enp157s0np0:…`). Ref: `/Users/benjaminfeuer/Documents/agent_logs/2026-07-08_gpu-rl-ib-enable.md`.
 - **NCCL DEFAULTS — use them (MoE-salad doubt FALSIFIED 2026-06-27).** On H100+IB, do
   NOT set the GH200/SIF disables (`NCCL_P2P_DISABLE` / `NCCL_NVLS_ENABLE=0` /
   `NCCL_COLLNET_ENABLE=0`): they cripple the intra-node NVLink all-reduce a TP=8 (DCP)
@@ -137,7 +158,7 @@ exclusive** (`H100x8`, one iris task per node, no co-tenants). ~**36 H100 nodes*
   `TORCH_NCCL_*`). *(The CJK token-salad observed on `rl-131k-cpdcp2r3-think2507-r9`
   was NOT an NCCL issue — it was the FusedMoE `w13` gate/up swap not re-applied on the
   disaggregated RL weight update, fixed by `SKYRL_W13_RELOAD_BRACKET` [MarinSkyRL
-  `2bb70a88`; default on]. Record: `agent_logs/2026-06-27_coreweave_nccl_defaults_doubt.md`.)*
+  `2bb70a88`; default on]. Record: `/Users/benjaminfeuer/Documents/agent_logs/2026-06-27_coreweave_nccl_defaults_doubt.md`.)*
 - **Egress: CoreWeave nodes have internet.** Models/data are pulled from HF **online** —
   do NOT set `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE` (contrast Leonardo/Jupiter compute
   nodes, which have none). The cost is the transient HF-weight-resolution flake below.
@@ -299,7 +320,48 @@ AND **fully-free 8-GPU nodes ≥ N** (the gang size; e.g. ≥16 for a 30B+35B pa
 to `--priority production` — do NOT churn-relaunch at interactive into contention. The
 in-container invocation the launcher ultimately drives is
 `uv run iris --cluster=cw-us-east-02a job run …` (the SDK `IrisClient.submit` path);
-you do not type that by hand — `python -m rl.cloud.launch_rl_iris` builds it.
+you do not type that by hand — `python -m cloud.iris.launch_rl_iris` builds it.
+
+**⚑ Priority bands + node cap (operator 2026-07-16).** `--priority {production, interactive, batch}`
+(`cloud/iris/launch_rl_iris.py` → `PRIORITY_BAND_*`; default `interactive`). Bands are ordered
+production > interactive > batch; a higher band preempts a lower one.
+- **`--priority batch` → NO node cap. Surge freely.** Batch is the lowest band, fully preemptible — it
+  yields to every higher-priority job (ours or a teammate's), so it can never block anyone. Submit as many
+  batch nodes as the clusters will hold across BOTH CW clusters.
+- **Non-batch (`interactive`/`production`) → the ~24-node soft cap applies** across ALL my non-batch CW
+  jobs combined (these contend with / preempt other tenants, so keep the footprint bounded; 24 is the
+  current operator-set value — treat the latest authorization as binding).
+- **Accounting:** sum only **non-batch** node usage against the ~24 cap; batch jobs don't count. The
+  cross-cluster-move authorization + the `NCCL_SOCKET_IFNAME` portability trap still apply (see the
+  `cw-cluster-move-node-cap` memory).
+- **⚑ Priority preemption now actually WORKS (marin #7207 + #7206, merged 2026-07-16) — this is what makes
+  "batch yields to everyone" true.** BEFORE #7207 it did NOT: multi-host gangs are admitted through Kueue (pods
+  held `SchedulingGated` until the whole Workload admits), so the native kube-scheduler PriorityClass preemption
+  never saw them, and the ClusterQueue carried no preemption policy → a higher-priority gang could NOT evict
+  running lower-priority `batch` gangs, and a full cluster of batch would **starve** it indefinitely (Kueue's
+  default `BestEffortFIFO` even backfilled freed nodes with the next small batch gang). #7207 makes **Kueue
+  MANDATORY on the k8s backend** (composer / LocalQueue reconcile / pod builder all fail fast if
+  `kubernetes_provider.kueue.cluster_queue` is unset — for us it's `iris-cq`; no non-Kueue path remains, which
+  is what makes preemption sound — a single-pod GPU job that bypassed Kueue used to silently defeat preemption
+  of the gangs beside it) and adds `preemption.withinClusterQueue: LowerPriority` so higher bands evict lower.
+  #7206 makes preempt-and-place **atomic** (the preemptor binds to the worker its victim frees — no gap where
+  the freed worker is stranded, stolen by a solo first-fit task, or over-preempts fresh victims tick after
+  tick; gangs re-form on the freed slice). **Implications for us:** (a) the "surge freely on batch, it never
+  blocks anyone" model is now genuinely sound — batch WILL be evicted the moment a higher band needs the nodes;
+  (b) precisely because batch now gets preempted for real, the ckpt→s3 durable-resume fix below is load-bearing
+  for any long batch run.
+- **⚠ Preemption trade-off — checkpoint-resume is NOT yet plumbed for CoreWeave preemption (2026-07-16).** A
+  batch job WILL get preempted when a higher band needs the nodes. But our RL runs write the resumable
+  checkpoint to **ephemeral pod-local disk**, not s3: `ckpt_path` is null in `hpc/skyrl_yaml/iris/*.yaml` →
+  auto-derives to `{experiments_dir}/{job}/checkpoints` and `experiments_dir` defaults to the in-container
+  `/app/experiments` (`cloud/iris/launch_rl_iris.py`), which a preempt/re-bring-up wipes. The trainer's
+  save+resume is correct and s3-capable (`resume_mode: latest` is set; fsspec supports s3://), so the ONE fix
+  is to point `trainer.ckpt_path` at a **stable per-job** `s3://marin-us-east-02a/iris/<job_name>/checkpoints`
+  (auto-derive in the launcher, mirroring the `trials_dir` pattern at `launch_rl_iris.py:879`, OR set it in the
+  YAMLs). Until that lands, a preempted batch job **restarts from step 0** — so batch is safe only for
+  short/smoke runs; do NOT park a long run on batch expecting resume. (SLURM resumes fine because
+  `experiments_dir` there is durable `$WORK`.) Verify the s3-ckpt round-trip at 80B FSDP scale at a smoke
+  before trusting it in production.
 
 **Monitor liveness — state-poll, NOT a log-string watch.** Poll the authoritative iris
 job lifecycle state, never grep rank-0 logs for a content string. A clean kill /
@@ -387,7 +449,7 @@ Then apply the harbor.md recipe to the fetched `result.json` fields.
   fails run-to-run; a likely cause of intermittent "long build then die" CoreWeave
   deaths). A head-only or single-port pin is INSUFFICIENT (the randomized port just
   moves to another agent). **Fix (committed `beda7a7f`,
-  `scripts/iris/start_rl_iris_controller.py:_ray_port_flags`):** pin ALL of them outside
+  `cloud/iris/start_rl_iris_controller.py:_ray_port_flags`):** pin ALL of them outside
   the range on head+worker — `metrics_export=8090, runtime_env_agent=8092,
   dashboard_agent_grpc=8093, dashboard_agent_listen=8094, node_manager=8076,
   object_manager=8077`. Rides the `/app` upload (no rebuild).
@@ -419,7 +481,7 @@ Then apply the harbor.md recipe to the fetched `result.json` fields.
 dedicated **Daytona RL org** (`DAYTONA_RL_API_KEY`, sha1 `f8f0296c1680`) — ~6000 fast
 sandboxes, so many concurrent gangs fit; do NOT spread RL across other orgs to "balance
 load." Route it via the committed **`--daytona-api-key-env DAYTONA_RL_API_KEY`** flag
-(`rl/cloud/launch_rl_iris.py`), NOT a pre-launch `export DAYTONA_API_KEY=…` — the
+(`cloud/iris/launch_rl_iris.py`), NOT a pre-launch `export DAYTONA_API_KEY=…` — the
 launcher re-sources `secrets.env` after any shell export (`hpc/iris/env.py` "file
 overrides shell") and CLOBBERS it. VERIFY in-pod:
 `kubectl exec … printenv DAYTONA_API_KEY | sha1sum` == the RL key hash.
@@ -479,9 +541,12 @@ monitor/harvest cron catch them at its >1200-count trigger).
   bring-up checklist, monitoring + completion) → the **`rl-agentic-launch-iris`** skill.
 - **TPU (datagen/eval) Iris** → `iris_job_lifecycle.md` + `iris_google_tpu_cloud_hardware.md`
   (a DIFFERENT cluster; see the scope banner above).
-- **Code:** `rl/cloud/launch_rl_iris.py` (launcher, digest pin, `extra_env` forwarding,
-  AWS_* warning), `scripts/iris/start_rl_iris_controller.py` (the per-node Ray
-  rendezvous controller).
+- **Code (canonical, MarinSkyRL `cloud/iris/`):** `cloud/iris/launch_rl_iris.py` (launcher,
+  digest pin, `extra_env` forwarding, AWS_* warning), `cloud/iris/start_rl_iris_controller.py`
+  (the per-node Ray rendezvous controller), `cloud/iris/run_rl.py` + `cloud/iris/rl_config_translation.py`
+  (in-pod config parse → Hydra args), `cloud/iris/configs/*.yaml` (recipes). The OT-Agent copies
+  (`rl/cloud/launch_rl_iris.py`, `scripts/iris/start_rl_iris_controller.py`, `scripts/iris/tilelang_cache_sync.py`)
+  are FROZEN/deprecated pending deletion.
 - **Standing constraints** (≤6 RUNNING RL/cluster, `enable_db_registration: false`, a3
   CONCLUDED, Daytona snapshot caps HARD, never kill a RUNNING job / `iris cluster
   restart` without permission) — see `CLAUDE.md §Always` + the launch skill §7.
