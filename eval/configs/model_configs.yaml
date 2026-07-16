@@ -308,6 +308,12 @@ models:
     agent_kwargs:
     - extra_body={"chat_template_kwargs":{"enable_thinking":true}}
     extra_args: --enable-prefix-caching
+  laion/Qwen3-32B-OpenThoughts-Agent-SFT-10K-axolotl-step250@gh200:
+    tensor_parallel_size: 1
+    max_model_len: 32768
+    swap_space: 32
+    trust_remote_code: true
+    extra_args: --enable-prefix-caching --dtype bfloat16 --kv-cache-dtype fp8
   laion/Sera-4.5A-Full-T1-v2-10000__Qwen3-8B:
     trust_remote_code: true
     tool_call_parser: hermes

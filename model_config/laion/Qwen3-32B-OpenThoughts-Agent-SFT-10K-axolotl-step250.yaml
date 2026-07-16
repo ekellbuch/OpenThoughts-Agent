@@ -1,0 +1,29 @@
+# laion/Qwen3-32B-OpenThoughts-Agent-SFT-10K-axolotl-step250 — dense 32B ID-eval target.
+#
+# GH200/Vista (TACC) serve variant ONLY. There is deliberately NO base eval config here, so
+# the generator emits ONLY the `...@gh200` standalone (no bare entry) — Jupiter/default keeps
+# resolving via the _patterns.yaml `3[02]B` rule (TP=4, intra-node NVLink), UNCHANGED.
+#
+# Vista = 1x GH200 (96GB) per node, whole-node, TP=1 (multi-node TP/PP vLLM serve is NOT wired
+# into eval/tacc/eval_harbor.sbatch — `#SBATCH --nodes 1`, direct single-node launch). The dense
+# 32B (~64GB bf16) FITS at TP=1, but at the sbatch default gpu-mem 0.90 only ~20.5GB is left for
+# KV -> "Maximum concurrency for 32768 tokens/req: 2.56x", so vLLM caps at ~3-4 in-flight
+# generations while harbor already sends N_CONCURRENT=8 (KV-CAPACITY-bound, NOT batch-starved:
+# observed Running 3-4 / Waiting 3-5, KV usage 79-98%).
+#
+# fp8 KV cache ~halves per-token KV bytes -> ~2x the concurrent decode streams on the same GPU,
+# enough to feed the conc-8 Vista ceiling. `--dtype bfloat16` keeps weights/activations bf16;
+# ONLY the KV cache is fp8 (the proven pairing — cf. the GLM entries in
+# eval/configs/baseline_model_configs_minimal.yaml). NB: fp8 KV introduces a small numeric shift
+# vs a bf16-KV serve; acceptable for throughput on an otherwise-non-viable eval. Revert this
+# extra_args (back to just `--enable-prefix-caching`) if strict bf16-KV paper parity is required.
+model: laion/Qwen3-32B-OpenThoughts-Agent-SFT-10K-axolotl-step250
+subsystems:
+  eval:
+    variants:
+      gh200:
+        tensor_parallel_size: 1
+        max_model_len: 32768
+        swap_space: 32
+        trust_remote_code: true
+        extra_args: --enable-prefix-caching --dtype bfloat16 --kv-cache-dtype fp8
