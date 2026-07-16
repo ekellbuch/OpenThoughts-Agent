@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+# =============================================================================
+# ⚠ DEPRECATED — FROZEN, PENDING DELETION (2026-07-16 launcher-shadow cutover).
+# -----------------------------------------------------------------------------
+# The CANONICAL live Iris/CoreWeave RL launcher is now the self-contained
+# MarinSkyRL port: `cloud/iris/launch_rl_iris.py` in the MarinSkyRL repo
+# (`~/Documents/MarinSkyRL`), invoked as `python -m cloud.iris.launch_rl_iris`.
+# This OT-Agent copy is FROZEN: no new maintenance — fix bugs in the MarinSkyRL
+# `cloud/iris/` copy ONLY (double-maintenance is exactly what this cutover ends).
+# It is retained ONLY until the in-flight megatron parity re-fire that still
+# invokes it completes; it is then deleted (see
+# ~/Documents/agent_logs/2026-07-16_ot-launcher-shadow-cutover.md for the
+# fast-follow deletion file-list). Do NOT launch new work from this module.
+# =============================================================================
 """Launch a MarinSkyRL RL training job on Marin's Iris GPU cluster (CoreWeave).
 
 This is the GPU/Iris analog of ``rl/cloud/launch_rl_cloud.py`` (the SkyPilot RL

@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+# =============================================================================
+# ⚠ DEPRECATED — FROZEN, PENDING DELETION (2026-07-16 launcher-shadow cutover).
+# -----------------------------------------------------------------------------
+# Superseded by the self-contained MarinSkyRL port `cloud/iris/start_rl_iris_controller.py`
+# (invoked by `python -m cloud.iris.launch_rl_iris`). This OT-Agent copy is FROZEN
+# (no new maintenance — fix bugs in the MarinSkyRL copy ONLY). It is retained until
+# (a) the in-flight megatron parity re-fire that uses the OT-Agent launcher completes
+# AND (b) the Tier-3 diagnostic probes in scripts/iris/ that still import it
+# (e.g. submit_ep8_disk_ref_diag.py) are ported or retired. See
+# ~/Documents/agent_logs/2026-07-16_ot-launcher-shadow-cutover.md.
+# =============================================================================
 """Bootstrap a multi-node MarinSkyRL RL job on an iris GPU slice.
 
 iris gang-schedules a multi-node job as N coscheduled tasks (one per node) and

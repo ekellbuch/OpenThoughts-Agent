@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# =============================================================================
+# ⚠ DEPRECATED — FROZEN, PENDING DELETION (2026-07-16 launcher-shadow cutover).
+# -----------------------------------------------------------------------------
+# Superseded by the self-contained MarinSkyRL port `cloud/iris/tilelang_cache_sync.py`
+# (invoked by the MarinSkyRL `cloud/iris/launch_rl_iris.py` bash bootstrap). This
+# OT-Agent copy is FROZEN (no new maintenance — fix bugs in the MarinSkyRL copy ONLY),
+# retained until the in-flight megatron parity re-fire on the OT-Agent launcher
+# completes, then deleted. See
+# ~/Documents/agent_logs/2026-07-16_ot-launcher-shadow-cutover.md.
+# =============================================================================
 """TileLang JIT-cache sync shim for CoreWeave iris GDN/FlashQLA RL runs (Fix A).
 
 ``SKYRL_GDN_FLASHQLA=1`` runs JIT-compile the FlashQLA GatedDeltaNet TileLang

@@ -12,7 +12,8 @@ description: >-
   `--skyrl-ref` checkout. Use when asked to build / rebuild / push the gpu-rl image, after bumping the vLLM-fork
   commit / flash-attn / torch-CUDA / a baked dep. The Mac CANNOT build it (arm64 + needs linux/amd64 + ~512GB).
   Reference: docker/Dockerfile.gpu-rl, docker/build_wheels.sh, docker/README.gpu-rl-wheelcache.md,
-  .claude/ops/iris/coreweave_gpu_ops.md, rl/cloud/launch_rl_iris.py.
+  .claude/ops/iris/coreweave_gpu_ops.md, MarinSkyRL cloud/iris/launch_rl_iris.py (canonical launcher; the
+  OT-Agent rl/cloud/launch_rl_iris.py copy is frozen/deprecated as of the 2026-07-16 cutover).
 ---
 
 # build-gpu-rl-image-iris
@@ -31,7 +32,7 @@ description: >-
 The **gpu-rl image** is the CoreWeave RL runtime — `linux/amd64`, **from-source CUDA**: the vLLM fork (cutlass
 GEMM kernels) + flash-attn 2.8.3 (`flash_attn_2_cuda`) compiled with `nvcc` against torch 2.11.0+cu128 / cp312
 / x86_64, plus MarinSkyRL editable + torchtitan EP + harbor. It is consumed by `rl-agentic-launch-iris`
-(digest-pinned in `rl/cloud/launch_rl_iris.py:DEFAULT_RL_DOCKER_IMAGE`). This skill is the **how-to to BUILD +
+(digest-pinned in `cloud/iris/launch_rl_iris.py:DEFAULT_RL_DOCKER_IMAGE`, MarinSkyRL — canonical since the 2026-07-16 cutover). This skill is the **how-to to BUILD +
 PUSH it**. Cluster access/hardware particulars defer to **`.claude/ops/iris/coreweave_gpu_ops.md`** (kubeconfig,
 the otagent iris binary, node shape); the Dockerfile internals are documented in
 **`docker/README.gpu-rl-wheelcache.md`** + the `Dockerfile.gpu-rl` header comments.
@@ -265,7 +266,7 @@ docker buildx imagetools inspect ghcr.io/open-thoughts/openthoughts-agent:gpu-rl
 crane manifest --platform linux/amd64 ghcr.io/open-thoughts/openthoughts-agent:gpu-rl-<gitsha>   # then digest it
 # (or the ghcr bearer-token API exchange with $GHCR_TOKEN)
 ```
-Then **bump `DEFAULT_RL_DOCKER_IMAGE` in `rl/cloud/launch_rl_iris.py`** to the new
+Then **bump `DEFAULT_RL_DOCKER_IMAGE` in MarinSkyRL `cloud/iris/launch_rl_iris.py`** (the canonical launcher; the frozen OT-Agent `rl/cloud/launch_rl_iris.py` copy is no longer maintained) to the new
 `ghcr.io/open-thoughts/openthoughts-agent@sha256:<digest>` and update the provenance comment. **Pin the DIGEST,
 never the floating `:gpu-rl` tag** (it stale-caches under `imagePullPolicy: IfNotPresent`). Last known-good
 digest: `sha256:17a46200af64fbcb05540ebedb70df9c1f32282130bffe20acc7b985cf72245e` (gpu-rl-7d15b25a,
@@ -325,5 +326,5 @@ vLLM-fork is the only thing that genuinely forces a rebuild.
 - **Cluster access / hardware / iris-binary / KUBECONFIG:** `.claude/ops/iris/coreweave_gpu_ops.md`.
 - **Dockerfile internals + the wheel cache (for a real x86 host):** `docker/README.gpu-rl-wheelcache.md`,
   `docker/Dockerfile.gpu-rl` (header + step 4a comments), `docker/build_wheels.sh`.
-- **Code:** `rl/cloud/launch_rl_iris.py` (`DEFAULT_RL_DOCKER_IMAGE` digest), `scripts/iris/watch_job_state.py`
+- **Code:** MarinSkyRL `cloud/iris/launch_rl_iris.py` (`DEFAULT_RL_DOCKER_IMAGE` digest — canonical; OT-Agent `rl/cloud/launch_rl_iris.py` frozen), `scripts/iris/watch_job_state.py`
   (the monitor primitive).

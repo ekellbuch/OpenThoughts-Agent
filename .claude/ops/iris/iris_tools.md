@@ -41,7 +41,7 @@ Reaches the **rank-0 pod** of a running agentic-RL job and reads its `trace_jobs
 ### `start_rl_iris_controller.py` — the per-node multi-node RL bootstrap
 iris runs **this same entrypoint on every node** of a gang (injecting `IRIS_TASK_ID`/`IRIS_NUM_TASKS`/`IRIS_ADVERTISE_HOST` per task). It bootstraps ONE cross-node Ray cluster: **rank 0** `ray start --head` → publishes head IP to the rendezvous file → waits for all nodes to join → `exec`s the MarinSkyRL driver with `RAY_ADDRESS` set; **ranks 1..N-1** read the head IP from the rendezvous, `ray start --address=…`, contribute their 8 H100s, and block until rank 0 writes the `done` marker.
 - **Rendezvous:** `ray_head.json` / `ray_head.done` under `--rendezvous-dir` (`OT_AGENT_IRIS_RENDEZVOUS_DIR`); opened via `fsspec` so `gs://` / `s3://` (CoreWeave CW object store `marin-us-east-02a`) / NFS all work. Pins ALL Ray agent ports outside the worker range (fixes the nondeterministic port-collision).
-- **Invoked by** `python -m rl.cloud.launch_rl_iris` — you never type it directly; edit it locally (rides the `/app` upload, no image rebuild).
+- **Invoked by** the RL launcher — you never type it directly; edit it locally (rides the `/app` upload, no image rebuild). **⚠ Cutover 2026-07-16:** the CANONICAL controller for RL launches is now **MarinSkyRL `cloud/iris/start_rl_iris_controller.py`**, invoked by `python -m cloud.iris.launch_rl_iris` (run from the MarinSkyRL repo). The OT-Agent copy `scripts/iris/start_rl_iris_controller.py` is **FROZEN/deprecated** and retained only because the Tier-3 diagnostic probes below still import it; it will be deleted once those are ported or retired.
 
 ---
 
@@ -77,5 +77,5 @@ Invoked from the TPU launcher's bash bootstrap **after `uv sync`, before the wor
 
 ## Cross-reference
 - **Access / hardware / scheduling (GPU):** `coreweave_gpu_ops.md` (incl. the full-log pagination recipe + the liveness=state-poll rule these tools implement).
-- **Launch procedure (GPU RL):** the `rl-agentic-launch-iris` skill; launcher `rl/cloud/launch_rl_iris.py`.
+- **Launch procedure (GPU RL):** the `rl-agentic-launch-iris` skill; canonical launcher **MarinSkyRL `cloud/iris/launch_rl_iris.py`** (`python -m cloud.iris.launch_rl_iris`, run from `~/Documents/MarinSkyRL`). The OT-Agent `rl/cloud/launch_rl_iris.py` is frozen/deprecated (2026-07-16 cutover).
 - **TPU job lifecycle / hardware:** `iris_job_lifecycle.md`, `iris_google_tpu_cloud_hardware.md`, `iris_eval_fixed_snapshot_template_scoping.md`.
