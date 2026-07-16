@@ -770,6 +770,31 @@ def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
     return out
 
 
+def load_config_trainer_ckpt_path(rl_config_path: str) -> Optional[str]:
+    """Return an EXPLICIT ``trainer.ckpt_path`` from the RL config YAML, else None.
+
+    The iris configs set ``ckpt_path: null`` (auto-derived downstream in
+    rl_config_utils). A config that sets it explicitly (non-null, non-empty) should
+    WIN over the launcher's durable-s3 default, so build_task_command consults this
+    before injecting its override. Returns None when the file is unreadable, has no
+    ``trainer.ckpt_path``, or the value is null/empty (byte-identical to today for
+    every existing iris config, which all leave it null)."""
+    try:
+        full = PROJECT_ROOT / rl_config_path
+        path = full if full.exists() else Path(rl_config_path)
+        import yaml
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[rl-iris] WARNING: could not read ckpt_path from {rl_config_path}: {exc}",
+              file=sys.stderr)
+        return None
+    val = (raw.get("trainer") or {}).get("ckpt_path")
+    if val is None or (isinstance(val, str) and not val.strip()):
+        return None
+    return str(val)
+
+
 def _job_scope_fr_dump_path(prefix: str, job_name: str) -> str:
     """Rewrite a JOB-SCOPED NCCL flight-recorder dump path so its slug segment is the
     ACTUAL job name, e.g. ``/tmp/fr_dumps/<slug>/nccl_fr_rank`` -> ``/tmp/fr_dumps/
@@ -878,6 +903,27 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         if trials_dir.lower() == "auto":
             trials_dir = f"s3://marin-us-east-02a/iris/{args.job_name}/trace_jobs"
         train_cmd.extend(["--skyrl_override", f"++terminal_bench_config.trials_dir={trials_dir}"])
+
+    # Durable RESUMABLE checkpoint (preempt-safe -> makes `--priority batch` safe for
+    # long runs). Without this, trainer.ckpt_path auto-derives (rl_config_utils) to
+    # {experiments_dir}/{job_name}/checkpoints, and on iris experiments_dir defaults to
+    # the in-container /app/experiments — EPHEMERAL pod-local disk. A batch preempt +
+    # re-admit wipes it, so the trainer can't find latest_ckpt_global_step.txt and
+    # restarts from step 0 despite resume_mode: latest. Redirect ckpt_path to a STABLE
+    # per-job path on the durable CW object store — SAME bucket + auto-injected creds
+    # path as trials_dir above, so ckpt co-locates with rollouts and follows any store
+    # migration identically. It MUST be keyed on job_name ONLY (NOT a fresh-per-attempt
+    # sub-path) so a re-admitted SAME --job-name job finds latest_ckpt_global_step.txt
+    # (read path == write path, MarinSkyRL skyrl-train utils/io/io.py is fsspec-s3) and
+    # auto-resumes from the banked step. iris-ONLY: SLURM uses a different launcher where
+    # experiments_dir is durable $WORK, so this path never runs there. Respect an
+    # explicit ckpt_path from the YAML or a --skyrl_override (either wins).
+    user_set_ckpt = any("trainer.ckpt_path=" in o for o in (args.skyrl_override or []))
+    yaml_ckpt = load_config_trainer_ckpt_path(args.rl_config)
+    if not user_set_ckpt and not yaml_ckpt:
+        ckpt_path = f"s3://marin-us-east-02a/iris/{args.job_name}/checkpoints"
+        train_cmd.extend(["--skyrl_override", f"++trainer.ckpt_path={ckpt_path}"])
+        print(f"[rl-iris] Durable resumable ckpt_path: {ckpt_path}")
 
     # The controller wraps the training command for the multi-node Ray bootstrap.
     controller_cmd: List[str] = [
