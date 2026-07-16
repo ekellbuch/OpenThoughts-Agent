@@ -1,4 +1,5 @@
 model: Qwen/Qwen3-30B-A3B-Thinking-2507
+tool_call_parser: hermes
 subsystems:
   eval:
     variants:
