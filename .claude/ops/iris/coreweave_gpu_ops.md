@@ -577,6 +577,19 @@ monitor/harvest cron catch them at its >1200-count trigger).
 
 ## Monitoring & debugging practices
 
+- **A post-bring-up TRAINER wedge stays `state 3 RUNNING` and emits NO terminal log — RUNNING ≠ stepping.**
+  A job can complete vLLM engine bring-up cleanly (weights loaded, KV cache sized, CUDA graphs captured) and then
+  the trainer side (megatron/FSDP2 re-sync, first ppo_train step, mesh init) HANGS — the last real line is a
+  benign heartbeat (e.g. an `fd-monitor` from `skyrl_entrypoint`), then silence for the whole wall-clock until the
+  job goes terminal. Do NOT read "vLLM up + state 3" as healthy. Liveness for a trainer = **forward advancement**
+  (a fresh training step / rising banked-gs / the run's `finished_at` horizon moving), never engine-bring-up
+  completion. (2026-07-17: `megatron-parity-v0m-mcore-east16/east17` both looked "up" then wedged post-bring-up
+  for ~68 min → terminal `FAILED(5)`; the log-string watcher never fired.)
+- **While ANY debug thread is in flight, a single 30-minute cron re-verifies EVERY active debug job's authoritative
+  state** (jobs-table `state` / `watch_job_state.py --once`), independent of each job's own watcher — the cron
+  backstops watchers that go silent on a clean kill/eviction/post-bring-up wedge. Per-job watchers are still armed,
+  but the cron is the catch-all. Retire the cron when the debug roster drains. (Behavioral rule:
+  memory `watcher-and-debug-monitoring`.)
 - **Throughput / max-concurrency probes: fixed 60/120-min check-ins + DIRECT log reads
   — NEVER watcher-park a subagent.** Parked "bring-up/generation watcher" subagents
   re-invoke unreliably and once stalled a 35B max-conc probe **~8h** with no number. The

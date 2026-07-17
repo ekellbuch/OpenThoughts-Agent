@@ -8,13 +8,13 @@ memories.
 
 ## Source of truth
 
-- **SoT = `marin-community/MarinSkyRL` branch `penfever/working`** (strict superset of `main`).
-- **`github.com/penfever/SkyRL` is OBSOLETE** (archived at `archive/skyrl-pre-marin-consolidation-20260608`, tip `5376d8f`). Every production feature it had (seqnorm-global loss, `policy_strict_spread_pg`, Stage-7 streamed-EP weight-sync, Qwen3-Next GDN kernel routing) is already in marin under squashed SHAs. marin *additionally* has TIS exact-alignment (`align_logprobs_by_token_ids`) + mp-backend the fork lacked. Do NOT merge the fork — it re-applies OLD copies (worker.py/trainer.py conflicts) and risks regressing the SoT.
-- **Cluster clones** (all track marin `penfever/working`, editable-installed):
+- **SoT = `marin-community/MarinSkyRL` branch `main`.** ⚠ The long-lived **`penfever/working` mono-branch is RETIRED** (2026-07-17) — accumulating everything on one branch caused drift and stranded fixes off `main`. Every change now lands via the **worktree → PR → `main` → report-to-supervisor** flow below; pins, refs, and cluster clones track **`main`** (the reviewed/merged state). For an unmerged fix under active test, pass it explicitly (`--skyrl-ref <branch>`) rather than mutating a shared branch.
+- **`github.com/penfever/SkyRL` is OBSOLETE** (archived). All its features are in marin under squashed SHAs; marin additionally has TIS exact-alignment + mp-backend. Do NOT merge the fork — it re-applies old copies and risks regressing SoT.
+- **Cluster clones** (all track `main`, editable-installed):
   - Jupiter: `/e/scratch/jureap59/feuer1/OpenThoughts-Agent/SkyRL` (editable from `.../SkyRL/skyrl-train`).
   - Leonardo: `/leonardo_work/AIFAC_5C0_290/bfeuer00/code/MarinSkyRL`.
   - Perlmutter / NYU Torch: realign when next used.
-- **Sync:** commit+push from the laptop (Leonardo can't push), then `git pull` on the cluster. See `.claude/ops/jupiter/ENVIRONMENT_MAP.md` for baked-SIF facts.
+- **Sync:** merged PRs land on `main`; `git pull` (`main`) on the cluster (editable installs go live after pull). See `.claude/ops/jupiter/ENVIRONMENT_MAP.md` for baked-SIF facts.
 
 ---
 
@@ -24,7 +24,7 @@ MarinSkyRL is a **marin-community shared fork** — code contributions follow th
 
 1. **Read `AGENTS.md` first.** Before editing any file, read the repo's `AGENTS.md` / `AGENTS-core.md` and obey it — env/dev setup, test + lint entry points, PR norms.
 2. **Follow the marin style conventions.** Run the repo's marin-style lint/format/type gate (e.g. `uv run infra/pre-commit.py --all-files --fix`, `ty check`) and match its vendored-tree / marin-style checks.
-3. **Dev on a FRESH branch → PR into `main`.** Never commit directly to `main` or a long-lived branch; cut one fresh feature branch per change and PR it into `main`. Keep it small — PR-per-change, no more mega-consolidation PRs going forward.
+3. **Dev in an ISOLATED WORKTREE off a FRESH branch from `main` → PR into `main`.** Every agent works in its own `git worktree` (the Agent tool's `isolation: "worktree"`, or a manual `git worktree add ../wt-<slug> -b <branch> main`) cut from `main` — parallel agents never collide, and there is no shared long-lived branch. One fresh feature branch per change; PR-per-change, small. ⚠ The `penfever/working` mega-consolidation branch is **RETIRED** — never commit to it, and never commit to `main` directly.
 4. **Iterate on the PR until ALL tests are green.** Push fixes to the PR branch until every required CI check passes (marin-precommit, marin-style-sync, tests, …); diagnose + fix CI failures, never force past them.
 5. **Do NOT self-merge — return for approval.** A SUBAGENT never merges a marin-community PR. Open it (green), then return to the SUPERVISOR, who surfaces it to the HUMAN for final approval + merge. (Shared upstream → human-in-the-loop on the merge; some of these repos allow same-author self-merge, which is exactly why this rule exists.)
 
@@ -38,17 +38,17 @@ Plus the standing norm: **no `Co-Authored-By` / self-crediting commit trailers**
 
 ### `n_concurrent_trials` vs `num_parallel_generation_workers` — heuristic, NOT a law
 
-The `2 * num_parallel_generation_workers + 32` ratio is a rule of thumb, **not** a derived relationship. The two knobs are **independent** and govern different layers:
+The `2 * num_parallel_generation_workers + 32` ratio is a heuristic, **not a derived relationship**. The two knobs are independent and govern different layers:
 - `num_parallel_generation_workers` = trainer's `max_concurrent_generation_groups` bound (`fully_async_trainer.py:374`) + gen-buffer queue `maxsize`, constrained `≥ mini_batch_size`.
 - `n_concurrent_trials` = the Daytona-sandbox TrialQueue semaphore, divided across `num_coordinators` (K) worker processes (`rollout_coordinator.py:117`).
 
-The 2:1 idea only models head-plasma footprint + "keep engines fed"; it ignores `batch_size`, `n_samples_per_prompt`, and engine serving capacity. **Tune the two empirically + independently against the engine-saturation tuple (Waiting/KV/power/mem-BW), not locked at 2:1.** Do not auto-rewrite configs to this ratio.
+**Tune the two empirically against the engine-saturation tuple (Waiting/KV/power/mem-BW), not locked at 2:1.** Do not auto-rewrite configs to this ratio.
 
 ### The engine "sawtooth" trough (Running→1) under fully_async is BENIGN backpressure while policy_train-bound
 
-Per-engine `Running` sawtoothing PEAK(=engine cap)→TROUGH 1 with `Waiting=0` + KV near-floor (period ~30–90 s) is the gen-buffer's **backpressure working as designed** — NOT a supply bug, NOT parse-bound, NOT under-provisioned workers. **The one decider: `timing/wait_for_generation_buffer`.** ≈0 (e.g. 0.0009 s) ⇒ the training consumer NEVER waits for rollouts ⇒ generation is OFF the critical path ⇒ the trough is benign and the run is compute/policy_train-bound. Confirm it with: gen buffer sitting FULL at its cap most of the step (`Saved N generation buffer items`, N=`maxsize`=npgw), `staleness_mean` ≪ cap, `discard_rate 0` — the bulk of the `npgw` workers are parked in `await buffer.put()`; only a residual cohort drives the engines, and their agentic turns are phase-correlated within a group → instantaneous demand beats 1↔cap instead of averaging out. The weight-sync `pause_generation` barrier fires once per step (not at the sawtooth period).
-- **`npgw < n_concurrent_trials` is NOT a starve.** `npgw × n_samples_per_prompt ≫ n_concurrent_trials` (e.g. 338×8=2704 ≫ 675) → the Harbor orchestrator can always be kept full; the submission/staleness gate is disabled, so the only live throttle is the buffer cap. **Raising npgw does NOT lift the trough** — generation is already ahead; more workers only deepen the buffer.
-- **When a cheaper-training architecture flips the run inference-bound, the levers in order:** (1) `harbor.n_concurrent_trials` — the real engine-demand knob (subscription ≈ concurrent_trials × per-trial LLM duty cycle); (2) per-trial DUTY CYCLE — trials spend most wall-time in Daytona tool-exec, not awaiting the LLM (see §"Engine saturation in agentic fully_async RL" — the harbor poll-loop floor, fixed `ef42e75e`; + sandbox reuse). **NOT** npgw / `max_staleness_steps` / `max_buffered_groups` (those bound off-policy lead depth, not instantaneous engine subscription). Evidence: `/Users/benjaminfeuer/Documents/agent_logs/2026-07-15_async-inference-sawtooth-rootcause.md`.
+Per-engine `Running` sawtoothing PEAK(=engine cap)→TROUGH 1 with `Waiting=0` + KV near-floor is the gen-buffer's **backpressure working as designed** — NOT a supply bug, NOT parse-bound, NOT under-provisioned workers. **The one decider: `timing/wait_for_generation_buffer`.** ≈0 ⇒ generation is OFF the critical path ⇒ the trough is benign. Confirm: gen buffer sitting FULL at its cap, `staleness_mean ≪ cap`, `discard_rate 0`.
+- **`npgw < n_concurrent_trials` is NOT a starve.** `npgw × n_samples_per_prompt ≫ n_concurrent_trials` → the Harbor orchestrator can always be kept full. Raising npgw does NOT lift the trough.
+- **When a cheaper-training architecture flips the run inference-bound, the levers in order:** (1) `harbor.n_concurrent_trials` — the real engine-demand knob; (2) per-trial DUTY CYCLE — trials spend most wall-time in Daytona tool-exec, not awaiting the LLM (harbor poll-loop floor, fixed `ef42e75e`; + sandbox reuse). **NOT** npgw / `max_staleness_steps` / `max_buffered_groups`.
 
 ### Hydra struct — every run-YAML key must be declared in `ppo_base_config.yaml`
 
@@ -84,13 +84,12 @@ GDN layers exist in **Qwen3-Next-80B-A3B** (36 GDN layers) and **Qwen3.6-35B-A3B
 
 ### 80B gs1 death = pure-torch GDN Python loop holds the GIL ~2h → SIGABRT. FIX = FlashQLA.
 
-GDN runs the pure-torch chunk-recurrence `torch_chunk_gated_delta_rule` (`transformers/models/qwen3_next/modeling_qwen3_next.py:442`) — two nested Python loops (`:502` loop-carried state recurrence + `:486` intra-chunk), ~`S/chunk_size` iters each. At `max_prompt_length=98304`, chunk=64 → ~1536 iters/layer × 36 layers ≈ **55,000 sequential Python iterations per forward micro-batch**. This **holds the process GIL ~continuously ~2h** (forward) and again in the gradient-checkpoint backward recompute during `policy_train` → the c10d HeartbeatMonitor (needs the GIL to verify liveness) logs `watchdog got stuck … Could not acquire GIL within 300 ms` at 1× `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC` (3600s) and **fatally SIGABRTs at 2× (7200s)**. The `_ALLGATHER_BASE` "remote process exited" on peers is the CASCADE after rank0 aborted.
+GDN's pure-torch chunk-recurrence (`transformers/models/qwen3_next/modeling_qwen3_next.py:442`) runs ~55,000 sequential Python iterations per forward micro-batch at `max_prompt_length=98304` → holds the GIL ~2h → the c10d HeartbeatMonitor SIGABRTs at 2× `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC` (7200s). Both a stability bug AND the dominant throughput cost (Python-dispatch-bound, not GPU-bound).
 
-- **Both a stability bug AND the dominant throughput cost** — the ~2h forward is Python-dispatch-bound, not GPU-bound (the module self-documents the pure-torch path ~27× slower at S=8192; worse at 98k).
-- The slow path is active because: `mask_fla()` forces the (broken) fla wheel OFF; the fused FlashQLA kernel is gated OFF (`SKYRL_GDN_FLASHQLA` unset); and `flash_qla` is not in the gpu-rl image.
-- **Do NOT "fix" by raising `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC`** — it only masks the abort while leaving the 2h dominant cost; a genuinely GIL-locked process must not be tolerated. The 1× log looks benign but the 2× abort is real.
-- **THE REAL FIX = the fused FlashQLA tilelang GDN kernel** (`SKYRL_GDN_FLASHQLA=1` → `engage_flashqla` → `_build_flashqla_chunk`, `models/qwen3_next_gdn.py`): one fused GPU kernel/GDN-layer (GIL-releasing) replaces the Python loop. Needs **`flash_qla 0.1.0+6ef4858` + tilelang 0.1.8 + apache-tvm-ffi 0.1.9 baked into the gpu-rl image, built for x86_64+sm_90** (Jupiter's `fla_tilelang_overlay.img` is arm64 — can't copy), THEN a CP1 logprob-parity smoke (fwd/bwd numerics change), THEN relaunch with `--gdn-flashqla on`.
-- **Diagnostic distinction:** real wedge (SIGABRT + stale logs + GPUs 0%) vs healthy compute-bound backward (GPUs high, timers advancing). On Qwen3-Next the GIL-hold IS the bug to fix, not an artifact to tolerate.
+- The slow path is active because: `mask_fla()` forces the (broken) fla wheel OFF; `SKYRL_GDN_FLASHQLA` unset; `flash_qla` not in the gpu-rl image.
+- **Do NOT mask by raising `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC`** — it only delays the abort while leaving the 2h cost. The GIL-hold IS the bug.
+- **FIX = the fused FlashQLA tilelang GDN kernel** (`SKYRL_GDN_FLASHQLA=1` → `engage_flashqla`): one fused GPU kernel/GDN-layer replaces the Python loop. Needs `flash_qla 0.1.0+6ef4858` + tilelang 0.1.8 + apache-tvm-ffi 0.1.9 baked into the gpu-rl image for x86_64+sm_90, THEN a CP1 logprob-parity smoke, THEN relaunch with `--gdn-flashqla on`.
+- **Diagnostic distinction:** real wedge (SIGABRT + stale logs + GPUs 0%) vs healthy compute-bound backward (GPUs high, timers advancing).
 
 ### 35B GDN + Context-Parallel (CP>1) HARD-CRASHES at forward
 
@@ -125,18 +124,17 @@ Declared `null` in `ppo_base_config.yaml` (`56cad1d7`). Resolution (`generators/
 
 ## Collectives — `strategy.all_reduce(status)` requires IDENTICAL keys on every rank
 
-`DistributedStrategy.all_reduce(data: dict)` iterates `for k,v in data.items(): ret[k]=all_reduce(v)` — a separate NCCL all_reduce per key. If keys differ across ranks, the per-key calls don't line up → NCCL **watchdog timeout** and process-group abort.
+`DistributedStrategy.all_reduce(data: dict)` does a separate NCCL all_reduce per key. If keys differ across ranks → NCCL **watchdog timeout** (`NumelIn=1` scalar is the giveaway).
 
-- **Symptom:** `Watchdog caught collective operation timeout: WorkNCCL(SeqNum=N, OpType=ALLREDUCE, NumelIn=1, NumelOut=1, Timeout(ms)=600000)` → `NCCL communicator was aborted`. The **`NumelIn=1` scalar** is the giveaway.
-- Fix pattern (`compute_log_ratio_diagnostics` v4, `69294ba5`): a `_log_ratio_diag_zero_metrics()` 16-key zeros fallback used on early return + try/except at the worker call site.
-- **Rule whenever you touch `status` dict keys in `worker.py`:** (1) every rank contributes the SAME key set every iteration — no conditional skips; (2) data-dependent values that might fail get a sentinel (0.0/NaN) under the same key, never omitted; (3) wrap risky helpers in try/except with a full-keyset fallback; (4) unit-test the helper with empty / all-padded / normal input and assert `sorted(keys())` is identical.
+- Fix pattern (`compute_log_ratio_diagnostics` v4, `69294ba5`): a `_log_ratio_diag_zero_metrics()` zeros fallback on early return + try/except at the call site.
+- **Rule when touching `status` dict keys in `worker.py`:** every rank contributes the SAME key set every iteration — no conditional skips; data-dependent values that might fail get a sentinel under the same key, never omitted; wrap risky helpers in try/except with full-keyset fallback.
 
 ### Do NOT fire a full-PG collective from INSIDE `ppo_train` under fully_async + R3-decentral (FIXED `68ea066e`)
 
-Same `NumelIn=1` fingerprint, DIFFERENT mechanism than the keyset diff. Under **fully_async + R3-decentral** the policy ranks do NOT co-arrive at ppo_train's top-of-body — the staggered R3-chunk relocation (`MeshDispatch` derefs each dp group's `_relocate_chunk_to_node` ObjectRef at different times) means some ranks are IN ppo_train while others sit idle in asyncio `select` → a scalar all_reduce deadlocks. The keyset is UNIFORM — the bug is **collective PARTICIPATION desync**.
+Under **fully_async + R3-decentral** the policy ranks do NOT co-arrive at ppo_train's top-of-body — staggered R3-chunk relocation means some ranks are IN ppo_train while others sit idle → a scalar all_reduce deadlocks (keyset is UNIFORM; the bug is collective PARTICIPATION desync).
 
-- **Fix (`68ea066e`, Option B, objective-preserving):** precompute `Z` on the **DRIVER, collective-free** (`ppo_utils.compute_global_loss_denom`: `Z = ranks_per_dp_group × nonzero-adv-count(full batch) × max_seq_len`, BIT-IDENTICAL to the summed reduce because MeshDispatch replicates each dp-chunk across its dp-group) in `trainer.train_critic_and_policy`, stash in `data.metadata["global_loss_denom"]`; the worker READS it (no collective), falls back to the legacy all_reduce only when the key is absent. Gated on `is_fully_async` → sync RL byte-identical.
-- **Durable rule:** any NEW cross-DP reduction needed for the loss/optimizer step must be hoisted to a **guaranteed co-arrival point** (the driver, or a barrier every rank provably reaches) — NEVER fired inline from `ppo_train`/the async loss loop, which fully_async makes a non-co-arrival section. The forward (`fwd_logprobs_values_reward`) IS a co-arrival point (all ranks reach it); ppo_train's body is NOT.
+- **Fix (`68ea066e`, objective-preserving):** precompute `Z` on the **DRIVER, collective-free** (`ppo_utils.compute_global_loss_denom`), stash in `data.metadata["global_loss_denom"]`; the worker READS it, falls back to legacy all_reduce only when absent. Gated on `is_fully_async` → sync RL byte-identical.
+- **Durable rule:** any NEW cross-DP reduction for the loss/optimizer step must be hoisted to a **guaranteed co-arrival point** (the driver, or a barrier every rank provably reaches) — NEVER fired inline from `ppo_train`/the async loss loop.
 
 ---
 
@@ -149,7 +147,7 @@ The `SKYRL_*` runtime knobs are first-class CLI flags (argparse group "MarinSkyR
 - **NCCL timeout — `--nccl-timeout-s` (env `SKYRL_WORKER_NCCL_TIMEOUT_IN_S`), default 1800.** Single accessor `constants.get_worker_nccl_timeout_s()` / `DEFAULT_WORKER_NCCL_TIMEOUT_IN_S=1800`.
 - **R3 transport — `--r3-transport {by_value,resident,decentral}`, default `decentral`** (folds `SKYRL_R3_RESIDENT` + `SKYRL_R3_DECENTRAL`); `--r3-put-timeout-s` = `SKYRL_DISPATCH_PUT_TIMEOUT_S`.
 - **Correctness knobs (default-ON), each now a flag:** `--forward-dispatch-fix`, `--weightsync-drain-barrier`, `--cp-require-right-align`, `--w13-reload-bracket` (pass `off` only for an A/B). Observability: `--host-ram-monitor`(+`-interval-s`). Feature: `--gdn-flashqla`, `--ep-loader-chunk-rows`.
-- **REMOVED as dead:** `SKYRL_FWD_UNSHARD_FENCE` (superseded by the drain barrier), the EPDIAG/`SKYRL_GROUPMM_DIAG`/`SKYRL_NUM_EXPERTS`/`SKYRL_EP_LOADER_DEBUG`/`SKYRL_ROUTER_REPLAY_DEBUG` diagnostic family, and `SKYRL_WEIGHT_SYNC_SERIALIZE`. Jupiter `extra/` configs still carry now-inert EPDIAG env lines (harmless — no reader).
+- **REMOVED (dead):** `SKYRL_FWD_UNSHARD_FENCE`, the EPDIAG diagnostic family, `SKYRL_WEIGHT_SYNC_SERIALIZE`. Jupiter `extra/` configs still carry now-inert EPDIAG env lines (harmless).
 
 ---
 
@@ -157,29 +155,22 @@ The `SKYRL_*` runtime knobs are first-class CLI flags (argparse group "MarinSkyR
 
 ### uvloop/libuv SIGABRT → force stock asyncio (BOTH driver + actors)
 
-The libuv epoll SIGABRT under Daytona sandbox-teardown socket churn is fixed by **forcing CPython's stock asyncio SelectorEventLoop**, not by changing libuv. The version chase was a dead end (uvloop 0.19→0.22.1, custom 1.49 — all still abort; `UV_USE_IO_URING=0` doesn't gate it). Ray installs uvloop in every worker via `try_install_uvloop()` (gated by `RAY_USE_UVLOOP`, default True); the SkyRL orchestrator is RTT-bound, so uvloop's throughput edge is moot.
+The libuv epoll SIGABRT under Daytona sandbox-teardown socket churn is fixed by **forcing CPython's stock asyncio SelectorEventLoop**, not by changing libuv. Ray installs uvloop in every worker via `try_install_uvloop()` (gated by `RAY_USE_UVLOOP`, default True); the SkyRL orchestrator is RTT-bound, so uvloop's throughput edge is moot.
 
-- **Driver fix:** reset the policy at the top of **`BasePPOExp.run()`** (`main_base.py`), before its `asyncio.run()` calls — SkyRL `77fb0074`:
-  ```python
-  import asyncio
-  asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
-  ```
-  **Placement is the trap:** must be on the SHARED `BasePPOExp.run()`, NOT a per-example `skyrl_entrypoint` (there are 26+; terminal_bench jobs use `TerminalBenchExp` which doesn't override run()).
-- **Actor fix (SkyRL `9e04851`):** the driver reset does NOT protect Ray ACTOR processes. Also set `env_vars["RAY_USE_UVLOOP"]="0"` in `prepare_runtime_environment` (utils.py) so `try_install_uvloop` is a no-op in every worker/actor. **Use BOTH.**
+- **Driver fix:** reset the policy at the top of **`BasePPOExp.run()`** (`main_base.py`), before its `asyncio.run()` calls — SkyRL `77fb0074`. Must be on the SHARED `BasePPOExp.run()`, NOT a per-example `skyrl_entrypoint`.
+- **Actor fix (SkyRL `9e04851`):** also set `env_vars["RAY_USE_UVLOOP"]="0"` in `prepare_runtime_environment` (utils.py). **Use BOTH.**
 - `set_event_loop_policy()` is deprecated Py3.12+; when removed, switch to `asyncio.run(coro, loop_factory=asyncio.SelectorEventLoop)`.
-- Related but SEPARATE bug class: the refcount-SIGABRT fix (harbor `ec508562` orphan-task reap + SkyRL `3b1708a0` gc backstop) on AgentTimeout-heavy datasets.
+- Related but SEPARATE: the refcount-SIGABRT fix (harbor `ec508562` orphan-task reap + SkyRL `3b1708a0` gc backstop).
 
 ### MoE-RL first-step forward wedge → R3 transport (resident → decentral)
 
-The MoE agentic-RL wedge at the first training-step policy forward (R3 shipped BY VALUE through every per-forward Ray task arg → Ray object-store spill → silent hang, a Ray-store wait **NOT** an NCCL watchdog).
+The MoE agentic-RL wedge at the first training-step forward: `rollout_routed_experts` `[B,seq,L,K]` shipped BY VALUE through every per-forward Ray task arg → Ray object-store spill → silent hang (a Ray-store wait, NOT an NCCL watchdog).
 
-- **Root cause:** `rollout_routed_experts` `[B,seq,L,K]` was shipped BY VALUE through every per-forward Ray task arg — ~3.0 GB/dp-chunk even at uint8 (~24 GB at int64), and the naive dispatch loop re-serialized it per actor (~16×/dp-group) → 96 GB plasma cap overflow.
-- **Fix (`ac4b3806`) — BOTH levers load-bearing:** (1) `dataset/preprocess.py` narrows routed_experts to uint8/int16 keyed to num_experts → int16 for Qwen3-Next's 512 (`39faff7d`; uint8 is UNSAFE at >255 experts → truncate + rank-divergent → NCCL size-mismatch hang); (2) `distributed/dispatch.py MeshDispatch.dispatch` `ray.put`s each dp-chunk ONCE + shares the ObjectRef across the dp-group (`SKYRL_R3_RESIDENT`, marker `R3_RESIDENT_SET`). uint8 alone would NOT fit.
-- **The "worker-resident" title is a MISNOMER:** `ray.put` runs on the **DRIVER (head node)**, so R3 lands in head plasma — just deduped to 1 copy/dp-group. The driver-centralization re-manifested at 80B.
-- **The REAL structural fix = `SKYRL_R3_DECENTRAL` (default ON as of `e9b2f10d`):** route routed-experts **generation-worker → node-resident consumer** so the head holds ~0 R3 (O(1) in model scale). `_relocate_chunk_to_node` re-puts the chunk with a `NodeAffinitySchedulingStrategy` (soft) pass-through, byte-identical, bounded-put fallback. Marker `R3_DECENTRAL_SET method=ppo_train …`. Set `=0` to force the old centralized driver-put for A/B.
-- **Config-only mitigation:** `trainer.fully_async.max_buffered_groups` knob (`8b065938`; default None ⇒ = num_parallel_generation_workers, byte-identical); **`num_parallel_generation_workers: 128` across ALL iris configs** caps buffer + worker-held groups → footprint O(1) in model scale, fits the 96 GB store. The `OT_AGENT_RAY_OBJECT_STORE_CAP_GIB=160` band-aid was reverted.
-- **A generation "worker" owns a GROUP, not a rollout** (`_run_generate_for_a_group_loop`; `max_concurrent_generation_groups = num_parallel_generation_workers`; a `GeneratedOutputGroup` = one prompt × n_samples, ~126 MiB with R3 at 80B). Workers ≫ vLLM working set (`num_inference_engines · max_num_seqs / n_samples`) only accumulate STALE groups — bound it, don't max it.
-- **The dp=1 put stall (gs1) loud-fails via `DispatchPutTimeoutError`** (`d13c3586`, 600s bounded-put) at global_step 1 — turned the silent 4.8h NCCL-watchdog wedge into a 10-min failure. NOT a GDN-kernel deadlock; `del`/`ray free` after dispatch does NOT help (the chunk is pinned by the LIVE `forward.remote()` task).
+- **Root cause:** ~3.0 GB/dp-chunk even at uint8, naive dispatch re-serialized per actor (~16×/dp-group) → plasma cap overflow. Fix = uint8/int16 narrowing keyed to `num_experts` (int16 for >255 experts) + `MeshDispatch.dispatch` `ray.put`s each dp-chunk ONCE + shares the ObjectRef across the dp-group.
+- **Current default = `SKYRL_R3_DECENTRAL` (ON, `e9b2f10d`):** routes routed-experts generation-worker → node-resident consumer so the head holds ~0 R3 (O(1) in model scale). Byte-identical, bounded-put fallback. Set `=0` for A/B.
+- **`num_parallel_generation_workers: 128` across ALL iris configs** caps buffer + worker-held groups → footprint O(1) in model scale.
+- A generation "worker" owns a GROUP (one prompt × n_samples, ~126 MiB with R3 at 80B), NOT a rollout. Workers ≫ vLLM working set only accumulate stale groups — bound it.
+- The dp=1 put stall (gs1) loud-fails via `DispatchPutTimeoutError` (`d13c3586`, 600s bounded-put) — turned the silent 4.8h wedge into a 10-min failure.
 
 ### MoE served-policy token-salad on the RL update path → `SKYRL_W13_RELOAD_BRACKET` (FIXED `2bb70a88`)
 
@@ -234,9 +225,9 @@ The launcher now (1) auto-resumes from the canonical run dir's `checkpoints/glob
 
 The Qwen3-Next-80B-A3B production RL step (EP=8×FSDP=8, 32k, R3+TIS) is **training-bound, NOT gen-bound**. Measured step ≈ 17,000s (~4.7h): `policy_train` ~48%, `fwd_logprobs_values_reward` ~31%, `sync_weights` ~13%, `wait_for_generation_buffer` only ~7.5%.
 
-- **SkyRL FSDP is cross-node regardless of `fsdp_size`.** `create_device_mesh` (`fsdp_utils.py:814`) builds the mesh with **`ep` innermost/contiguous** (`mesh_shape=(ddp,fsdp,ep)`), so on 4-GPU/node Jupiter an FSDP group = 1 GPU per node spanning `fsdp_size` nodes; EP is the intra-node dim. The yaml comments claiming FSDP is "intra-node" are FACTUALLY WRONG. The ordering is deliberate for a **correctness** reason (fsdp must precede ep so the composed expert DTensor `[Shard_fsdp, Shard_ep]` slices ascending; reverse → `KeyError: Mesh dim indices should be in ascending order`), NOT topology.
-- **EP=16×FSDP=4 does NOT restore intra-node FSDP** — launchable but throughput-neutral-to-worse (FSDP stays cross-node; EP all-to-all widens 8→16). Do NOT switch EP/FSDP for the speed objective.
-- **The real speed lever** = make FSDP intra-node via a mesh-dim-reorder CODE change (fsdp last, working around the DTensor ascending-slice constraint) — attacks the dominant 48% `policy_train`. Secondary: the 13% `sync_weights` (`broadcast_to_inference_engines` full_tensor gather) and 31% `fwd_logprobs`.
+- **SkyRL FSDP is cross-node regardless of `fsdp_size`.** `create_device_mesh` builds the mesh with `ep` innermost/contiguous (`mesh_shape=(ddp,fsdp,ep)`), so on 4-GPU/node Jupiter an FSDP group spans `fsdp_size` nodes. The ordering is deliberate for correctness (fsdp must precede ep so the composed expert DTensor slices ascending). The yaml comments claiming FSDP is "intra-node" are FACTUALLY WRONG.
+- **EP=16×FSDP=4 does NOT restore intra-node FSDP** — throughput-neutral-to-worse. Do NOT switch EP/FSDP for speed.
+- **The real speed lever** = make FSDP intra-node via a mesh-dim-reorder CODE change (fsdp last).
 
 ---
 
@@ -252,23 +243,21 @@ Branch `feuer/fsdp2-cp`. Added `trainer.attn_backend ∈ {auto,flash_attention_2
 
 ---
 
-## Engine saturation in agentic fully_async RL — how to READ it
+## Engine saturation — root cause + how to READ it
 
-The vLLM inference engines are starved by **HARBOR'S CLIENT-SIDE 1-SECOND POLL LOOP**, not Daytona, not an intrinsic agentic duty cycle, not the engine count. **Raising `n_concurrent_trials` (n) cannot help** — doubling n=128→256 stayed STARVED cleanly (tok/s FLAT). Per-turn (mean 101.4 s): generate 21.2 s (21%) + agent-requested command 0.7 s (<1% intrinsic) + **RESIDUAL 79.5 s (78%)**.
+The vLLM inference engines were starved by **harbor's client-side 1-second poll loop** (`_poll_response`), not Daytona, not engine count. Raising `n_concurrent_trials` cannot help (doubling n=128→256 stayed STARVED, tok/s FLAT). Daytona is FAST from CoreWeave (exec 0.15 s median; full HTTP call ~0.03 s). Per-turn residual ~79.5 s (78%) was harbor's `asyncio.sleep(1)` poll flooring every non-instant exec command at ≥1 s.
 
-- **Direct measurement:** Daytona is FAST from CoreWeave (full `exec` 0.15 s median, each HTTP call ~0.03 s, sandbox create ~0.05 s, bare API RTT ~0.15 s — FASTER than the Mac's 0.78 s). CoreWeave↔Daytona network + Daytona control-plane are BOTH REFUTED (network ≈ 2–4 s/turn total).
-- **The residual is harbor's `_poll_response` `asyncio.sleep(1)` loop** (`harbor/src/harbor/environments/environment.py:_poll_response`): per-`exec` ≈ `ceil(command_runtime)` + ~0.14 s network — every non-instant command is floored at ≥1 s. With ~15–24 execs/turn on ~3–4 s commands → 52–84 s/turn ≈ the observed 79.5 s. The "Daytona exec round-trip latency" label was a MISATTRIBUTION — it is client-side poll rounding.
-- **FIX (harbor-side, shipped):** (1) poll loop → `sleep(0.001 + random.uniform(0,0.001))` (harbor `ef42e75e`); (2) setup-timeout → tmux/asciinema baked into the snapshot via `_AGENT_TOOLING_LAYER`/`bake_agent_tooling()` in `snapshots.py` (harbor `0729a3e9`), so episodes no longer apt-install/compile per-episode. **Measured payoff: `agent_setup` ~401 s → mean 0.41 s (~1000×); `AgentSetupTimeout` 63% → 0%.** Re-minting the snapshot requires manually deleting the stale `harbor__<hash>__snapshot` first (env-dir hash is unchanged by a library-code change).
-- On CoreWeave harbor is baked NON-editably into the gpu-rl image → harbor fixes need a kaniko rebuild + digest bump (SLURM harbor is editable → live on `git pull`). Build the gpu-rl image MULTI-LAYER (`SINGLE_SNAPSHOT=0`, max layer <8 GB) — a single >8 GB layer can't cold-pull over CW→ghcr.
-- **The gpu-rl / megatron image build is CANONICAL in MarinSkyRL:** `docker/Dockerfile.gpu-rl` + `docker/build_gpu_rl_kaniko.sh` (`INSTALL_MEGATRON=1` + `TAG_PREFIX=gpu-rl-megatron` for the megatron variant); `docker/Dockerfile.megatron` is a stale unrelated upstream stub, not the build home. OT-Agent carries NO gpu-rl `docker/` build files — the former shadow copies (`Dockerfile.gpu-rl`, `build_gpu_rl_kaniko.sh`, `build_wheels.sh`, `wheelhouse/`, `rl_env_constraints.txt`) were removed; MarinSkyRL is the sole home. `harbor[daytona]` is installed WITHOUT `--no-deps`, so a base-env re-resolve (e.g. a transformers/megatron bump) drifts the Daytona SDK transitives (`websockets` etc.) and breaks sandbox-create — pin the Daytona-path deps to the last-good image and validate sandbox-CREATE, not just import.
+- **FIX (shipped):** (1) poll loop → `sleep(0.001 + random.uniform(0,0.001))` (harbor `ef42e75e`); (2) setup-timeout → tmux/asciinema baked into the snapshot (harbor `0729a3e9`). Measured payoff: `agent_setup` ~401 s → 0.41 s; `AgentSetupTimeout` 63% → 0%.
+- On CoreWeave harbor is baked NON-editably into the gpu-rl image → harbor fixes need a kaniko rebuild + digest bump (SLURM harbor is editable → live on `git pull`). Build MULTI-LAYER (`SINGLE_SNAPSHOT=0`, max layer <8 GB).
+- The gpu-rl / megatron image build is CANONICAL in MarinSkyRL: `docker/Dockerfile.gpu-rl` + `docker/build_gpu_rl_kaniko.sh`. `harbor[daytona]` is installed WITHOUT `--no-deps` — a base-env re-resolve drifts the Daytona SDK transitives; pin and validate sandbox-CREATE.
+  - **The megatron image is built from `Dockerfile.gpu-rl` with `INSTALL_MEGATRON=1`, NOT from `Dockerfile.megatron`** — the latter is a dead 34-line CUDA/TE stub (no skyrl COPY, wired to no build; carries a redirect note). `Dockerfile.gpu-rl` **COPYs** `/opt/skyrl` (it does not `git clone` — any "gpu-rl git clones" comment is aspirational); a `git init`-after-COPY bake (GITSHA plumbed through `build_gpu_rl_kaniko.sh`) gives `/opt/skyrl` a `.git` so `--skyrl-ref` works on megatron images (verified: build log `/opt/skyrl git tree baked @ <sha>`).
+  - **⚠ Megatron backend is only HALF-merged to `main`:** the megatron CODE files are on `main`, but the `megatron` pyproject extra + its ~27 `uv.lock` entries live ONLY on the feature branch `feuer/megatron-w13-reload-bracket` (d41bb73d). So a megatron image **cannot build off `main`** (`Extra 'megatron' is not defined`) — every megatron image is built from a worktree off that feature branch. A code-fix-to-main PR is valid (the code files are there), but until the **megatron deps extra + lock entries are merged to `main`** as their own PR, megatron builds must cherry-pick onto / branch from d41bb73d. (Surfaced 2026-07-17 during the east-series ckpt/logprob fix.)
 
-### How to read saturation — `nvidia-smi` SM-util% is a TRAP
+### `nvidia-smi` SM-util% is a TRAP
 
-A point-in-time `nvidia-smi` SM-util reads **84–89% even when the engine is idle-waiting** — it only means "a kernel was resident during the sample interval." **Do NOT trust SM-util% alone.** The trustworthy saturation tuple is: **`Waiting`-queue depth (vLLM scheduler) + GPU KV-cache usage + power draw + memory-BW util**, cross-checked against nvidia-smi.
-
-- **Saturated ⇔** `Waiting > 0` AND KV usage well off the floor AND power near TDP (~700 W H100) AND mem-BW util high.
-- **Under-fed ⇔** `Waiting = 0` always (engines instantly drain what trickles in) + KV ≈ 0 + power ≈ ⅓ TDP + mem-BW 2–5%.
-- `Σ Running` (concurrent-request count) is a **valid** proxy. Use KV/power/mem-BW, not SM-util%.
+Point-in-time SM-util reads **84–89% even when the engine is idle-waiting** — it only means "a kernel was resident during the sample." The trustworthy saturation tuple: **`Waiting`-queue depth + GPU KV-cache usage + power draw + memory-BW util**.
+- Saturated ⇔ `Waiting > 0` AND KV off floor AND power near TDP (~700 W H100) AND mem-BW high.
+- Under-fed ⇔ `Waiting = 0` always + KV ≈ 0 + power ≈ ⅓ TDP + mem-BW 2-5%.
 
 ### Daytona ORG routing
 
@@ -276,12 +265,23 @@ The agentic-RL grid must run on the **dedicated RL org (`DAYTONA_RL_API_KEY`, Da
 
 ---
 
-## CI — the old `SkyRL-GPU-E2E-CI` was REPLACED upstream by `marin-nightly.yaml` (resolved 2026-07-15)
+## Dependency stack — `skyrl-train/pyproject.toml` + `uv.lock`
 
-**RESOLVED.** Upstream `main` (#2 `e1cc7d51`, "Adopt marin-style, restore PR CI, and add a nightly single-H100 GRPO gate") **DELETED** the old `.github/workflows/gpu_e2e_ci.yaml` (and `gpu_ci.yaml`) and added **`marin-nightly.yaml`** — a Marin-owned single-H100 GRPO nightly gate — plus restored PR CI (`cpu_ci.yaml`, `cpu_skyrl_tx.yaml`). This is the Marin-owned GPU CI the old note was waiting on.
+Ground truth lives HERE, not in pyproject/lock comments (a stale `production runs cu130` comment caused a wrong-CUDA build; comments were purged in PR #19). Load-bearing pins:
 
-- The prior fork problem: the old `SkyRL-GPU-E2E-CI` (`gpu_e2e_ci.yaml` → `Basic convergence test`) `anyscale job submit`ed to **upstream SkyRL's Anyscale account**, which the `marin-community/MarinSkyRL` fork had no `ANYSCALE_CLI_TOKEN`/`WANDB_API_KEY` for → every scheduled run fast-failed (~30s) at CLI auth. We'd disabled its `schedule:` cron (`b1e4a362`).
-- **On merging `main` into `penfever/working` (merge commit `0d101151`, 2026-07-15): took the upstream deletion** — the modify/delete conflict on `gpu_e2e_ci.yaml` (our disable vs upstream delete) resolved by deleting the file (our disable-workaround is subsumed). No `schedule:` to restore anymore; the nightly GPU gate is `marin-nightly.yaml`.
+- **CUDA line = cu128, NOT cu130.** `torch`/`torchvision` resolve from `pytorch-cu128`, `flashinfer-jit-cache` from `flashinfer-cu128`. cu128 supports Blackwell/sm_100, so one lock serves both the CoreWeave-H100 gpu-rl image AND the EmpireAI B200 (NGC-cu128) container. The gpu-rl Dockerfile is cu128 (`nvidia/cuda:12.8.0` + cu128-compiled wheels); a cu130 lock ABI-mismatches it. A cu130 pin was introduced speculatively in `e1cc7d51` and reverted in PR #19; cu130 was never prod.
+- **`transformers>=4.56.0,<5`.** transformers 5 is breaking (peft 0.17 can't import); floor 4.56.0 = vLLM 0.20.2's floor.
+- **`torch>=2.10` floor** carries the torch-native context-parallel API the CP path needs.
+- **flash-attn is CPU-stubbed** via `FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE`: enough for CPU suites but NOT for real attention (fails at `import flash_attn_2_cuda`). Real builds happen out-of-band (gpu-rl image / production SIF). `[tool.uv.dependency-metadata]` declares flash-attn's requires-dist because its sdist computes metadata at build time needing torch → circularity makes `uv lock` fail otherwise.
+- **flashinfer DOUBLE-PIN (gotcha).** vLLM 0.20.2 hard-pins `flashinfer-python==0.6.8.post1`; flashinfer RAISES if the jit-cache version differs → `flashinfer-jit-cache` MUST match, not float.
+- **vllm is the ONLY inference extra.** sglang/mcore/flashrl were removed (each pinned a torch/transformers the base excludes). The `vllm` extra mirrors the production SIF: torch 2.11.0, vLLM 0.20.2rc0, flash-attn 2.6.3, torchvision 0.26.0.
+- **torchtitan** (`git rev a1fdd7e`) is pure-python, installed by the `ep` extra (+ tyro from the lock). `deepep` = the Stage-5 perf backend, x86_64-only. Neither pins torch/vllm, so they're NOT in `[tool.uv].conflicts`.
+
+---
+
+## CI — `marin-nightly.yaml` (resolved 2026-07-15)
+
+Upstream `main` (#2 `e1cc7d51`) deleted the old `SkyRL-GPU-E2E-CI` (which fast-failed on Anyscale auth) and added **`marin-nightly.yaml`** — a Marin-owned single-H100 GRPO nightly gate — plus restored PR CI (`cpu_ci.yaml`, `cpu_skyrl_tx.yaml`). Merged into `penfever/working` at `0d101151`.
 
 ---
 
