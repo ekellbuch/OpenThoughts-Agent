@@ -1546,14 +1546,21 @@ def main() -> int:
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    a = analyze(
-        args.job_id,
-        output,
-        args.refresh,
-        args.warmup_seconds,
-        max_gap_seconds=args.max_coverage_gap_seconds,
-        allow_incomplete=args.allow_incomplete,
-    )
+    try:
+        a = analyze(
+            args.job_id,
+            output,
+            args.refresh,
+            args.warmup_seconds,
+            max_gap_seconds=args.max_coverage_gap_seconds,
+            allow_incomplete=args.allow_incomplete,
+        )
+    except LookupError as e:
+        # Expected when the job's output dir can't be resolved (e.g. a CoreWeave RL
+        # job with an s3:// trials_dir — this tool is gs://-oriented). Print the
+        # directional message cleanly instead of dumping a traceback.
+        print(f"[analyze_job_history] {e}", file=sys.stderr)
+        return 1
 
     md = render_markdown(a, warmup_seconds=args.warmup_seconds)
     output.write_text(md)
