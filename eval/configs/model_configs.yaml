@@ -1,3 +1,8 @@
+# AUTO-GENERATED from model_config/ — do NOT hand-edit.
+# Edit the per-model files under model_config/<org>/<slug>.yaml and run:
+#     python scripts/generate_eval_registry.py
+# (or scripts/generate_eval_registry.py --check in CI to detect drift).
+# Source of truth: model_config/ (file-per-model, layered schema).
 
 models:
   GAIR/OpenSWE-32B:
@@ -58,11 +63,14 @@ models:
     tensor_parallel_size: 2
     swap_space: 32
     extra_args: --enable-prefix-caching
+  Qwen/Qwen3-30B-A3B-Thinking-2507:
+    tool_call_parser: hermes
   Qwen/Qwen3-30B-A3B-Thinking-2507@gh200:
     tensor_parallel_size: 1
     max_model_len: 32768
     swap_space: 32
     trust_remote_code: true
+    tool_call_parser: hermes
     agent_kwargs:
     - extra_body={"chat_template_kwargs":{"enable_thinking":true}}
     extra_args: --enable-prefix-caching --max-num-seqs 512
@@ -368,6 +376,28 @@ models:
     agent_kwargs:
     - extra_body={"chat_template_kwargs":{"enable_thinking":true}}
     extra_args: --enable-prefix-caching
+  laion/qwen3-30b-a3b-thinking-opencode-sft-densemixer:
+    tool_call_parser: hermes
+  laion/qwen3-30b-a3b-thinking-opencode-sft-densemixer@gh200:
+    tensor_parallel_size: 1
+    max_model_len: 32768
+    swap_space: 32
+    trust_remote_code: true
+    tool_call_parser: hermes
+    agent_kwargs:
+    - extra_body={"chat_template_kwargs":{"enable_thinking":true}}
+    extra_args: --enable-prefix-caching --max-num-seqs 512
+  laion/qwen3-30b-a3b-thinking-opencode-sft-sparse:
+    tool_call_parser: hermes
+  laion/qwen3-30b-a3b-thinking-opencode-sft-sparse@gh200:
+    tensor_parallel_size: 1
+    max_model_len: 32768
+    swap_space: 32
+    trust_remote_code: true
+    tool_call_parser: hermes
+    agent_kwargs:
+    - extra_body={"chat_template_kwargs":{"enable_thinking":true}}
+    extra_args: --enable-prefix-caching --max-num-seqs 512
   mistralai/Devstral-Small-2-24B-Instruct-2512:
     max_model_len: 32768
     tool_call_parser: mistral
