@@ -33,6 +33,17 @@ export TORCHINDUCTOR_CACHE_DIR="$CACHE/inductor"
 export XDG_CACHE_HOME="$CACHE/xdg"
 export TMPDIR="$CACHE/tmp"
 
+# ⚠ PAGE-CACHE PRE-WARM (fix for job 31693). On a COLD-cache node the 8 ranks concurrently
+# mmap-PAGE-FAULT the 60 GB θ₀ from VAST-NFS at ~7 MB/s (random 4 KB faults, no readahead),
+# vs 1 GB/s sequential — model load crawls for hours, GPUs 0%. (Earlier runs were fast ONLY
+# because they reused nodes b2-16/18 whose page cache was already warm.) A one-shot SEQUENTIAL
+# pre-read per node warms the node RAM so the ranks' mmap faults hit cache. Runs once per node
+# (ntasks-per-node=1), before torchrun spawns the 4 local ranks. Nodes have ~1.5 TB RAM.
+echo "=== [$(date)] page-cache pre-warm: theta0 + prepared arrow ==="
+time cat /mnt/home/bf996/experiments/densemixer/theta0/*.safetensors > /dev/null 2>&1 || true
+time cat /mnt/home/bf996/experiments/densemixer/prepared/run1/*/*.arrow > /dev/null 2>&1 || true
+echo "=== [$(date)] pre-warm done ==="
+
 PY=/usr/bin/python
 echo "NODE_RANK=${SLURM_PROCID} HOST=$(hostname) MASTER=${MASTER_ADDR}:${MASTER_PORT} CFG=${CFG} TRITON_CACHE_DIR=${TRITON_CACHE_DIR}"
 $PY -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'gpus', torch.cuda.device_count(), 'cap', torch.cuda.get_device_capability(0))"
