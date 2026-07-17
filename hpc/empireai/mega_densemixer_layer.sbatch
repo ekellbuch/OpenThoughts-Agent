@@ -40,6 +40,11 @@ enroot create --name "$NAME" "$BASE"
 ROOTFS="$ENROOT_DATA_PATH/$NAME"
 ls -ld "$ROOTFS/root"
 
+# stage the transformers-5.x DenseMixer port into the sandbox (overwrites the pip file).
+# densemixer 1.0.1's qwen3_moe_custom.py assumes the transformers 4.x Qwen3MoE API and
+# crashes on 5.12 (`'tuple' object has no attribute 'to'` at first forward, job 31645).
+cp /mnt/home/bf996/scripts/densemixer_qwen3moe_tf5.py "$ROOTFS/root/densemixer_qwen3moe_tf5.py"
+
 cat > "$ROOTFS/root/setup.sh" <<'SETUP'
 set -euxo pipefail
 export PATH=/usr/local/bin:/usr/local/cuda/bin:/usr/bin:/bin
@@ -55,16 +60,24 @@ $PY -c "import torch, transformers; print('pre torch', torch.__version__, '| tra
 # pure-python, deps already satisfied -> --no-deps keeps torch/transformers pinned to the NGC build.
 $PY -m pip install --no-deps --break-system-packages densemixer==1.0.1
 
-# ---- GATE: the exact import path the plugin uses (integrations/densemixer/plugin.py) ----
+# ---- overwrite the incompatible qwen3_moe custom forward with the transformers-5.x port ----
+DST=$($PY -c "import densemixer.models.qwen3_moe_custom as m; print(m.__file__)")
+echo "densemixer qwen3_moe_custom.py -> $DST"
+cp /root/densemixer_qwen3moe_tf5.py "$DST"
+grep -q "tf5-ported-densemixer" "$DST" || { echo "PORT MARKER MISSING"; exit 1; }
+
+# ---- GATE: import path the plugin uses + the port is in place ----
 $PY - <<'PYGATE'
 import importlib.util as u
 assert u.find_spec("densemixer") is not None, "densemixer spec still missing"
-import densemixer
+import densemixer, inspect
 from densemixer.patching import apply_olmoe_patch, apply_qwen2_moe_patch, apply_qwen3_moe_patch  # noqa: F401
+from densemixer.models.qwen3_moe_custom import CustomQwen3MoeSparseMoeBlock
+src = inspect.getsource(CustomQwen3MoeSparseMoeBlock.forward)
+assert "tf5-ported-densemixer" in src, "port not active"
 import torch, transformers
 print("GATE densemixer", getattr(densemixer, "__version__", "?"),
-      "| torch", torch.__version__, "| transformers", transformers.__version__)
-print("GATE apply_qwen3_moe_patch import OK")
+      "| torch", torch.__version__, "| transformers", transformers.__version__, "| PORT active")
 PYGATE
 echo "SETUP_DONE_OK"
 SETUP
