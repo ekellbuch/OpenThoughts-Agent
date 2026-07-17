@@ -1463,6 +1463,57 @@ vista = HPC(
     },
 )
 
+# EmpireAI Beta — NY-state consortium GB200 NVL72 SuperPOD (aarch64 Grace + B200/sm_100).
+# Placed by the aarch64/TACC blocks (vista) since it shares that arch class.
+# NOTE: EmpireAI is currently driven by DIRECT enroot/sbatch — Pyxis/Enroot containers
+# (run image `mega_final_dm.sqsh`, the 3-layer SFT/RL/JAX mega-container), NOT yet fully
+# `python -m hpc.launch`-integrated. This block registers the cluster + its per-cluster
+# secrets path per the standard HPC convention (so it's discoverable/resolvable like the
+# others); the containerized run mechanics live in .claude/ops/empireai/ + hpc/empireai/.
+# All scalar fields below are LIVE-VERIFIED (2026-07-17, sinfo/scontrol over the beta login):
+#   total_partition_nodes=72 (sinfo -p beta %D), cpus_per_node=144 (scontrol CPUTot, 2×72-core
+#   Grace), GPUs ARE a SLURM gres here (--gres=gpu:b200:N), account confirmed by operator.
+empireai = HPC(
+    name="empireai",
+    # Login mgmt node fqdn `b6-21-s1-mgmt-01.cm.cluster`; compute nodes `b1-11-s1-dgx-01-c01`
+    # … `bN-NN-sN-dgx-01-cNN`. This pattern matches both (Bright `bN-NN-sN-<role>-…`).
+    hostname_pattern=r"b\d+-\d+-s\d+-.*",
+    dotenv_filename="empireai.env",
+    account="ny_chinmayh_datacomp",
+    partition="beta",  # the only partition on Beta (GPU); no CPU-only path
+    gpus_per_node=4,  # 4× NVIDIA B200 (GB200 NVL72) per DGX node
+    cpus_per_node=144,  # 2× 72-core aarch64 Grace = 144 cores/node (verified CPUTot)
+    internet_node=True,  # compute nodes have egress
+    gpus_type="B200",  # Blackwell sm_100, ~189GB HBM (GB200 NVL72 rack)
+    total_partition_nodes=72,  # 72 DGX nodes = 288 B200 total (verified sinfo)
+    # GPUs are a real SLURM gres on Beta (unlike TACC/vista) → request them explicitly.
+    gpu_directive_format="--gres=gpu:b200:{n}",
+    # Eval-listener / secrets cluster view (per-cluster secrets path lives here, as on
+    # vista/leonardo). project_root is intentionally OMITTED — `/mnt/home/bf996/OpenThoughts-Agent`
+    # does not exist yet (HOME is a 100GB VAST quota; code checkout TBD), and omitting it
+    # avoids to_eval_cluster_view() setting a bogus DCFT.
+    eval_cluster_view={
+        "cluster_name": "empireai",
+        "use_model_registry": True,
+        "model_registry": "eval/configs/model_configs.yaml",
+        "hardware_profile": "default",
+        "slurm_partition": "beta",
+        "slurm_account": "ny_chinmayh_datacomp",
+        "slurm_time": "23:59:00",
+        "paths": {
+            "hf_cache": "/mnt/home/bf996/hf_cache",
+            "secrets_file": "/mnt/home/bf996/secrets.env",
+        },
+        "proxy": {"enabled": False},
+        "hardware": {
+            "gpus_per_node": 4,
+            "cpus_per_node": 144,
+            "arch": "aarch64",
+            "gpu_gres": True,
+        },
+    },
+)
+
 lonestar = HPC(
     name="lonestar",
     hostname_pattern=r".*?.ls6.tacc.utexas.edu",
@@ -1706,7 +1757,7 @@ polaris = HPC(
     num_nodes_fast=56,
 )
 
-clusters = [jureca, jupiter, juwels, leonardo, capella, alpha, dip, lrz, vista, lonestar, claix, nyugreene, nyutorch, oumi, perlmutter, frontier, polaris]
+clusters = [jureca, jupiter, juwels, leonardo, capella, alpha, dip, lrz, vista, empireai, lonestar, claix, nyugreene, nyutorch, oumi, perlmutter, frontier, polaris]
 
 
 def detect_hpc() -> HPC:
