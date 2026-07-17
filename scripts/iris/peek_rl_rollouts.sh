@@ -75,12 +75,22 @@ fi
 # Match rank-0 of the LATEST generation: the pod-name suffix is the iris retry generation
 # (`-0` first attempt, `-1` after a --max-retries re-bring-up, …), so a hardcoded `-0$` misses
 # a retried job's live pod. Take the highest generation.
-POD=$(kubectl get pods -n "$NS" -o name 2>/dev/null | grep -E "iris-.*${JOB}.*-0-[0-9a-f]+-[0-9]+$" | sort | tail -1 || true)
+# rank-0 pod — handle BOTH pod-naming schemes:
+#   single-node RL:                     iris-<...><JOB><...>-0-<hash>-<gen>  (rank '-0-' mid-name; take highest gen)
+#   leafgroup / multi-node (megatron):  iris-<...><JOB><...>-<hash>-0        (rank '-0' at the very end)
+# The old regex only matched the first scheme, so leafgroup jobs (e.g. megatron-parity) never matched.
+POD=$(kubectl get pods -n "$NS" -o name 2>/dev/null | grep -E "iris-.*${JOB}.*(-0-[0-9a-f]+-[0-9]+|-[0-9a-f]+-0)$" | sort | tail -1 || true)
+# Fallback: the durable REMOTE R2 trials_dir (default since 2026-07-05) is readable from ANY pod of the
+# job (same creds + bucket), so if the rank-0 heuristic still misses, take any RUNNING job pod rather
+# than fail — the in-pod boto3/R2 read below does not require rank-0 specifically.
 if [ -z "$POD" ]; then
-  echo "[peek] no running rank-0 pod matching '*${JOB}*-0-*' in ns/$NS." >&2
+  POD=$(kubectl get pods -n "$NS" --field-selector=status.phase=Running -o name 2>/dev/null | grep -E "iris-.*${JOB}" | sort | tail -1 || true)
+fi
+if [ -z "$POD" ]; then
+  echo "[peek] no running pod matching '*${JOB}*' in ns/$NS." >&2
   echo "[peek] (job terminal? then a node-local trials_dir is GC'd — only a REMOTE R2 trials_dir survives,"
   echo "[peek]  inspect it with: PEEK_TRIALS_S3=s3://… and a still-running pod, or aws/boto3 against R2.) Candidate rl pods:" >&2
-  kubectl get pods -n "$NS" -o name 2>/dev/null | grep -iE "rl-|cpdcp|resmoke|a3b" | sed 's#^pod/#  #' >&2 || true
+  kubectl get pods -n "$NS" -o name 2>/dev/null | grep -iE "rl-|cpdcp|resmoke|a3b|megatron|parity" | sed 's#^pod/#  #' >&2 || true
   exit 1
 fi
 POD="${POD#pod/}"
@@ -88,10 +98,24 @@ echo "[peek] pod=$POD  ns=$NS  container=$CONTAINER"
 
 # Derive the iris job_id (/<user>/<jobname>) from the pod name for finelog + dest naming.
 USER_FROM_POD=$(printf '%s' "$POD" | sed -E 's/^iris-([a-z0-9]+)-.*/\1/')
+# Strip the pod suffix to get the run name — handle BOTH pod-naming schemes:
+#   single-node RL:      iris-<user>-<job>-<rank>-<hash>-<gen>  (3 trailing segments)
+#   leafgroup / megatron: iris-<user>-<job>-<hash>-<rank>       (2 trailing segments)
+# The single-node strip is tried first; if it doesn't match (JOBNAME unchanged), fall to leafgroup.
 JOBNAME=$(printf '%s' "$POD" | sed -E 's/^iris-[a-z0-9]+-(.+)-[0-9]+-[0-9a-f]+-[0-9]+$/\1/')
+if [ "$JOBNAME" = "$POD" ]; then
+  JOBNAME=$(printf '%s' "$POD" | sed -E 's/^iris-[a-z0-9]+-(.+)-[0-9a-f]+-[0-9]+$/\1/')
+fi
 JOBID="/${USER_FROM_POD}/${JOBNAME}"
 
 kexec() { kubectl exec -n "$NS" "$POD" -c "$CONTAINER" -- bash -lc "$1"; }
+
+# Resolve a python WITH boto3 inside the pod. The container's PATH may not expose a bare
+# `python` (e.g. the megatron `task` container only has it under a venv), so probe the usual
+# interpreters and require `import boto3` to succeed. Fall back to `python` if nothing matches.
+PYBIN=$(kexec 'for p in python python3 /opt/openthoughts/.venv/bin/python /opt/openthoughts/envs/rl/bin/python /usr/local/bin/python3 /usr/bin/python3; do ("$p" -c "import boto3" >/dev/null 2>&1) && { echo "$p"; break; }; done' 2>/dev/null | tr -d '\r' | head -1)
+[ -z "$PYBIN" ] && PYBIN=python
+echo "[peek] in-pod python: $PYBIN" >&2
 
 # In-pod torch NCCL flight-recorder dump path prefix. Default matches the 2026-07-10
 # job-scoped convention (TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /tmp/fr_dumps/<jobname>/nccl_fr_rank
@@ -154,7 +178,7 @@ fi
 #   r2_op catdir <trial>     -> print every *.json under that trial (key header + body)
 #   r2_op grep <regex>       -> print trial-relative keys of *.json objects whose body matches <regex>
 r2_op() {
-  kubectl exec -i -n "$NS" "$POD" -c "$CONTAINER" -- python - "$S3_TJ" "$@" <<'PYEOF'
+  kubectl exec -i -n "$NS" "$POD" -c "$CONTAINER" -- "$PYBIN" - "$S3_TJ" "$@" <<'PYEOF'
 import sys, os, re, collections, boto3
 from botocore.config import Config
 s3url = sys.argv[1]
@@ -260,7 +284,7 @@ case "$ACTION" in
     else
       mkdir -p "$DEST"
       POD_TMP="/tmp/peek_cp_${TR//\//_}"
-      kubectl exec -i -n "$NS" "$POD" -c "$CONTAINER" -- python - "$S3_TJ/$TR" /dev/null download "$POD_TMP" <<'PYEOF' >/dev/null
+      kubectl exec -i -n "$NS" "$POD" -c "$CONTAINER" -- "$PYBIN" - "$S3_TJ/$TR" /dev/null download "$POD_TMP" <<'PYEOF' >/dev/null
 import sys, os, boto3
 from botocore.config import Config
 s3url = sys.argv[1]; dest = sys.argv[3]

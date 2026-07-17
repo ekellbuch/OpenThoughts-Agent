@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import csv
+import os
 import re
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -288,13 +290,32 @@ def _iris_query(cluster_config: str, sql: str, timeout: int = 30) -> List[dict]:
     region discovery (falling back to a non-co-located static bucket →
     cross-region writes).
     """
-    iris_bin = shutil.which("iris")
-    if iris_bin is None or not Path(iris_bin).exists():
+    # Resolve the iris binary: explicit $IRIS_BIN override, then PATH, then the
+    # `iris` that lives in the SAME venv as the running interpreter. Callers run
+    # this via the otagent env's python (`.../envs/otagent/bin/python`), whose
+    # sibling `.../bin/iris` IS cw-capable but is NOT on a bare Bash-tool shell's
+    # PATH — so the plain `shutil.which("iris")` used to raise even though a
+    # working binary was one directory away. The venv-sibling fallback fixes that.
+    iris_bin = os.environ.get("IRIS_BIN") or shutil.which("iris")
+    if not iris_bin or not Path(iris_bin).exists():
+        sibling = Path(sys.executable).resolve().parent / "iris"
+        if sibling.exists():
+            iris_bin = str(sibling)
+    if not iris_bin or not Path(iris_bin).exists():
         raise RuntimeError(
-            "iris CLI not found on PATH; run from the Marin/Iris launch "
-            "environment before using dynamic region discovery."
+            "iris CLI not found (checked $IRIS_BIN, PATH, and the running "
+            "interpreter's venv sibling); run from the Marin/Iris launch "
+            "environment or set IRIS_BIN to the cw-capable iris binary."
         )
-    cmd = [iris_bin, "--config", str(cluster_config), "query", "-f", "csv", sql]
+    # ``cluster_config`` may be a NAME ("cw-us-east-02a") or a PATH to a config
+    # yaml. iris takes ``--cluster <name>`` (registry-resolved) OR ``--config
+    # <path>`` — pick the right flag so a bare name isn't handed to ``--config``
+    # (which errors ``Path '<name>' does not exist`` and defeats resolution).
+    if Path(str(cluster_config)).exists():
+        cluster_flag = ["--config", str(cluster_config)]
+    else:
+        cluster_flag = ["--cluster", str(cluster_config)]
+    cmd = [iris_bin, *cluster_flag, "query", "-f", "csv", sql]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(
