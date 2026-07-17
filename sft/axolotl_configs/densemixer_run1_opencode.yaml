@@ -1,0 +1,88 @@
+# axolotl SFT — Run 1 (DenseMixer ON) — Qwen3-30B-A3B-Thinking-2507 on opencode traces.
+# Experiment: axolotl-sft-opencode-densemoe (task #16). Paired-init controlled ablation:
+#   Run 1 = densemixer ON (this file), Run 2 = byte-identical EXCEPT `dense_mixer: false`.
+# Design/rationale: experiments/active/axolotl-sft-opencode-densemoe/{POLICY,STATE}.md.
+#
+# ⚠ LAUNCH PATH = DIRECT `axolotl.cli.train` (NOT hpc.launch). EmpireAI is NOT registered
+# in hpc.launch; the SFT path is torch.distributed.run -m axolotl.cli.train <this.yaml>
+# (bring-up Stage-3 recipe: ~/scripts/stage3_incontainer.sh, bond0 NCCL). The direct path
+# honors this WHOLE file verbatim — which is REQUIRED here: the hpc.launch translator
+# (hpc/axolotl_config_utils.py) would STRIP `plugins:`, `dense_mixer:` (rebuilds plugins
+# from a fixed whitelist) AND `fp8:` (unhandled key) → densemixer silently off + fp8 auto-on.
+#
+# ⚠ REQUIRES the densemixer-enabled image `mega_final_dm.sqsh` (densemixer==1.0.1 in the SFT
+# system python). The DenseMixerPlugin hard-raises "DenseMixer is not installed" otherwise.
+
+# θ₀ — the SHARED init both runs start from (control discipline). Pinned local snapshot.
+base_model: /mnt/home/bf996/experiments/densemixer/theta0    # Qwen/Qwen3-30B-A3B-Thinking-2507 @ 144afc2f...
+model_type: AutoModelForCausalLM
+trust_remote_code: true
+
+# === THE DenseMoE mechanism = DenseMixer (marin #7088; yaof20/DenseMixer) ===
+# Training-only patch of Qwen3MoeSparseMoeBlock.forward: dense forward through ALL experts +
+# full-softmax router + STE combine (forward value = sparse/identical; backward = dense
+# gradient) + per-expert grad hook (expert params still update sparsely). Net: the ROUTER
+# gets the dense all-experts gradient. Inference untouched. This IS the single Run-1/Run-2
+# differentiator — Run 2 flips ONLY `dense_mixer: false` (plugin becomes a no-op).
+plugins:
+  - axolotl.integrations.densemixer.DenseMixerPlugin
+dense_mixer: true                 # Run 1 = ON.  Run 2 = false (only-flag diff).
+
+# opencode SFT dataset — pinned revision, IDENTICAL for both runs.
+datasets:
+  # local parquet @ 6cc0c0b5... (train split, 30 files under data/). Column `conversations`
+  # = list of {role, content} (VERIFIED via parquet schema) → field_messages: conversations.
+  - path: /mnt/home/bf996/experiments/densemixer/data_nemotron_code_oracle
+    ds_type: parquet
+    data_files:
+      - /mnt/home/bf996/experiments/densemixer/data_nemotron_code_oracle/data/train-*.parquet
+    type: chat_template
+    field_messages: conversations
+    message_property_mappings:
+      role: role
+      content: content
+    split_thinking: false                 # keep <think> inline on all turns (Qwen3-Thinking parity)
+chat_template: chatml
+dataset_prepared_path: /mnt/home/bf996/experiments/densemixer/prepared/run1   # SHARED (multi-node sentinel fast-path)
+val_set_size: 0.0
+dataset_num_proc: 1
+
+# === precision — bf16 + flash-attn (coordinator signal 2026-07-17; job 31623 HEALTHY). ===
+bf16: true
+fp16: false
+fp8: false                        # ⚠ MANDATORY EXPLICIT — axolotl 0.17 auto-enables fp8 on sm_100 → nan.
+tf32: false
+attn_implementation: flash_attention_2   # load-bearing: FA2 avoids the Blackwell cuDNN-SDPA bf16 backward nan
+                                          # (= the healthy job 31623 path; non-deprecated form of flash_attention:true)
+
+# === memory: 30B MoE + DENSE forward (all 128 experts materialized ≈ 16× expert-FFN FLOPs). ===
+# ZeRO-3 shards params/grads/optimizer; grad-checkpointing recomputes activations; chunked-CE
+# bounds the LM-head logit tensor WITHOUT a model monkeypatch (avoids any liger×densemixer
+# patch-interaction on qwen3_moe — deliberately NOT using enable_liger_kernel here).
+deepspeed: /opt/axolotl/deepspeed_configs/zero3_bf16.json
+gradient_checkpointing: true
+chunked_cross_entropy: true
+sequence_len: 16384               # conservative for the dense forward; raise to 32768 iff smoke shows headroom
+sample_packing: true              # OPERATOR: packing ON (cadence)
+
+# === control discipline — IDENTICAL both runs ===
+seed: 42
+micro_batch_size: 1
+gradient_accumulation_steps: 4    # 8 GPUs (2×4) × micro 1 × accum 4 = effective batch 32
+num_epochs: 3.0
+learning_rate: 2.0e-5
+lr_scheduler: cosine
+warmup_ratio: 0.1
+max_grad_norm: 1.0
+optimizer: adamw_torch_fused
+weight_decay: 0.0
+
+# === checkpoint cadence (POLICY §5.5) — θ₀ + intermediate + final for the Δθ trajectory. ===
+# save_steps → ~10-15 intermediate ckpts; FINALIZE once preprocess reveals the packed step-count.
+# θ₀ (step 0) = the pinned prestaged snapshot. Keep ALL ckpts (Δθ analysis) — do NOT prune.
+logging_steps: 1                  # instrument first 2-3 steps: grad_norm finite + loss real (nan → STOP→fp32)
+save_steps: 10
+save_total_limit: 100
+output_dir: /mnt/home/bf996/experiments/densemixer/run1_dense_out
+# Omit hub_model_id (offline init_hf_repo crash); push manually at cleanup. enable_db_registration: false.
+special_tokens: {}
