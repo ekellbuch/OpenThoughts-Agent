@@ -175,7 +175,7 @@ fi
 #   r2_op count              -> trial-dir + COMPLETED (result.json) counts + artifact breakdown + episode range
 #   r2_op listdirs           -> one trial-dir name per line
 #   r2_op download <pod-dir> -> download every object under the trials_dir prefix into <pod-dir>; echoes the object count
-#   r2_op catdir <trial>     -> print every *.json under that trial (key header + body)
+#   r2_op catdir <trial>     -> print every *.json + opencode.txt/exception.txt under that trial (key header + body)
 #   r2_op grep <regex>       -> print trial-relative keys of *.json objects whose body matches <regex>
 r2_op() {
   kubectl exec -i -n "$NS" "$POD" -c "$CONTAINER" -- "$PYBIN" - "$S3_TJ" "$@" <<'PYEOF'
@@ -229,9 +229,15 @@ elif mode == "download":
         n += 1
     print(n)  # object count -> stdout (last line)
 elif mode == "catdir":
+    # *.json PLUS the agent-log text files: opencode.txt is the installed-agent's OWN
+    # stdout/stderr (the real crash on NonZeroAgentExit lives here, NOT in any .json —
+    # e.g. the vLLM "auto tool choice requires ..." error surfaces inside opencode's
+    # session), and exception.txt carries harbor's exception detail. Neither is json.
+    CAT_TXT = ("opencode.txt", "exception.txt")
     for k in keys:
         r = k[len(PREFIX):]
-        if r.split("/")[0] == arg and k.endswith(".json"):
+        base = r.rsplit("/", 1)[-1]
+        if r.split("/")[0] == arg and (k.endswith(".json") or base in CAT_TXT):
             print(f"\n# {r}")
             try:
                 print(c.get_object(Bucket=BUCKET, Key=k)["Body"].read().decode("utf-8", "replace"))
@@ -264,7 +270,7 @@ case "$ACTION" in
   cat)
     TR="${3:?cat needs <trial-dir>}"
     if [ "$MODE_LOCAL" = 1 ]; then
-      kexec "find '$TJ_LOCAL/$TR' -maxdepth 2 -name '*.json' -print -exec sh -c 'echo; cat \"\$1\"; echo' _ {} \; 2>/dev/null"
+      kexec "find '$TJ_LOCAL/$TR' -maxdepth 2 \( -name '*.json' -o -name 'opencode.txt' -o -name 'exception.txt' \) -print -exec sh -c 'echo; cat \"\$1\"; echo' _ {} \; 2>/dev/null"
     else
       r2_op catdir "$TR"
     fi
