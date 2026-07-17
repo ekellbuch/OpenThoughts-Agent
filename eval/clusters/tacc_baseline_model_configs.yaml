@@ -1,31 +1,5 @@
-# ============================================================================
-# DEPRECATED (model-config decoupling, Stage 3 — 2026-06-29).
-# This forked file has been MIGRATED into the shared registry
-# eval/configs/model_configs.yaml as flat `<name>@gh200` STANDALONE entries +
-# the gh200-scoped pattern fallbacks. tacc.yaml now sets `use_model_registry:
-# true` + `hardware_profile: gh200`, so eval launches resolve from the registry.
-# This file is RETAINED ONLY as a legacy fallback: `--baseline-model-configs
-# eval/clusters/tacc_baseline_model_configs.yaml` still loads it byte-identically
-# via the legacy path (G5 backward-compat). It is scheduled for DELETION in the
-# Stage-4 cutover. Do NOT edit it for new models — edit the registry instead.
-# ============================================================================
-#
-# TACC Vista per-model vLLM serving overrides.
-#
-# Derived from eval/configs/baseline_model_configs_minimal.yaml, but every TP is
-# pinned to 1 because Vista has exactly ONE 96GB GH200 GPU per node (GPUs are not
-# SLURM-gres-tracked; a multi-GPU TP would need a multi-node vLLM). A 32B bf16
-# (~64GB weights) fits a single 96GB GH200 at TP=1 with ~30GB KV headroom at 32k.
-#
-# Use via --baseline-model-configs eval/clusters/tacc_baseline_model_configs.yaml
-# (or implicitly via tacc.yaml's `baseline_model_configs:` key).
-#
-# Format: models (exact HF name -> config), patterns (regex fallback, first match).
 
 models:
-  # Qwen3-32B — terminus-2 Pattern D (NO tool_call_parser / reasoning_parser:
-  # both hijack the plain-JSON output terminus-2 parses client-side). TP=1 on the
-  # 96GB GH200. trust_remote_code permission-only. prefix-caching = pure win.
   "Qwen/Qwen3-32B":
     tensor_parallel_size: 1
     max_model_len: 32768
@@ -33,19 +7,12 @@ models:
     trust_remote_code: true
     extra_args: "--enable-prefix-caching"
 
-  # Qwen3-8B baseline control.
   "Qwen/Qwen3-8B":
     tensor_parallel_size: 1
     max_model_len: 32768
     trust_remote_code: true
     extra_args: "--enable-prefix-caching"
 
-  # allenai/tmax-9b — text-only weights in a Qwen3_5ForConditionalGeneration VL config
-  # (no preprocessor_config.json). The otagent fork-vLLM resolves the arch but eagerly
-  # loads the image processor -> OSError, fatal, WITHOUT limit_mm_per_prompt. Without an
-  # explicit entry here tmax falls to the catch-all `.*` (no MM-disable) -> the same crash
-  # at 32k; the _65k variant overrides max_model_len. limit_mm_per_prompt is its OWN field,
-  # NOT extra_args (JSON quotes survive word-splitting only there).
   "allenai/tmax-9b":
     tensor_parallel_size: 1
     max_model_len: 32768
@@ -53,15 +20,6 @@ models:
     limit_mm_per_prompt: '{"image":0,"video":0}'
     extra_args: "--enable-prefix-caching"
 
-  # Qwen3.6-35B-A3B / Qwen3.5-35B-A3B — model_type: qwen3_5_moe
-  # (Qwen3_5MoeForConditionalGeneration). ~34.4B total / ~3.2B active, bf16 ~69 GB.
-  # TP=1 on the 96GB GH200: ~69 GB weights → ~17 GB KV headroom at 32k (the hybrid
-  # arch grows KV on only 10/40 layers, so 32k is cheap). Fits comfortably.
-  # The otagent env's fork-vLLM (76259c63a) + transformers 5.12.1 resolves
-  # qwen3_5_moe natively — NO separate eval-qwen35 env needed (unlike Leonardo).
-  # VL arch (carries vision_config) → serve TEXT-only via limit_mm_per_prompt
-  # image=0,video=0 (mirrors the tmax qwen3_5 entries). Hybrid thinking ON via
-  # enable_thinking. NO tool_call_parser / reasoning_parser (Pattern D for terminus-2).
   "Qwen/Qwen3.6-35B-A3B":
     tensor_parallel_size: 1
     max_model_len: 32768
@@ -82,19 +40,6 @@ models:
       - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching --max-num-seqs 512"
 
-  # Qwen3-30B-A3B-Thinking-2507 — model_type: qwen3_moe (Qwen3MoeForCausalLM).
-  # 30B total / 3B active, bf16 ~60 GB → fits the 96GB GH200 at TP=1 with KV
-  # headroom at 32k (same envelope as the 35B-A3B legs above, which are ~69 GB).
-  # This is a NATIVE THINKING model (always emits long <think> traces), NOT a VL
-  # arch — config.json has model_type qwen3_moe, Qwen3MoeForCausalLM, NO
-  # vision_config / image|video tokens — so NO limit_mm_per_prompt is needed
-  # (unlike the qwen3_5_moe VL-config 35B legs). The otagent fork-vLLM resolves
-  # qwen3_moe natively. Thinking ON via enable_thinking (model's own chat template
-  # handles <think>; no explicit --chat-template, matching the 35B-A3B legs). The
-  # thinking trace + answer need a LARGE output budget — the sbatch defaults
-  # (EVAL_VLLM_MAX_MODEL_LEN 32768 + EVAL_MAX_OUTPUT_TOKENS 16384) supply 16k
-  # output, which is what the 35B-A3B thinking legs ran with. NO tool_call_parser /
-  # reasoning_parser (Pattern D — terminus-2 parses plain JSON client-side).
   "Qwen/Qwen3-30B-A3B-Thinking-2507":
     tensor_parallel_size: 1
     max_model_len: 32768
@@ -104,7 +49,6 @@ models:
       - 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'
     extra_args: "--enable-prefix-caching --max-num-seqs 512"
 
-# Pattern fallbacks — all force TP=1 (single GH200/node) + prefix-caching.
 patterns:
   - match: "(?i)32[Bb]"
     trust_remote_code: true

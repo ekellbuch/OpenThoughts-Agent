@@ -1,6 +1,3 @@
-# Harbor eval config (default)
-# NOTE: jobs_dir is NOT set here — it's passed via `--jobs-dir` CLI flag
-# from the sbatch, which reads EVAL_JOBS_DIR from the cluster config.
 n_attempts: 3
 timeout_multiplier: 1.0
 orchestrator:

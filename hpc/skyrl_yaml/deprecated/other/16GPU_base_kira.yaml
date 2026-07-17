@@ -1,14 +1,9 @@
-# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs (terminus-kira agent)
-# Based on: 16GPU_base.yaml with terminus-kira agent
 
-# SkyRL entrypoint module
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# Hydra config groups (+ prefix in CLI)
 config_groups:
   terminal_bench_config: terminal_bench
 
-# Terminal bench / agentic environment settings
 terminal_bench:
   trials_dir: null
 
@@ -21,7 +16,6 @@ terminal_bench:
     record_terminal_session: false
     enable_pane_logging: false
     strict_json_parser: true
-    # Interleaved Thinking Settings
     interleaved_thinking: true
     extra_body:
       chat_template_kwargs:

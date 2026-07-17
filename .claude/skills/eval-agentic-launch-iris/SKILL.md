@@ -5,166 +5,55 @@ description: Launch, monitor, and manually clean up an eval job on Marin's Iris 
 
 # eval-agentic-launch-iris
 
-> **📍 Iris orientation — read first.** Before acting on anything in this skill, read the Iris **tools
-> catalog** (`.claude/ops/iris/iris_tools.md`) and the Iris **ops directory** (`.claude/ops/iris/` — the
-> CoreWeave GPU particulars in `coreweave_gpu_ops.md`, the TPU `marin` particulars in `iris_job_lifecycle.md`).
-> They carry the binding access/preamble/gotchas and the helper-script inventory the steps below rely on.
+> **📍 Iris orientation — read first.** Read the Iris **tools catalog** (`.claude/ops/iris/ops.md`) and the Iris **ops directory** (`.claude/ops/iris/` — CoreWeave GPU in `ops.md`, TPU `marin` in `ops.md`) before acting.
 
-End-to-end operation of an eval job through `eval/cloud/launch_eval_iris.py`
-(the Iris analog of the SkyPilot `launch_eval_cloud.py` — same arg names/flow).
-Covers launch → monitor → manual cleanup. For **datagen/tracegen** jobs use the
-**datagen-launch-iris** skill instead.
+Launch → monitor → manual cleanup of an eval job via `eval/cloud/launch_eval_iris.py` (Iris analog of the SkyPilot `launch_eval_cloud.py`). For **datagen/tracegen** use **datagen-launch-iris** instead.
 
-> **🚪 The SLURM eval front door (`python -m hpc.launch --job_type eval_listener`) does NOT apply here.**
-> The 2026-07-02 eval-listener unification is a **SLURM-cluster** change (leonardo/tacc/jupiter); the
-> Iris/cloud/local launchers **bypass `hpc.launch` entirely** and were never coupled to the removed
-> single-shot path. Keep launching Iris evals via `eval/cloud/launch_eval_iris.py` as below. What DID
-> change for Iris (commit `81df3e47`, "align preset handling with the listener defaults"): the launcher's
-> `_apply_preset` now (a) **applies `n_attempts` from the preset** (CLI-overridable via `--n_attempts`;
-> it previously defaulted to 3 regardless of preset), and (b) **expanded `_PRESET_IGNORED_FIELDS`** so
-> fields Iris forces via a different channel (`harbor_config` [CLI-required], `agent_name` [from harbor
-> config], `tp_size` [from TPU chip count], `slurm_partition`/`slurm_account` [SLURM-only]) now log as
-> *ignored* instead of silently dropping. The `[eval-iris] preset <name>: applied {…}; ignored {…}` line
-> shows the split. **As of commit `e792bfbb` (2026-07-02) the Iris launcher DOES resolve per-model serve
-> config from `model_config/`** (via the shared `model_config/resolver.py` + `hpc/model_config_apply.py`):
-> it **merges/forwards the model's `agent_kwargs`** (so thinking is now auto-applied per-model — see the
-> updated **Thinking on Iris** note below) and applies serve intrinsics (`max_model_len` / `limit_mm` /
-> `extra_args`) on the worker; **`tp_size` + `harbor_config` are still ignored** (tp derives from TPU chip
-> count; `--harbor_config` is CLI-required). Precedence: explicit CLI/`--preset` values win over
-> `model_config/`. Edit the source at `model_config/<org>/<slug>.yaml` (not the generated registry).
+> **🚪 Iris/cloud launchers bypass `hpc.launch` entirely** — the `python -m hpc.launch --job_type eval_listener` SLURM front door does NOT apply here. The Iris launcher resolves per-model serve config from `model_config/` (via `model_config/resolver.py` + `hpc/model_config_apply.py`): merges/forwards the model's `agent_kwargs`, and applies serve intrinsics (`max_model_len` / `limit_mm` / `extra_args`) on the worker. It also applies `n_attempts` from the preset (CLI-overridable via `--n_attempts`) and **ignores** SLURM-only fields plus `tp_size` (TPU chip count), `harbor_config` (CLI-required), `agent_name` (from harbor config). It prints `[eval-iris] preset <name>: applied {…}; ignored {…}`. Precedence: explicit CLI/`--preset` > `model_config/`. Edit the source at `model_config/<org>/<slug>.yaml` (not the generated registry).
 
-## Required info (ask if missing)
+## Required info
 
-1. `model` — model id for `--model` (HF id or a GCS/served path). Alternatively
-   pass `--datagen_config <yaml>` and the launcher infers `--model` from its
-   `engine.model`.
-2. `dataset` — **for standard benchmarks, don't set this directly: use
-   `--preset <name>` (see "Presets" below), which selects the dataset for you.**
-   Pass an explicit dataset only for a *custom* benchmark or to override a
-   preset: `--dataset <harbor slug>` **or** `--dataset_path <tasks dir | HF
-   dataset id>` (mutually exclusive).
-   - `--dataset` is a harbor-registry slug; harbor resolves/snapshots it itself.
-   - `--dataset_path` is a local tasks dir **or** a bare HF dataset id of
-     pre-built task folders (exactly one `/`, no leading `./`,`/`,`~`). The
-     **worker's** `run_eval.py` resolves the HF id (`snapshot_download` +
-     `convert_parquet_to_tasks`) — the launch host does NOT (see "Snapshots").
-3. `harbor_config` — an eval harbor YAML from `hpc/harbor_yaml/eval/` (REQUIRED).
-   - **`dcagent_eval_defaults.yaml` — USE THIS BY DEFAULT.** It is an exact,
-     Iris-adapted port of the eval team's canonical config
-     (`hpc/harbor_yaml/eval/configs/dcagent_eval_config.yaml`, the SLURM listener's default
-     `EVAL_CONFIG_YAML` — resolved directly from `hpc/harbor_yaml/eval/configs/`; the old
-     `eval/configs/` symlinks were deleted in `b355163f`):
-     terminus-2, `timeout_multiplier: 1.0`, `n_attempts: 3`,
-     agent `max_timeout_sec: 7200`, verifier `max_timeout_sec: 14400`. Using it
-     means our Iris numbers match the eval team's SLURM numbers. (The only
-     deviation from their file is `force_build: true` — required because Iris
-     builds sandboxes at runtime instead of using their prebuilt snapshot.)
-   - `eval_ctx32k.yaml` / `eval_ctx131k.yaml` — terminus-2, but with
-     **`timeout_multiplier: 8.0`** (and an 8GB/4GB sandbox override). This is the
-     eval team's *extended-budget* mode, NOT the default — only use it when you
-     deliberately want 8× the per-task timeout. For normal reg eval, prefer
-     `dcagent_eval_defaults.yaml` so you don't silently inflate timeouts.
-   - `eval_openhands_ctx32k_*` / `eval_mini_swe_ctx32k.yaml` /
-     `swe_agent_ctx32k_eval_.yaml` — alternate agent harnesses (OpenHands /
-     mini-SWE / SWE-agent). Only use these when reproducing a paper's preferred
-     harness; the default reg eval for tb2/swebench is terminus-2.
+1. `model` — model id for `--model` (HF id or GCS/served path), OR pass `--datagen_config <yaml>` (model inferred from its `engine.model`).
+2. `dataset` — for standard benchmarks, use `--preset <name>` (below), which selects the dataset. Pass an explicit dataset only for a *custom* benchmark or to override a preset:
+   - `--dataset <harbor slug>` — harbor resolves/snapshots it.
+   - `--dataset_path <tasks dir | HF dataset id>` (mutually exclusive with `--dataset`). A bare HF id has exactly one `/`, no leading `./`,`/`,`~`; the **worker's** `run_eval.py` resolves it (`snapshot_download` + `convert_parquet_to_tasks`) — the launch host does NOT.
+3. `harbor_config` — REQUIRED, an eval harbor YAML from `hpc/harbor_yaml/eval/`:
+   - **`dcagent_eval_defaults.yaml` — DEFAULT.** Iris-adapted port of the eval team's canonical config (`hpc/harbor_yaml/eval/configs/dcagent_eval_config.yaml`, the SLURM listener's `EVAL_CONFIG_YAML`): terminus-2, `timeout_multiplier: 1.0`, `n_attempts: 3`, agent `max_timeout_sec: 7200`, verifier `max_timeout_sec: 14400`. Iris numbers match the eval team's SLURM numbers. Only deviation: `force_build: true` (Iris builds sandboxes at runtime).
+   - `eval_ctx32k.yaml` / `eval_ctx131k.yaml` — terminus-2 with **`timeout_multiplier: 8.0`** (8GB/4GB sandbox). Extended-budget mode — only for deliberate 8× timeout. Don't use for normal reg eval.
+   - `eval_openhands_ctx32k_*` / `eval_mini_swe_ctx32k.yaml` / `swe_agent_ctx32k_eval_.yaml` — alternate harnesses (OpenHands / mini-SWE / SWE-agent). Only when reproducing a paper's harness.
 
 ## Presets (`--preset`, shared with the SLURM listener)
 
-`--preset <name>` pulls run defaults from the shared catalog in
-`eval/presets/` (one YAML per preset, the **same** catalog the SLURM
-orchestrator `eval/unified_eval_listener.py` consumes). Choices:
-`aider, bfcl, financeagent, gaia, medagentbench, swebench, swebench_full,
-tb2, v1, v2`.
-
-**Precedence: explicit CLI flags ALWAYS override preset values.** A preset only
-fills in what you didn't pass.
+`--preset <name>` pulls run defaults from `eval/presets/` (one YAML per preset, **same** catalog the SLURM `eval/unified_eval_listener.py` consumes). Choices: `aider, bfcl, financeagent, gaia, medagentbench, swebench, swebench_full, tb2, v1, v2`. **Precedence: explicit CLI flags ALWAYS override preset values.**
 
 What the Iris launcher does with each preset field:
+- **Applied:** `datasets[0]` → `--dataset_path` (bare HF id, resolved on the worker) when neither `--dataset` nor `--dataset_path` was passed (extra datasets skipped, logged); `n_concurrent` → `--n_concurrent` when not passed.
+- **Applied (agent kwargs, mapped as the SLURM `eval/jupiter/eval_harbor.sbatch` does):** `agent_parser` → harbor `--agent-kwarg parser=<value>` (e.g. swebench → `parser=xml`) unless you passed a `parser=`; each preset `agent_kwargs` list entry → its own `--agent-kwarg key=value` (your `--agent_kwarg` with the same key overrides).
+- **Thinking (NOT a preset property):** the launcher resolves the model's `agent_kwargs` from `model_config/`, so thinking IS auto-applied per-model for models carrying `agent_kwargs: [extra_body={…enable_thinking:true}]`. For a model with **no `model_config/` entry**, thinking falls back to the served model's chat-template default (Qwen3 = ON). For a default-OFF template model not in `model_config/` (e.g. Qwen3.5/3.6), pass `--agent_kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'` (the live nested form vLLM applies; a bare `enable_thinking=true` is DEAD — terminus-2 has no such param). There is no `--enable-thinking` flag.
+- **Ignored (SLURM/vLLM-serve-only):** `slurm_time`, `vllm_max_retries`, `gpu_memory_util`, `sbatch_script`, `check_hf_exists`, `log_suffix`, `error_threshold`, `config_yaml`, `agent_envs`, `auto_snapshot`.
 
-- **Applied (Iris analogs):**
-  - `datasets[0]` → `--dataset_path` (bare HF id, resolved on the worker), only
-    when you gave neither `--dataset` nor `--dataset_path`. Extra datasets in the
-    list are skipped (logged).
-  - `n_concurrent` → `--n_concurrent`, only when you didn't pass `--n_concurrent`.
-- **Applied (result-affecting agent kwargs — mapped exactly as the SLURM
-  `eval/jupiter/eval_harbor.sbatch` does):**
-  - `agent_parser` → harbor `--agent-kwarg parser=<value>` (e.g. `swebench` →
-    `parser=xml`), unless you already passed a `parser=` `--agent_kwarg`.
-  - each entry of the preset's generic `agent_kwargs` list → its own harbor
-    `--agent-kwarg key=value`. A `--agent_kwarg` you pass with the same key
-    overrides the preset's.
-  - **Thinking on Iris:** as of commit `e792bfbb` the Iris launcher **resolves the model's
-    `agent_kwargs` from `model_config/`**, so **thinking IS now auto-applied per-model** for any model
-    that carries `agent_kwargs: [extra_body={…enable_thinking:true}]` in its `model_config/<org>/<slug>.yaml`
-    (precedence: explicit `--agent_kwarg` / `--preset` > `model_config/`). For a model with **no
-    `model_config/` entry**, behavior is unchanged — thinking falls back to the served model's
-    chat-template default (Qwen3 = thinking ON; so the usual Qwen3/Qwen3-MoE de-risk models still think
-    with no flag). For a default-OFF template model that isn't in `model_config/` (e.g. Qwen3.5/3.6),
-    pass it explicitly:
-    `--agent_kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'`
-    (the live nested chat-template-kwarg form vLLM applies; a bare
-    `enable_thinking=true` is DEAD — terminus-2 has no such param). There is no
-    `--enable-thinking` flag.
-- **Ignored (SLURM / vLLM-serve-only, no Iris analog):** `slurm_time`,
-  `vllm_max_retries`, `gpu_memory_util`, `sbatch_script`, `check_hf_exists`,
-  `log_suffix`, `error_threshold`, `config_yaml`, `agent_envs`, `auto_snapshot`.
-
-The launcher prints a one-line `[eval-iris] preset <name>: applied {...};
-ignored {...}` so the split is transparent. `--preset` composes with
-`--harbor_config` (still required), `--model`, `--upload_to_database`, etc.;
-e.g. `--preset swebench --harbor_config hpc/harbor_yaml/eval/dcagent_eval_defaults.yaml
---model <id>` evaluates the swebench-verified-100 set with the xml parser.
+`--preset` composes with `--harbor_config` (required), `--model`, `--upload_to_database`, etc.
 
 ## Core evals
 
-The standard/core eval benchmarks are **presets** — launch them by name (the
-preset sets the dataset, concurrency, and agent parser; you do not pass
-`--dataset*`):
+The standard/core evals are **presets** — launch by name (preset sets dataset, concurrency, parser; do not pass `--dataset*`):
 
 | Benchmark | Command | preset sets |
 |---|---|---|
 | SWE-bench-verified (random 100) | `--preset swebench` | `DCAgent2/swebench-verified-random-100-folders`, n_concurrent 32, `parser=xml` |
 | terminal-bench 2.0 | `--preset tb2` | `DCAgent2/terminal_bench_2`, n_concurrent 32 |
 
-> The presets do **not** set thinking (it's not a preset property) — see the **Thinking on Iris** note
-> above: thinking comes from the served model's template default (Qwen3 = on), or pass
-> `--agent_kwarg 'extra_body={"chat_template_kwargs":{"enable_thinking":true}}'` for a default-OFF model.
+Presets do **not** set thinking — see the note above. Both require `--harbor_config hpc/harbor_yaml/eval/dcagent_eval_defaults.yaml` (terminus-2 @ 32k, eval-team default budget, the Cat 1 "reg eval" harness per `docs/EVAL_GUIDE.md`), fit a v6e-4 for an 8B model, and should launch **with `--upload_to_database`**. For full parity with the eval team's SLURM runs, pass `--n_concurrent 128` (their CLI default). (terminal-bench 2.0 also exists as slug `--dataset terminal-bench@2.0`; prefer the preset.)
 
-Both still require `--harbor_config hpc/harbor_yaml/eval/dcagent_eval_defaults.yaml`
-(terminus-2 @ 32k, eval-team default budget — the Cat 1 "reg eval" harness per
-`docs/EVAL_GUIDE.md`), fit a v6e-4 for an 8B model, and should be launched
-**with `--upload_to_database`** (Supabase sync, below). For full parity with the
-eval team's SLURM runs, pass `--n_concurrent 128` (their CLI default).
+## Snapshots — eval is the exception
 
-(terminal-bench 2.0 also exists as the harbor-registry slug
-`--dataset terminal-bench@2.0` — the same benchmark in slug form; the `tb2`
-preset uses the HF task-folder form. Prefer the preset.)
+Eval does NOT pre-build Daytona snapshots and does NOT call `hpc/snapshot_manager.ensure_snapshots`. Eval harbor configs set `environment.force_build: true` — **harbor builds each task's sandbox at runtime on the worker**, no launch-host prebuild, no 60-snapshot cap, no `SnapshotCapExceeded`. Datagen is the opposite (`force_build: false` → pre-builds; see **datagen-launch-iris**).
 
-## Snapshots — eval is the exception (no pre-build, MAIN Daytona org)
-
-**Eval does NOT pre-build Daytona snapshots and does NOT touch
-`hpc/snapshot_manager.ensure_snapshots`** (the shared-org 60-snapshot cap that
-datagen lives under). The eval harbor configs in `hpc/harbor_yaml/eval/` all set
-`environment.force_build: true`, so **harbor builds each task's sandbox at
-runtime on the worker** — no launch-host prebuild, no cap, no `MISSING`-snapshot
-cleanup dance. This is deliberate: agent benchmarks legitimately need one env
-per task (swebench-verified-100 = 100 envs), which the 60-cap is wrong for.
-Datagen is the opposite (`force_build: false` → it *does* pre-build; see
-**datagen-launch-iris**).
-
-**Always run eval out of the MAIN Daytona org.** The worker builds in the org
-keyed by **`DAYTONA_API_KEY`** (the main org), carried via `--secrets-env`. Do
-NOT point eval at the `DAYTONA_B_KEY` / `DAYTONA_RL_API_KEY` / `DAYTONA_DATA_API_KEY`
-orgs — those are for other workloads. So: no `SnapshotCapExceeded` handling is
-needed for eval, and there is nothing to prune on a shared snapshot org.
+**Always run eval out of the MAIN Daytona org** (`DAYTONA_API_KEY`, carried via `--secrets-env`). Do NOT use `DAYTONA_B_KEY` / `DAYTONA_RL_API_KEY` / `DAYTONA_DATA_API_KEY` (other workloads).
 
 ## Prerequisites
 
-Same as datagen: launch from the **py3.12 otagent conda env**, `source
-"$DC_AGENT_SECRET_ENV"` (see `.claude/secret.md`; pass `--secrets-env`), and
-`git pull` the marin checkout if the iris client is reported too old. Harbor env
-defaults to **daytona** (the only sandbox backend that works on iris workers).
+Launch from the **py3.12 otagent conda env**, `source "$DC_AGENT_SECRET_ENV"` (see `.claude/secret.md`; pass `--secrets-env`), and `git pull` the marin checkout if the iris client is reported too old. Harbor env defaults to **daytona** (the only sandbox backend that works on iris workers).
 
 ## Launch
 
@@ -188,11 +77,7 @@ python eval/cloud/launch_eval_iris.py \
 
 ### CoreWeave H100x8 GPU eval (single node, `cw-us-east-02a`)
 
-Pass `--gpu H100x8` (mutually exclusive with `--tpu`) to run on one CoreWeave
-H100x8 node instead of a TPU. The launcher then defaults to the `gpu-8x`
-OT-Agent image and the `cw-us-east-02a` iris config, installs the `datagen`
-extra (not `datagen-tpu`), and skips the TPU iris-serve/`patch_tpu_inference`
-path. `export KUBECONFIG=~/.kube/coreweave-iris-gpu` first.
+Pass `--gpu H100x8` (mutually exclusive with `--tpu`) for one CoreWeave H100x8 node. The launcher defaults to the `gpu-8x` OT-Agent image, the `cw-us-east-02a` iris config, the `datagen` extra (not `datagen-tpu`), and skips the TPU iris-serve/`patch_tpu_inference` path. `export KUBECONFIG=~/.kube/coreweave-iris-gpu` first. Single-node only — do NOT pass `--replicas > 1` (task sharding + shared multi-node vLLM not implemented for GPU eval); `--gpu` is limited to `H100x8`. Use a model known to serve on the runtime (Qwen/Qwen3-32B works).
 
 ```bash
 export KUBECONFIG=~/.kube/coreweave-iris-gpu
@@ -208,55 +93,20 @@ python eval/cloud/launch_eval_iris.py \
   --upload_to_database --no-wait
 ```
 
-- **Output mode (GPU)**: defaults to `--output-mode local` — Harbor writes
-  `trace_jobs` to pod-local NVMe and `run_eval --upload_to_database` registers
-  to Supabase + HF **in-pod** before the ephemeral pod is torn down (the same
-  registration path TPU/SLURM use). `--upload_to_database` IS supported on the
-  GPU path. For a durable copy of the raw Harbor artifacts, add
-  `--output-mode s3 --s3-output-dir s3://marin-us-east-02a/tmp/ttl=7d/ot-agent/evals/<user>`
-  (CW object store under the cluster's `marin-us-east-02a` bucket). **⚠ PREFER setting the output dir off
-  `marin_prefix()` (`rigging.filesystem` — auto-resolves the storage root; don't hardcode the region bucket);
-  the literal here is a fallback. See `.claude/ops/iris/coreweave_gpu_ops.md` §rendezvous.** **⚠ Store moved R2
-  (`s3://marin-na`) → CW (`s3://marin-us-east-02a`) on 2026-07-05 (marin `c7caecc95a`); pods
-  can no longer reach `s3://marin-na` (R2), so never use it here.)
-- **Storage creds (GPU)**: the launcher WITHHOLDS the launch host's
-  `AWS_*/LAION_*/MARIN_HMAC_*` from the pod so they cannot clobber the R2 creds
-  the `cw-us-east-02a` cluster injects via the `iris-task-env` `envFrom` Secret.
-  Do not re-add them. (This is why `--jobs-dir=s3://marin-us-east-02a/...` used to fail
-  with HeadObject 400.)
-- Single-node only: do **not** pass `--replicas > 1` (task sharding + shared
-  multi-node vLLM are not implemented for GPU eval). `--gpu` is limited to
-  `H100x8`. Use a model known to serve on the runtime (Qwen/Qwen3-32B works).
+### Flag notes
 
-Flag notes:
-- **Supabase sync = `--upload_to_database`** (the opposite of datagen's
-  `--skip_register`). It registers result abstracts to Supabase **and** uploads
-  traces to HuggingFace; the HF repo is auto-derived from `--job_name` when
-  `--upload_hf_repo` is omitted. Requires `SUPABASE_URL` +
-  `SUPABASE_SERVICE_ROLE_KEY` in `--secrets-env` (carried automatically).
-  Companion flags: `--upload_username` (attribution; defaults to
-  `$UPLOAD_USERNAME`/current user), `--upload_error_mode
-  {skip_on_error,rollback_on_error}`, `--upload_forced_update` (overwrite
-  existing rows). There is no `--register`/`--skip_register` here — sync is OFF
-  by default and turned ON solely by passing `--upload_to_database`.
-- `--upload_hf_repo` alone (no `--upload_to_database`) does **HF-only** upload,
-  no Supabase. Pass an explicit repo if you want a fixed destination.
-- `--tpu` defaults to **v6e-4** for eval (vs v5p-8 for S1 datagen); set per the
-  model's footprint.
-- **Output mode**: by default eval outputs are **rsync'd back periodically to
-  `--local-sync-dir`** while the job runs (so local eval-analysis tooling sees
-  files). Pass `--output-mode gcs` (and OMIT `--gcs-output-dir`) to write straight
-  to GCS instead — the launcher auto-pins a co-located **single-region** output
-  bucket (`gs://marin-us-east5/ot-agent`, …). Passing an explicit
-  `--gcs-output-dir gs://marin-models-us/ot-agent` opts OUT of the pin (and reverts
-  to the pricier multi-region bucket) — only for the stuck-PENDING dodge when a TPU
-  pool has collapsed and you want iris free to place anywhere in the US.
-- `--upload_hf_repo` pushes results to HF on completion (image `ae085bc8`+ wires
-  harbor's `--export-push`); omit it if you only want local/GCS outputs.
-- `--model` is optional only when `--datagen_config` is given (model inferred);
-  otherwise it's required.
-- See `docs/EVAL_GUIDE.md` for the benchmark/harness catalog and
-  `scripts/iris/EVAL_GUIDE.md`/`README.md` for eval-analysis tooling.
+- **Supabase sync = `--upload_to_database`** (opposite of datagen's `--skip_register`). Registers result abstracts to Supabase **and** uploads traces to HF (repo auto-derived from `--job_name` when `--upload_hf_repo` omitted). Requires `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` in `--secrets-env`. Companion flags: `--upload_username` (attribution; defaults `$UPLOAD_USERNAME`/current user), `--upload_error_mode {skip_on_error,rollback_on_error}`, `--upload_forced_update`. No `--register`/`--skip_register` — sync is OFF by default, ON solely via `--upload_to_database`.
+- `--upload_hf_repo` alone (no `--upload_to_database`) = **HF-only**, no Supabase.
+- `--upload_hf_repo` pushes results to HF on completion (image `ae085bc8`+ wires harbor's `--export-push`); omit for local/GCS-only.
+- `--tpu` defaults to **v6e-4** for eval (vs v5p-8 for S1 datagen); set per model footprint.
+- `--model` is optional only when `--datagen_config` is given (model inferred); otherwise required.
+- See `docs/EVAL_GUIDE.md` (benchmark/harness catalog) and `scripts/iris/EVAL_GUIDE.md`/`README.md` (eval-analysis tooling).
+
+### Output modes
+
+- **TPU default**: outputs rsync'd back periodically to `--local-sync-dir` while the job runs (local eval-analysis tooling sees files). Pass `--output-mode gcs` (and OMIT `--gcs-output-dir`) to write straight to a co-located **single-region** bucket (`gs://marin-us-east5/ot-agent`, …). An explicit `--gcs-output-dir gs://marin-models-us/ot-agent` opts OUT of the pin (pricier multi-region) — only for the stuck-PENDING dodge when a TPU pool has collapsed.
+- **GPU default**: `--output-mode local` — Harbor writes `trace_jobs` to pod-local NVMe and `run_eval --upload_to_database` registers to Supabase + HF **in-pod** before the ephemeral pod tears down (same path TPU/SLURM use). `--upload_to_database` IS supported on GPU. For durable raw Harbor artifacts: `--output-mode s3 --s3-output-dir s3://marin-us-east-02a/tmp/ttl=7d/ot-agent/evals/<user>` (CW object store). ⚠ Prefer deriving the output dir off `marin_prefix()` (`rigging.filesystem` — auto-resolves the storage root; don't hardcode the region bucket); the literal is a fallback. Never use `s3://marin-na` (R2) — pods can't reach it.
+- **GPU storage creds**: the launcher WITHHOLDS the launch host's `AWS_*/LAION_*/MARIN_HMAC_*` from the pod (can't clobber the R2 creds the `cw-us-east-02a` cluster injects via the `iris-task-env` `envFrom` Secret). Do not re-add them.
 
 Confirm placement (same as datagen):
 ```bash
@@ -266,23 +116,17 @@ Confirm placement (same as datagen):
 
 ## Monitor
 
-Same analyzer as datagen (it's job-agnostic):
+Same job-agnostic analyzer as datagen:
 ```bash
 /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python \
   /Users/benjaminfeuer/Documents/OpenThoughts-Agent/scripts/iris/analyze_job_history.py \
   /benjaminfeuer/<job> --output /tmp/<job>_history.md --refresh
 ```
-For eval, the signal of interest is **completion + productive trial rate**
-(`non_empty_trials`/`total_trial_dirs`) and the harness exception stats, more
-than gen tok/s. Scores land in the synced outputs, not the analyzer sidecar:
-- default mode → `--local-sync-dir` on the launch host (point eval-analysis
-  tooling at it);
-- `--output-mode gcs` → under the pinned single-region bucket, e.g.
-  `gs://marin-us-east5/ot-agent/<job>/` (resolve the exact recorded URI with
-  `python -m hpc.iris.job_output_resolver <job> --cluster …/marin.yaml`).
+For eval, the signals of interest are **completion + productive trial rate** (`non_empty_trials`/`total_trial_dirs`) and the harness exception stats, more than gen tok/s. Scores land in the synced outputs, not the analyzer sidecar:
+- default mode → `--local-sync-dir` on the launch host;
+- `--output-mode gcs` → under the pinned single-region bucket (e.g. `gs://marin-us-east5/ot-agent/<job>/`; resolve with `python -m hpc.iris.job_output_resolver <job> --cluster …/marin.yaml`).
 
-Per-task progress / resume helpers live in `scripts/iris/check_progress.py` and
-`check_resume_needed.py`.
+Per-task progress / resume helpers: `scripts/iris/check_progress.py` and `check_resume_needed.py`.
 
 ## Manual cleanup
 
@@ -291,33 +135,15 @@ Per-task progress / resume helpers live in `scripts/iris/check_progress.py` and
 /Users/benjaminfeuer/Documents/marin/.venv/bin/iris --cluster=marin job kill /benjaminfeuer/<job>
 ```
 
-**Recover partial results**: eval outputs are already on the launch host
-(`--local-sync-dir`) or in GCS (`--output-mode gcs`). To re-pull a GCS job dir,
-resolve the recorded output prefix first (single- or multi-region — never hardcode):
-`OUT=$(python -m hpc.iris.job_output_resolver <job> --cluster …/marin.yaml)` then
-`gsutil -m rsync -r "$OUT/<job>/" /tmp/<job>_eval/`.
-If HF upload didn't fire (pre-`ae085bc8` image or non-state-4 exit) and you need
-the traces on the Hub, use the same `make_and_upload_trace_dataset.py` recipe as
-in **datagen-launch-iris** against the local job dir.
+**Recover partial results**: outputs are already on the launch host (`--local-sync-dir`) or in GCS (`--output-mode gcs`). To re-pull a GCS job dir, resolve the recorded output prefix first (never hardcode): `OUT=$(python -m hpc.iris.job_output_resolver <job> --cluster …/marin.yaml)` then `gsutil -m rsync -r "$OUT/<job>/" /tmp/<job>_eval/`. If HF upload didn't fire and you need traces on the Hub, use the same `make_and_upload_trace_dataset.py` recipe as **datagen-launch-iris** against the local job dir.
 
-**Daytona snapshot cap**: N/A for eval — eval does not pre-build snapshots or
-call `ensure_snapshots` (see "Snapshots" above), so `SnapshotCapExceeded` does
-not arise here. If you somehow see it, you're on the wrong (datagen) path or the
-wrong harbor config (eval configs use `force_build: true`).
+**Daytona snapshot cap**: N/A for eval (no pre-build, no `ensure_snapshots`, eval configs use `force_build: true`). If you see `SnapshotCapExceeded`, you're on the wrong (datagen) path or wrong harbor config.
 
-**Stuck PENDING**: relaunch with `--output-mode gcs --gcs-output-dir
-gs://marin-models-us/ot-agent` (unpinned — this deliberate override drops the
-single-region pin and writes the pricier multi-region bucket) so iris places on
-any free TPU in the US region. Kill the stuck submission first only with user
-permission.
+**Stuck PENDING**: relaunch with `--output-mode gcs --gcs-output-dir gs://marin-models-us/ot-agent` (unpinned — deliberate override drops the single-region pin so iris places on any free TPU in the US). Kill the stuck submission first only with user permission.
 
 ## Guardrails
 
-- NEVER stop/restart/bounce a RUNNING job or the Iris cluster without explicit
-  user permission in the current thread.
+- NEVER stop/restart/bounce a RUNNING job or the Iris cluster without explicit user permission in the current thread.
 - NEVER read/write GCS across regions. Keep outputs in the US bucket.
-- ALWAYS run eval out of the MAIN Daytona org (`DAYTONA_API_KEY`) — never the
-  B/RL/DATA orgs. Eval builds sandboxes at runtime (`force_build: true`); it does
-  not pre-build or call `ensure_snapshots`.
-- Match `--harbor_config` to the model's context window and the benchmark's
-  harness (plain vs OpenHands/mini-SWE/SWE-agent) — a mismatch fails at runtime.
+- ALWAYS run eval out of the MAIN Daytona org (`DAYTONA_API_KEY`) — never the B/RL/DATA orgs. Eval builds sandboxes at runtime (`force_build: true`); it does not pre-build or call `ensure_snapshots`.
+- Match `--harbor_config` to the model's context window and the benchmark's harness (plain vs OpenHands/mini-SWE/SWE-agent) — a mismatch fails at runtime.

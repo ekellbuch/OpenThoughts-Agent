@@ -243,8 +243,6 @@ extra_env:
   VLLM_ATTENTION_BACKEND: FLASH_ATTN
   LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib
   NCCL_DEBUG: WARN
-  # Cluster-PORTABLE exclusion list (auto-pick Ethernet PF on any CW cluster) — East's enp157s0np0 is absent on
-  # rno2a (NCCL "Bootstrap: no socket interface found", 2026-07-14). Matches the cw-rno2a.yaml default.
   NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"
   NCCL_SOCKET_FAMILY: AF_INET
   SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "3600"

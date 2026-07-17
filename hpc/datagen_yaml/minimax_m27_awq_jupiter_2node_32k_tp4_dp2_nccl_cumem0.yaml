@@ -1,50 +1,3 @@
-# MiniMax-M2.7-AWQ-4bit — DP=2 COMPILED + NCCL_CUMEM_ENABLE=0 (2026-05-27)
-# https://huggingface.co/cyankiwi/MiniMax-M2.7-AWQ-4bit
-#
-# 32K context — Jupiter GH200 2-node TP=4 / DP=2, cudagraphs ON
-# (FULL_AND_PIECEWISE), NCCL cuMem registration DISABLED.
-#
-# WHY THIS RUN EXISTS — the capture-crash root-cause discriminator.
-# Both compiled DP=2 (522000, FULL_AND_PIECEWISE) and PIECEWISE-only DP=2
-# (522159) crashed IDENTICALLY: "CUDA driver error: illegal memory access"
-# ×4 in profile_cudagraph_memory on the cross-node worker (DP1_TP3_EP7),
-# T+~24min, no serving. The crash is in the STARTUP memory-profiling capture
-# of the cross-node MoE all-to-all — mode-independent, uniform dummy sizes
-# (so NOT serve-time ragged replay).
-#
-# Three live capture-time hypotheses (see post-mortem
-# 2026-05-27_minimax_dp2_compiled_capture_crash.md):
-#   H1: in-graph torch.empty colliding with the profiling mempool
-#   H2: NCCL inter-node group state invalid mid-capture (lazy connection /
-#       proxy-thread / cuMem buffer registration triggered DURING capture →
-#       non-capturable side effect). << best fit: cross-node-only,
-#       intermittent (GLM 493343 ran clean), wheel-specific (Perlmutter
-#       older wheel was fine).
-#   H3: CPU-offset read during capture (num_tokens_across_dp_cpu unpopulated)
-#
-# This run probes H2 with the highest-value single toggle:
-#   NCCL_CUMEM_ENABLE=0  — disables NCCL's cuMem-based buffer registration,
-#     a known source of illegal-access regressions under graph capture and a
-#     likely Jupiter-vs-Perlmutter NCCL-build difference. If capture SUCCEEDS
-#     → H2 confirmed AND we have a one-env-var workaround that resurrects
-#     compiled-DP>1 outright. If it still crashes → H2-via-cuMem is out;
-#     escalate to CUDA_LAUNCH_BLOCKING + compute-sanitizer (run 2).
-#   NCCL_DEBUG=INFO + NCCL_DEBUG_SUBSYS=INIT,COLL,GRAPH — timestamp-correlate
-#     connection/channel setup against the profile_cudagraph_memory entry. If
-#     setup is logged DURING the capture window → H2 (lazy connect) regardless
-#     of whether cuMem=0 fixed it.
-#
-# All three NCCL env vars propagate to the cross-node Ray DP actors via
-# vLLM's NCCL_ copy-prefix (vllm/ray/ray_env.py DEFAULT_ENV_VAR_PREFIXES),
-# so they reach the worker where NCCL initializes its comms.
-#
-# DELTA vs dp2_cudagraph.yaml: + nccl_cumem_enable / nccl_debug /
-# nccl_debug_subsys. cudagraphs still ON (FULL_AND_PIECEWISE), enforce_eager
-# still OFF. Deliberately NOT setting CUDA_LAUNCH_BLOCKING here — it serializes
-# every CUDA op (huge slowdown) and could perturb the race; it's the run-2
-# escalation paired with compute-sanitizer.
-#
-# Required launch flags: --num_nodes 2 --gpus_per_node 4
 
 engine:
   type: vllm_local
@@ -82,7 +35,6 @@ vllm_server:
   pynccl_trace_flush_interval_sec: 300
   pynccl_pyspy_on_sigusr1: true
   pynccl_faulthandler_interval_sec: 0
-  # H2 discriminator + candidate workaround (see header).
   nccl_cumem_enable: false
   nccl_debug: 'INFO'
   nccl_debug_subsys: 'INIT,COLL,GRAPH'
@@ -91,8 +43,6 @@ vllm_server:
   - bfloat16
   - --kv-cache-dtype
   - fp8
-  # NO --enforce-eager — cudagraphs ON (FULL_AND_PIECEWISE). The whole point
-  # is to test whether NCCL_CUMEM_ENABLE=0 lets the capture succeed.
   - --chat-template-content-format
   - string
   - --max-num-batched-tokens

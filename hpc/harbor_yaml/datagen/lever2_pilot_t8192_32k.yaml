@@ -1,20 +1,8 @@
-# Lever-2 summarization-aware-SFT datagen PILOT harbor config.
-# CELL: proactive_summarization_threshold=8192  max_input_tokens=32768
-# 3-LAYER AGREEMENT: vLLM max_model_len == model_info.max_input_tokens == this max_input_tokens == 32768.
-#   -> pair with serve config glm_47_jupiter_1node_32k_lever2pilot.yaml (max_model_len=32768).
-# enable_summarize:true, linear_history:true (eval regime), verifier ON (reward/realness signal).
 job_name: lever2-pilot-trace-job
 jobs_dir: trace_jobs
 n_attempts: 1
 timeout_multiplier: 1.0
 debug: false
-# Bound worker host-RAM on long, memory-heavy datagen runs: drop per-trial
-# trajectories/step-observations from the in-memory copies harbor retains for
-# aggregation (full results are already on disk per trial). Without this, the
-# harbor process grows ~15 MB/trial on heavy datasets (e.g. repo-based tasks)
-# and OOM-kills the v5p-8 container mid-run. Datagen-only; never set for RL
-# (which reads rollout_details back from the returned results). Requires harbor
-# >= the slimming fix (JobConfig.release_trial_payloads_in_memory).
 release_trial_payloads_in_memory: true
 orchestrator:
   type: local

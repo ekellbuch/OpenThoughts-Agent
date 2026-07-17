@@ -1,83 +1,10 @@
-# =============================================================================
-# Iris / CoreWeave seqnorm + TIS SMOKE config (launcher end-to-end validation).
-# =============================================================================
-# PURPOSE: cheaply validate rl/cloud/launch_rl_iris.py end-to-end on the Iris
-# CoreWeave H100 cluster — exercising the SAME seqnorm+TIS RL code path as
-# hpc/skyrl_yaml/iris/56GPU_seqnorm_tis.yaml (agentic terminal_bench / Harbor /
-# Daytona, RLOO-N, seq_mean_token_sum_norm_global loss + Truncated Importance
-# Sampling) but at TOY scale so it reaches >=2 COMPLETE training steps in minutes.
-#
-# This is a CODE/LAUNCHER-VALIDATION smoke. Results are NOT for DB/HF.
-#
-# RUNS AT BOTH --num-nodes 1 (8 H100) AND --num-nodes 2 (16 H100):
-#   - placement.colocate_all=true and ALL placement node/gpu counts are null, so
-#     build_skyrl_hydra_args derives them from the launcher's --num_nodes /
-#     --gpus_per_node (8). Policy/ref/engines all share the same GPUs (vLLM sleep
-#     mode), so there is no policy-vs-engine GPU partition to get wrong at either
-#     node count.
-#   - inference_engine_tensor_parallel_size=1 and num_inference_engines=null, so
-#     num_inference_engines = (num_nodes * 8) / 1  =>  8 at 1 node, 16 at 2 nodes.
-#     Both are integral (TP=1 divides 8 and 16), as required.
-#   - train_batch_size = policy_mini_batch_size = 16 >= the policy data-parallel
-#     size at EITHER node count (8 GPUs at 1 node, 16 GPUs at 2 nodes), so the
-#     "train_batch_size >= DP size" SkyRL constraint holds for both. (Sync RL is
-#     used here — NO fully_async — so there is no train==mini coupling to satisfy
-#     beyond keeping them equal, which they are.)
-#
-# Kept IDENTICAL to the 56GPU base (so it exercises the same code path):
-#   - The seqnorm + TIS knobs: advantage_estimator rloo_n,
-#     loss_reduction seq_mean_token_sum_norm_global, use_tis true,
-#     tis_imp_ratio_cap 2.0, eps_clip 0.2/0.05, collect_rollout_details true.
-#   - The terminal_bench / Harbor / Daytona agentic structure + chat template.
-#   - strategy fsdp2, optimizer family.
-#
-# Made FAST / SMALL (content is irrelevant to the launcher path under test):
-#   - model Qwen/Qwen3-8B (small).
-#   - max_steps 3 (>=2 complete steps observable); ckpt_interval / hf_save_interval
-#     999 (effectively no checkpoint/HF saves); enable_db_registration false.
-#   - train_batch_size 16, policy_mini_batch_size 16, eval_batch_size 16.
-#   - n_samples_per_prompt 2  =>  8 prompts x 2 = 16 episodes/step.
-#   - sampling_params.max_generate_length 4096 -> 512 (short episodes).
-#   - generator.max_turns 999999 -> 6 (cap agent turns so episodes end fast).
-#   - harbor.override_timeout_sec 900 -> 300, n_concurrent_trials 16.
-#   - trace_upload.enabled false (don't waste time exporting traces).
-#   - tracker_commit_each_step true + logger console (frequent step logging).
-#
-# Launch — 1 node (8 H100), no rendezvous needed:
-#   set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
-#   python -m rl.cloud.launch_rl_iris \
-#     --rl_config hpc/skyrl_yaml/iris/smoke_seqnorm_tis.yaml \
-#     --model_path Qwen/Qwen3-8B \
-#     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
-#     --val_data '["open-thoughts/OpenThoughts-TB-dev"]' \
-#     --num-nodes 1 \
-#     --job-name rl-iris-smoke-1n --priority interactive --no-wait
-#
-# Launch — 2 nodes (16 H100), REQUIRES a reachable s3://(R2) rendezvous dir:
-#   python -m rl.cloud.launch_rl_iris \
-#     --rl_config hpc/skyrl_yaml/iris/smoke_seqnorm_tis.yaml \
-#     --model_path Qwen/Qwen3-8B \
-#     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
-#     --val_data '["open-thoughts/OpenThoughts-TB-dev"]' \
-#     --num-nodes 2 \
-#     --rendezvous-dir s3://<r2-bucket>/rl-iris-rdv/smoke \
-#     --job-name rl-iris-smoke-2n --priority interactive --no-wait
-# =============================================================================
 
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# Hydra config groups (+ prefix in CLI)
 config_groups:
   terminal_bench_config: terminal_bench
 
-# Terminal bench / agentic environment settings
 terminal_bench:
-  # REVERIFY: persist per-trial Harbor outputs (incl. exception.txt = verbatim
-  # traceback.format_exc(), and result.json carrying exception_info.exception_traceback)
-  # to an s3:// (R2) path the CoreWeave pods can reach. The cw-us-east-02a cluster
-  # injects working in-cluster R2 creds (iris-task-env Secret / envFrom) into every
-  # task pod, so fsspec/UPath default credential discovery writes here. This is how
-  # the reward-zeroing AttributeError gets captured if it recurs.
   trials_dir: s3://marin-us-east-02a/iris/rl-rebuild-verify/rebuild-verify-0624
 
   harbor:
@@ -97,7 +24,6 @@ terminal_bench:
     extra_body:
       chat_template_kwargs:
         enable_thinking: true
-    # SMOKE: short agent timeout so episodes terminate quickly.
     override_timeout_sec: 300
 
     override_cpus: 1
@@ -120,15 +46,12 @@ terminal_bench:
       - RewardFileEmptyError
       - VerifierOutputParseError
 
-    # SMOKE: small concurrency wave.
     n_concurrent_trials: 16
 
     log_level: INFO
 
     enable_reward_shaping: false
 
-    # TIS: REQUIRED for trainer.algorithm.use_tis (kept identical to the base so
-    # the smoke exercises the TIS code path).
     collect_rollout_details: true
 
     enable_error_classification: true
@@ -153,9 +76,6 @@ terminal_bench:
   archiving:
     enabled: false
 
-  # REVERIFY: trace upload ON — persists per-trial Harbor traces (incl.
-  # exception_info) to an HF dataset under repo_org as a SECOND capture channel,
-  # in addition to the trials_dir s3 persistence above.
   trace_upload:
     enabled: true
     repo_org: DCAgent
@@ -163,7 +83,6 @@ terminal_bench:
     dataset_type: SFT
     cleanup: true
 
-# Trainer configuration
 trainer:
   strategy: fsdp2
   algorithm:
@@ -172,17 +91,14 @@ trainer:
     kl_loss_coef: 0.0
     eps_clip_low: 0.2
     eps_clip_high: 0.05
-    # seqnorm + TIS knobs — IDENTICAL to the 56GPU base.
     loss_reduction: seq_mean_token_sum_norm_global
     use_tis: true
     tis_imp_ratio_cap: 2.0
 
-  # Training loop settings — SMOKE: 3 steps.
   epochs: 1
   max_steps: 3
   update_epochs_per_batch: 1
 
-  # Batch sizes — SMOKE: 16 clears the policy DP-size floor at both 8 and 16 GPU.
   train_batch_size: 16
   policy_mini_batch_size: 16
   eval_batch_size: 16
@@ -192,7 +108,6 @@ trainer:
 
   max_prompt_length: 999999
 
-  # SMOKE: no eval, no checkpoint/HF saves (intervals > max_steps).
   eval_interval: 999999
   eval_before_train: false
   ckpt_interval: 999
@@ -204,11 +119,10 @@ trainer:
 
   enable_db_registration: false
 
-  # Logging — SMOKE: frequent (per-step) console logging.
   project_name: OpenThoughts-Agent
   log_level: INFO
   tracker_commit_each_step: true
-  logger: wandb  # CoreWeave has egress -> log to dogml/OpenThoughts-Agent (entity via WANDB_ENTITY, defaulted by launcher)
+  logger: wandb
 
   run_name: null
   ckpt_path: null
@@ -228,10 +142,6 @@ trainer:
       cpu_offload: false
       reshard_after_forward: true
 
-  # Model placement — colocate_all so policy/ref/engines share GPUs; ALL node/gpu
-  # counts null so the launcher derives them from --num_nodes / --gpus_per_node.
-  # This is what makes the smoke run unchanged at BOTH 1 node (8 GPU) and 2 nodes
-  # (16 GPU).
   placement:
     colocate_all: true
     policy_num_nodes: null
@@ -239,19 +149,14 @@ trainer:
     policy_num_gpus_per_node: null
     ref_num_gpus_per_node: null
 
-# Generator configuration (vLLM)
 generator:
   backend: vllm
   timeout_multiplier: 1.0
   model_dtype: bfloat16
 
-  # TP=1 divides both 8 and 16, so num_inference_engines (derived as
-  # total_gpus / TP) stays integral at both node counts.
   inference_engine_tensor_parallel_size: 1
-  # null => derived: (num_nodes * gpus_per_node) / TP = 8 (1 node) or 16 (2 nodes).
   num_inference_engines: null
 
-  # SMOKE: 2 samples/prompt x 8 prompts = 16 episodes/step.
   n_samples_per_prompt: 2
   eval_n_samples_per_prompt: 2
 
@@ -271,11 +176,9 @@ generator:
   enable_ray_prometheus_stats: false
   vllm_stats_interval: 1
   append_eos_token_after_stop_str_in_multi_turn: true
-  # SMOKE: cap agent turns so episodes terminate quickly.
   max_turns: 6
 
   sampling_params:
-    # SMOKE: short generations — fills the gen buffer in minutes.
     max_generate_length: 512
     temperature: 0.7
     top_p: 0.95
@@ -283,10 +186,8 @@ generator:
 
   engine_init_kwargs:
     max_model_len: 32768
-    # Relative path resolved against the in-container repo root (/app workspace).
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
 
-# Data paths (set via CLI --train_data / --val_data)
 data:
   train_data: []
   val_data: []

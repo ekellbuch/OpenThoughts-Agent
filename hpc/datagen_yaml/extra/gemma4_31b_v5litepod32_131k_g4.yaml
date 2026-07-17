@@ -1,17 +1,3 @@
-# G4: D4 stack (prefix + chunked + FP8 KV) on v5litepod-32 at 131k.
-#
-# Hardware: v5litepod-32 = 32 chips × 16 GB HBM = 512 GB total slice.
-# Full slice utilization via TP=8 DP=4 (four replicas of 8 chips each).
-# 2× total HBM vs v5litepod-16 (G3) and 2× vs v6e-8 (G1/G2). Per-replica
-# chip count stays at 8 to avoid the gemma4 TP>8 vision-tower failure.
-#
-# DP=4 is more ambitious than DP=2 (G3). If DP=2 fails on v5litepod-16
-# the same way it failed on v6e-16 (E1dp2), DP=4 here will fail too.
-# But if v5e backend handles multi-replica DP cleanly, this gives us 4×
-# parallel throughput vs G1.
-#
-# HBM accounting per chip (v5litepod-32, 16 GB) — identical to G3:
-#   weights ≈ 8 GB, KV FP8 seqs=2 ≈ 6.5 GB, act ≈ 1-2 GB → ~16 GB tight.
 
 env_vars:
   MODEL_IMPL_TYPE: auto

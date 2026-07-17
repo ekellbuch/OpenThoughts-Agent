@@ -1,9 +1,3 @@
-# Bounded-timeout eval harbor config — for FAST CoreWeave GPU-eval plumbing
-# smokes ONLY (not scoring parity). Identical to dcagent_eval_defaults.yaml
-# except each trial's agent is hard-capped at 900s (15 min) via
-# timeout_multiplier: 1.0 + agents[0].max_timeout_sec: 900, so a runaway
-# thinking rollout cannot exceed the smoke's job timeout. Use the canonical
-# dcagent_eval_defaults.yaml for real scoring.
 n_attempts: 3
 timeout_multiplier: 1.0
 orchestrator:

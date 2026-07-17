@@ -6,8 +6,8 @@ description: Run the Iris harbor job-history analyzer (scripts/iris/analyze_job_
 # analyze-job-history-iris
 
 > **📍 Iris orientation — read first.** Before acting on anything in this skill, read the Iris **tools
-> catalog** (`.claude/ops/iris/iris_tools.md`) and the Iris **ops directory** (`.claude/ops/iris/` — the
-> CoreWeave GPU particulars in `coreweave_gpu_ops.md`, the TPU `marin` particulars in `iris_job_lifecycle.md`).
+> catalog** (`.claude/ops/iris/ops.md`) and the Iris **ops directory** (`.claude/ops/iris/` — the
+> CoreWeave GPU particulars in `ops.md`, the TPU `marin` particulars in `ops.md`).
 > They carry the binding access/preamble/gotchas and the helper-script inventory the steps below rely on.
 
 `scripts/iris/analyze_job_history.py` pulls an Iris job's **complete** log from the **finelog** store
@@ -59,9 +59,9 @@ datagen job. So:
   == the cluster name; it resolves `cw-us-east-02a` automatically). Still run under the **marin venv** python.
   **⚠ CoreWeave needs R2 archive creds, NOT IAP.** On cw the live half uses a k8s tunnel (no `marin-login`),
   but the archive half reads `s3://marin-na/finelog/cw-us-east-02a` (R2 — this literal is the historical store;
-  the resolved root comes from `marin_prefix()`, see `.claude/ops/iris/coreweave_gpu_ops.md` §rendezvous) — creds the Mac lacks, so the run
+  the resolved root comes from `marin_prefix()`, see `.claude/ops/iris/ops.md` §rendezvous) — creds the Mac lacks, so the run
   crashes `FileNotFoundError: The specified bucket does not exist` unless you first source them from the
-  `iris`-ns secret. **Procedure: `.claude/ops/iris/finelog_r2_archive_creds.md`.**
+  `iris`-ns secret. **Procedure: `.claude/ops/iris/ops.md`.**
   **Also:** GPU-RL jobs have **no harbor trial sidecars**, so §2 is empty and most of the value is gone — for
   GPU-RL use **rl-job-health-deep-dive** instead. This analyzer is for **harbor-shaped jobs (datagen / agentic eval)**.
 - **Completeness sanity:** the run prints `[enumerate] N attempt(s)`, `[merge] live=… + gcs=… -> deduped=…`,

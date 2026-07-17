@@ -1,47 +1,11 @@
-# Harbor EVAL config — opencode installed agent, 32k context, Daytona (cloud).
-#
-# NET-NEW (2026-07-16): the ONLY prior opencode configs were DATAGEN
-# (hpc/harbor_yaml/datagen/opencode_ctx{32k,131k}.yaml) with the verifier
-# DISABLED. This is the opencode EVAL config — verifier ON (reward scored),
-# n_attempts 3, 32B-band timeout multiplier. Modeled on the installed-agent
-# eval template hpc/harbor_yaml/eval/eval_openhands_ctx32k_toolcall_skyrl_full.yaml,
-# with the agent swapped to opencode.
-#
-# HOW IT IS DELIVERED ON TACC: this file lives under hpc/harbor_yaml/eval/configs/
-# because on TACC/Leonardo the harbor `--config` is driven by the listener's
-# `--config-yaml` value (-> EVAL_CONFIG_YAML -> resolved from
-# hpc/harbor_yaml/eval/configs/ -> passed as `harbor jobs start --config`).
-# TACC does NOT consume EVAL_HARBOR_CONFIG (that is Jupiter-only), so the opencode
-# agents[] block must ride in the `--config-yaml` file, not `--harbor-config`.
-# Launch:  --config-yaml eval_opencode_ctx32k.yaml   (see the exp POLICY §3).
-#
-# MODEL ROUTING: opencode splits model_name into `provider/model`. The TACC sbatch
-# installed-agent branch injects agents[0].model_name = `vllm/<served_id>` at
-# runtime (a runtime config copy — harbor's `jobs start` ignores --model unless
-# --agent is also passed, which would wipe agents[]) and exports OPENAI_BASE_URL
-# (the pinggy tunnel) + OPENCODE_DUMMY_KEY. harbor registers the `vllm` provider
-# via "@ai-sdk/openai-compatible" (POST /v1/chat/completions) reading
-# baseURL/apiKey from those env vars (harbor agents/installed/opencode.py
-# _build_register_config_command). The placeholder below is overwritten at launch.
-#
-# TEMPERATURE: Qwen3-30B-A3B-Thinking-2507 ships temperature 0.6 in its
-# generation_config.json (the thinking-mode recommended sampling), which vLLM
-# honors by default when serving the raw HF weights — so temp 0.6 needs no
-# explicit override here (opencode/ai-sdk has no harbor temperature knob).
-# Thinking is native to the -Thinking- chat template (on by default).
 
 job_name: default-eval-job
 jobs_dir: trace_jobs
 n_attempts: 3
-# 32B-class (30B-A3B MoE) decodes its agentic rollout ~16x slower than an 8B; the
-# 16x multiplier matches dcagent_eval_defaults_32b.yaml so 32B rollouts do not
-# spuriously hit AgentTimeout -> deflated scores.
 timeout_multiplier: 16.0
 debug: false
 orchestrator:
   type: local
-  # Overridden at runtime by `harbor jobs start --n-concurrent` (the TACC sbatch
-  # clamps the preset value to the Vista GPU-bound ceiling, currently 8).
   n_concurrent_trials: 8
   quiet: false
   plain_output: true
@@ -78,8 +42,6 @@ environment:
   type: daytona
   force_build: true
   delete: true
-  # opencode installs node/nvm + the opencode CLI inside the sandbox, so give it
-  # more headroom than the terminus-2 default.
   override_cpus: 2
   override_memory_mb: 8192
   override_storage_mb: 8192
@@ -92,23 +54,14 @@ verifier:
 agents:
 - name: opencode
   import_path: null
-  # Overwritten at runtime by the TACC sbatch -> vllm/<served_id>.
   model_name: vllm/override-at-runtime
   max_timeout_sec: null
   override_setup_timeout_sec: 600
   kwargs:
-    # Per-job opencode.json overrides, deep-merged into the agent's generated
-    # config (harbor agents/installed/opencode.py _deep_merge, unvalidated
-    # passthrough). compaction.{auto,reserved} keeps the growing agent history
-    # under the 32k window. NOTE (launch-time observable): harbor does not
-    # validate this against the pinned opencode-ai schema — confirm the opencode
-    # CLI accepts `compaction.{auto,reserved}` on the first live run.
     opencode_config:
       compaction:
         auto: true
         reserved: 16384
-    # Harmless if unused by opencode (base agent swallows unknown kwargs); kept
-    # for parity with the installed-agent eval template.
     model_info:
       max_input_tokens: 32768
       max_output_tokens: 16384

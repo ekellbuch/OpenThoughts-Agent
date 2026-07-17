@@ -1,22 +1,9 @@
-# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs - TEST: TACC GH200 optimized settings
-# Based on: qwen3_8b_16GPU_thinking_bs64_group8_async_rloo_n_noct_strict_micro2x4_autosnap_console_v9_base_workers_noblock.yaml
-#
-# TEST VARIANT: Apply settings that work well on TACC Vista (also GH200)
-#   - kv_cache_dtype: fp8 (reduces KV cache memory by ~50%)
-#   - block_size: 16 (smaller blocks, better memory management)
-#   - max_num_partial_prefills: 1 (limits concurrent partial prefills)
-#   - gpu_memory_utilization: 0.80 (lower utilization helped)
-#
-# These settings are proven to work on GH200 at TACC with larger models.
 
-# SkyRL entrypoint module
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# Hydra config groups (+ prefix in CLI)
 config_groups:
   terminal_bench_config: terminal_bench
 
-# Terminal bench / agentic environment settings
 terminal_bench:
   trials_dir: null
 
@@ -29,7 +16,6 @@ terminal_bench:
     record_terminal_session: false
     enable_pane_logging: false
     strict_json_parser: true
-    # Interleaved Thinking Settings
     interleaved_thinking: true
     extra_body:
       chat_template_kwargs:
@@ -147,7 +133,6 @@ generator:
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
 
-  # TEST CHANGE: Lower GPU memory (helped in previous test)
   gpu_memory_utilization: 0.80
 
   max_num_seqs: 32
@@ -172,14 +157,10 @@ generator:
     top_p: 0.95
     top_k: -1
 
-  # TEST CHANGES: TACC GH200 optimized settings
   engine_init_kwargs:
     max_model_len: 32768
-    # FP8 KV cache - reduces memory by ~50%, proven on GH200
     kv_cache_dtype: fp8
-    # Smaller block size - better memory management on unified memory
     block_size: 16
-    # Limit concurrent partial prefills
     max_num_partial_prefills: 1
 
 data:

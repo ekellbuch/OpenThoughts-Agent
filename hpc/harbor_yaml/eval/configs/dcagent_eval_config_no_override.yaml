@@ -1,5 +1,3 @@
-# Harbor eval config (no-override variant for swebench/tb2)
-# NOTE: jobs_dir is NOT set here — it's passed via `--jobs-dir` CLI flag.
 n_attempts: 3
 timeout_multiplier: 1.0
 orchestrator:
@@ -23,11 +21,6 @@ orchestrator:
 environment:
   type: daytona
   force_build: true
-  # delete the sandbox on stop (2026-06-28 leak-fix safety net): the single-container Direct
-  # stop() skips delete() when this is false, so any sandbox that falls back to the non-snapshot
-  # image path (non-ephemeral, auto_delete_interval=0) would leak forever. The auto_snapshot
-  # forwarding in eval_harbor.sbatch is the primary fix (snapshot path -> ephemeral auto-delete);
-  # this is belt-and-suspenders for the from-scratch fallback.
   delete: true
 verifier:
   max_timeout_sec: 14400
@@ -46,14 +39,6 @@ agents:
       proactive_summarization_threshold: 2048
       metrics_endpoint: https://replace-with-vllm-host/metrics
       metrics_timeout_sec: 10
-      # litellm PER-REQUEST timeout (seconds). Raised 600 (litellm default) -> 1800
-      # for the tmax-27b DP2xTP2 ID-eval relaunch (2026-06-24). The default 600s
-      # aborted a single 16k-token thinking generation that needed ~1,550s at the
-      # old TP=4 per-stream rate (~10 tok/s) -> ~2,900 litellm timeouts + a
-      # summarization spiral. terminus-2's `llm_kwargs` flows into LiteLLM(**kwargs)
-      # -> spread into every litellm.acompletion() call (harbor llms/lite_llm.py
-      # _build_base_kwargs). 1800 is a safe headroom for slow large-model decode and
-      # harmless for fast small models (they finish well under it).
       llm_kwargs:
         timeout: 1800
       model_info:

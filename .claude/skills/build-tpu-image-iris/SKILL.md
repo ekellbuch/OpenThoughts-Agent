@@ -15,14 +15,14 @@ description: >-
   smoke), capturing the digest, monitoring, and WHEN a rebuild is required vs a runtime `/app` bundle sync.
   Use when asked to build / rebuild / push the `:tpu` image, or after bumping harbor / the [datagen-tpu]
   resolve / vLLM-TPU. Reference: docker/Dockerfile.tpu, docker/build_tpu_kaniko.sh, the sibling
-  build-gpu-rl-image-iris skill, .claude/ops/iris/iris_job_lifecycle.md.
+  build-gpu-rl-image-iris skill, .claude/ops/iris/ops.md.
 ---
 
 # build-tpu-image-iris
 
 > **📍 Iris orientation — read first.** Before acting on anything in this skill, read the Iris **tools
-> catalog** (`.claude/ops/iris/iris_tools.md`) and the Iris **ops directory** (`.claude/ops/iris/` — the
-> CoreWeave GPU particulars in `coreweave_gpu_ops.md`, the TPU `marin` particulars in `iris_job_lifecycle.md`).
+> catalog** (`.claude/ops/iris/ops.md`) and the Iris **ops directory** (`.claude/ops/iris/` — the
+> CoreWeave GPU particulars in `ops.md`, the TPU `marin` particulars in `ops.md`).
 > They carry the binding access/preamble/gotchas and the helper-script inventory the steps below rely on.
 
 > **⚠ Local clone = ground truth.** ALL `Dockerfile.tpu` / `build_tpu_kaniko.sh` edits go in the local Mac
@@ -60,7 +60,7 @@ is consumed by every datagen/eval launch (`data/cloud/launch_tracegen_iris.py`, 
   wheel-packaging step.
 - **Cluster:** run on **`cw-us-east-02a`** (proven kaniko + ghcr-egress + kubeconfig path; the TPU image is a
   plain amd64 CPU build so it does not need the marin TPU cluster). `KUBECONFIG=~/.kube/coreweave-iris-gpu`
-  and the **otagent-env iris binary** are hard prereqs (see `.claude/ops/iris/coreweave_gpu_ops.md`).
+  and the **otagent-env iris binary** are hard prereqs (see `.claude/ops/iris/ops.md`).
 
 ## 1. Mechanism (crane-export kaniko) — what `build_tpu_kaniko.sh` does
 
@@ -303,6 +303,6 @@ Do **NOT** rebuild the image to deploy:
   campaign tracker Runtime block + rollback digest after a promote.
 - **Shared kaniko mechanics (deep reference):** `build-gpu-rl-image-iris` SKILL §1 (kaniko-not-buildkit),
   §2 (crane-export + ghcr creds + `SINGLE_SNAPSHOT=0`), §6 (build-asserts-as-validation).
-- **Cluster access / kubeconfig / iris-binary:** `.claude/ops/iris/coreweave_gpu_ops.md`.
-- **TPU datagen lifecycle / preemption / resume:** `.claude/ops/iris/iris_job_lifecycle.md`.
+- **Cluster access / kubeconfig / iris-binary:** `.claude/ops/iris/ops.md`.
+- **TPU datagen lifecycle / preemption / resume:** `.claude/ops/iris/ops.md`.
 - **Code:** `docker/Dockerfile.tpu`, `docker/build_tpu_kaniko.sh`, `scripts/iris/watch_job_state.py`.

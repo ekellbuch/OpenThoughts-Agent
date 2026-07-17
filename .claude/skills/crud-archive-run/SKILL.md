@@ -55,7 +55,7 @@ them. Verify the tarball is non-empty + lists the expected trees (`tar tzf … |
   OR pod-local `/app/experiments/<run>/trace_jobs` (EPHEMERAL → grab before pod GC via
   `scripts/iris/peek_rl_rollouts.sh <pod> cp`). Full log = `iris … job logs --since-ms <submit> --no-tail`
   (finelog keeps init→crash). ray logs + `vllm.log` are pod-local (exec/peek). wandb online (record URL).
-  Details: `.claude/ops/iris/coreweave_gpu_ops.md`, `.claude/projects/marinskyrl/`.
+  Details: `.claude/ops/iris/ops.md`, `.claude/projects/marinskyrl/`.
 - **SFT (LLaMA-Factory / axolotl, SLURM)** — `.out` per-step logs at `experiments/<job>/logs/*.out`,
   `trainer_log.jsonl`, rendered config, wandb. Weights → HF (SKIP). Log path via `scontrol show job <id> -o`
   `StdOut=`/`%Z`. Details: `.claude/projects/{llama-factory,axolotl}/`, the cluster ops doc.

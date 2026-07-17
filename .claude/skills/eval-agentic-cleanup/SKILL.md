@@ -13,78 +13,37 @@ description: >-
 
 # eval-agentic-cleanup
 
-Normal evals auto-upload their traces + auto-register in Supabase on completion — but "the score is in the
-leaderboard" does NOT mean the eval is complete. **Always start with the read-only audit (§0)** to verify
-the four things that actually matter, then run only the remediations it flags. The auto-harvest path is
-known to land a score while silently skipping trace upload, or to record a bogus 0 from an eval that never
-reached the model — the audit catches both.
+Always start with the read-only audit (§0): it verifies the four conditions that actually matter, then run only the remediations it flags. "The score is in the leaderboard" does NOT mean the eval is complete — the auto-harvest path can land a score while silently skipping trace upload, or record a bogus 0 from an eval that never reached the model.
 
-## 0. Read-only completeness + health AUDIT — ALWAYS run first (idempotent, ZERO writes)
-Safe to run any time, repeatedly — it only reads (sacct, run-dir `result.json`, HF API, Supabase **reads**).
-It does NOT upload, register, mutate, or delete. For each eval `(slurm_job_id, model, benchmark)` check the
-four conditions and emit a per-eval verdict + recommended action; only then run the flagged remediation(s).
+## 0. Read-only completeness + health AUDIT — run first (idempotent, ZERO writes)
 
-**Pre-gate — is it EXEMPT?** grid / throughput / OOM-test **measurement** runs targeting `DCAgent2/*` →
-audit not needed (upload only production winners). Skip.
+Reads only (sacct, run-dir `result.json`, HF API, Supabase reads). Emits a per-eval verdict + recommended action per check; run only the flagged remediations.
+
+**Pre-gate — EXEMPT:** grid / throughput / OOM-test measurement runs targeting `DCAgent2/*` → skip (upload only production winners).
 
 | # | Check | How (read-only) | PASS | If it FAILS → recommend |
 |---|---|---|---|---|
-| 1 | **Job finished** | `sacct -j <id> -X -o State` | `COMPLETED` | `RUNNING`/`PENDING` → wait & re-audit later; `FAILED`/`TIMEOUT`/`CANCELLED` → diagnose + relaunch (see `eval-agentic-launch` gotchas #1–#5: `jobs_dir` perm / `hosted_vllm` 2-slash / `model_info` / reservation / stale-row) |
-| 2 | **Score present & not obviously broken** | Supabase `sandbox_jobs` score (read), or run-dir `result.json` → `stats.evals.<k>.metrics[0].mean` | non-null real number; a `0` is OK *only* if check 4 shows trials actually ran (POSTs flowed) | null / missing / **`0` with ~0 trials or ~0 vLLM POSTs** = infra-broken (the eval never reached the model — classic `jobs_dir`/`hosted_vllm`/`model_info` failure) → **re-run**, don't trust the 0. **Also suspect INFLATION:** see the `VerificationNotCompletedError` note in check 4 — a high rate there means the score is biased UP. |
+| 1 | **Job finished** | `sacct -j <id> -X -o State` | `COMPLETED` | RUNNING/PENDING → wait & re-audit; FAILED/TIMEOUT/CANCELLED → diagnose + relaunch (see `eval-agentic-launch` gotchas #1–#5: `jobs_dir` perm / `hosted_vllm` 2-slash / `model_info` / reservation / stale-row) |
+| 2 | **Score present & not broken** | Supabase `sandbox_jobs` score, or run-dir `result.json` → `stats.evals.<k>.metrics[0].mean` | non-null real number; `0` OK only if check 4 shows trials ran | null/missing/`0` with ~0 trials/POSTs = infra-broken (eval never reached the model — classic `jobs_dir`/`hosted_vllm`/`model_info` failure) → re-run. High `VerificationNotCompletedError` rate → score may be biased (note below). |
+| 3 | **HF traces present + linked** | trace HF repo exists + non-empty (HF API 200) AND DB/LB row has trace/url field set | repo 200 AND linked | missing/empty OR unlinked → upload traces + register link (§1–§3) |
+| 4 | **VALID trial count (PARSE, don't file-count)** | Parse each per-trial `result.json` for a numeric reward (snippet below). An errored trial STILL writes `result.json` with `exception_info` and no reward, so file-count overstates coverage. | VALID ≥ ~90% of `n_rep_eval × benchmark_size` | short on VALID (<~90%, a missing rep, or high hard-error 15–25%) → resume errored trials (re-submit SAME eval/run-tag; Jupiter sbatch auto-calls `harbor jobs resume --filter-error-type …`). Expected: swebench-verified-random-100=100, dev_set_v2=100, terminal_bench_2=89; × `n_rep_eval` (default 3) → ~300/~300/~267. |
 
-> **⚠️ `VerificationNotCompletedError` (no-reward trials) — the bias depends on WHICH score path you read (verified empirically 2026-06-17):**
-> - **harbor's internal `JobStats` mean** (`stats.evals.*.metrics[0].mean_reward`; `JobStats.increment` only counts reward-bearing trials in `n_trials`) **DROPS no-reward trials from the denominator → biased UP** (looks better than reality).
-> - **the DB/leaderboard auto-harvest path**, however, was observed to register with the **full /300 denominator** (masked trials counted as **0**) — so the leaderboard number was NOT inflated in the 2026-06-17 cohort. Don't assume the leaderboard is up-biased; check whether the registered `n_trials`/denominator is the full count or the reward-bearing count for the path that produced the row.
-> - **Either way, resuming is worth it** — the payoff is usually **recovering real passes hidden as 0s**, not "fixing inflation" (verified 2026-06-17: VNC-resume of 5 swebench evals re-ran ~198 relabeled trials and accuracy **rose** in all five). So: a non-trivial VNC rate means the score is **untrustworthy** (could be inflated in harbor-mean terms, or hiding recoverable passes) → resume on a healthy sandbox.
-> This trial state (harbor 9203989f) = the verifier never produced a result (e.g. `AddTestsDirError` on a sandbox left degraded by a 3000 s agent timeout); reward is absent. Pre-9203989f these were mislabeled `AgentTimeoutError`; **discriminate by reward presence, not the label** (legitimately-scored-after-timeout trials DO have a reward).
->
-> **Handle no-reward classes differently (the bias direction depends on WHY the trial is missing):**
-> - **`AgentTimeoutError`/`VerificationNotCompletedError` = informative missingness (MNAR):** missing *because* the agent burned its budget without solving → true score ≈ 0 (SWE-bench is ~pass/fail; a timeout rarely hides a pass). Dropping them → up-bias. Repair: **impute 0 *or* re-run** (both ≈0).
-> - **Infra errors (`DaytonaAuthenticationError`/`DaytonaValidationError`/etc.) = ~ignorable missingness (MAR/MCAR):** failure uncorrelated with solvability → dropping is ~unbiased (just lowers N). Repair: **re-run for completeness only — do NOT impute 0** (that introduces a down-bias). Lower priority.
-| 3 | **HF traces present + linked** | trace HF repo exists + non-empty (`hf` API 200) AND the eval's DB/LB row has the trace/url field set | repo 200 **and** linked | repo missing/empty OR unlinked → **upload traces + register the link** (§1–§3) |
-| 4 | **VALID trial count (PARSE, don't file-count)** | **Parse** each per-trial `result.json` for a numeric reward — do NOT `ls`/`find | wc -l` (an errored trial STILL writes a `result.json`, just with `exception_info` and no reward, so a file count overstates coverage). Count VALID vs ERRORED per eval — see the snippet below. | VALID ≥ ~90% of `n_rep_eval × benchmark_size` | materially short on VALID (<~90%, a whole rep missing, OR a high hard-error rate like 15–25%) → **resume the errored trials** by re-submitting the SAME eval (same run-tag): the Jupiter sbatch auto-calls `harbor jobs resume --filter-error-type …` (keeps valid trials, re-runs the filtered error classes). First check the error TYPES (aggregate `result.json` → `exception_stats`); if they're outside the Jupiter sbatch's filter list (`EnvironmentStartTimeoutError`/`DaytonaError`/`DaytonaRateLimitError`/**`VerificationNotCompletedError`**), widen it — see `.claude/projects/harbor/harbor.md` "Resume". Expected: swebench-verified-random-100=100, dev_set_v2=100, terminal_bench_2=89; × `n_rep_eval` (default 3) → ~300/~300/~267. **`AgentTimeoutError` WITH a reward is a passthrough VALID 0 (verifier scored it) — don't filter/re-run those.** But an `AgentTimeoutError` (or, post-9203989f, `VerificationNotCompletedError`) **with NO reward** is the verifier-never-completed state from the check-2 note — it **biases accuracy UP**, so it IS retriable: resume it. Discriminate by reward presence, not the bare label. |
+Output one row per eval: `✅/⚠️` per check + the single recommended next action. **Re-run the audit after any remediation** to confirm ✅.
 
-Output one row per eval: `✅/⚠️` per check + the single recommended next action. **Re-run the audit after any
-remediation** to confirm it flipped to ✅ (that's what makes the whole skill idempotent — the audit is the
-source of truth, the remediations below are the only side-effecting parts and you run them deliberately).
+### No-reward trial classes (VNC / infra errors) — bias direction
+- **`VerificationNotCompletedError` (harbor 9203989f) / pre-fix `AgentTimeoutError` WITH NO reward** = the verifier never produced a result. Missing *because* the agent burned its budget → true score ≈ 0 (SWE-bench ~pass/fail). Harbor's `JobStats` mean DROPS these from the denominator → biased UP; the DB/leaderboard harvest counts them as 0 → unbiased. Either way retriable: resume on a healthy sandbox — the payoff is usually recovering real passes hidden as 0s.
+- **Infra errors (`DaytonaAuthenticationError`/`DaytonaValidationError`/etc.)** = failure uncorrelated with solvability → dropping is ~unbiased (lowers N). Re-run for completeness only; do NOT impute 0.
+- **`AgentTimeoutError` WITH a reward** = verifier scored it → passthrough VALID 0. Don't filter/re-run.
+- **Discriminate by reward presence, not the error label.**
 
-> **⚠️ <90% COMPLETE → RESUME, do NOT REGISTER (and DE-REGISTER if it slipped through).** Check 4 is the gate: an eval
-> whose VALID-trial count is **< ~90%** of the planned `n_rep × benchmark_size` (e.g. swebench-100=300, tb2=267, dev_set_v2=300)
-> is **INCOMPLETE** — it must be **RESUMED to completion** (the Check-4 resume below), **NOT registered.** A partial score on the
-> leaderboard is worse than no score — it silently MIS-RANKS the model. So **never run §1's register/upload on a <90% eval**, and
-> never treat a job that terminated (TIMEOUT/CANCELLED) at <90% as "done to clean up." **If the eval was AUTO-registered while
-> still <90%** — a lingering `Pending`/`Started` row, OR a prematurely-`Finished` partial row the auto-harvest wrote — **DE-REGISTER
-> it: delete that ONE row** so it doesn't pollute the leaderboard; it re-registers cleanly when the resume finishes. (≥90% / a
-> ~99% tail-short is fine to finalize + register normally.)
->
-> **🔑 Before de-registering, apply the cross-user FK-safety rule (§Remediations):** query ALL rows for the
-> `(model × benchmark)` pair, disambiguate by `created_at`+`username`, delete ONLY your own partial/stale row.
-> **NEVER delete a complete (≥90% `Finished`) row, a newer good row, or ANY other user's row** because a partial
-> sibling exists. Skip a candidate whose slurm job is still RUNNING (a live eval or an in-flight resume).
+### <90% COMPLETE → RESUME, do NOT REGISTER (and DE-REGISTER if it slipped through)
+An eval whose VALID-trial count is < ~90% of planned `n_rep × benchmark_size` (swebench-100=300, tb2=267, dev_set_v2=300) is INCOMPLETE → RESUME to completion (Check-4 resume), NOT register. A partial score silently MIS-RANKS the model. If the auto-harvest already registered a partial (`Pending`/`Started`, or a prematurely-`Finished` partial) → DE-REGISTER that ONE row (cross-user FK-safe per §Remediations); it re-registers cleanly on resume. ≥90% / a ~99% tail-short is fine to finalize. **Never run §1's register/upload on a <90% eval.** Skip a candidate whose slurm job is still RUNNING.
 
-> **📐 The leaderboard's `Errors:` field = the EXACT incompleteness metric.** "errors > 10%" is the right partial-eval
-> test *because this field already EXCLUDES the benign passthrough error types*. **Do NOT restate the formula or the
-> BENIGN set here — compute it via the ONE authoritative utility** `OpenThoughts-Agent/scripts/database/eval_guardrail.py`
-> (`guardrail_counts(stats, planned).invalid_error_count`), the Python port of the leaderboard's guardrail
-> (`OT-Agent-Leaderboard server/storage.ts:416-449`, the `Errors: {invalidErrorCount}` badge). Hand-restating the BENIGN
-> set is how the sibling copies drifted (a wrong member). Then: **error-fraction = `invalid_error_count / total_attempted`;
-> a row is an incomplete partial (→ de-register + resume) iff error-fraction > 10%.** (The leaderboard badges the raw
-> count at `>10`.)
-> **🚩 HARD GATE (2026-06-29 user directive) — the 10% line is NOT a fuzzy barrier.** There is NO "borderline" /
-> "just over" / "close enough" discretion: error-fraction 10.1% fails exactly like 30%. A >10% eval **does not
-> belong in the database** — (a) if you are HARVESTING it, do NOT register/finalize until a resume brings
-> error-fraction ≤ 10%; (b) if the auto-pipeline ALREADY registered it, **DE-REGISTER it** (FK-safe, your own
-> row) — do NOT "flag the partial and leave it because it's already finalized." The only exception is an explicit, logged user grandfather of a specific already-pushed row.
-> ⚠️ **Do NOT re-derive this as a naive "no-reward / valid-reward<90%" count** — that wrongly folds in the benign
-> passthroughs (AgentTimeout etc., which ARE scored 0/1) and massively over-flags near-complete evals as partial
-> (2026-06-29 audit: 13 rows tripped the raw `>10` *count* but only **4** exceeded the `>10%` *fraction*). Always use THIS formula.
+### >10% error-fraction HARD GATE — the authoritative metric
+Compute via the ONE utility `scripts/database/eval_guardrail.py` (`guardrail_counts(stats, planned).invalid_error_count`), the Python port of the leaderboard guardrail (`OT-Agent-Leaderboard server/storage.ts:416-449`). It EXCLUDES the benign passthrough error types — never hand-restate the BENIGN set (that's how sibling copies drifted). **error-fraction = invalid_error_count / total_attempted; a row is an incomplete partial (→ de-register + resume) iff > 10%.** There is NO "borderline"/"close enough" discretion: 10.1% fails like 30%. Do NOT re-derive as a naive "no-reward / valid-reward<90%" count — that folds in the benign passthroughs and over-flags near-complete evals. Exception: an explicit, logged user grandfather of a specific already-pushed row.
 
 ### Check 4 — counting VALID trials (parse, never file-count) — STANDARD report element
-Trial dirs live at `eval_jobs/eval-<safe_model>_<safe_dataset>/<task>__<id>/result.json` (depth-1 under the
-run dir; the run-dir-root `result.json` is the aggregate — exclude it via the `*/` glob). Each per-trial
-`result.json` has `verifier_result.rewards.reward` (the metric) and `exception_info` (set on error). A trial
-is **VALID** iff `reward` is a finite number; otherwise **ERRORED** (no reward — Daytona/infra/non-passthrough
-exception). One pass over all evals (run from the `otagent` env python, read-only, ~1 min for 21×~300):
+Trial dirs at `eval_jobs/eval-<safe_model>_<safe_dataset>/<task>__<id>/result.json` (depth-1; the run-dir-root `result.json` is the aggregate — exclude via the `*/` glob). A trial is VALID iff `reward` is finite; else ERRORED. One pass over all evals (otagent env, read-only, ~1 min):
 ```python
 import glob, json
 EJ='/e/data1/datasets/playground/ot-baf/eval_jobs'
@@ -99,42 +58,17 @@ for tag, exp in EVALS:
         else: err+=1                             # no reward = ERRORED (hard infra/exception)
     print(f'{tag}: valid={valid} err={err} total={valid+err} / exp {exp}')
 ```
-**Always include the valid/errored/expected matrix in the agent report** — a bare file count is NOT
-acceptable evidence of completeness (it hides errored trials). Flag any eval whose ERRORED rate is high
-(≳10–15%) as a re-run candidate + note the score may be deflated if those errors scored 0.
+**Always include the valid/errored/expected matrix in the report.** Flag any eval with ERRORED rate ≳10–15% as a re-run candidate.
 
-### Check 4 — resuming the errored trials (`resume_chunked.py`; Cat-3 swe-agent needs the Pinggy tunnel)
-Resume re-runs only the errored trials of the SAME run dir (keeps valid trials). The standard chunked driver
-is **`eval/resume_chunked.py`**, which fires one `unified_eval_listener.py --resume-only --force-reeval`
-invocation per chunk. **You MUST restate the same sizing/yaml/conda-env/Pinggy you used on the original
-fire** — the per-chunk listener flag set must match the original or Harbor errors on the `config.json`
-conflict.
+### Check 4 — resuming errored trials (`resume_chunked.py`)
+Resume re-runs only the errored trials of the SAME run dir (keeps valid trials). Standard driver: **`eval/resume_chunked.py`** → one `unified_eval_listener.py --resume-only --force-reeval` per chunk. **Restate the same sizing/yaml/conda-env/Pinggy from the original fire** or Harbor errors on the `config.json` conflict.
 
-- **`--force-reeval` (NOT `--force-eval`)** is what resume mode uses, and it is a **distinct flag** from the
-  launch-time `--force-eval` (gotcha #6 in `eval-agentic-launch` — that one bypasses the *dedup* in
-  `should_start_job`). `--force-reeval` bypasses the DB status check (re-submits even on a `Finished`/`Started`
-  row) AND, as of PR #31, **bypasses the `active_pairs` resume filter** — needed when an active job for the
-  same `(model, dataset)` uses a *different scaffold* than the resume target, so the pair-collision would
-  otherwise be a false positive that silently drops the resume. `resume_chunked.py` always passes it.
-- **`--once` + `--batch-size` interaction (PR #31 fix):** in `--once` mode with many models per priority file,
-  freshly-submitted JIDs are now folded into `active_ids` as they submit, so the sliding-window `--batch-size`
-  dependency chain actually takes effect. Before the fix `active_ids` was snapshotted before the submit loop,
-  so `--batch-size` was silently a no-op in `--once` mode.
+- **`--force-reeval` (NOT `--force-eval`)** — resume-mode flag; distinct from launch-time `--force-eval` (which bypasses dedup in `should_start_job`). Bypasses the DB status check AND the `active_pairs` resume filter (needed when an active job for the same pair uses a different scaffold).
+- **`--once` + `--batch-size`** — in `--once` mode, freshly-submitted JIDs fold into `active_ids` as they submit, so the sliding-window `--batch-size` chain takes effect.
 
-**Cat-3 swe-agent (installed-harness) resume — MUST start a Pinggy tunnel.** Cat-3 = a preferred-harness
-reproduction (`dcagent_eval_config_swe_agent.yaml`, swe-agent/openhands/mini-swe-agent) where the sandboxed
-agent calls back to the served model over a public **Pinggy** tunnel. The OLD resume path only sed-rewrote
-the stale Pinggy URL into the dir's `config.json` but **did not start a tunnel** → every post-resume trial
-hit `[Errno 111] Connection refused` (100% trial failure; pre-resume ~50% → post-resume ~0%, confirmed on
-JIDs 581168/581169/581170 and 668150/158/165). **PR #31 fixes this:** the resume branch of
-`eval/jupiter/eval_harbor.sbatch` now starts the Pinggy SSH tunnel (gated on `EVAL_PINGGY_URL`) and exports
-`OPENAI_API_BASE`/`OPENAI_BASE_URL` (+ openhands `LLM_BASE_URL`/`LLM_API_KEY`, mini-swe-agent
-`MSWEA_*`/`HOSTED_VLLM_API_BASE`) so the sandboxed agent uses the PUBLIC tunnel URL, not the localhost
-`api_base` saved in `config.json`. **So a Cat-3 resume MUST pass the four passthroughs** so the tunnel +
-agent config survive into the new fire (these are `resume_chunked.py` args, forwarded to the listener;
-note the hyphens — distinct from the launch-mode underscored `--pinggy_persistent_url`/`--pinggy_token`):
+**Cat-3 swe-agent (installed-harness) resume — MUST start a Pinggy tunnel.** Cat-3 = preferred-harness reproduction (`dcagent_eval_config_swe_agent.yaml`, swe-agent/openhands/mini-swe-agent) where the sandboxed agent calls back to the served model over a public **Pinggy** tunnel. The resume branch of `eval/jupiter/eval_harbor.sbatch` starts the Pinggy SSH tunnel (gated on `EVAL_PINGGY_URL`) and exports `OPENAI_API_BASE`/`OPENAI_BASE_URL` (+ openhands `LLM_BASE_URL`/`LLM_API_KEY`, mini-swe-agent `MSWEA_*`/`HOSTED_VLLM_API_BASE`). A Cat-3 resume MUST pass the four passthroughs (note hyphens — distinct from launch-mode `--pinggy_persistent_url`/`--pinggy_token`):
 ```bash
-# otagent env, in tmux. Single Pinggy pair PER invocation (one chunk per free pair for multi-model batches).
+# otagent env, in tmux. One Pinggy pair PER invocation (one chunk per free pair for multi-model batches).
 python eval/resume_chunked.py \
   --csv /tmp/resume_cands.csv --preset swebench --org eval \
   --tp-size 2 --dp-size 2 --timeout-multiplier 16.0 \
@@ -146,97 +80,56 @@ python eval/resume_chunked.py \
   --agent-parser '' \
   --chunk-size 4 --sleep-between 120
 ```
-- `--config-yaml` = the Harbor config (scaffold/parser selection); `--agent-parser ''` (empty string) =
-  disable the parser for swe-agent (it doesn't use one). Both flow to the sbatch on resume.
-- Pinggy pair URL+token are privileged — read a FREE pair from `.claude/secret.md` / `pinggy_bank.md`
-  (`eval-agentic-launch` §2). `resume_chunked.py` is single-pair per invocation; fire one chunk per pair.
-- **terminus-2 resumes leave `EVAL_PINGGY_URL` empty** → the tunnel block is a no-op for them (they reach
-  the model via the normal sbatch path); only Cat-3 installed-harness resumes set the Pinggy flags.
+- `--config-yaml` = Harbor config (scaffold/parser); `--agent-parser ''` = disable parser for swe-agent.
+- Pinggy pair URL+token privileged — read a FREE pair from `.claude/secret.md`/`pinggy_bank.md`.
+- **terminus-2 resumes leave `EVAL_PINGGY_URL` empty** → tunnel block is a no-op (they use the normal sbatch path); only Cat-3 installed-harness resumes set the Pinggy flags.
 
-> **swe-agent retry-policy change (PR #31, `dcagent_eval_config_swe_agent.yaml`) — changes swe-agent scoring.**
-> Aligned to the M1 parity run (SERA-32B 48.67%): `ContextLengthExceededError` / `BadRequestError` /
-> `AgentEnvironmentTimeoutError` / `SummarizationTimeout` are now **RETRIED** (no longer terminal) — important
-> for long-output SERA checkpoints that overflow 32k context then recover on retry. Newly **terminal**:
-> `VerifierOutputParseError` / `RewardFileEmptyError` / `RewardFileNotFoundError`. A wrapup-era drift had made
-> the first set terminal, which suppressed scores vs the parity run; this restores M1 parity. So a swe-agent
-> resume scored under the new policy is NOT directly comparable to one scored under the old (drifted) config.
+> **swe-agent retry-policy** (`dcagent_eval_config_swe_agent.yaml`, aligned to M1 SERA-32B 48.67%): `ContextLengthExceededError`/`BadRequestError`/`AgentEnvironmentTimeoutError`/`SummarizationTimeout` are RETRIED; `VerifierOutputParseError`/`RewardFileEmptyError`/`RewardFileNotFoundError` are terminal. A resume scored under this policy is NOT comparable to one scored under the old drifted config.
 
-> **Offline-first pre-download (PR #31):** the sbatch now tries `snapshot_download(local_files_only=True)`
-> first (the HF cache may be read-only for the current user when the Hub HEAD advanced past the cached
-> snapshot — fetching into a foreign-owned cache dir fails with `PermissionError`) and only falls back to an
-> online fetch if the model isn't cached. The Pinggy SSH-out is prefixed with proxychains so it can egress
-> from no-internet compute nodes. If you previously saw a ~300s pre-download hang, the listener's pre-download
-> wedge fix (ThreadPoolExecutor `shutdown(wait=False)`, `etag_timeout=120`, 600s hard cap) addresses it.
+> **Offline-first pre-download:** sbatch tries `snapshot_download(local_files_only=True)` first (HF cache may be read-only when HEAD advanced past the cached snapshot), falls back to online. Pinggy SSH-out is prefixed with proxychains to egress from no-internet nodes. (etag_timeout=120, 600s hard cap on the pre-download wedge.)
 
 ---
-# Remediations — the §0 audit scopes which to run (idempotent; re-run §0 after to confirm ✅)
-The §0 audit is read-only; the steps below **do write** — and that's expected: **HF trace upload + Supabase
-registration are normal, sanctioned operations of this skill**, not something to avoid. The audit just tells
-you *which* are needed so you don't redo finished work or clobber a good row. (Check-4 "re-run/resume missing
-trials" is a relaunch — see `eval-agentic-launch` — not one of the steps below.)
+# Remediations — the §0 audit scopes which to run (re-run §0 after to confirm ✅)
+HF trace upload + Supabase registration are normal, sanctioned operations — run the ones the audit flags.
 
 ### Cross-user FK safety — REQUIRED before EVERY write (update / delete)
-The same `(model × benchmark)` pair can have MULTIPLE `sandbox_jobs` rows — `Pending`+`Finished`, reruns, a resume
-that minted a new row, sibling `model_id`s, AND other users' rows. So before ANY mutation (`sandbox_jobs` /
-`sandbox_trial_model_usage` / `models` / `benchmarks`): **query ALL rows for the pair, disambiguate by `created_at` +
-`username`, and assert the target row is yours** (`username == me`; your usernames: feuer1/bfeuer00/penfever/
-benjaminfeuer). Scope every update/delete to `id`+`username`. **NEVER mutate or delete another user's row** — that
-is exactly the cross-user mutation that broke `zhuang1`'s eval jobs (2026-05-26). When you can't tell which row is
-the partial/yours → **STOP and surface, do not guess.** (An INSERT of a new own row is fine and never touches theirs
-— see the standing rule in §1.) The per-section snippets below each operationalize this with their own `assert`.
+The same `(model × benchmark)` pair can have MULTIPLE `sandbox_jobs` rows (reruns, resumes, sibling `model_id`s, AND other users' rows). Before ANY mutation (`sandbox_jobs`/`sandbox_trial_model_usage`/`models`/`benchmarks`): **query ALL rows for the pair, disambiguate by `created_at` + `username`, assert the target row is yours** (`username == me`; your usernames: feuer1/bfeuer00/penfever/benjaminfeuer). Scope every update/delete to `id`+`username`. **NEVER mutate/delete another user's row.** When you can't tell which row is yours → STOP and surface, don't guess. (An INSERT of a new own row never touches theirs — see §1.)
 
 ## 1. Manual upload + DB register — `manual_db_eval_push.py`
-Pass the **`trace_jobs/<RUN_TAG>`** path (where Harbor writes the `<task>__<id>` trial dirs), **NOT**
-`eval_jobs/<RUN_TAG>` (that only has `meta.env`). The script auto-resolves nested trial subdirs and
-auto-detects agent/model/benchmark from job metadata.
+Pass the **`trace_jobs/<RUN_TAG>`** path (where Harbor writes `<task>__<id>` trial dirs), NOT `eval_jobs/<RUN_TAG>` (that only has `meta.env`). Auto-resolves nested trial subdirs and auto-detects agent/model/benchmark.
 ```bash
-set -a; source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"; set +a   # needs SUPABASE_URL, SUPABASE_ANON_KEY, HF_TOKEN
+set -a; source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"; set +a   # SUPABASE_URL, SUPABASE_ANON_KEY, HF_TOKEN
 cd <OpenThoughts-Agent>
 python scripts/database/manual_db_eval_push.py --job-dir trace_jobs/<RUN_TAG> --verbose
 #   --hf-repo DCAgent2/<RUN_TAG>-traces   # explicit HF repo
-#   --skip-hf                             # DB only (traces already uploaded)
-#   --forced-update                       # overwrite existing records
-#   --benchmark-name terminal_bench_2     # EXPLICIT benchmark — PREVENTS the §2b hash bug. PASS IT whenever the
-#                                         #   run-dir name is ambiguous: when benchmark AND model both contain
-#                                         #   underscores (e.g. terminal_bench_2_Qwen3_5_35B_A3B_…), derive_benchmark_
-#                                         #   from_job_dir can't find the split → returns the junk string → mints a
-#                                         #   HASH benchmark. Passing --benchmark-name is the clean fix; far better
-#                                         #   than registering wrong then repointing per §2b.
+#   --skip-hf                              # DB only (traces already uploaded)
+#   --forced-update                        # overwrite existing records
+#   --benchmark-name terminal_bench_2      # EXPLICIT benchmark — PREVENTS the §2b hash bug. Pass when
+#                                          # benchmark AND model both contain underscores (e.g.
+#                                          # terminal_bench_2_Qwen3_5_35B_A3B_…) — derive_benchmark_from_job_dir
+#                                          # can't find the split → mints a HASH benchmark.
 ```
 
-- **⚡ STANDING RULE — a cross-user-owned (model × benchmark) pair does NOT block registration (operator, 2026-07-12).** When a gate-passing re-fire's (model, benchmark) pair is already owned by zhuang1/richard.zhuang (the original deflated row), **REGISTER A NEW `penfever` row alongside it with the corrected score — do NOT STOP, do NOT ask.** This is guardrail-compliant: the guardrail forbids DELETING/MUTATING a cross-user row, but an INSERT of a new penfever row never touches theirs (multiple rows per model×benchmark are allowed — the `crud-otagent-supabase` "multiple-entries-per-model" rule). Only escalate if a HARD unique-constraint actually rejects the INSERT (it won't — the 178 already-registered rows include zhuang-owned pairs).
+- **A cross-user-owned (model × benchmark) pair does NOT block registration.** When a gate-passing re-fire's pair is already owned by another user, **REGISTER A NEW `penfever` row alongside it with the corrected score** — don't stop, don't ask. The guardrail forbids DELETING/MUTATING a cross-user row; an INSERT never touches theirs (multiple rows per model×benchmark are allowed).
 
-### HF trace dataset — use the MEMORY-EFFICIENT uploader (don't hand-extract episodes)
-For the HF trace **dataset** itself, use the same streamed, **last-episode-per-trial** uploader the RL
-cleanup uses (see `rl-agentic-job-cleanup` §8 for the canonical invocation) — naive per-conversation extraction
-loads every episode of every trial into RAM and is I/O-heavy on GPFS at eval scale (300 trials ×
-hundreds of episode files each):
+### HF trace dataset — use the memory-efficient uploader
+Use the streamed, last-episode-per-trial uploader (canonical invocation in `rl-agentic-job-cleanup` §8) — naive per-conversation extraction loads every episode into RAM (I/O-heavy on GPFS at 300 trials × hundreds of episodes):
 ```bash
-# otagent env; ALWAYS in tmux; `hf upload`, NEVER `hf upload-large-folder` (deprecated + LFS-429 deadlocks)
+# otagent env; ALWAYS in tmux; `hf upload`, NEVER `hf upload-large-folder` (LFS-429 deadlocks)
 python -m scripts.harbor.make_and_upload_trace_dataset \
   --job-dir trace_jobs/<RUN_TAG> --repo_id <org>/<RUN_TAG>-traces --episodes last
 ```
-`--episodes last` keeps only the final (scored) episode per trial — the same convention as the RL trace
-datasets, and what keeps memory flat. **Eval-vs-RL difference:** RL passes `--skip_register`; for EVALS you
-DO want the trace repo linked, so register/link it onto the eval's existing `sandbox_jobs` row (§2/§3 — set
-the trace/url field only, do NOT create a second row or touch the score). On **Leonardo**, login-node
-`hf upload` is SIGKILLed at ~100s → use the sbatch+tunnel pattern (`ops/leonardo/ops.md`).
+`--episodes last` keeps only the scored episode per trial. **Eval-vs-RL:** RL passes `--skip_register`; for EVALS register/link the trace repo onto the eval's existing `sandbox_jobs` row (§2/§3 — set trace/url only, do NOT create a second row or touch the score). On **Leonardo**, login-node `hf upload` is SIGKILLed at ~100s → use the sbatch+tunnel pattern (`ops/leonardo/ops.md`).
 
-## 2. ⚠️ CRITICAL — verify + fix the model name (with cross-user FK safety)
-The script auto-detects the model from trial `result.json` → `agent_info.model_info.name`. For vLLM-served
-models that field is the **vLLM served-model name** (a numeric ID like `1774950145766573`), NOT the HF repo
-— so it can register a **bogus numeric `models` row**. Get the real name from the eval config:
+## 2. ⚠️ Verify + fix the MODEL name (with cross-user FK safety)
+Auto-detect reads `agent_info.model_info.name`. For vLLM-served models that field is the **vLLM served-model name** (numeric, e.g. `1774950145766573`), NOT the HF repo → can register a bogus numeric `models` row. Get the real name:
 ```bash
 python3 -c "import json; d=json.load(open('experiments/<RUN_TAG>/configs/<RUN_TAG>_eval_config.json')); print(d['model_hf_name'])"
 ```
-Then check what got registered:
+Then check + repoint (FK-safe; the `assert` enforces it; `models` DELETE only if no other-user row FKs it):
 ```python
 c.table("sandbox_jobs").select("model_id,username").eq("id", "<JOB_ID>").execute()
 c.table("models").select("name").eq("id", "<MODEL_ID>").execute()
-```
-If it's a numeric ID, repoint to the real model — **after the cross-user FK-safety pre-check (§Remediations)**; the
-`assert job["username"] == me` in the snippet enforces it. Note the `models` DELETE only runs if no other-user row FKs it.
-```python
 import os; me = os.environ.get("USER")
 job = c.table("sandbox_jobs").select("id,username,model_id").eq("id", "<JOB_ID>").execute().data[0]
 assert job["username"] == me, f"FK-SAFETY STOP: job owned by {job['username']}, not {me} — do not mutate"
@@ -247,93 +140,45 @@ c.table("models").delete().eq("id", "<BOGUS_ID>").execute()  # only if no other-
 ```
 
 ## 2b. ⚠️ ALSO verify + fix the BENCHMARK name (the version-hash mis-registration)
-The **benchmark** FK has the same failure mode as the model FK in §2. The eval harness's benchmark-name
-derivation can register the row under a **raw 40-hex dataset version-hash** (e.g. `0c553bd6d05d…`, `377118ff…`,
-`693231ec…`) instead of the proper benchmark name — it bites when the launch passed a **local hash-named
-snapshot dir** as the dataset (`eval/leonardo/eval_harbor.sbatch` `basename`'d it, and `BENCHMARK_NAME_MAP`
-had no entry → it fell through to the hash). **Fixed for NEW launches in `0c24c528`** (the sbatch now derives
-the name from the `datasets--<org>--<name>` segment / run-dir, falling back to empty rather than a hash) — but
-legs launched BEFORE that, the auto-harvest path, and any manual `manual_db_eval_push` off such a run dir can
-all STILL land under a hash. A hash-named benchmark silently MIS-FILES the score (the leaderboard groups by
-benchmark) and spawns orphan benchmark rows. Always verify it.
+Same failure mode as the model FK. The harness can register the row under a **raw 40-hex dataset version-hash** (`0c553bd6d05d…`/`377118ff…`/`693231ec…`) instead of the benchmark name — bites when the launch passed a local hash-named snapshot dir as the dataset. A hash-named benchmark silently MIS-FILES the score and spawns orphan rows. (Fixed for new launches; old legs, the auto-harvest path, and manual registers off such a run dir can still land under a hash.)
 
-**Detect** (do this in §0 check-2/3 AND after any register): read the row's benchmark NAME — if it matches
-`^[0-9a-f]{32,64}$` it's mis-keyed.
-**Resolve the proper name** from the run-dir name (the leading segment IS the benchmark: `<benchmark>_<model>_<ts>`
-or `<benchmark>_a1_<model>_<ts>`) or the trace repo (`DCAgent2/<benchmark>_…`), then map to the registered id:
-`swebench-verified-random-100-folders`=`cc1aca76…` · `dev_set_v2`=`b94dfab2…` · `terminal_bench_2`=`34ab93c4…`.
-**Repoint FK-safe** (pre-check per §Remediations; the `assert` below enforces it):
+**Detect** (in §0 check-2/3 AND after any register): if the row's benchmark NAME matches `^[0-9a-f]{32,64}$` → mis-keyed.
+**Resolve** from the run-dir name (`<benchmark>_<model>_<ts>` — the leading segment IS the benchmark) or trace repo (`DCAgent2/<benchmark>_…`), then map: `swebench-verified-random-100-folders`=`cc1aca76…` · `dev_set_v2`=`b94dfab2…` · `terminal_bench_2`=`34ab93c4…`.
+**Repoint FK-safe:**
 ```python
 me = ...  # your username ∈ feuer1/bfeuer00/penfever/benjaminfeuer
 job = c.table("sandbox_jobs").select("id,username,benchmark_id").eq("id","<JOB_ID>").execute().data[0]
 assert job["username"] == me, "FK-SAFETY STOP — not your row; surface, do not mutate"
-proper = c.table("benchmarks").select("id").eq("name","terminal_bench_2").execute().data[0]["id"]   # the resolved name
+proper = c.table("benchmarks").select("id").eq("name","terminal_bench_2").execute().data[0]["id"]
 c.table("sandbox_jobs").update({"benchmark_id": proper}).eq("id","<JOB_ID>").eq("username",me).execute()
 ```
-**Then clean the orphan hash benchmark** — ONLY if **0 `sandbox_jobs` reference it across ALL users** (the
-cross-user pre-check): delete its `sandbox_benchmark_tasks` CHILDREN first (the FK that otherwise blocks the
-benchmark delete — note that table has **no `id` column**, delete by `.eq("benchmark_id", <id>)`), then delete
-the benchmark. **LEAVE it** (do not delete) if ANY row still references it — a `Started`/in-flight sibling, a
-rerun, or another user's row. `manual_db_eval_push` uses `hpc/launch_utils.py:derive_benchmark_from_job_dir`,
-which resolves correctly from the run-dir/HF-cache path — so a clean manual register usually avoids the hash;
-this guard is the safety net for pre-fix legs, the auto-harvest path, and any row that slipped through.
+**Clean the orphan hash benchmark** — ONLY if **0 `sandbox_jobs` reference it across ALL users** (cross-user pre-check): delete `sandbox_benchmark_tasks` CHILDREN first (the FK that blocks the delete; that table has **no `id`** column — delete by `.eq("benchmark_id", <id>)`), then delete the benchmark. LEAVE it if ANY row still references it.
 
 ## 3. Verify it landed
-Confirm `sandbox_jobs.<JOB_ID>.model_id` now points to the real `laion/<name>` row and the trial scores are
-attached. If `--skip-hf` wasn't used, confirm the trace dataset (`DCAgent2/<RUN_TAG>-traces`) is non-empty on HF.
+Confirm `sandbox_jobs.<JOB_ID>.model_id` → real `laion/<name>` row and trial scores attached. If `--skip-hf` wasn't used, confirm the trace dataset (`DCAgent2/<RUN_TAG>-traces`) is non-empty on HF.
 
 ## 4. Clean up disk (only after upload + register verified)
-Remove the local eval run dir once the traces are on HF + the DB row is correct (the `trace_jobs` tree is
-the bulk). Detach a large GPFS `rm` (nohup/tmux); never `du`/`find` to size it first. Do NOT delete shared
-canonical task dirs.
+Remove the local eval run dir once traces are on HF + the DB row is correct (the `trace_jobs` tree is the bulk). Detach a large GPFS `rm` (nohup/tmux); never `du`/`find` to size it first. Do NOT delete shared canonical task dirs.
 
 ---
 ## 5. IRIS TPU evals — the idempotent path (GCS-backed, no SLURM)
 
-Iris (marin v6e TPU) evals run through `eval/cloud/launch_eval_iris.py`, NOT SLURM — so the SLURM mechanics
-above (sacct, cluster `eval_jobs`/`trace_jobs` run-dirs, sbatch resume, GPFS `rm`) DON'T apply. The **audit
-logic is identical** (the same 4 checks + the same >10% error-fraction HARD gate + the same <90%→resume-not-
-register rule + the same cross-user FK safety); only the DATA SOURCE and the resume/register MECHANICS differ.
+Iris (marin v6e TPU) evals run through `eval/cloud/launch_eval_iris.py`, NOT SLURM — so the SLURM mechanics (sacct, cluster run-dirs, sbatch resume, GPFS `rm`) DON'T apply. **The audit logic is identical** (same 4 checks + >10% HARD gate + <90%→resume-not-register + cross-user FK safety); only the data source + resume/register MECHANICS differ.
 
 - **Enumerate** terminal evals (no sacct): the marin jobs table.
   `iris=/Users/benjaminfeuer/Documents/marin/.venv/bin/iris`
   `$iris --cluster=marin query "SELECT job_id,state FROM jobs WHERE job_id LIKE '%eval-%' ORDER BY job_id DESC" -f csv`
-  **State codes: 4=COMPLETED (terminal-good), 5=FAILED, 6=KILLED, 1/2/3=pending/running (SKIP — live).** There is
-  no `-S <date>` filter; the job_id timestamp suffix (or a `created_at` column) bounds "since June 3". EXEMPT the
-  `DCAgent2/*` grid/throughput/OOM measurement runs (§0 pre-gate) same as SLURM.
-- **Results live in GCS, NOT on a filesystem.** The aggregate is `<job_output_dir>/<job>/result.json`, where
-  `<job_output_dir>` is the job's RECORDED output prefix. **Resolve it — never guess or scan buckets:**
-  `OUT=$(python -m hpc.iris.job_output_resolver <job> --cluster …/marin.yaml)` (registry-first, iris-fallback).
-  The resolver returns whatever bucket the job actually wrote to — a new single-region bucket
-  (`gs://marin-us-east5/…`), a legacy multi-region bucket (`gs://marin-models-us/…`), or the
-  `gs://marin-eu-west4` static default a region-discovery-failed launch fell back to. This replaces the old
-  "⚠ CHECK BOTH BUCKETS" probe: because the recorded URI is authoritative, a single `gsutil ls "$OUT/<job>/"`
-  finds the `result.json` regardless of region. (Data written to any of these is valid + self-consistent —
-  harvest it where the resolver points, don't re-run for region alone.)
-- **Audit the GCS `result.json`** — schema is `stats.evals.<key>` (NOT top-level `metrics`). Per eval key:
-  `score = metrics[0].mean`; `n_trials` / `n_total_trials` (swe/v2=300, tb2=267); `exception_stats[<name>]` is a
-  **LIST of trial ids → use `len()`** (Σlen over NON-benign names / n_trials = error-fraction; same benign set as
-  §0 check-4). Reward buckets under the eval key. (A minimal aggregator: gsutil cp the result.json, then sum
-  `len()` over exception_stats.) `n_cache_tokens=0` in the row is the prefix-cache-off fingerprint (below).
-- **Resume (<90% OR >10% err)** — no sbatch; **relaunch `launch_eval_iris.py` with the SAME `--job_name`** (Harbor
-  resumes the incomplete/errored trials of that run dir; helpers `scripts/iris/check_resume_needed.py` +
-  `check_progress.py`). **REGION-CORRECT the relaunch** (else it re-lands in eu-west4): run with BOTH
-  `export PATH=/Users/benjaminfeuer/Documents/marin/.venv/bin:$PATH` (marin iris → region discovery → us-east5)
-  AND the otagent python by FULL PATH `/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python` (the launcher
-  needs omegaconf, which the marin venv lacks). Add `--max-retries 2` (a fraction of fresh preemptible v6e-4
-  slices silently WEDGE at model-load `model_loader.py:476` ~50min then die; `--max-retries 2` auto-reschedules to
-  a fresh slice). Confirm the launch prints `Region pin: … → us-east5`. Iris eval = MAIN Daytona org
-  (`DAYTONA_API_KEY`), `force_build: true` (no snapshot pre-build / cap).
-- **Register (≥90%, not auto-registered)** — Iris evals auto-register via `--upload_to_database` on completion, so
-  most complete legs ARE registered; for one that isn't, `gsutil -m rsync -r gs://<bucket>/ot-agent/<job>/<job>/
-  <local_tmp>/` then `manual_db_eval_push.py --job-dir <local_tmp>` (+ the §2/§2b model/benchmark FK fixes, same
-  own-rows-only pre-check). Then remove the local tmp (GCS is the durable store — no cluster-filesystem cleanup).
+  **State codes: 4=COMPLETED, 5=FAILED, 6=KILLED, 1/2/3=pending/running (SKIP — live).** EXEMPT `DCAgent2/*` measurement runs (§0 pre-gate).
+- **Results live in GCS, not a filesystem.** The aggregate is `<job_output_dir>/<job>/result.json`. **Resolve the prefix — never guess/scan buckets:** `OUT=$(python -m hpc.iris.job_output_resolver <job> --cluster …/marin.yaml)` (registry-first, iris-fallback). It returns whatever bucket the job wrote to (new single-region `gs://marin-us-east5/…`, legacy multi-region `gs://marin-models-us/…`, or the `gs://marin-eu-west4` static default). A single `gsutil ls "$OUT/<job>/"` finds the `result.json` regardless of region.
+- **Audit the GCS `result.json`** — schema is `stats.evals.<key>` (NOT top-level `metrics`). Per eval key: `score = metrics[0].mean`; `n_trials`/`n_total_trials` (swe/v2=300, tb2=267); `exception_stats[<name>]` is a **LIST of trial ids → use `len()`** (Σlen over NON-benign names / n_trials = error-fraction; same benign set as §0 check-4). `n_cache_tokens=0` = prefix-cache-off fingerprint.
+- **Resume (<90% OR >10% err)** — no sbatch; **relaunch `launch_eval_iris.py` with the SAME `--job_name`** (Harbor resumes incomplete/errored trials; helpers `scripts/iris/check_resume_needed.py` + `check_progress.py`). **REGION-CORRECT the relaunch** (else it re-lands in eu-west4): run with BOTH `export PATH=/Users/benjaminfeuer/Documents/marin/.venv/bin:$PATH` (marin iris → region discovery → us-east5) AND the otagent python by FULL PATH `/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python` (launcher needs omegaconf, which the marin venv lacks). Add `--max-retries 2` (a fraction of fresh preemptible v6e-4 slices wedge at model-load `model_loader.py:476` ~50min then die). Confirm `Region pin: … → us-east5`. Iris eval = MAIN Daytona org (`DAYTONA_API_KEY`), `force_build: true` (no snapshot pre-build / cap).
+- **Register (≥90%, not auto-registered)** — Iris evals auto-register via `--upload_to_database` on completion, so most complete legs ARE registered; for one that isn't, `gsutil -m rsync -r gs://<bucket>/ot-agent/<job>/<job>/ <local_tmp>/` then `manual_db_eval_push.py --job-dir <local_tmp>` (+ §2/§2b FK fixes, own-rows-only). Then remove the local tmp (GCS is the durable store — no cluster-filesystem cleanup).
 
 Sibling cleanups: **`rl-agentic-job-cleanup`** (RL model), **`sft-job-cleanup`** (SFT model), **`datagen-job-cleanup`** (trace dataset). Launching evals → **`eval-agentic-launch`** (+ the `*-iris` variant for TPU). Per-cluster particulars → `.claude/ops/<cluster>/`.
 
 ---
 
-## Operating notes (folded from memory 2026-06-14)
+## Operating notes
 
-- **`notes/ot-agent/task_repos/rl_to_check.md` is a QUEUE file, not documentation** — bare HF repo URLs, one per line, consumed line-by-line by the smoke-test runner (processed entries move to `rl_checked.md`, same flat format). "Update rl_to_check.md with the fixes" = **append the newly-uploaded repo URLs**, one per line. Do NOT add markdown tables / sections / writeups (breaks the parser). Fix notes belong in the chat response or a dedicated `rl_fixes_<date>.md`. Same caution for all `task_repos/*.md` (flat URL/path lists feeding tooling).
-- **Stale >12h non-Finished (Started/Running/Pending) rows owned by us are cosmetic cruft → DELETE them (FK-cascade, own-rows-only); registration is create-if-missing so this never blocks a real score landing later.**
+- **Stale >12h non-Finished (Started/Running/Pending) rows owned by us are cosmetic cruft → DELETE them** (FK-cascade, own-rows-only); registration is create-if-missing so this never blocks a real score landing later.
+- **`notes/ot-agent/task_repos/rl_to_check.md` is a QUEUE file** (flat URL list, one per line, consumed line-by-line by the smoke-test runner; processed entries → `rl_checked.md`). "Update rl_to_check.md with the fixes" = **append new repo URLs**, one per line. Do NOT add markdown tables/sections (breaks the parser). Same caution for all `task_repos/*.md`.

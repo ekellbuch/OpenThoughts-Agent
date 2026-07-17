@@ -1,5 +1,3 @@
-# Harbor eval configuration (16 concurrency, generic agent, 32k context, max 100 tasks).
-# Variant: for API-based engines (OpenAI, Anthropic, etc.) — no vLLM-specific kwargs.
 
 job_name: default-eval-job
 jobs_dir: trace_jobs

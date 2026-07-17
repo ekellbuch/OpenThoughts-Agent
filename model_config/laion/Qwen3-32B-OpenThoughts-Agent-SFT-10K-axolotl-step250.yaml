@@ -1,29 +1,3 @@
-# laion/Qwen3-32B-OpenThoughts-Agent-SFT-10K-axolotl-step250 — dense 32B ID-eval target.
-#
-# GH200/Vista (TACC) serve variant ONLY. There is deliberately NO base eval config here, so
-# the generator emits ONLY the `...@gh200` standalone (no bare entry) — Jupiter/default keeps
-# resolving via the _patterns.yaml `3[02]B` rule (TP=4, intra-node NVLink), UNCHANGED.
-#
-# Vista = 1x GH200 (96GB) per node, whole-node, TP=1 (multi-node TP/PP vLLM serve is NOT wired
-# into eval/tacc/eval_harbor.sbatch). The dense 32B (~64GB bf16) FITS at TP=1, but with bf16 KV
-# at gpu-mem 0.90 only ~20.5GB is left for KV -> "Maximum concurrency 2.56x" at 32k, so vLLM
-# caps at ~3-4 in-flight generations while harbor sends N_CONCURRENT=8 (KV-CAPACITY-bound, NOT
-# batch-starved: observed Running 3-4 / Waiting 3-5, KV 79-98%).
-#
-# fp8 KV cache ~halves per-token KV bytes -> ~2x concurrent decode streams, feeding the conc-8
-# ceiling. --dtype bfloat16 keeps weights/activations bf16; ONLY the KV cache is fp8.
-# VALIDATED on Vista aarch64 via gh-dev canary 836949 (gpu-mem 0.94): fp8 KV serves the 32B
-# clean under VLLM_COMPILE (no --enforce-eager) with FlashInfer sampling -> KV 198,768 tokens /
-# 24.26 GiB, "Maximum concurrency 6.07x" (vs bf16@0.90's 84,032 tokens / 2.56x = 2.37x more).
-#
-# ⚠ fp8 KV forces inductor/Triton + flashinfer JIT compiles that hit Vista's aarch64 toolchain
-# (nvc rejects -Wno-psabi; flashinfer link needs libcudart). These are ALREADY satisfied by the
-# eval sbatch serve env (eval/tacc/eval_harbor.sbatch:146 `module load gcc/13.2.0 cuda/12.8`
-# + :154 `LD_LIBRARY_PATH=$CONDA_PREFIX/lib`) — gcc makes Triton use gcc not nvc, and the cuda
-# module + conda lib provide nvcc/libcudart. So fp8 needs NO sbatch change, ONLY this config
-# knob; a BARE-env serve fails (canaries 836866/836885/836940 = incomplete env, 836949 = full
-# env green). Launch with --gpu-memory-util 0.94. NB: fp8 KV is a small numeric shift vs bf16 KV
-# — revert to just `--enable-prefix-caching` if strict bf16-KV paper parity is required.
 model: laion/Qwen3-32B-OpenThoughts-Agent-SFT-10K-axolotl-step250
 subsystems:
   eval:

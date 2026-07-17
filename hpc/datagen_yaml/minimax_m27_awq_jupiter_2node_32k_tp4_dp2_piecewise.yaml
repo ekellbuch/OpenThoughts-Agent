@@ -1,27 +1,3 @@
-# MiniMax-M2.7-AWQ-4bit — DP=2 PIECEWISE-only cudagraph (2026-05-27)
-# https://huggingface.co/cyankiwi/MiniMax-M2.7-AWQ-4bit
-#
-# 32K context — Jupiter GH200 2-node TP=4 / DP=2, cudagraph_mode=PIECEWISE.
-#
-# THE NEEDLE-THREADER. Two confirmed DP>1 failure modes for MiniMax, both on
-# the cross-node MoE all-to-all collective:
-#   (1) compiled (FULL_AND_PIECEWISE): capturing the all-to-all into a FULL
-#       cudagraph → "illegal memory access in profile_cudagraph_memory" (DP1
-#       worker). Crash is in the FULL-capture path only.
-#   (2) eager: the all-to-all runs, but its reduce_scatterv chunk sizes are
-#       the per-DP-rank token counts; WITHOUT padding they desync across ranks
-#       → recv≠send → Gloo timeout (the v6a-v11 hang).
-# PIECEWISE runs the all-to-all EAGER at a split boundary (→ never FULL-captured
-# → dodges mode 1) but STILL pads batches to capture-size buckets (→ per-rank
-# token counts quantize to matching values → dodges mode 2). The intersection
-# of both escape conditions.
-# RESIDUAL RISK: mode 2 also involved sync_dp_state phase drift; PIECEWISE's
-# padding may not align that independently — this run is the test.
-#
-# DELTA vs dp2_cudagraph.yaml: + --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
-# (default with cudagraphs on is FULL_AND_PIECEWISE, which crashes at capture).
-#
-# Required launch flags: --num_nodes 2 --gpus_per_node 4
 
 engine:
   type: vllm_local
@@ -64,9 +40,6 @@ vllm_server:
   - bfloat16
   - --kv-cache-dtype
   - fp8
-  # cudagraphs ON but forced to PIECEWISE-only (NOT FULL_AND_PIECEWISE) so the
-  # cross-node MoE all-to-all runs eager at a split boundary (no FULL capture)
-  # while batches still pad to capture-size buckets (aligns DP token counts).
   - --compilation-config
   - '{"cudagraph_mode":"PIECEWISE"}'
   - --chat-template-content-format

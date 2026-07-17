@@ -1,19 +1,9 @@
-# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs - with PRM thrashing detector
-# Based on: qwen3_8b_16GPU_mask_context_timeout.yaml
-#
-# VARIANT: Adds thrashing-detector PRM for mid-trial early termination.
-#   - Checks every 3 turns (after min 10 turns) for repetitive command patterns
-#   - Kills agents whose last 6 assistant messages have >= 0.5 Jaccard similarity
-#   - Reclaims compute from thrashing agents; provides cleaner reward signal
 
-# SkyRL entrypoint module
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# Hydra config groups (+ prefix in CLI)
 config_groups:
   terminal_bench_config: terminal_bench
 
-# Terminal bench / agentic environment settings
 terminal_bench:
   trials_dir: null
 
@@ -26,7 +16,6 @@ terminal_bench:
     record_terminal_session: false
     enable_pane_logging: false
     strict_json_parser: false
-    # Interleaved Thinking Settings
     interleaved_thinking: true
     extra_body:
       chat_template_kwargs:
@@ -63,7 +52,6 @@ terminal_bench:
       - AgentTimeoutError
       - ContextLengthExceededError
 
-  # PRM: mid-trial thrashing detection
   prm:
     name: thrashing_detector
     window_size: 6

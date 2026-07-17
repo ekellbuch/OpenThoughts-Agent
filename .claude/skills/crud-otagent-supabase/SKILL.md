@@ -5,16 +5,14 @@ description: Read, aggregate, and (carefully) write OT-Agent eval/model data in 
 
 # crud-otagent-supabase
 
-The OT-Agent Supabase is the source of truth for **model eval results** (the
-numbers behind every ablation/paper table). The scores are NOT in any markdown
-file — they live in `sandbox_jobs`. This skill is how to query them correctly,
-aggregate ID/OOD means + SE the way the tables do, and write rows safely.
+OT-Agent Supabase is the source of truth for **model eval results** — the scores
+live in `sandbox_jobs`, not in any markdown file. This skill covers querying them,
+aggregating ID/OOD means + SE as the ablation/paper tables do, and writing rows safely.
 
 ## Connect (run LOCALLY — faster than ssh-ing a cluster)
 
-Run from the Mac with the `otagent` env; source the local secrets. Per the
-team convention, run Supabase queries locally (≈10 s faster than ssh+python on a
-cluster), and **filter by your own username for any write** (see Guardrails).
+Run from the Mac with the `otagent` env (≈10 s faster than ssh+python on a
+cluster). **Filter by your own username for any write** (see Guardrails).
 
 ```bash
 cd /Users/benjaminfeuer/Documents
@@ -129,20 +127,15 @@ table numbers). Use exactly this:
 | | `gaia_127` | 127 |
 | | `medagentbench` | 300 |
 
-> **`dev_set_v2` is ID as of 2026-06-16** (3-member ID set, matching the `eval-agentic-launch` "ID evals"
-> launch shorthand `{swebench, v2, tb2}`). BUT `dev_set_v2` is **partial-credit** (no clean binomial `N`,
-> see `analyze-rl-behavior`): it contributes to the ID **mean** but is **EXCLUDED from the pooled binomial
-> SE** (SE pools only over the binary ID benchmarks: `swebench-verified-random-100-folders` + `terminal_bench_2`).
-> For any **model-vs-model ranking**, still compare on a shared **binary** benchmark (swebench-100 or tb2),
-> never on `dev_set_v2`.
+> **`dev_set_v2` is ID** (3-member set: `{swebench, v2, tb2}`) but **partial-credit** — it's in the ID
+> **mean** but **excluded from the pooled binomial SE** (SE pools only over swebench-100 + tb2; see
+> Aggregation). **For model-vs-model rankings, compare on a shared binary benchmark (swebench-100 or tb2),
+> never on `dev_set_v2`.**
 
-**The #1 trap:** `swebench-verified` (full, 500) is **OOD**, while the
-`swebench-verified-random-100-folders` subset (100) is **ID**. They are different
-benchmarks with similar accuracy — so using the wrong one barely moves the *mean*
-on most models but (a) flips ID↔OOD membership, (b) changes the SE `N` a lot
-(100 vs 500), and (c) can wrongly report a model "ID-incomplete" when only the
-full-swebench (OOD) eval is still running. Always check **which** swebench row is
-`Finished`.
+**The #1 trap:** `swebench-verified` (full, 500) is **OOD**; the
+`swebench-verified-random-100-folders` subset (100) is **ID**. Same accuracy range,
+so a wrong pick barely moves the *mean* but flips ID↔OOD membership and changes the
+SE `N` (100 vs 500). Always check **which** swebench row is `Finished`.
 
 ```python
 ID  = {"swebench-verified-random-100-folders", "terminal_bench_2", "dev_set_v2"}
@@ -184,8 +177,8 @@ def set_stat(S, scores):                        # scores from get_model_scores()
 
 ## CREATE / UPDATE (registration)
 
-Do **not** hand-insert rows; use the maintained scripts (they fill 9–12 metadata
-fields and resolve FKs). Full flags are in `OpenThoughts-Agent/CLAUDE.md`.
+Do **not** hand-insert rows; use the maintained scripts. Full flags are in
+`OpenThoughts-Agent/CLAUDE.md`.
 
 - **Register a model** (after an HF upload): `scripts/database/manual_db_push.py`
   `--hf-model-id <repo> --base-model <hf> --dataset-name <name|comma,list> [--training-type RL]`
@@ -222,9 +215,8 @@ fields and resolve FKs). Full flags are in `OpenThoughts-Agent/CLAUDE.md`.
 
 After an eval's HF trace dataset is uploaded, the leaderboard's **trace icon** keys off the
 **`sandbox_jobs.hf_traces_link`** column (a `text` URL on the **job** row, NOT on `models`) —
-see `.claude/projects/ota-leaderboard/ota-leaderboard.md` (DB-contract §5: missing link →
-grey/red icon, and the `hideNoTraceLink` filter drops the row). Cross-linking = setting that
-**one column** to the trace repo URL. Touch **nothing else** (never scores/`metrics`,
+see `.claude/projects/ota-leaderboard/ota-leaderboard.md` (DB-contract §5). Cross-linking =
+setting that **one column** to the trace repo URL. Touch **nothing else** (never scores/`metrics`,
 `model_id`, status).
 
 **Discover the eval → HF-repo mapping** (don't guess the repo from the run-tag — the auto-push
@@ -265,16 +257,13 @@ else:
     c.table("sandbox_jobs").update({"hf_traces_link": url}).eq("id", job_id).eq("username", ME).execute()
 ```
 Then **re-read** each row to confirm the link set and that `metrics`/`model_id`/`job_status` are
-unchanged. Report any eval whose trace repo was missing/empty/over-length (couldn't link). This is the
-field `analyze-rl-behavior` waits on — its Q1 behavioral/judge steps auto-resolve to "no post-RL eval
-traces selected" while `hf_traces_link` is `None`.
+unchanged. Report any eval whose trace repo was missing/empty/over-length (couldn't link).
 
 ## DELETE / MUTATE — cross-user FK safety (MANDATORY pre-check)
 
 Before deleting or updating ANY row, confirm no **other user's** rows depend on
 it. Restrict every write to rows you own; if an FK forces touching someone else's
-row, **STOP and ask** — do not repoint/delete it. (A past cleanup repointed
-another user's eval jobs without authorization; don't repeat.)
+row, **STOP and ask** — do not repoint/delete it.
 
 ```python
 import os
@@ -291,13 +280,12 @@ safe; the danger is exclusively delete/update.
 
 ## Purging stale placeholder evals → separate skill
 
-Removing dead, never-populated `Pending`/`Started` placeholder rows (the eval launches that
+Removing dead, never-populated `Pending`/`Started` placeholder rows (eval launches that
 died/stalled before scoring) is its own guardrailed DELETE skill:
-**`crud-purge-stale-eval-placeholders`** — the >36h qualifier, the mandatory cross-user FK-safety
-pre-check, and the REQUIRED grandchild→child→job cascade delete all live there. Reach for that
-skill when the registry is clogged with stale `Pending`/`Started`/"Running" placeholders or when
-the eval listener's dedup is mis-firing on dead rows. The cross-user FK-safety rule above applies
-to ALL deletes/updates in this table, including that purge.
+**`crud-purge-stale-eval-placeholders`** — the >36h qualifier, the cross-user FK-safety
+pre-check, and the grandchild→child→job cascade delete all live there. Reach for it when
+the registry is clogged with stale `Pending`/`Started`/"Running" placeholders or when the
+eval listener's dedup is mis-firing on dead rows.
 
 ## Quick recipes
 
@@ -311,12 +299,12 @@ to ALL deletes/updates in this table, including that purge.
   cross-user FK pre-check, then dedup only your own rows.
 
 ## Recipe: ALL models NOT yet evaled (on ANY benchmark)
-For the *general* "which models have no eval at all" (vs `query_unevaled_models.py`, which is
-**benchmark-specific** and counts a `Started`/`Pending` job as "evaluated"). Here a model is **EVALED iff it
-has ≥1 `sandbox_jobs` row that is `Finished` AND has a non-null `accuracy`** (a real score — see the §"job_status"
-note); everything else (no jobs, only `Started`/`Pending`, or `Finished`-but-null) is UN-EVALED. **Sibling-aware:**
-a model NAME is evaled if ANY of its `models.id` rows is evaled (the same name can have multiple ids — §GOTCHA 2).
-**PAGINATE** — `models` (~1300) and `sandbox_jobs` (~9000) both exceed the 1000-row default.
+The *general* "which models have no eval at all" (vs `query_unevaled_models.py`, which is
+**benchmark-specific** and counts a `Started`/`Pending` job as "evaluated"). A model is **EVALED iff it
+has ≥1 `sandbox_jobs` row that is `Finished` AND has a non-null `accuracy`**; everything else (no jobs,
+only `Started`/`Pending`, or `Finished`-but-null) is UN-EVALED. **Sibling-aware:** a model NAME is evaled
+if ANY of its `models.id` rows is evaled (§GOTCHA 2). **PAGINATE** — `models` (~1300) and `sandbox_jobs`
+(~9000) both exceed the 1000-row default.
 ```python
 def page(table, cols):
     out=[]; off=0
@@ -332,11 +320,11 @@ id2name={m["id"]:m["name"] for m in models}
 evaled_names={id2name[i] for i in evaled_ids if i in id2name}
 unevaled=sorted({m["name"] for m in models if m["name"] not in evaled_names})
 ```
-**⚠️ TRIAGE the result before reporting it — it is mostly DATA-QUALITY NOISE, not real eval gaps (2026-06-29: 60 raw):**
-- **(A) Real trained checkpoints (the actionable set)** — `DCAgent*/…`, `laion/…`, bare run-names. THESE are the ones a human means by "un-evaled." Cross-check: is one **in-progress** (a `Started` row — e.g. a model being evaled right NOW shows here because it has no `Finished` yet)? is it a **CONCLUDED series** (a3-*)?  flag both.
-- **(B) API / served baselines** — names prefixed `openai/`, `together_ai/`, or bare `o4-mini`/`gpt-*`. Reference models, usually intentionally outside our eval pipeline.
-- **(C) FILESYSTEM-PATH junk registrations** — names that are a local path (`^/…/models--<org>--<name>/snapshots/<hash>`). These are bogus rows (the model was registered by its on-disk path instead of the HF repo name — the path-analog of the served-id trap, §eval-agentic-cleanup §2); the underlying model is usually ALREADY evaled under its proper HF name. NOT an eval gap → a cleanup candidate, not a re-eval candidate.
-**So report it bucketed A/B/C with the in-progress / concluded flags — never a raw 60-name dump** (the raw count wildly overstates the real eval gap; in the 2026-06-29 run only ~17 of 60 were genuinely-actionable trained checkpoints).
+**⚠️ TRIAGE the result before reporting it — it is mostly DATA-QUALITY NOISE, not real eval gaps:
+- **(A) Real trained checkpoints (the actionable set)** — `DCAgent*/…`, `laion/…`, bare run-names. Cross-check: **in-progress** (`Started` row — evaled right NOW, no `Finished` yet) vs **CONCLUDED series** (`a3-*`); flag both.
+- **(B) API / served baselines** — `openai/`, `together_ai/`, or bare `o4-mini`/`gpt-*`. Reference models, intentionally outside our eval pipeline.
+- **(C) FILESYSTEM-PATH junk registrations** — names that are a local path (`^/…/models--<org>--<name>/snapshots/<hash>`): registered by on-disk path instead of HF repo name (path-analog of the served-id trap, §eval-agentic-cleanup §2). The underlying model is usually ALREADY evaled under its proper HF name → a cleanup candidate, not a re-eval candidate.
+**So report it bucketed A/B/C with the in-progress / concluded flags — never a raw name dump** (the raw count wildly overstates the real eval gap).
 
 ## Recipe: per-task timeouts + turn counts + outcome breakdown (model × benchmark)
 
@@ -409,9 +397,3 @@ but `stats` does NOT have per-task timeouts or turns.
 - A `Finished` SLURM/eval job is necessary but not sufficient — confirm a numeric
   accuracy in `metrics` (evalchemy can exit 0 with empty `results`).
 
----
-
-## Operating notes (folded from memory 2026-06-14)
-
-- **Always filter bulk sandbox_jobs deletes/updates by username** — `.eq("username", "bfeuer00")`. NEVER delete all rows matching a status without the username filter (once deleted 95 Pending/Started rows across ALL users). Never assume a shared table's rows all belong to one user.
-- **Run Supabase queries on the LOCAL Mac, not via `ssh Leonardo`** (~10s/query SSH round-trip saved): `source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV first}"` for `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`, run with the `supabase` client (fall back to `/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python` if not installed locally). Only use the cluster when the data lives there.

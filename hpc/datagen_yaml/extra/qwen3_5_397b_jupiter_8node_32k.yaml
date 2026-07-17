@@ -1,12 +1,3 @@
-# Qwen3.5-397B-A17B-AWQ - MoE reasoning model, AWQ 4-bit quantized
-# https://huggingface.co/QuantTrio/Qwen3.5-397B-A17B-AWQ
-#
-# 32K context variant
-#
-# Hardware: 8 nodes × 4x GH200 96GB (shared memory) = 32 GPUs (~3TB total)
-#   - Model weights ~200GB (AWQ 4-bit) → fits in 1 node (TP=4)
-#   - TP=4 within node (shared memory), DP=8 (one replica per node)
-#
 engine:
   type: vllm_local
   model: QuantTrio/Qwen3.5-397B-A17B-AWQ

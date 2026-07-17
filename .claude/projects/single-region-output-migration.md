@@ -212,7 +212,7 @@ registry/iris first** (a one-liner the skill runs), then rsync that exact URI:
   guard at ~186 refers to *weights* -> leave pointing at `marin-models-us`).
 - `.claude/skills/eval-agentic-launch-iris/SKILL.md` (~248, 278, 292, 303) and
   `.claude/skills/eval-agentic-cleanup/SKILL.md` (~307 "CHECK BOTH BUCKETS").
-- `.claude/ops/iris/iris_job_lifecycle.md` (~45, 54, 142, 274, 290).
+- `.claude/ops/iris/ops.md` (~45, 54, 142, 274, 290).
 
 Recommended skill snippet (single source of truth), e.g.:
 
@@ -455,7 +455,7 @@ Run one real datagen job end-to-end and verify each leg:
 | `.claude/skills/monitor-restore-iris/SKILL.md` | rescue mechanics | XS |
 | `.claude/skills/datagen-launch-iris/SKILL.md` | rescue rsync (leave weight model-path guard on `marin-models-us`) | XS |
 | `.claude/skills/eval-agentic-launch-iris/SKILL.md`, `eval-agentic-cleanup/SKILL.md` | resolve URI; drop "CHECK BOTH BUCKETS" | S |
-| `.claude/ops/iris/iris_job_lifecycle.md` | update the output-bucket narrative to single-region + resolver | S |
+| `.claude/ops/iris/ops.md` | update the output-bucket narrative to single-region + resolver | S |
 | tests (`tests/hpc/...`) | `output_bucket_for_region` map + unmapped fail-fast; xla_cache derivation; weight-guard unchanged | S |
 | GCS lifecycle (ops, no code) | TTL on transient prefixes, single- + legacy multi-region | S (ops) |
 

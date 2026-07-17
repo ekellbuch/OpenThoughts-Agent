@@ -1,41 +1,13 @@
-# 16GPU TP4 config — the actual deployed config for our RL campaign
-# 4 nodes × 4 GPUs = 16 GPUs total (Jupiter GH200)
-# Base: 24GPU_base.yaml with all --skyrl_override flags baked in
-# All 18 jobs (v1 + v3) use this exact config.
-#
-# GPU allocation (16 GPUs):
-#   - Policy model: 8 GPUs (2 nodes × 4, FSDP2)
-#   - Reference model: 8 GPUs (2 nodes × 4, FSDP2)
-#   - vLLM inference: 2 engines × TP4 = 8 GPUs (colocated with trainer)
-#
-# Key differences from 24GPU_base.yaml:
-#   - TP4 with 2 engines (not TP1 with 16)
-#   - KL loss enabled (coef=0.01)
-#   - Higher LR (1e-5 vs 5e-6), weight decay (0.01), lower grad norm (1.0)
-#   - Temperature 1.0 (not 0.7), top_k disabled
-#   - Checkpoint every 3 steps, HF upload every 10
-#   - Fewer parallel workers (128 vs 768), lower staleness (8 vs 16)
-#   - Agent timeout 900s (not 1800s)
-#
-# Usage:
-#   python -m hpc.launch --job_type rl --rl_config /e/scratch/jureap59/etash/16GPU_tp4_deployed.yaml \
-#     --model_path laion/r2egym-nl2bash-stack-bugsseq \
-#     --train_data /path/to/tasks/exp_rpt_nemotron-cpp \
-#     --num_nodes 4 --job_name rl_v1_tp4s64_8x_nemotron-cpp \
-#     --daytona_api_key $DAYTONA_API_KEY
 
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# Hydra config groups (+ prefix in CLI)
 config_groups:
   terminal_bench_config: terminal_bench
 
-# Terminal bench / agentic environment settings
 terminal_bench:
   trials_dir: null
 
   harbor:
-    # Agent settings
     name: terminus-2
     max_episodes: 999999
     enable_summarize: false
@@ -44,30 +16,23 @@ terminal_bench:
     record_terminal_session: false
     enable_pane_logging: false
 
-    # Strict JSON parser
     strict_json_parser: true
 
-    # Interleaved Thinking Settings
     interleaved_thinking: true
     extra_body:
       chat_template_kwargs:
         enable_thinking: true
 
-    # Timeout: 900s (not 1800s from base)
     override_timeout_sec: 900
 
-    # Environment settings
     override_cpus: 1
     override_memory_mb: 2048
     override_storage_mb: 2048
 
-    # Auto snapshot
     auto_snapshot: true
 
-    # Verifier settings
     verifier_override_timeout_sec: 120
 
-    # Retry settings
     max_retries: 3
     min_wait_sec: 60.0
     max_wait_sec: 600.0
@@ -80,16 +45,12 @@ terminal_bench:
       - RewardFileEmptyError
       - VerifierOutputParseError
 
-    # Concurrency: 256 (not 280)
     n_concurrent_trials: 256
 
-    # Logging
     log_level: INFO
 
-    # Binary rewards
     enable_reward_shaping: false
 
-    # RLOO-N error classification
     enable_error_classification: true
     mask_exceptions:
       - DaytonaError
@@ -118,7 +79,6 @@ terminal_bench:
     dataset_type: SFT
     cleanup: true
 
-# Trainer configuration
 trainer:
   strategy: fsdp2
   algorithm:
@@ -129,23 +89,19 @@ trainer:
     eps_clip_high: 0.2
     loss_reduction: token_mean
 
-  # Training loop
   epochs: 10
   max_steps: 80
   update_epochs_per_batch: 1
 
-  # Batch sizes
   train_batch_size: 64
   policy_mini_batch_size: 64
   eval_batch_size: 64
 
-  # Micro batch sizes
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
 
   max_prompt_length: 999999
 
-  # Evaluation and checkpointing
   eval_interval: 999999
   eval_before_train: false
   ckpt_interval: 3
@@ -155,16 +111,13 @@ trainer:
   hf_hub_private: false
   hf_hub_revision: main
 
-  # Database registration
   enable_db_registration: true
 
-  # Logging
   project_name: OpenThoughts-Agent
   log_level: INFO
   tracker_commit_each_step: true
   logger: console
 
-  # Paths
   run_name: null
   ckpt_path: null
   export_path: null
@@ -201,7 +154,6 @@ generator:
   timeout_multiplier: 8.0
   model_dtype: bfloat16
 
-  # TP4 with 2 engines (8 GPUs for inference, colocated with trainer)
   inference_engine_tensor_parallel_size: 4
   num_inference_engines: 2
 

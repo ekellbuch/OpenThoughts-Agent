@@ -1,27 +1,12 @@
 name: Python Tests
 
-# CI-safe unit-test baseline for OT-Agent.
-#
-# SCOPE: only `tests/` runs here. That directory is the repo's pure-unit +
-# import-only suite — it mocks Daytona/Harbor, needs no GPU, no torch/vllm, no
-# SLURM/iris cluster, and no HF/Supabase/network secrets, so it runs green on a
-# stock GitHub ubuntu runner. The other ~50 `test_*.py` files scattered under
-# data/, sft/axolotl/, scripts/, rl/hpc/, eval/ require GPUs, a live cluster,
-# Daytona, or credentials and are intentionally NOT run in CI. Widen this scope
-# (e.g. add a `not gpu and not integration` marker convention) as more tests are
-# made infra-free.
-#
-# INSTALL: base package only (`uv pip install -e .`). We deliberately do NOT
-# install the accelerator extras ([datagen]/[rl]/[sft-qwen35]/[datagen-tpu]) —
-# on Linux they pull torch/vllm/flash-attn, which is huge and unnecessary for
-# the tests/ suite. Verified locally: base install + tests/ = 271 passed.
 
 on:
   pull_request:
     branches: ["main", "penfever/working"]
   push:
     branches: ["main", "penfever/working"]
-  workflow_dispatch: # Allow manual trigger
+  workflow_dispatch:
 
 permissions:
   contents: read

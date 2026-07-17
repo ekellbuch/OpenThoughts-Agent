@@ -16,9 +16,8 @@ description: >-
 Post-run consolidation for **STANDARD evals** (lm_eval / evalchemy): the Delphi #6279 RL-scaling-laws
 math suite — **MATH-500 (1 seed) + AIME24 (10-seed mean±sd) + gsm8k (strict+flex)** — launched by the
 **`eval-standard-launch`** skill on Leonardo. The deliverable is **scalar scores in a tracker**: no HF
-trace upload, no model upload, and **NEVER a DB registration**. This is the consolidation counterpart of
-that launcher; for the agentic terminal-bench path (Harbor traces + Supabase) use **`eval-agentic-cleanup`**
-instead — do **not** cross the two.
+trace upload, no model upload, **NEVER a DB registration** (see §5). For the agentic Harbor-trace +
+Supabase path, use **`eval-agentic-cleanup`** instead.
 
 ## 0. Reference files (source of truth — derive the flow from these)
 Local notes dir: `/Users/benjaminfeuer/Documents/experiments/active/delphi/rl-scaling-laws-6279/`
@@ -40,8 +39,7 @@ and writes an **empty `results: {}` JSON** (silent drop). For each job:
    (`…/delphi-eval/<RUN_NAME>/seed42/`) must exist and its `results_*.json` must carry **numeric** scores
    (a crashed/timed-out run leaves an empty or missing `seed42`). An empty/missing seed42 → leave the row
    **pending** and note it; **do not fabricate a score**. (If gsm8k failed *after* MATH-500 wrote seed42,
-   the row's seed42 exists but is partial — note it; the launcher's fix is to delete seed42 and re-run, not
-   a cleanup action here.)
+   seed42 exists but is partial — note it; deleting seed42 + re-running is a launcher action, not a cleanup one.)
 
 ## 2. Consolidate — rsync results into the local per-model dir + write scalar partials
 Pull **only** the per-task `results_*.json` (the `examples` payloads live inside the JSON, ~1-2 MB each;
@@ -54,9 +52,9 @@ rsync -avz --prune-empty-dirs --include='*/' --include='results_*.json' --exclud
   Leonardo:/leonardo_work/AIFAC_5C0_290/bfeuer00/experiments/delphi-eval/$RUN/ "$DEST/"
 ```
 This pulls the MATH-500 `seed42` JSON, the gsm8k `seed42` JSON (written by the plain `lm_eval` step), and
-the AIME24 `seed42..seed51` JSONs. Write the extracted scalars to `main_sft_evals/.partial/<basename>.json`
-(the durable scalar record the table is consolidated from). Keep the rsynced JSONs in `<basename>/` as the
-archive. Parse by loading the JSON and reading **only numeric keys** — never print the huge `examples` list.
+the AIME24 `seed42..seed51` JSONs. Write the extracted scalars to `main_sft_evals/.partial/<basename>.json`.
+Keep the rsynced JSONs in `<basename>/` as the archive. Parse by loading the JSON and reading **only
+numeric keys** — never print the huge `examples` list.
 
 ## 3. Parse the scalars (the §5.2-E method — round to 1 decimal to match the table)
 - **MATH-500** = `results["MATH500"]["accuracy"] × 100` (it's a fraction; 0.018 → 1.8). From `seed42`.
@@ -89,7 +87,6 @@ The local artifacts are small (~1-2 MB JSONs); no large delete is needed. On the
 stays safe. No `find` / `du` / `rglob` on GPFS; use canonical paths.
 
 ---
-Launcher: **`eval-standard-launch`**. Contrast: **`eval-agentic-cleanup`** (Harbor-trace + Supabase DB —
-the OTHER eval-cleanup path; this one is scores-in-a-tracker, HF-only, NO DB). Model-publishing cleanups:
-**`rl-agentic-job-cleanup`** / **`sft-job-cleanup`**. Per-cluster particulars (ssh, the step-ca cert refresh for
-rsync, the `/leonardo_work/AIFAC_5C0_290/bfeuer00/…` paths) → `.claude/ops/<cluster>/`.
+Launcher: **`eval-standard-launch`**. Model-publishing cleanups: **`rl-agentic-job-cleanup`** /
+**`sft-job-cleanup`**. Per-cluster particulars (ssh, the step-ca cert refresh for rsync, the
+`/leonardo_work/AIFAC_5C0_290/bfeuer00/…` paths) → `.claude/ops/<cluster>/`.

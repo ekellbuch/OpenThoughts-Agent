@@ -1,15 +1,3 @@
-# SkyRL Configuration: Qwen3 8B - MAX CONCURRENCY VARIANT (v2)
-# Based on: qwen3_8b_16x80GB_thinking_bs64_group8_async_rloo_n_noct_strict_micro2x4_autosnap_console.yaml
-#
-# THROUGHPUT OPTIMIZATION v2: Maximum Concurrent Trials
-# Key changes:
-#   - n_concurrent_trials: 256 -> 512 (2x concurrent trials - main bottleneck)
-#   - num_parallel_generation_workers: 768 -> 320 (2.5x workers to feed more trials)
-#   - num_inference_engines: 8 -> 12 (for 20 total GPUs: 12 engines + 8 policy/ref)
-#   - max_staleness_steps: 8 -> 12 (allow more staleness for throughput)
-#
-# Expected impact: ~50-70% reduction in generation wait time
-# Trade-off: Higher staleness, more memory for concurrent trial state
 
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
@@ -147,9 +135,7 @@ trainer:
     ref_num_gpus_per_node: 4
 
   fully_async:
-    # INCREASED: 8 -> 12 staleness tolerance for more throughput
     max_staleness_steps: 12
-    # INCREASED: 128 -> 320 generation workers
     num_parallel_generation_workers: 768
 
 generator:
@@ -158,7 +144,6 @@ generator:
   model_dtype: bfloat16
 
   inference_engine_tensor_parallel_size: 1
-  # INCREASED: 8 -> 12 inference engines (20 total GPUs)
   num_inference_engines: 12
 
   n_samples_per_prompt: 8

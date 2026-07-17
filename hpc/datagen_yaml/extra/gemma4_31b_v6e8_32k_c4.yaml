@@ -1,8 +1,3 @@
-# C4: seqs=64, n_conc=512 — 8× concurrency
-# Concurrency-push grid starts from A3 (TP=8 seqs=8) which gave 129.9 tok/s
-# on gemma4-31b-a3-hf-173500. Each C-config bumps max_num_seqs in vLLM and
-# the launcher's --n_concurrent in lockstep until vLLM scheduler saturates.
-# Part of grid in /Users/benjaminfeuer/Documents/notes/marin/experiments/gemma4_31b_v6e8_32k_grid.md
 env_vars:
   MODEL_IMPL_TYPE: auto
 engine:

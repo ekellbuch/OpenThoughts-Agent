@@ -1,17 +1,5 @@
 name: Ruff
 
-# Lint/format baseline for OT-Agent.
-#
-# SCOPE: intentionally minimal — ruff runs on `tests/` ONLY. The rest of the
-# repo has never had a lint gate and is not ruff-clean (format would rewrite
-# many files; `ruff check` surfaces ~90 pre-existing findings incl. some latent
-# undefined-name bugs). Rather than reformat the whole tree or ship a red CI, we
-# gate just the test directory (which CI actually exercises) and keep it clean.
-# Tighten later by widening the path or adding a `[tool.ruff]` config as dirs are
-# cleaned up.
-#
-# Ruff is pinned (uvx ruff@<ver>) so a future ruff release changing a rule can't
-# silently turn this red.
 
 on:
   pull_request:

@@ -1,18 +1,9 @@
-# SkyRL Configuration: Qwen3 8B on 16 GPUs - Optimizer test: Muon
-# Based on: qwen3_8b_16GPU_base.yaml
-#
-# TEST VARIANT: Muon optimizer (momentum + orthogonalization)
-#   - optimizer: Muon
-#   - lr: 3e-5 (Muon paper recommends similar to Adam range)
 
-# SkyRL entrypoint module
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# Hydra config groups (+ prefix in CLI)
 config_groups:
   terminal_bench_config: terminal_bench
 
-# Terminal bench / agentic environment settings
 terminal_bench:
   trials_dir: null
 
@@ -25,7 +16,6 @@ terminal_bench:
     record_terminal_session: false
     enable_pane_logging: false
     strict_json_parser: true
-    # Interleaved Thinking Settings
     interleaved_thinking: true
     extra_body:
       chat_template_kwargs:

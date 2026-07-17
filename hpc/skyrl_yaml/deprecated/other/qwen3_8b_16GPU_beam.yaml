@@ -1,14 +1,9 @@
-# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs - BEAM terminal bench
-# Distilled from CLI overrides for a 4-node run (4x4 GPUs)
 
-# SkyRL entrypoint module
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# Hydra config groups (+ prefix in CLI)
 config_groups:
   terminal_bench_config: terminal_bench
 
-# Terminal bench / agentic environment settings
 terminal_bench:
   environment_type: beam
   trials_dir: null
@@ -24,7 +19,6 @@ terminal_bench:
     record_terminal_session: false
     enable_pane_logging: false
     strict_json_parser: false
-    # Interleaved Thinking Settings
     interleaved_thinking: true
     extra_body:
       chat_template_kwargs:
@@ -38,7 +32,6 @@ terminal_bench:
     log_level: INFO
 
   model_info:
-    # Keep max context length at 32768
     max_input_tokens: 32768
     max_output_tokens: 8192
     input_cost_per_token: 0.0

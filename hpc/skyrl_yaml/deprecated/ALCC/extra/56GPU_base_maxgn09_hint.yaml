@@ -1,18 +1,5 @@
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# 56GPU teacher-hint variant (14-node Perlmutter). Combines 56GPU_base.yaml's
-# tripled inference / generation cap (16→48 engines, 300→900 trials,
-# 768→2304 workers) with the teacher_hint PRM from the deprecated
-# 24GPU_base_maxgn09_hint.yaml.
-#
-# v2 ablation knobs vs the May-24 maxgn09_hint job 53336325:
-#   - check_interval lowered 8 → 4 so more rollouts (especially the 62%
-#     that ended in <8 turns) actually get a hint. Per teacher_hint_v2
-#     analysis: hint mechanism only touches ~35% of rollout budget at
-#     interval=8; halving the interval should roughly double exposure.
-#   - max_grad_norm 0.9 retained (no collapse observed in v1).
-#
-# All else mirrors ALCC/56GPU_base.yaml — same 56 GPU / 14 node layout.
 
 config_groups:
   terminal_bench_config: terminal_bench
@@ -62,27 +49,11 @@ terminal_bench:
       engine_type: openai
       engine_kwargs:
         model: gpt-5.5-2026-04-23
-        # max_tokens 2048: paired with the teacher_hint PRM's 2048-token
-        # hard mandate in its system prompt (preserves the May-21 fix
-        # that resolved the ContextLengthExceeded collapse on job 53102590).
         max_tokens: 2048
-      # v2 ablation: 8 → 4. Per teacher_hint_v2 analysis, 62% of rollouts
-      # finish in <8 turns and never received a hint at interval=8.
-      # Halving exposes ~2x more rollouts to hints. Recommended next-move
-      # #2 in REPORT_v2.md.
       check_interval: 4
       min_turns: 4
       k: 8
 
-    # v3 (2026-05-25): walked back concurrency 900 → 500. Three v2 chain
-    # links (53383710/12/13) died with the Ray-2.48 distributed-refcount
-    # SIGABRT after monotonically-growing volumes of
-    # `reference_count.cc:1619: ref already removed` warnings (133→431→838).
-    # Root cause: single skyrl_entrypoint driver hits a Ray-internal
-    # threshold under extreme actor/object-ref concurrency. v1 (300 trials)
-    # ran 23h clean; 500 keeps 1.67x v1 headroom while staying clear of
-    # the empirically-bad ceiling. check_interval=4 retained — that is
-    # the actual ablation knob.
     n_concurrent_trials: 500
 
     log_level: INFO
@@ -100,32 +71,11 @@ terminal_bench:
       - AgentEnvironmentTimeoutError
       - ContextLengthExceededError
     default_error_treatment: zero
-    # NOTE (2026-05-27): AgentTimeoutError / ContextLengthExceededError moved
-    # OUT of passthrough_exceptions into zero_exceptions. Passthrough routed
-    # these soft-limit trials through the *normal* (live-trajectory) path in
-    # terminal_bench_generator._process_trial_result, keeping the trial's
-    # dangling vLLM ObjectRefs + orphaned litellm async-callback closures
-    # alive in the training batch. That fed Ray's distributed-refcount race
-    # (reference_count.cc:1619 → SIGABRT / WorkerCrashedError) that killed the
-    # GLM-4_7-swesmith maxgn09_hint chain (true 32847-token overflows on ~32k
-    # prompts). zero_exceptions takes the EARLY-RETURN path (response_ids=[0],
-    # reward=0, included in baseline) which never consumes rollout_details, so
-    # no dangling refs enter training. Matches harbor_config.py schema default.
     passthrough_exceptions:
       - AgentTimeoutError
     zero_exceptions: []
 
   model_info:
-    # 2026-05-28: 32767 → 65535 was REVERTED to 40959 after 53508905 FAILED
-    # at 5:48 with vLLM ValidationError: "max_model_len (65536) > derived
-    # max_model_len (max_position_embeddings=40960 in model's config.json)".
-    # The base model's name "GLM-4_7-…-131k-fixthink" was aspirational
-    # training-target naming; the actual config.json caps at 40960. Could
-    # force 65k with VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 but vLLM warns of
-    # CUDA errors / garbage outputs from RoPE extrapolation past trained
-    # range. 40959 (one-below-max-model-len) preserves the original
-    # loose-truncation pattern while giving ~25% more headroom than the
-    # 32767 that failed. See 2026-05-28_perlmutter_53494636_…
     max_input_tokens: 40959
     max_output_tokens: 4096
 
@@ -205,10 +155,6 @@ trainer:
 
   fully_async:
     max_staleness_steps: 16
-    # v3 (2026-05-25): walked back 2304 → 1500 alongside n_concurrent_trials
-    # 900 → 500 to avoid the Ray-2.48 ref-counting SIGABRT. 1500 is ~2x v1's
-    # 768. Keeps inference-engine pressure low while staying clear of the
-    # driver-side concurrency ceiling.
     num_parallel_generation_workers: 1500
 
 generator:
@@ -217,7 +163,6 @@ generator:
   model_dtype: bfloat16
 
   inference_engine_tensor_parallel_size: 1
-  # 14-node layout: 48 inference engines + 8 GPUs policy/ref = 56 GPUs.
   num_inference_engines: 48
 
   n_samples_per_prompt: 8
@@ -248,14 +193,6 @@ generator:
     top_k: 20
 
   engine_init_kwargs:
-    # 2026-05-28: 32768 → 65536 REVERTED to 40960 (the model's actual
-    # max_position_embeddings per config.json). vLLM ValidationError on
-    # 53508905 confirmed the "131k-fixthink" suffix was aspirational
-    # naming, not architectural. 40960 still gives ~25% more headroom
-    # over the failing 32768 — should push most of the boundary-hugging
-    # overflow distribution out of the FD-churn → SIGABRT path. If
-    # 24-948/link overflow rate persists at 40k, the next lever is
-    # option 2 (pre-filter dataset to drop prompts > ~36k tokens).
     max_model_len: 40960
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
 

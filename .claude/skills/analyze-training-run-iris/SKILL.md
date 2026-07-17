@@ -6,8 +6,8 @@ description: Detailed health check for a Levanter/executor TRAINING run on the m
 # analyze-training-run-iris
 
 > **📍 Iris orientation — read first.** Before acting on anything in this skill, read the Iris **tools
-> catalog** (`.claude/ops/iris/iris_tools.md`) and the Iris **ops directory** (`.claude/ops/iris/` — the
-> CoreWeave GPU particulars in `coreweave_gpu_ops.md`, the TPU `marin` particulars in `iris_job_lifecycle.md`).
+> catalog** (`.claude/ops/iris/ops.md`) and the Iris **ops directory** (`.claude/ops/iris/` — the
+> CoreWeave GPU particulars in `ops.md`, the TPU `marin` particulars in `ops.md`).
 > They carry the binding access/preamble/gotchas and the helper-script inventory the steps below rely on.
 
 A Levanter training run launched through the marin **executor** surfaces as **TWO** Iris jobs:

@@ -1,12 +1,3 @@
-# Qwen3.5-397B-A17B-AWQ - MoE reasoning model, AWQ 4-bit quantized
-# https://huggingface.co/QuantTrio/Qwen3.5-397B-A17B-AWQ
-#
-# 131K context variant
-#
-# Hardware: 8x H200 141GB (~1.1TB total)
-#   - Model weights ~200GB (AWQ 4-bit) → much more room for KV cache
-#   - fp8 KV cache for memory efficiency at long contexts
-#
 engine:
   type: vllm_local
   model: QuantTrio/Qwen3.5-397B-A17B-AWQ

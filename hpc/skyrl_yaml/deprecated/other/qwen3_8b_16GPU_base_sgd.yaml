@@ -1,19 +1,9 @@
-# SkyRL Configuration: Qwen3 8B on 16 GPUs - Optimizer test: SGD with momentum
-# Based on: qwen3_8b_16GPU_base.yaml
-#
-# TEST VARIANT: SGD optimizer with momentum instead of AdamW
-#   - optimizer: SGD
-#   - momentum: 0.9, nesterov: true
-#   - lr: 1e-4 (higher than AdamW since SGD typically needs larger lr)
 
-# SkyRL entrypoint module
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# Hydra config groups (+ prefix in CLI)
 config_groups:
   terminal_bench_config: terminal_bench
 
-# Terminal bench / agentic environment settings
 terminal_bench:
   trials_dir: null
 
@@ -26,7 +16,6 @@ terminal_bench:
     record_terminal_session: false
     enable_pane_logging: false
     strict_json_parser: true
-    # Interleaved Thinking Settings
     interleaved_thinking: true
     extra_body:
       chat_template_kwargs:

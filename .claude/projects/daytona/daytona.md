@@ -49,14 +49,22 @@ Org-cap-full ≠ dataset-needs-too-many-new — only the latter blocks. Either w
 
 ### How to clean stale snapshots (case 1 procedure)
 
-Tool: **`scripts/daytona/daytona_snapshot_manager.py`** (the *safe* reclaim tool — it ONLY audits and deletes snapshots; do NOT confuse it with `cleanup_stale_sandboxes.py`, which targets running sandboxes). Run from the otagent env; `source secrets.env` first (it reads the key from `--api-key-env`, default `DAYTONA_DATA_API_KEY` — env var only, never inline).
+Tool: **`scripts/daytona/daytona_snapshot_manager.py`** (the *safe* reclaim tool — it ONLY audits and deletes snapshots; do NOT confuse it with `cleanup_stale_sandboxes.py`, which targets running sandboxes). Run from the otagent env; `source secrets.env` first (it reads the key from `--api-key-env` — env var only, never inline).
+
+> **⚠️ MUST pass `--api-key-env DAYTONA_API_KEY` for datagen/eval.** The `SnapshotCapExceeded` on org `'cli'`
+> fires against the org keyed by **`DAYTONA_API_KEY`** (that's the org the launcher's snapshot pre-build uses:
+> `OrgConfig(name="cli", api_key=DAYTONA_API_KEY)`). But the tool **defaults `--api-key-env` to `DAYTONA_DATA_API_KEY`**
+> (`daytona_snapshot_manager.py` argparse) — a **DIFFERENT org** (verified 2026-07-16: distinct key values, `cli`=60/60
+> while the default org read 105). Omitting the flag audits/reclaims the wrong org, so the `cli` org silently saturates
+> and the next launch still `SnapshotCapExceeded`s (root-caused a keep-3 refill block 2026-07-16 — the `cli` org had 19
+> unreclaimed stale while the default-org reclaim reported "success"). **Always `--api-key-env DAYTONA_API_KEY` here.**
 
 ```bash
 # 1. AUDIT first (read-only default — no deletes). Shows used/headroom + which snapshots are STALE.
 #    --stale-days takes a FLOAT → 2 HOURS = 0.0833 (2/24).
-python scripts/daytona/daytona_snapshot_manager.py --api-key-env DAYTONA_DATA_API_KEY --stale-days 0.0833
+python scripts/daytona/daytona_snapshot_manager.py --api-key-env DAYTONA_API_KEY --stale-days 0.0833
 # 2. RECLAIM (dry-run unless --yes). Deletes only STALE harbor__* envs:
-python scripts/daytona/daytona_snapshot_manager.py --api-key-env DAYTONA_DATA_API_KEY --delete-stale --yes --stale-days 0.0833
+python scripts/daytona/daytona_snapshot_manager.py --api-key-env DAYTONA_API_KEY --delete-stale --yes --stale-days 0.0833
 ```
 
 - **`--stale-days 0.0833` (= 2 HOURS) is the standard threshold, NOT 2 days.** In a fast-churning campaign (eval legs cycle in hours) a 2-day window reclaims ~nothing (everything is idle <2d). 2 hours is safe: staleness = idle (`last_used_at` older than `--stale-days`) **AND not protected/active** — so this NEVER deletes an env an ACTIVELY-running leg is still using (it has a fresh `last_used_at` <2h). A reclaimed shared `harbor__<hash>` env that a later run needs **rebuilds instantly as a registry hit (0 err)**, so reclaiming an env merely idle 2h+ costs a cheap rebuild, not lost work.

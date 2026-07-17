@@ -1,19 +1,12 @@
-# 24GPU shaped rewards + entropy regularization (coef=0.003) — ALCC variant
-# Identical to 24GPU_shaped.yaml except use_entropy_loss=true.
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# Hydra config groups (+ prefix in CLI)
 config_groups:
   terminal_bench_config: terminal_bench
 
-# Terminal bench / agentic environment settings
 terminal_bench:
-  # trials_dir: Directory for Harbor trial artifacts (derived from experiments_dir if null)
   trials_dir: null
 
-  # Harbor configuration - schema-driven mapping to TrialConfig
   harbor:
-    # Agent settings
     name: terminus-2
     max_episodes: 999999
     enable_summarize: false
@@ -22,34 +15,22 @@ terminal_bench:
     record_terminal_session: false
     enable_pane_logging: false
 
-    # Strict JSON parser
     strict_json_parser: true
 
-    # Interleaved Thinking Settings
     interleaved_thinking: true
     extra_body:
       chat_template_kwargs:
         enable_thinking: true
-    # Long timeout for thinking models
     override_timeout_sec: 1800
 
-    # Environment settings
     override_cpus: 1
     override_memory_mb: 2048
     override_storage_mb: 2048
 
-    # ==========================================================================
-    # AUTO SNAPSHOT: Reduce Daytona rate limits with hash-based snapshot caching
-    # ==========================================================================
-    # When true, automatically creates a snapshot from the Dockerfile on first use,
-    # then reuses it for all subsequent sandboxes with the same Dockerfile content.
-    # Snapshots are named: harbor__<sha256[:12]>__snapshot
     auto_snapshot: true
 
-    # Verifier settings
     verifier_override_timeout_sec: 120
 
-    # Retry settings
     max_retries: 3
     min_wait_sec: 60.0
     max_wait_sec: 600.0
@@ -64,16 +45,12 @@ terminal_bench:
 
     n_concurrent_trials: 300
 
-    # Logging settings
     log_level: INFO
 
-    # ==========================================================================
-    # Reward shaping: composite (verifier + trajectory signals)
-    # ==========================================================================
     enable_reward_shaping: true
-    reward_parser: null            # Auto-detect (pytest, unittest, generic)
+    reward_parser: null
     reward_shaper: composite
-    reward_shaping_fallback: true  # Fall back to original reward if parsing fails
+    reward_shaping_fallback: true
     composite_components:
       verifier: 0.4
       thinking_length: 0.2
@@ -85,7 +62,6 @@ terminal_bench:
     thinking_min_turns_ratio: 0.5
     command_quality_min_turns: 2
 
-    # RLOO-N error classification
     enable_error_classification: true
     mask_exceptions:
       - DaytonaError
@@ -100,23 +76,19 @@ terminal_bench:
       - AgentTimeoutError
       - ContextLengthExceededError
 
-  # Model info for Harbor's hosted_vllm validation
   model_info:
     max_input_tokens: 32767
     max_output_tokens: 4096
 
   archiving:
-    # Enable trial archiving callback
     enabled: false
 
-  # Post-training trace upload to HuggingFace
   trace_upload:
     enabled: true
     repo_org: DCAgent
     episodes: last
     dataset_type: SFT
 
-# Trainer configuration
 trainer:
   strategy: fsdp2
   algorithm:
@@ -129,50 +101,38 @@ trainer:
     eps_clip_high: 0.2
     loss_reduction: token_mean
 
-  # Training loop settings
   epochs: 2
   max_steps: 80
   update_epochs_per_batch: 1
 
-  # Batch sizes
   train_batch_size: 64
   policy_mini_batch_size: 64
   eval_batch_size: 64
 
-  # Micro batch sizes (micro1x4 variant)
   micro_forward_batch_size_per_gpu: 4
   micro_train_batch_size_per_gpu: 1
 
   max_prompt_length: 999999
 
-  # Evaluation and checkpointing
   eval_interval: 999999
   eval_before_train: false
-  # Resumable checkpointing
   ckpt_interval: 3
   resume_mode: latest
-  # HF upload-ready checkpoints
   hf_save_interval: 5
-  # HuggingFace Hub upload (set via CLI: trainer.hf_hub_repo_id=org/repo)
   hf_hub_repo_id: null
   hf_hub_private: false
   hf_hub_revision: main
 
-  # Database registration (auto-registers trained model to Supabase)
-  # Requires KEYS env var pointing to Supabase credentials file
   enable_db_registration: false
 
-  # Logging
   project_name: OpenThoughts-Agent
   log_level: INFO
   tracker_commit_each_step: true
 
-  # Paths
   run_name: null
   ckpt_path: null
   export_path: null
 
-  # Policy optimizer
   policy:
     optimizer_config:
       lr: 8e-6
@@ -183,14 +143,12 @@ trainer:
       cpu_offload: true
       reshard_after_forward: true
       fsdp_size: 4
-  # Reference model
   ref:
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
       fsdp_size: 4
 
-  # Model placement (async training) - 8 shared GPUs for policy/ref
   placement:
     colocate_all: false
     policy_num_nodes: 2
@@ -198,12 +156,10 @@ trainer:
     policy_num_gpus_per_node: 4
     ref_num_gpus_per_node: 4
 
-  # Fully async generation (settings from v2_maxconcurrent)
   fully_async:
     max_staleness_steps: 16
     num_parallel_generation_workers: 768
 
-# Generator configuration
 generator:
   backend: vllm
   timeout_multiplier: 1.0
@@ -241,11 +197,8 @@ generator:
 
   engine_init_kwargs:
     max_model_len: 32768
-    # Interleaved thinking chat template: preserves <think> blocks on ALL
-    # historical assistant turns (stock Qwen3 template strips them).
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
 
-# Data paths
 data:
   train_data: []
   val_data: ["open-thoughts/OpenThoughts-TB-dev"]

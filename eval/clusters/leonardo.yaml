@@ -1,67 +1,20 @@
-# CINECA Leonardo (A100-64GB, x86_64) cluster configuration for the eval listener.
-#
-# DEPRECATED (Stage 4 of the eval-listener-unification plan): the canonical source
-# of truth for this config is now the `eval_cluster_view` field on the `leonardo` HPC
-# object in `hpc/hpc.py`. This YAML is retained as a compat shim — the listener still
-# loads it when given the file path, but prefer the cluster-name form:
-#   python eval/unified_eval_listener.py --cluster-config leonardo ...
-# (or `python -m hpc.launch --job_type eval_listener --cluster-config leonardo ...`).
-# The HPC view and this YAML are kept byte-identical; edits must go in hpc/hpc.py.
-#
-# Why a cluster config (vs the bare --sbatch-script path): without it the
-# listener falls back to Jupiter-shaped hardware defaults (gpus_per_node 8,
-# cpus_per_node 96, ~1.8 TB/node) and computes --cpus-per-task / --mem that a
-# Leonardo node (4 GPU, 32 CPU, ~512 GB) cannot satisfy → "CPU count per node
-# can not be satisfied". The hardware block below makes the per-GPU CPU/mem
-# proportioning resolve to Leonardo-valid values. It also populates
-# CONDA_ENV_PATHS so a per-model `conda_env:` override (eval-qwen35 for the
-# qwen3_5 tmax models) resolves to a real prefix.
-#
-# Sourced by user bfeuer00.
 
-# cluster_name controls which dotenv the sbatch auto-sources (hpc/dotenv/${CLUSTER_NAME}.env).
 cluster_name: leonardo
 
-# --- Per-model serve overrides ---------------------------------------------
-# Default path for the per-model vLLM serving overrides (conda_env,
-# tensor_parallel_size, data_parallel_size, trust_remote_code,
-# limit_mm_per_prompt, ...). The listener resolves --baseline-model-configs as:
-#   CLI flag > this cluster-config key > None.
-# Pinning it here makes the overrides apply even if an operator forgets the CLI
-# flag. WHY THIS EXISTS: on 2026-06-25 the 6 Qwen3.5/3.6-35B-A3B (model_type
-# qwen3_5_moe) eval legs (jobs 47840673/674/677/692/693/694) FAILED because the
-# listener was launched WITHOUT --baseline-model-configs, so the per-model
-# `conda_env: eval-qwen35` (+ TP=2/DP=2/trust_remote_code) override never loaded
-# and the serve silently fell back to otagent (vanilla vLLM 0.16 / transformers
-# 4.x, TP=1) -> "model type qwen3_5_moe not recognized by installed Transformers".
-# The eval-qwen35 env itself is correct (fork-vLLM @ 76259c63a + transformers
-# 5.12.1, both qwen3_5 AND qwen3_5_moe registered; ENVIRONMENT_MAP §2f) — the
-# bug was purely the missing config flag.
 baseline_model_configs: eval/configs/baseline_model_configs_minimal.yaml
 
-# Model-config decoupling: resolve per-model serve config from the SHARED registry instead
-# of the legacy baseline file above. As of the Stage-4 cutover the registry is DEFAULT-ON for
-# every cluster (this key is now redundant but kept explicit). Leonardo's 4-GPU A100 node uses
-# the registry's multi-GPU BASE entries (no hardware variant), so hardware_profile is left
-# default. The baseline_model_configs key above stays valid as a DEPRECATED legacy fallback
-# (G5); the registry supersedes it.
 use_model_registry: true
 model_registry: eval/configs/model_configs.yaml
 hardware_profile: default
 
-# --- SLURM defaults --------------------------------------------------------
 slurm_partition: boost_usr_prod
 slurm_account: AIFAC_5C0_290
-slurm_time: "23:59:00"      # Leonardo boost_usr_prod 24h cap
+slurm_time: "23:59:00"
 
-# --- Conda environments ----------------------------------------------------
-# Prefix paths (the dir containing bin/python). eval-qwen35 is the ONLY env that
-# vLLM-serves model_type: qwen3_5 (tmax-9b/27b) — see ENVIRONMENT_MAP §2f.
 conda_envs:
   otagent: /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/envs/otagent
   eval-qwen35: /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/envs/eval-qwen35
 
-# --- Paths -----------------------------------------------------------------
 paths:
   project_root: /leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent
   hf_cache: /leonardo_work/AIFAC_5C0_290/bfeuer00/data/hub
@@ -75,17 +28,12 @@ paths:
     - /leonardo_work/AIFAC_5C0_290/bfeuer00/data/hub
   secrets_file: ~/secrets.env
 
-# --- Proxy / no-internet support ------------------------------------------
-# Compute nodes have no internet; the Leonardo sbatch is self-contained — it
-# opens a SOCKS5 SSH tunnel to a login node via eval/leonardo/start_proxy_tunnel.sh
-# and wraps HF/Daytona traffic in proxychains4 internally. No listener-side proxy.
 proxy:
   enabled: false
 
-# --- Hardware --------------------------------------------------------------
 hardware:
-  gpus_per_node: 4            # A100-64GB
-  cpus_per_node: 32           # Ice Lake, 32 cores/node
-  mem_per_node_mb: 490000     # ~512 GB; leave headroom under the node limit
+  gpus_per_node: 4
+  cpus_per_node: 32
+  mem_per_node_mb: 490000
   arch: x86_64
   cuda_home: /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/envs/otagent

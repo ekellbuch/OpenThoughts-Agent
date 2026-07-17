@@ -1,8 +1,3 @@
-# Qwen3.5-122B-A10B-FP8 — v5p-32 R1: 131k context with Q6-winner stack.
-#
-# 131k tier (R-tier) of the v5p-32 throughput grid. Uses the 32k winner stack
-# from Q6 (FP8 KV, prefix cache via vLLM v1 default, chunked-prefill at 16k)
-# and drops to seqs=2 to stay inside the KV budget at 131k.
 
 env_vars:
   RUNAI_STREAMER_CONCURRENCY: '4'

@@ -1,45 +1,18 @@
-### 4k-context delphi SFT — PACKED MFU-measurement variant (framework-vs-framework MFU comparison)
-#
-# EXACT copy of 4k_sft_dsfs.yaml (the delphi-1e22-p33m67 magpie_lr1e5 baseline config, LR 1e-5,
-# data_shared_file_system: true, include_mfu: true, template delphi, cutoff 4096, global batch 16,
-# fa2 + liger + ZeRO-3, 1 epoch, push_to_hub false) with the ONLY changes being sequence PACKING
-# turned ON, to reproduce LF job 46798799 (which ran UNPACKED, 35.67% mfu_percent_theoretical /
-# 2.29 s/it, 34720 steps) but PACKED — isolating the pure per-step framework MFU with BOTH LF and
-# Levanter packed, for an exact comparison against the Levanter delphi-1e22 parity run
-# (Levanter packed = 18.3% MFU). Kill at steady-state (~2-3h); does NOT need to complete.
-#
-# CHANGES vs 4k_sft_dsfs.yaml (the 46798799 baseline config):
-#   - packing: true          (was unpacked / 1 doc per 4096 slot)
-#   - neat_packing: false     (standard packing; neat_packing is gated on transformers <= 4.52.4 and
-#                              corrupts under 4.53+ which casts 2D masks to bool — this ckpt is on
-#                              transformers 4.57.6, so neat_packing MUST be false. See
-#                              .claude/projects/llama-factory/llama-factory.md §Neat packing.)
-# include_mfu is ALREADY true (unchanged from the baseline). PEAK_TFLOPS_PER_GPU=312 is set in the
-# ENV at launch (A100 bf16 dense peak) so the end-of-run MFU% line is on the same 312 basis as the
-# Levanter/LF numbers; steady-state MFU is read from the tqdm s/it before the kill.
-#
-# See sft/lf_configs/delphi/4k_sft_dsfs.yaml for the full rationale on template/cutoff/LR/dsfs.
 
-### HPC Launch Settings
 global_batch_size: 16
-# gradient_accumulation_steps = global_batch_size // (num_nodes * gpus_per_node)
 
-### model
-model_name_or_path: laion/delphi-3e18-p33m67-k0p20-lr83-a003   # PLACEHOLDER — overridden per run via --model_path
+model_name_or_path: laion/delphi-3e18-p33m67-k0p20-lr83-a003
 trust_remote_code: true
 attn: fa2
 enable_liger_kernel: true
 optim: adamw_torch_fused
 
-### method
 stage: sft
 do_train: true
 finetuning_type: full
 deepspeed: sft/lf_configs/deepspeed/ds_z3_accelerate.json
 include_mfu: true
 
-### dataset
-# dataset(s) passed at launch from the registry (--dataset_dir sft/delphi). Do NOT hardcode `dataset:`.
 template: delphi
 cutoff_len: 4096
 packing: true
@@ -50,7 +23,6 @@ dataloader_persistent_workers: true
 dataloader_pin_memory: true
 dataloader_num_workers: 4
 
-### output
 logging_steps: 5
 save_strategy: "steps"
 save_steps: 24107
@@ -60,7 +32,6 @@ logging_strategy: "steps"
 plot_loss: true
 report_to: wandb
 
-### train
 learning_rate: 1.0e-5
 num_train_epochs: 1.0
 max_grad_norm: 1.0
@@ -73,5 +44,4 @@ gradient_checkpointing: true
 ddp_timeout: 180000000
 push_to_hub: false
 
-### Multi-node shared-FS dataset prep (fixes per-node datasets.map cache race on GPFS).
 data_shared_file_system: true

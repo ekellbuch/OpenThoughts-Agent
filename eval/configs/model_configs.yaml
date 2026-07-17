@@ -1,8 +1,3 @@
-# AUTO-GENERATED from model_config/ — do NOT hand-edit.
-# Edit the per-model files under model_config/<org>/<slug>.yaml and run:
-#     python scripts/generate_eval_registry.py
-# (or scripts/generate_eval_registry.py --check in CI to detect drift).
-# Source of truth: model_config/ (file-per-model, layered schema).
 
 models:
   GAIR/OpenSWE-32B:

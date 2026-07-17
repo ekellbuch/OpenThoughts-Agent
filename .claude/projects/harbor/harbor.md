@@ -1,11 +1,9 @@
 # Harbor — dependency overview
 
-The agent framework OT-Agent uses for **trace generation** (RL/SFT data) and **agentic eval**. Written
-2026-06-14 from notes + the live `penfever/working` tree. Operational eval-job file layout + resume-debug
-specifics live alongside this in `ops.md`; this is the architecture/facts overview.
+The agent framework OT-Agent uses for **trace generation** (RL/SFT data) and **agentic eval**.
 
 - **Repo:** local `/Users/benjaminfeuer/Documents/harbor`, branch **`penfever/working`**. Editable-installed on every cluster; synced via git (commit→push→`git pull`), never patched on the cluster.
-- **⚠️ CANONICAL UPSTREAM = `marin-community/harbor`** (v0.7.0). The laptop's `origin`/`marin`/`upstream` all point here and `penfever/working` tracks `marin/penfever/working` — **always push here**. Other remotes on the laptop (`laude` = `laude-institute/harbor`, `charlie`, `marianna`) are forks/mirrors and are NOT kept in sync — do not push to or pull from them. **Gotcha (fixed 2026-06-17):** both cluster clones had a STALE `origin` = `laude-institute/harbor` (frozen at an old commit), so `git pull` silently no-op'd and never saw new laptop pushes. Both were repointed to `marin-community/harbor`. If a cluster `git pull` reports "Already up to date" but the fix isn't there, **check `git remote get-url origin` points at `marin-community/harbor`** first.
+- **⚠️ CANONICAL UPSTREAM = `marin-community/harbor`** (v0.7.0). `penfever/working` tracks `marin/penfever/working` — **always push here**. Other remotes (`laude`, `charlie`, `marianna`) are forks/mirrors — do not push to or pull from them. If a cluster `git pull` reports "Already up to date" but the fix isn't there, check `git remote get-url origin` points at `marin-community/harbor`.
 - **CLI:** Typer app `harbor.cli.main:app` — `harbor run`, `harbor jobs start`, `harbor view`, `harbor trials start`.
 - **Two OT-Agent uses:** (1) **datagen trace-gen** — run an agent over a task set, record rollout trajectories → HF dataset; (2) **agentic eval** — run an agent over a benchmark, verify, compute metrics. Both go through `hpc/launch.py` (`--job_type datagen`/`eval`) or the unified eval listener.
 
@@ -13,27 +11,24 @@ specifics live alongside this in `ops.md`; this is the architecture/facts overvi
 
 ## Contributing to this fork (marin-community fork workflow)
 
-Harbor is a **marin-community shared fork** — code contributions follow the **marin-community fork contribution workflow** (shared with `MarinSkyRL`, `evalchemy`), which is DIFFERENT from OT-Agent's:
+Harbor is a **marin-community shared fork** — code contributions follow the marin-community fork workflow (shared with MarinSkyRL, evalchemy):
 
-1. **Read `AGENTS.md` first.** Before editing any file, read the repo's `AGENTS.md` / `AGENTS-core.md` and obey it — env/dev setup, test + lint entry points, PR norms.
-2. **Follow the marin style conventions.** Run the repo's marin-style lint/format/type gate (e.g. `uv run infra/pre-commit.py --all-files --fix`, `ty check`) and match its vendored-tree / marin-style checks.
-3. **Dev on a FRESH branch → PR into `main`.** Never commit directly to `main` or a long-lived branch; cut one fresh feature branch per change and PR it into `main`. Keep it small — PR-per-change, no more mega-consolidation PRs going forward.
-4. **Iterate on the PR until ALL tests are green.** Push fixes to the PR branch until every required CI check passes (marin-precommit, marin-style-sync, tests, …); diagnose + fix CI failures, never force past them.
-5. **Do NOT self-merge — return for approval.** A SUBAGENT never merges a marin-community PR. Open it (green), then return to the SUPERVISOR, who surfaces it to the HUMAN for final approval + merge. (Shared upstream → human-in-the-loop on the merge; some of these repos allow same-author self-merge, which is exactly why this rule exists.)
+1. **Read `AGENTS.md` first.** Obey env/dev setup, test + lint entry points, PR norms.
+2. **Follow the marin style conventions** (`uv run infra/pre-commit.py --all-files --fix`, `ty check`).
+3. **Dev in an isolated worktree off a fresh branch from `main` → PR into `main`.** The `penfever/working` mega-consolidation branch is **RETIRED** — never commit to it or `main` directly.
+4. **Iterate until ALL CI checks pass.** Diagnose + fix, never force past failures.
+5. **Do NOT self-merge — return for approval.** No `Co-Authored-By` trailers; use the `agent-generated` PR label.
 
-Plus the standing norm: **no `Co-Authored-By` / self-crediting commit trailers** (the repo's AGENTS.md forbids them) — use the **`agent-generated` PR label** + the repo's PR-body format instead.
-
-**Scope:** this applies ONLY to the marin-community shared forks (harbor, MarinSkyRL, evalchemy). **OT-Agent (`OpenThoughts-Agent` `penfever/working`) and the vllm fork keep their CURRENT norms** — the agent may commit + push + self-merge, and the `Co-Authored-By` / `Claude-Session` trailers stay.
+**Scope:** this applies ONLY to marin-community shared forks (harbor, MarinSkyRL, evalchemy). OT-Agent and the vllm fork keep their current norms (self-merge + trailers allowed).
 
 ---
 
 ## OT-Agent's harbor pin (`@main`, not a branch)
 
-Two OT-Agent files pin harbor and must stay in sync: `pyproject.toml` (`harbor[daytona] @ git+…marin-community/harbor.git@main`) and `docker/Dockerfile.tpu` (`ENV HARBOR_COMMIT=<sha>` + `--force-reinstall`). (The gpu-rl image's harbor pin lives in **MarinSkyRL** `docker/Dockerfile.gpu-rl`, the canonical gpu-rl build — not OT-Agent.) `uv.lock` is the RUNTIME gate on the iris workers (they `uv sync --frozen`), so a harbor bump is a `uv lock --upgrade-package harbor` + commit, not only an image rebuild; the Dockerfile `HARBOR_COMMIT` pin is a secondary image-consistency measure.
+Two OT-Agent files pin harbor and must stay in sync: `pyproject.toml` (`harbor[daytona] @ git+…marin-community/harbor.git@main`) and `docker/Dockerfile.tpu` (`ENV HARBOR_COMMIT=<sha>` + `--force-reinstall`). The gpu-rl image's harbor pin lives in **MarinSkyRL** `docker/Dockerfile.gpu-rl`. `uv.lock` is the RUNTIME gate on iris workers (`uv sync --frozen`), so a harbor bump is a `uv lock --upgrade-package harbor` + commit, not only an image rebuild.
 
-- **Pin is `@main`** (changed 2026-07-15, was `@penfever/working`). Harbor now follows the marin-fork workflow (fresh-branch → PR → `main`), so `@main` tracks the reviewed/merged state and `penfever/working` drifts/retires.
-- **Why not a mergeable branch:** harbor's repo has **auto-delete-head-branch ON**, so a squash-merge (PR #6) auto-DELETED `penfever/working`, which broke every `@penfever/working` pin (OT-Agent CI went red until the branch was recreated @ `805726bf`). **Do not re-pin OT-Agent to a mergeable/deletable branch.** `@main` cannot be auto-deleted.
-- The `pyproject.toml` branch pin resolves to main's floating HEAD; the Dockerfiles pin the concrete `HARBOR_COMMIT` sha (bump it to main's current HEAD on each rebuild).
+- **Pin is `@main`** (changed 2026-07-15 from `@penfever/working`). Harbor's repo has **auto-delete-head-branch ON**, so a squash-merge auto-deletes the merged branch — `@main` cannot be auto-deleted. Do not re-pin to a mergeable/deletable branch.
+- The `pyproject.toml` pin resolves to main's floating HEAD; the Dockerfiles pin the concrete `HARBOR_COMMIT` sha (bump to main's HEAD on each rebuild).
 
 ---
 
@@ -83,25 +78,9 @@ asciinema recorder). Load-bearing behaviors:
 
 ## Per-trial `TimingInfo` duty-cycle recipe (result.json — reusable across clusters)
 
-Every harbor trial writes a **`result.json`** (`TrialResult`, `models/trial/result.py`) into its trial dir, and
-the coordinator uploads it to the run's `.../trace_jobs/<trial>/result.json`. It carries per-phase `TimingInfo`
-blocks — this is the clean, authoritative source for a per-trial **duty-cycle breakdown** (LLM-gen vs tool-exec vs
-sandbox-lifecycle vs verifier vs error/retry). It is a **harbor trial artifact** (schema + fields are defined and
-written by harbor: `TimingInfo` in `models/trial/result.py:13`, phases set in `trial/trial.py`,
-`api_request_times_msec` emitted by `agents/terminus_2/terminus_2.py:2153`) — NOT a MarinSkyRL/SkyRL artifact — so
-the recipe is cluster-agnostic and lives here; only the per-cluster *access* to the trials bucket is
-cluster-specific (see `.claude/ops/<cluster>/`).
+Every harbor trial writes a **`result.json`** (`TrialResult`, `models/trial/result.py`) with per-phase `TimingInfo` blocks. This is the clean source for a per-trial **duty-cycle breakdown** (LLM-gen vs tool-exec vs sandbox-lifecycle vs verifier). It is a harbor artifact, so the recipe is cluster-agnostic; only the per-cluster access to the trials bucket differs (`.claude/ops/<cluster>/`).
 
-**Why this and not finelog:** harbor logs at INFO but emits **no per-phase timing log lines**, and
-`analyze_job_history.py` can't resolve a pure-RL job's output dir → finelog is the wrong source for a duty-cycle
-read. Aggregate `result.json` instead.
-
-**⚠ Discipline — aggregates only, never pull raw trials to the Mac.** Read only a **bounded sample** (newest ~200
-by `LastModified` for the steady-state duty cycle; ~500 for error / re-provision tails) and print only the computed
-medians/percentiles/fractions. Never sync raw `result.json`/trial dirs or a log stream to the laptop (memory
-`iris-log-resource-discipline`). When the trials bucket is in-cluster-only (e.g. CoreWeave LOTA), aggregate
-**in-pod** and transfer only the numbers — the in-pod `kubectl exec` + boto3 access detail is the cluster-specific
-half (`.claude/ops/iris/coreweave_gpu_ops.md` §Observability).
+**Discipline — aggregates only, never pull raw trials to the Mac.** Read a bounded sample (newest ~200 by `LastModified` for steady-state; ~500 for error tails) and print only computed medians/percentiles. When the bucket is in-cluster-only (CoreWeave LOTA), aggregate in-pod.
 
 **`result.json` field → phase map** (each phase is a `TimingInfo {started_at, finished_at}`, UTC ISO):
 
@@ -113,78 +92,48 @@ half (`.claude/ops/iris/coreweave_gpu_ops.md` §Observability).
 | `agent_execution` | **LLM-gen + tool-exec (combined)** | `TimingInfo` dur |
 | `verifier` | verifier | `TimingInfo` dur |
 | `agent_result.metadata.api_request_times_msec` | **LLM-gen ONLY** (list of per-call msec) | `Σ list ÷ 1000` → s |
-| `agent_result.metadata.n_episodes` / `len(api_request_times_msec)` | turns / LLM-calls | count |
-| `exception_info.exception_type` | error class (bare Python class name) | — |
+| `exception_info.exception_type` | error class | — |
 
-Derived phases:
-- **Tool-exec (+ agent loop)** = `agent_execution_dur − LLM-gen` (the non-LLM part of the agent loop).
-- **Teardown (stop/delete) + sched gap** = `finished_at − max(phase.finished_at)`. The shielded
-  `_stop_agent_environment` `stop(delete=…)` runs in cleanup **AFTER** `finished_at` (`trial/trial.py`), so clean
-  teardown shows as this residual (sub-second on a healthy run).
+Derived: **Tool-exec** = `agent_execution − LLM-gen`. **Teardown/gap** = `finished_at − max(phase.finished_at)` (sub-second on healthy runs). **Frac LLM-gen** = LLM-gen / total; **frac sandbox** = (`environment_setup` + teardown-gap) / total.
 
-**Duty-cycle fraction math** (per trial, then median + p10/p90/max over the sample):
-- **frac LLM-gen** = LLM-gen / total; **frac NOT-LLM** = 1 − that (the duty-cycle overhead).
-- **frac tool-exec** = tool-exec / total.
-- **frac sandbox-lifecycle (the "sandbox-churn tax")** = (`environment_setup` + teardown-gap) / total.
-- **Interpretation:** **LLM-gen ≫ sandbox** (e.g. ~89% vs <1%) ⇒ throughput is **LLM-turn-bound, not sandbox
-  churn** — the lever is `n_concurrent_trials` / generation-buffer depth, NOT sandbox optimization. A **material
-  sandbox fraction** (create/teardown >~10%, or an `environment_setup` heavy >10 s tail) = real re-provision churn.
-- **Lease / release-race check:** count trials with `verifier.finished_at > finished_at` — **expected 0** (verifier
-  runs before finalize; the shielded stop/delete follows). Non-zero = release-race signature.
-- **"Burst ≠ churn" rule:** bucket the exception breakdown by ~10-min `LastModified` slot. A **time-clustered**
-  DaytonaAuth/401 spike (one slot, absent before/after) is the **transient server-side 401 flake** (the
-  `_sandbox_exec` hot-path missing a retry wrap), NOT steady-state sandbox lifecycle and NOT a lease race. Only a
-  *steady* per-slot error rate is a standing fault.
-
-*(Reference measurement + numbers: `/Users/benjaminfeuer/Documents/agent_logs/2026-07-15_per-trial-dutycycle-measurement.md`; durable artifact
-copy: `experiments/active/rno2a-30b-coder-throughput/DUTY_CYCLE_ANALYSIS.md`. v0l = 89% LLM-gen / 11% tool-exec /
-~0.45% sandbox-lifecycle.)*
+**Interpretation:** LLM-gen ≫ sandbox (e.g. ~89% vs <1%) ⇒ LLM-turn-bound, not sandbox-churn — lever is `n_concurrent_trials` / buffer depth. A material sandbox fraction (>10%, or `environment_setup` >10 s tail) = real re-provision churn. Count trials with `verifier.finished_at > finished_at` — expected 0 (non-zero = release-race).
 
 ---
 
 ## Literal-token trace datasets (opencode datagen)
 
-Canonical reference for the `--record_literal` opencode trace datasets and their downstream SFT use. Applies to the opencode-131k campaign (`penfever/<task>-qwen3.5-122b-131k-opencode-traces`) and any future literal datagen.
+Canonical reference for the `--record_literal` opencode trace datasets and their downstream SFT use. Applies to the opencode-131k campaign (`penfever/<task>-qwen3.5-122b-131k-opencode-traces`).
 
 ### What the literal columns are
 
 `make_and_upload_trace_dataset` on a `--record_literal` job emits three parallel columns alongside the text `conversations`:
 
-- `prompt_token_ids`, `completion_token_ids` — **list-of-lists**, one inner list per agent step (turn). The verbatim tokens the serving engine emitted (RecordProxy capture, correlated by `literal_correlator.py`).
-- `logprobs` — list-of-lists of floats, same shape as `completion_token_ids`.
+- `prompt_token_ids`, `completion_token_ids` — **list-of-lists**, one inner list per agent step (turn). Verbatim tokens the serving engine emitted (RecordProxy capture, correlated by `literal_correlator.py`).
+- `logprobs` — list-of-lists of floats, same shape.
 
-A row is "literal-populated" when `prompt_token_ids` is non-empty (`count_populated_literal_rows` checks exactly this).
+A row is "literal-populated" when `prompt_token_ids` is non-empty.
 
-### Capture + correlation — and why "literal yield" varies by arm
+### Capture + correlation
 
-For **installed agents like `opencode`** the LLM calls happen INSIDE the Daytona sandbox (via ai-sdk), so Harbor's `RolloutDetail` never sees the token IDs — the trajectory steps carry only token *counts*. A co-located `harbor.literal.proxy.RecordProxy` on the iris worker captures the real `prompt_token_ids`/`completion_token_ids`/`logprobs` into one job-global `literal.jsonl` (interleaving all ~N concurrent trials). ai-sdk strips the upstream vLLM completion id, so there is **no join key**; OT-Agent's `scripts/harbor/literal_correlator.py` reconstructs attribution from content, verify-or-skip (omit rather than mis-attribute). A trial's tokens must clear **two gates** to land in the exported dataset:
+For installed agents like `opencode`, LLM calls happen INSIDE the Daytona sandbox, so Harbor's `RolloutDetail` never sees the token IDs. A co-located `RecordProxy` captures the real tokens into one job-global `literal.jsonl` (interleaving all concurrent trials). There is no join key (ai-sdk strips the upstream completion id); `literal_correlator.py` reconstructs attribution from content via message-prefix extension + count-sequence matching (verify-or-skip: omit rather than mis-attribute).
 
-- **Gate 1 — capture.** The proxy only logs `status==200` responses carrying a `completion_token_ids` block. A trial that makes few successful LLM calls contributes few/zero records. This is the dominant yield driver and it is **task-shaped**: short/fast or early-failing interactions (e.g. `llm-verifier`, `methods2test`) leave almost no records, while long multi-turn debugging loops (code/bug-fix arms) capture richly.
-- **Gate 2 — unique binding.** Records are grouped into per-trial chains by exact message-**prefix** extension (opencode replays full history each turn), then a chain binds to a trajectory only if their per-step `(prompt_tokens, completion_tokens)` **count sequences match exactly and uniquely**. Fails when: duplicate/templated task prompts make a record extend two chains (**ambiguous → skipped**), or a **short trajectory** yields a non-distinctive count signature that collides across trials (long trajectories are effectively fingerprints).
+Low "literal yield" is usually a **capture ceiling**, not corruption: short/fast or early-failing interactions leave few records; long multi-turn debugging loops capture richly.
 
-**So low "literal yield" (populated-rows / total-trials) is usually a Gate-1 capture ceiling, not corruption or a binding bug.** Measured on the qwen3.5-122b-131k-opencode campaign: code/bug arms ~77–95% (nl2bash 90%, nemotron 95%, stack-junit 77%); verifier/test arms ~6–10% (llm-verifier 510/8965=5.7%, methods2test 108/1039=10.4%). For llm-verifier the log held only ~678 chains for 8965 trials (capture ceiling ~7.6%), and binding then succeeded on ~75% of *captured* chains — i.e. the low headline is few-records-captured, not can't-bind. The literals that *are* captured are correct (verify-or-skip guarantees omission over mis-join).
+### Decoding the token IDs
 
-### Decoding the token IDs → text
+The IDs only decode with the **EXACT tokenizer the engine served with** — for the 131k campaign: **`Qwen/Qwen3.5-122B-A10B-FP8`** (`Qwen2Tokenizer`, vocab 248044). A stock Qwen3 tokenizer (~152k vocab) decodes word tokens to garbage. GCS mirror: `gs://marin-models-us/ot-agent/models/Qwen/Qwen3.5-122B-A10B-FP8/` (pull `tokenizer.json`/`tokenizer_config.json`/`vocab.json`/`merges.txt`).
 
-The IDs only decode with the **EXACT tokenizer the engine served with**. For the 131k campaign that is **`Qwen/Qwen3.5-122B-A10B-FP8`** (a `qwen3_5_moe`, `Qwen2Tokenizer`, **vocab 248044**, specials at 248044–248076). A stock Qwen3 tokenizer (~152k vocab) shares only the low-id digit/whitespace/structure tokens, so word tokens decode to **garbage**.
+Always pass `--served_model Qwen/Qwen3.5-122B-A10B-FP8` on any literal upload/rescue — it stamps `tokenizer_provenance.json`. Decode per-turn with `skip_special_tokens=False` to keep `<|im_end|>`/`<tool_call>`/`<think>` markers.
 
-- GCS mirror (guaranteed source; the HF repo may be gated): `gs://marin-models-us/ot-agent/models/Qwen/Qwen3.5-122B-A10B-FP8/` — pull just `tokenizer.json`/`tokenizer_config.json`/`vocab.json`/`merges.txt` (~22 MB, no weights).
-- Which tokenizer produced a dataset is recorded in its **`tokenizer_provenance.json`** (+ a README decode recipe), written by `make_and_upload_trace_dataset` when you pass `--served_model`. **Always pass `--served_model Qwen/Qwen3.5-122B-A10B-FP8` on any literal upload/rescue** — omitting it still uploads the columns but stamps only the engine-reported served-name.
-- Decode per-turn (list-of-lists) with `skip_special_tokens=False` to keep `<|im_end|>`/`<tool_call>`/`<think>` markers.
+### Rescue from GCS
 
-### Every terminal job must be rescued from GCS
+The worker's end-of-job HF upload cannot be trusted for preemptible jobs. Every terminal job is rescued from banked GCS by the ops cron. Before rescuing a FAILED job, spot-check trials' `result.json`: if 100% errored with `steps: 0` (e.g. `NonZeroAgentExitCodeError` exit 127 = opencode binary absent), there is nothing to rescue — it needs a full re-run.
 
-The worker's end-of-job HF upload cannot be trusted for these preemptible (`v5p + --max-retries`) jobs — "SUCCEEDED" or "repo exists" is never proof of trainable data. In-job export lands text-only (the pinned `:tpu` worker image predates the literal-column fix), and preempt-resumed runs fail export outright. So **every terminal job is rescued from banked GCS by the 3-hourly ops cron**. (`FAILED at export-push` and `landed text-only` both mean "rescue from GCS.")
-
-**Precheck before rescuing — is there anything to rescue?** A third terminal mode is a job that produced **zero valid traces**: every trial errored with `steps: 0` / no LLM calls (e.g. `NonZeroAgentExitCodeError` exit **127**: the `opencode` binary/nvm/node absent in the Daytona sandbox — a task-env provisioning failure, dataset-specific). These have no literal.jsonl AND no usable text — NOT rescuable; they need a **full RE-RUN after the sandbox issue is fixed**, not a GCS rescue. Before rescuing a FAILED job, spot-check a few trials' `result.json`/`exception.txt`: if 100% errored with 0 steps, mark BLOCKED + flag for re-run.
-
-**Rescue procedure:** rsync the OUTER `gs://marin-models-{us,eu}/ot-agent/<job>/` (so sibling `logs/*_literal.jsonl` rides along), clear the target repo's partial `data/` (keep README + `tokenizer_provenance.json`), then re-run the uploader with `--served_model` from the otagent env. Verify with `count_populated_literal_rows` that the literal count ≈ the correlation yield.
+**Rescue:** rsync the outer `gs://marin-models-{us,eu}/ot-agent/<job>/` (so `logs/*_literal.jsonl` rides along), clear the target repo's partial `data/`, re-run the uploader with `--served_model`. Verify with `count_populated_literal_rows`.
 
 ### Literal traces → SFT
 
-`scripts/harbor/literal_traces_to_sft.py` converts a literal trace dataset into an SFT dataset whose **assistant turns are decoded verbatim from the literal completion tokens** (real `<think>` + native tool calls). It emits `conversations` (ShareGPT) + a reasoning-preserving `text` string, and **auto-resolves the tokenizer from the source's `tokenizer_provenance.json`** (override with `--tokenizer`). Rows without literals, or whose assistant-turn count ≠ literal step count, are dropped. `--validate N` dry-runs.
-
-**LAION upload gotcha:** the `laion` org's PRIVATE storage quota is full — push SFT datasets there **public** (public storage isn't quota-capped). A private push succeeds but 403s on readback (`Private repository storage limit reached`).
+`scripts/harbor/literal_traces_to_sft.py` converts a literal trace dataset into SFT data whose assistant turns are decoded verbatim from the literal completion tokens. Auto-resolves the tokenizer from `tokenizer_provenance.json`. Rows without literals, or whose assistant-turn count ≠ literal step count, are dropped. **LAION upload gotcha:** the `laion` org's PRIVATE storage quota is full — push SFT datasets PUBLIC.
 
 ---
 
@@ -192,11 +141,10 @@ The worker's end-of-job HF upload cannot be trusted for these preemptible (`v5p 
 
 Two layers, easy to conflate:
 
-- **Auto-resume** (`job.py` `Job.create()`): if `<job_dir>/config.json` exists, the run resumes — each existing trial dir is matched by **strict Pydantic equality** against the planned `TrialConfig` (any config drift → `FileExistsError`/`ValueError`; delete the stale run dir only after confirming no useful trials — see `ops.md`). **It keeps EVERY existing trial dir and runs only the truly-missing ones. An errored trial still has a dir (with `exception_info` + no reward), so auto-resume treats it as complete and will NOT re-run it.** Re-launching the same run-tag with the same config is auto-resume.
-- **`harbor jobs resume` (`cli/jobs.py:1375`) — the partial-resume path that actually re-runs errored trials.** Before resuming it walks the trial dirs, reads each `result.json` → `TrialResult`, and **deletes any whose `exception_info.exception_type` is in `--filter-error-type` so they re-run.** `-f`/`--filter-error-type` is **repeatable** and **defaults to `["CancelledError"]`** — so for non-cancelled errors you MUST pass the actual type(s). The type string is the bare Python class name (`type(e).__name__` in `models/trial/result.py:31`) — e.g. `DaytonaError`, `EnvironmentStartTimeoutError`, `DaytonaRateLimitError`. **`AgentTimeoutError` is passthrough (the verifier still scores it → it has a reward → counts VALID) and is deliberately NOT filtered.** `--upload` after is an idempotent fill-in-missing-trials sweep.
-  - **Discover which types your errored trials carry** before choosing `-f`: the aggregate `result.json` has an `exception_stats` map keyed by exception_type (`models/job/result.py`), or parse per-trial `result.json` → `exception_info.exception_type`.
-  - **Resuming an EVAL re-runs trials → needs the served model live**, so it runs inside the eval sbatch (which brings vLLM up), not as a bare CLI call. **The canonical eval sbatch already wires this** (Jupiter `eval/jupiter/eval_harbor.sbatch` resume block; the live Leonardo variant `eval/leonardo/eval_harbor.sbatch:625` mirrors it): if `$RUN_DIR/config.json` exists it calls `harbor jobs resume -p $RUN_DIR --filter-error-type EnvironmentStartTimeoutError --filter-error-type DaytonaError --filter-error-type DaytonaRateLimitError`. **So the clean way to resume a partial eval is just to re-submit the same eval (same run-tag) — valid trials are kept, those three error classes re-run.** If an eval's errored trials are a type NOT in that list (check `exception_stats` first; the Jupiter `eval/jupiter/eval_harbor.sbatch` also filters the Daytona auth/authorization/notfound variants), widen the sbatch's filter list (commit→push→pull) or run `jobs resume` by hand with the right `-f` flags.
-- **Port checklist** (`notes/harbor/port_checklist.md`): tiers what to port first when syncing harbor changes (config/deps → core trace/LLM utils → HPC backends → architecture → deletions). The OT-Agent orchestrator/TrialQueue path is kept; upstream's separate orchestrator system + Terminus-3 are NOT ported.
+- **Auto-resume** (`job.py` `Job.create()`): if `<job_dir>/config.json` exists, the run resumes — each existing trial dir is matched by strict Pydantic equality against the planned `TrialConfig` (any config drift → `FileExistsError`). **An errored trial still has a dir (with `exception_info` + no reward), so auto-resume treats it as complete and will NOT re-run it.** Re-launching the same run-tag with the same config is auto-resume.
+- **`harbor jobs resume` (`cli/jobs.py:1375`) — the path that actually re-runs errored trials.** Walks trial dirs, reads each `result.json`, and **deletes any whose `exception_info.exception_type` is in `--filter-error-type`** so they re-run. `-f`/`--filter-error-type` is repeatable and **defaults to `["CancelledError"]`** — for non-cancelled errors you MUST pass the actual type(s) (bare Python class name: `DaytonaError`, `EnvironmentStartTimeoutError`, `DaytonaRateLimitError`). `AgentTimeoutError` is passthrough (verifier still scores it → has reward → counts VALID). Discover which types your errored trials carry via the aggregate `result.json`'s `exception_stats` map.
+  - **Resuming an EVAL needs the served model live**, so it runs inside the eval sbatch (which brings vLLM up). The canonical eval sbatchs already wire `harbor jobs resume` with the standard error-type filters — just re-submit the same eval.
+- **Port checklist** (`notes/harbor/port_checklist.md`): tiers what to port first when syncing harbor changes.
 
 ---
 

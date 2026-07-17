@@ -1,17 +1,3 @@
-# SkyRL Configuration: Qwen3 8B - EFFICIENCY OPTIMIZED VARIANT (v5)
-# Based on: qwen3_8b_16x80GB_thinking_bs64_group8_async_rloo_n_noct_strict_micro2x4_autosnap_console.yaml
-#
-# THROUGHPUT OPTIMIZATION v5: Batching Efficiency + Smarter Scheduling
-# Key changes:
-#   - num_inference_engines: 8 -> 12 (moderate increase)
-#   - max_num_seqs: 32 -> 56 (75% more sequences per engine for better batching)
-#   - max_num_batched_tokens: 32768 -> 65536 (2x tokens for longer sequences)
-#   - num_parallel_generation_workers: 768 -> 224 (matched to 2x engines)
-#   - n_concurrent_trials: 256 -> 448 (matched to worker capacity)
-#   - timeout_multiplier: 2.0 -> 2.5 (more tolerance for larger batches)
-#
-# Expected impact: ~40-50% reduction in generation wait time with better GPU utilization
-# Trade-off: Optimized for efficiency, not raw throughput ceiling
 
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
@@ -35,7 +21,6 @@ terminal_bench:
       chat_template_kwargs:
         enable_thinking: true
 
-    # INCREASED: 900 -> 1200 timeout for longer generations
     override_timeout_sec: 1200
 
     override_cpus: 1
@@ -57,7 +42,6 @@ terminal_bench:
       - RewardFileEmptyError
       - VerifierOutputParseError
 
-    # EFFICIENT: 256 -> 448 concurrent trials (matched to 224 workers * 2)
     n_concurrent_trials: 448
 
     log_level: INFO
@@ -151,19 +135,15 @@ trainer:
     ref_num_gpus_per_node: 4
 
   fully_async:
-    # EFFICIENT: Keep staleness reasonable for training stability
     max_staleness_steps: 10
-    # EFFICIENT: 128 -> 224 workers (matched to ~18-19 per engine)
     num_parallel_generation_workers: 768
 
 generator:
   backend: vllm
-  # EFFICIENT: 2.0 -> 2.5 timeout for larger batches
   timeout_multiplier: 2.5
   model_dtype: bfloat16
 
   inference_engine_tensor_parallel_size: 1
-  # EFFICIENT: 8 -> 12 inference engines
   num_inference_engines: 12
 
   n_samples_per_prompt: 8
@@ -171,9 +151,7 @@ generator:
 
   gpu_memory_utilization: 0.90
 
-  # EFFICIENT: 32 -> 56 sequences per engine for better batching
   max_num_seqs: 56
-  # EFFICIENT: 32768 -> 65536 batched tokens (2x for longer sequences)
   max_num_batched_tokens: 65536
 
   enable_prefix_caching: true

@@ -1,15 +1,3 @@
-# SkyRL Configuration: Qwen3 8B - HIGH GENERATOR THROUGHPUT VARIANT (v1)
-# Based on: qwen3_8b_16x80GB_thinking_bs64_group8_async_rloo_n_noct_strict_micro2x4_autosnap_console.yaml
-#
-# THROUGHPUT OPTIMIZATION v1: High Generator Count
-# Key changes:
-#   - num_inference_engines: 8 -> 12 (50% more engines)
-#   - num_parallel_generation_workers: 768 -> 256 (2x workers)
-#   - n_concurrent_trials: 256 -> 384 (50% more concurrent trials)
-#   - max_num_seqs: 32 -> 48 (more sequences per engine)
-#
-# Expected impact: ~40-60% reduction in generation wait time
-# Trade-off: Higher GPU memory pressure on inference engines
 
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
@@ -54,7 +42,6 @@ terminal_bench:
       - RewardFileEmptyError
       - VerifierOutputParseError
 
-    # INCREASED: 256 -> 384 concurrent trials
     n_concurrent_trials: 384
 
     log_level: INFO
@@ -149,7 +136,6 @@ trainer:
 
   fully_async:
     max_staleness_steps: 8
-    # INCREASED: 128 -> 256 generation workers
     num_parallel_generation_workers: 256
 
 generator:
@@ -158,7 +144,6 @@ generator:
   model_dtype: bfloat16
 
   inference_engine_tensor_parallel_size: 1
-  # INCREASED: 8 -> 12 inference engines
   num_inference_engines: 12
 
   n_samples_per_prompt: 8
@@ -166,7 +151,6 @@ generator:
 
   gpu_memory_utilization: 0.90
 
-  # INCREASED: 32 -> 48 sequences per engine
   max_num_seqs: 48
   max_num_batched_tokens: 32768
 

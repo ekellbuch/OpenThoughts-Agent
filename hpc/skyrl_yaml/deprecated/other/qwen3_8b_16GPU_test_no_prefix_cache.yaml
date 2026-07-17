@@ -1,21 +1,9 @@
-# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs - TEST: enable_prefix_caching=false
-# Based on: qwen3_8b_16GPU_thinking_bs64_group8_async_rloo_n_noct_strict_micro2x4_autosnap_console_v9_base_workers_noblock.yaml
-#
-# TEST VARIANT: Disable prefix caching
-#   - enable_prefix_caching: false
-#
-# Hypothesis: Prefix caching's memory management (hash tables, cache eviction)
-# might have issues on GH200's unified memory architecture. Disabling it
-# simplifies memory access patterns.
 
-# SkyRL entrypoint module
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# Hydra config groups (+ prefix in CLI)
 config_groups:
   terminal_bench_config: terminal_bench
 
-# Terminal bench / agentic environment settings
 terminal_bench:
   trials_dir: null
 
@@ -28,7 +16,6 @@ terminal_bench:
     record_terminal_session: false
     enable_pane_logging: false
     strict_json_parser: true
-    # Interleaved Thinking Settings
     interleaved_thinking: true
     extra_body:
       chat_template_kwargs:
@@ -151,7 +138,6 @@ generator:
   max_num_seqs: 32
   max_num_batched_tokens: 32768
 
-  # TEST CHANGE: Disable prefix caching
   enable_prefix_caching: false
   enable_chunked_prefill: true
 

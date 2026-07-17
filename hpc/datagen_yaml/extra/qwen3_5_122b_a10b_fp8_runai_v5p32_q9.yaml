@@ -1,12 +1,3 @@
-# Qwen3.5-122B-A10B-FP8 — v5p-32 Q9: 32k seqs=32, bf16 KV.
-#
-# Extends the seqs ladder past Q8's seqs=16 (918 mean / 1276 peak) since
-# scaling is still near-linear at the edge. Harbor n_concurrent must be 64
-# (seqs × DP=2) to keep Daytona feed matched.
-#
-# KV budget: at 32k context × 32 seqs × 2 DP = 2M tokens. Per chip across
-# TP=8 / 16 chips: 125k tokens × ~32 KiB bf16 = ~4 GiB — comfortable inside
-# the ~79 GiB free after FP8 weights (~15.6 GiB).
 
 env_vars:
   RUNAI_STREAMER_CONCURRENCY: '4'

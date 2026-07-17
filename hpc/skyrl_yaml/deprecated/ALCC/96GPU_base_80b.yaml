@@ -1,40 +1,9 @@
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# ==========================================================================
-# Qwen3-Next-80B-A3B-Instruct production agentic RL — DISAGGREGATED.
-# Ported from ALCC/56GPU_base.yaml (the a3 "hero" config; 8B reached
-# r~0.74 / pass@8 0.83 over 80 steps). a3 hparams are PRESERVED verbatim
-# (entrypoint, Harbor terminus-2, rloo_n, eps_clip 0.2/0.05, token_mean,
-# lr 8e-6, wd 0, max_grad_norm 0.9, batch 64, mini 64, n_samples 8,
-# epochs 2, max_steps 80, ckpt_interval 3, resume latest, db_reg off,
-# colocate_all false, fully_async.max_staleness_steps 16).
-#
-# 80B swaps (from the Stage-7 capstone, jobs 596157/596282 + Stage-8):
-#   model Qwen/Qwen3-Next-80B-A3B-Instruct (Jupiter HF cache)
-#   expert_model_parallel_size 8, moe_router_replay true, moe_grouped_gemm
-#   true, ep_comm_backend torch, gradient_checkpointing true, fsdp_size 4.
-#   TRAINING = EP=8 x FSDP=4 = 32 GPUs / 8 nodes (policy + ref colocated
-#   on the same 8 train nodes, non-colocated wrt inference).
-#
-# Engine sizing (DISAGGREGATED): start ~16 inference engines TP=4 (64 GPUs
-# / 16 nodes) + 32 train GPUs (8 nodes) = ~24 nodes; calibrate toward the
-# a3 6:1 ratio if the trainer is gen-bound (wait_for_generation_buffer),
-# down if gen is surplus. Each engine is multi-GPU (Qwen3-Next-80B is
-# 3B-active MoE; TP=4 fits + serves on GH200-96GB).
-#
-# Runs in skyrl_megatron_vllm.sif with BOTH overlays composed:
-#   vllm_http_overlay.img (P1 routed_experts HTTP)  [:ro]
-#   fla_tilelang_overlay.img (Stage-8 FlashQLA GDN) [:ro]  + the masking +
-#   monkeypatch shim (see stage8_scope.md §Routing) engaged at model load.
-# (Overlay mounting + the GDN shim are wired in the launch sbatch /
-# runtime, NOT in this yaml.)
-# ==========================================================================
 
-# Hydra config groups (+ prefix in CLI)
 config_groups:
   terminal_bench_config: terminal_bench
 
-# Terminal bench / agentic environment settings
 terminal_bench:
   trials_dir: null
 
@@ -49,7 +18,6 @@ terminal_bench:
 
     strict_json_parser: true
 
-    # Interleaved Thinking Settings
     interleaved_thinking: true
     extra_body:
       chat_template_kwargs:
@@ -76,17 +44,12 @@ terminal_bench:
       - VerifierOutputParseError
       - VerifierRuntimeError
 
-    # Daytona RL concurrency discipline: a3 (4 RUNNING) + this = 5 jobs <= 6/cluster.
-    # Per-job concurrency itself is the n_concurrent_trials below; keep modest at
-    # 80B (each trial holds an engine slot longer than 8B) — 300 (1x base) rather
-    # than a3's 900 (3x) since gen is slower per token and engines are fewer.
     n_concurrent_trials: 300
 
     log_level: INFO
 
     enable_reward_shaping: false
 
-    # RLOO-N error classification
     enable_error_classification: true
     mask_exceptions:
       - DaytonaError
@@ -101,7 +64,6 @@ terminal_bench:
       - AgentTimeoutError
       - ContextLengthExceededError
 
-  # Model info for Harbor's hosted_vllm validation. Sized for 80B at 32k ctx.
   model_info:
     max_input_tokens: 32767
     max_output_tokens: 4096
@@ -115,11 +77,8 @@ terminal_bench:
     episodes: last
     dataset_type: SFT
 
-# Trainer configuration
 trainer:
   strategy: fsdp2
-  # 80B fits the node budget only with gradient checkpointing (Stage-7 P3:
-  # made replay-recompute-safe, commit 9a0ae57f).
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
 
@@ -139,7 +98,6 @@ trainer:
   policy_mini_batch_size: 64
   eval_batch_size: 64
 
-  # Micro batch sizes (micro1x4 variant — match a3)
   micro_forward_batch_size_per_gpu: 4
   micro_train_batch_size_per_gpu: 1
 
@@ -159,16 +117,6 @@ trainer:
   project_name: OpenThoughts-Agent
   log_level: INFO
   tracker_commit_each_step: true
-  # 80B prod runs use console logging instead of wandb: SkyRL's tracking.py
-  # hardcodes wandb.Settings(mode="shared") for multi-node system-metric
-  # aggregation, and shared mode IGNORES WANDB_MODE=offline — it requires a
-  # live wandb server and wandb.init() times out after 90s through the
-  # compute node's proxychains (CommError). This is what killed attempts
-  # 599463 and 600913 (model/training were fine, telemetry init was not).
-  # logger=console disables the wandb.init path entirely while ConsoleLogger
-  # + the trainer's WANDB_MIRROR stdout lines still emit every per-step
-  # metric to the .out. This is a per-run override; flag-off (a3) runs that
-  # don't set logger stay on wandb and are byte-identical.
   logger: console
 
   run_name: null
@@ -187,7 +135,6 @@ trainer:
       cpu_offload: true
       reshard_after_forward: true
       fsdp_size: 4
-      # --- Expert-parallel / router-replay (80B swaps) ---
       expert_model_parallel_size: 8
       moe_router_replay: true
       moe_grouped_gemm: true
@@ -204,11 +151,6 @@ trainer:
       moe_grouped_gemm: true
       ep_comm_backend: torch
 
-  # Model placement — DISAGGREGATED (non-colocated): training on 8 dedicated
-  # nodes (EP=8 x FSDP=4 = 32 GPUs); inference engines on separate nodes.
-  # This is the key difference from the Stage-7 capstone (colocated -> OOM in
-  # the weight-sync gather). Non-colocated should fit; if it still OOMs, that
-  # is the streamed-gather fix flagged in stage7_scope.md.
   placement:
     colocate_all: false
     policy_num_nodes: 8
@@ -218,23 +160,14 @@ trainer:
 
   fully_async:
     max_staleness_steps: 16
-    # Workers that pump Harbor trials into SkyRL. Scaled to the engine fleet:
-    # ~16 engines x ~48 in-flight ~= 768. Matches n_concurrent_trials headroom.
     num_parallel_generation_workers: 768
 
-# Generator configuration — DISAGGREGATED inference fleet
 generator:
   backend: vllm
   timeout_multiplier: 1.0
   model_dtype: bfloat16
 
-  # Each engine is multi-GPU: Qwen3-Next-80B (3B-active MoE) serves on TP=4
-  # (one full GH200 node per engine). Confirmed fittable per the capstone.
   inference_engine_tensor_parallel_size: 4
-  # START 16 engines x TP=4 = 64 GPUs / 16 nodes. With 32 train GPUs = 24 nodes.
-  # CALIBRATE up toward the a3 6:1 inf:train ratio (up to ~40 engines) if the
-  # trainer is gen-bound; down if gen is a surplus. Stay within ~71 free reformo
-  # nodes (never preempt a3).
   num_inference_engines: 16
 
   n_samples_per_prompt: 8
@@ -266,11 +199,8 @@ generator:
 
   engine_init_kwargs:
     max_model_len: 32768
-    # routed_experts capture rail requires the P1 HTTP overlay + this flag is
-    # set at engine launch (enable_return_routed_experts) in the sbatch.
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
 
-# Data paths
 data:
   train_data: []
   val_data: []

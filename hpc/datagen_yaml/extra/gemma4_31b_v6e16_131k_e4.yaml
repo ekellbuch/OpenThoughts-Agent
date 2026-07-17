@@ -1,11 +1,3 @@
-# E4 (v6e-16 TP=8 DP=2): D4 stack seqs=4 → engine cap=8
-# v6e-16 with TP=8 × DP=2 (two engine replicas, each spanning 8 of 16 chips).
-# TP=16 failed loading gemma4's `embed_vision.embedding_projection` weight
-# (shape 1152x5376) — 1152 doesn't shard cleanly at TP=16 (1152/16=72,
-# prime factor 9 doesn't tile). TP=8 splits to 144 cleanly. So DP=2 is the
-# only way to fully use all 16 chips.
-#
-# Engine capacity = max_num_seqs × DP = seqs×2.
 env_vars:
   MODEL_IMPL_TYPE: auto
 engine:

@@ -1,30 +1,9 @@
-# ============================================================================
-# DEPRECATED (model-config decoupling, Stage 3 — 2026-06-29).
-# Migrated into the shared registry eval/configs/model_configs.yaml as flat
-# `<name>@gh200-65k` STANDALONE entries. The 65k launch selects it via
-# `--hardware-profile gh200-65k` (with --use-model-registry). Retained ONLY as a
-# legacy fallback: `--baseline-model-configs eval/clusters/tacc_baseline_model_configs_65k.yaml`
-# still loads it byte-identically (G5). Scheduled for DELETION in Stage 4. Do NOT
-# edit for new models — edit the registry instead.
-# ============================================================================
-#
-# TACC Vista per-model overrides — 65k context variant.
-#
-# Identical to tacc_baseline_model_configs.yaml but pins allenai/tmax-9b to
-# max_model_len=65536 (vs the standard 32768). Use via:
-#   --baseline-model-configs eval/clusters/tacc_baseline_model_configs_65k.yaml
 
 models:
   "allenai/tmax-9b":
     tensor_parallel_size: 1
     max_model_len: 65536
     trust_remote_code: true
-    # tmax is text-only weights in a Qwen3_5ForConditionalGeneration VL config (no
-    # preprocessor_config.json). The otagent fork-vLLM resolves the arch fine but, being a
-    # multimodal class, eagerly builds a MultiModalBudget -> get_image_processor() ->
-    # OSError (no preprocessor_config.json) -> fatal serve crash. This disables the
-    # image/video modality so it serves text-only (the flag TACC lacked vs Leonardo).
-    # OWN field, NOT extra_args (the JSON quotes only survive shell word-splitting here).
     limit_mm_per_prompt: '{"image":0,"video":0}'
     extra_args: "--enable-prefix-caching"
 

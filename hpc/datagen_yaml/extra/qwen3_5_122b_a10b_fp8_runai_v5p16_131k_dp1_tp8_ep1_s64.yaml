@@ -1,11 +1,3 @@
-# B4: v5p-16 TP=8 DP=1 EP=on seqs=64 @131k — push seqs (more KV room at TP=8).
-#
-# DP=1 TP/EP throughput sweep. TP=8 spans 2 hosts (v5p-16 = 8 chips) but DP=1,
-# so it is multi-host but NOT the DP=2 continuous-batching path that marin#6136
-# fingerprints. MUST decode-quality-check (multi-host DP=1 is unvalidated). More
-# chips than A2 → more KV room → can push seqs higher (see B4). Weights 122 GB /
-# TP=8 = 15.25 GB/chip; KV at 131k seqs=32 / TP=8 ~ 8 GB/chip; ample headroom.
-# Companion: A2 (v5p-8 TP=4), B3 (EP off).
 
 env_vars:
   RUNAI_STREAMER_CONCURRENCY: '4'

@@ -1,4 +1,3 @@
-# Harbor eval configuration (16 concurrency, terminus-kira agent, 32k context).
 
 job_name: default-eval-job
 jobs_dir: trace_jobs

@@ -1,67 +1,19 @@
-# TACC Vista (GH200 96GB, aarch64, sm_90) cluster configuration for the eval listener.
-#
-#   python eval/unified_eval_listener.py --cluster-config eval/clusters/tacc.yaml ...
-#
-# Why a cluster config: the listener otherwise falls back to Jupiter-shaped
-# defaults (8 GPU/node, 96 CPU, ~1.8 TB) and emits `--gres gpu:N` + `--mem` +
-# `--cpus-per-task`. NONE of that works on Vista:
-#   - GPUs are NOT a SLURM gres here (`scontrol show node` -> Gres=(null)); each
-#     GH200 node has exactly ONE whole-node-allocated 96GB GPU. Requesting
-#     `--gres gpu:N` => "Invalid generic resource (gres) specification".
-#   - RealMemory is misreported as 1 (MB) on Vista nodes, so `--mem=<MB>` fails
-#     ("Memory specification can not be satisfied").
-# The `hardware.gpu_gres: false` flag below tells the listener to request whole
-# NODES (ceil(TP*DP / gpus_per_node)) with NO --gres / --mem / --cpus-per-task —
-# the node is allocated exclusively (CPUAlloc=72 on a 72-core GH200).
-#
-# Daytona connectivity (the usual hard part) is TRIVIAL on Vista: compute nodes
-# have FULL direct egress (verified job 787310: huggingface.co 200, app.daytona.io
-# 200). The terminus-2 LLM call is made by the harbor orchestrator on the compute
-# node to the LOCAL vLLM (localhost:8000) — the Daytona sandbox only runs terminal
-# commands and never calls the model — so the ONLY external dependency is
-# compute-node -> Daytona API, which works directly. NO proxy / SSH tunnel /
-# step-ca cert is needed (unlike Leonardo). proxy.enabled is false and the TACC
-# sbatch has no proxychains path.
-#
-# Sourced by user penfever.
 
 cluster_name: tacc
 
-# --- Per-model serve overrides ---------------------------------------------
-# Default path for per-model vLLM serving overrides. Resolved as:
-#   CLI --baseline-model-configs > this key > None.
-# NB: the shared baseline_model_configs_minimal.yaml pins Qwen/Qwen3-32B to
-# tensor_parallel_size: 2, which on Vista (1 GPU/node) would need a 2-node
-# multi-node vLLM. The TACC override below pins the 32B family to TP=1 (a 32B
-# bf16 ~64GB fits the 96GB GH200 at TP=1 with ~30GB KV headroom at 32k).
 baseline_model_configs: eval/clusters/tacc_baseline_model_configs.yaml
 
-# Model-config decoupling: resolve per-model serve config from the SHARED registry under the
-# Vista hardware profile. As of the Stage-4 cutover the registry is DEFAULT-ON for every cluster
-# (use_model_registry is now redundant but kept explicit); hardware_profile is what makes TACC
-# select its gh200 recipe. The Vista-divergent models live in the registry as flat name@gh200
-# STANDALONE entries (no inheritance — they differ from the Leonardo/Jupiter base on INTRINSIC
-# fields: terminus-2 Pattern D = no parsers, otagent fork-vLLM = no eval-qwen35 conda_env / no
-# DP), and the gh200 pattern fallbacks force TP=1. The 65k launch selects hardware_profile
-# gh200-65k (overriding only what differs — tmax-9b max_model_len 65536) via --hardware-profile
-# on the command line. The legacy baseline_model_configs key above stays valid as a DEPRECATED
-# fallback (G5).
 use_model_registry: true
 model_registry: eval/configs/model_configs.yaml
 hardware_profile: gh200
 
-# --- SLURM defaults --------------------------------------------------------
 slurm_partition: gh
 slurm_account: CCR24067
-slurm_time: "23:59:00"      # well under the gh 48h cap; leaves SU headroom
+slurm_time: "23:59:00"
 
-# --- Conda environments ----------------------------------------------------
-# Prefix paths (the dir containing bin/python). otagent has the from-source
-# vLLM fork wheel (0.1.dev16611+g76259c63a) + harbor 0.8.0 (editable).
 conda_envs:
   otagent: /scratch/10635/penfever/miniconda3/envs/otagent
 
-# --- Paths -----------------------------------------------------------------
 paths:
   project_root: /scratch/10635/penfever/OpenThoughts-Agent
   hf_cache: /scratch/10635/penfever/hub
@@ -75,17 +27,12 @@ paths:
     - /scratch/10635/penfever/hub
   secrets_file: /scratch/10635/penfever/keys.env
 
-# --- Proxy / no-internet support ------------------------------------------
-# Vista compute nodes have full direct egress (verified). No proxy.
 proxy:
   enabled: false
 
-# --- Hardware --------------------------------------------------------------
 hardware:
-  gpus_per_node: 1            # GH200: 1 Hopper GPU (96GB) per node
-  cpus_per_node: 72           # 72 cores/socket, 1 socket
+  gpus_per_node: 1
+  cpus_per_node: 72
   arch: aarch64
   cuda_home: /scratch/10635/penfever/miniconda3/envs/otagent
-  # Vista does NOT track GPUs as a SLURM gres and misreports RealMemory; request
-  # whole nodes with no --gres/--mem/--cpus-per-task (see header).
   gpu_gres: false

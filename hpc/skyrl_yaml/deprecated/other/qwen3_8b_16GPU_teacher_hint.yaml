@@ -1,19 +1,9 @@
-# SkyRL Configuration: Qwen3 8B on 16x80GB GPUs - with teacher_hint PRM
-# Based on: qwen3_8b_16GPU_mask_context_timeout_prm.yaml
-#
-# VARIANT: Replaces thrashing-detector with teacher_hint PRM.
-#   - Every 8 turns (after min 8 turns), calls GPT-5-mini to inspect last 8 exchanges
-#   - Injects a concise hint into the student's next observation
-#   - Never terminates the agent — only provides guidance
 
-# SkyRL entrypoint module
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# Hydra config groups (+ prefix in CLI)
 config_groups:
   terminal_bench_config: terminal_bench
 
-# Terminal bench / agentic environment settings
 terminal_bench:
   trials_dir: null
 
@@ -26,7 +16,6 @@ terminal_bench:
     record_terminal_session: false
     enable_pane_logging: false
     strict_json_parser: false
-    # Interleaved Thinking Settings
     interleaved_thinking: true
     extra_body:
       chat_template_kwargs:
@@ -64,7 +53,6 @@ terminal_bench:
       - AgentTimeoutError
       - ContextLengthExceededError
 
-  # PRM: mid-trial teacher hints via GPT-5-mini
   prm:
     name: teacher_hint
     engine_type: openai

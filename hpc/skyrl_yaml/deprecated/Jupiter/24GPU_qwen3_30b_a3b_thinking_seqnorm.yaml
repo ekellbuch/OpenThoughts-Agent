@@ -1,55 +1,9 @@
-# =============================================================================
-# Qwen3-30B-A3B-Thinking-2507 — RL config for Jupiter (GH200 96GB, 4 GPU/node).
-# =============================================================================
-# Target: Qwen/Qwen3-30B-A3B-Thinking-2507. STANDARD Qwen3 MoE (qwen3_moe /
-# Qwen3MoeForCausalLM) — NOT Qwen3-Next: plain full attention on EVERY layer, no GDN.
-#   48 layers, hidden 2048, 32 attn / 4 KV heads (GQA), head_dim 128,
-#   128 experts top-8, moe_intermediate 768, vocab 151936,
-#   max_position_embeddings 262144, rope_theta 1e7, bf16.
-#
-# THINKING variant of jupiter/extra/24GPU_qwen3_coder_30b_a3b.yaml — SAME qwen3_moe
-# arch + dims, so ALL the EP=4xFSDP=4 / TP=2 sharding, container, and NCCL wiring below
-# are UNCHANGED. Diffs only: (1) model = Thinking-2507 (native always-on thinking);
-# (2) sampling temp 0.6 (Qwen3-Thinking-2507 rec, was 0.7); (3) max_output 8192 (long
-# reasoning traces) kept within max_model_len 32768 by trimming max_input to 24576
-# (24576 + 8192 = 32768; if CoT truncates, bump max_model_len — native 262144, no YaRN).
-#
-# Launch:
-#   python -m hpc.launch \
-#     --job_type rl \
-#     --rl_config ./hpc/skyrl_yaml/jupiter/24GPU_qwen3_30b_a3b_thinking.yaml \
-#     --model_path Qwen/Qwen3-30B-A3B-Thinking-2507 \
-#     --num_nodes 6 \
-#     --train_data '["DCAgent/exp_rpt_pymethods2test-large"]' \
-#     --time_limit 11:59:00 \
-#     --max_restarts 5 \
-#     --experiments_dir /e/data1/datasets/playground/ot-baf
-#
-# -----------------------------------------------------------------------------
-# GPU / NODE SIZING (6 nodes x 4 GH200 = 24 GPUs)  [colocate_all: false]
-# -----------------------------------------------------------------------------
-# Generation (vLLM):  4 engines x TP=2              =  8 GPUs = 2 nodes
-# Policy/Ref FSDP  :  4 nodes x 4 (EP=4 x FSDP=4)   = 16 GPUs = 4 nodes
-#                                          TOTAL    = 24 GPUs   6 nodes
-#
-# DIVISIBILITY (verified): MoE 128 experts / EP=4 = 32/EP-rank; FSDP=4 | 32 (8/FSDP-rank).
-#   EP x FSDP = 16 = policy GPUs. vLLM TP=2 | 32 attn heads (16/GPU) AND 4 KV heads
-#   (2 KV/rank, valid GQA) AND 128 experts (64/GPU).
-#
-# MEMORY: FSDP state ~540 GB sharded over 16 GPUs → ~34 GB/GPU; cpu_offload:true moves
-#   params+optimizer into the GH200 coherent LPDDR (480 GB/node, NVLink-C2C), leaving
-#   HBM for the active shard + activations → 32k training fits comfortably. vLLM: 30 GB
-#   bf16 weights / TP2 = 15 GB/GPU; at 0.85 util on 94 GB, ample KV headroom (all 48
-#   layers are full-attention so KV grows/layer, but 30B is tiny at TP=2 / 32768).
-# =============================================================================
 
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# Hydra config groups (+ prefix in CLI)
 config_groups:
   terminal_bench_config: terminal_bench
 
-# Terminal bench / agentic environment settings
 terminal_bench:
   trials_dir: null
 
@@ -70,8 +24,6 @@ terminal_bench:
     extra_body:
       chat_template_kwargs:
         enable_thinking: true
-    # 1800s agent timeout; long ceiling lets boundary samples finish. AgentTimeoutError
-    # stays PASSTHROUGH.
     override_timeout_sec: 1800
 
     override_cpus: 1
@@ -94,21 +46,15 @@ terminal_bench:
       - VerifierOutputParseError
       - VerifierRuntimeError
 
-    # 300 — the no-R3 value (R3 is OFF here; routed_experts capture would inflate
-    # per-trial host-RAM, which is why the 80B dropped to 150). 300 keeps the async
-    # buffer full across the 4 TP=2 engines.
     n_concurrent_trials: 300
 
     log_level: INFO
 
     enable_reward_shaping: false
 
-    # REQUIRED for use_tis below (trainer asserts non-null rollout_logprobs). TIS alone
-    # corrects the vLLM↔FSDP rollout-vs-train gap; R3 router-replay is OFF.
     collect_rollout_details: true
 
     enable_error_classification: true
-    # ContextLengthExceededError is PASSTHROUGH (zero-reward signal, not masked).
     mask_exceptions:
       - DaytonaError
       - EnvironmentStartTimeoutError
@@ -122,7 +68,6 @@ terminal_bench:
       - AgentTimeoutError
       - ContextLengthExceededError
 
-  # 24576 + 8192 = 32768 (reasoning room within max_model_len; coder used 32767/4096).
   model_info:
     max_input_tokens: 24576
     max_output_tokens: 8192
@@ -137,12 +82,8 @@ terminal_bench:
     dataset_type: SFT
     cleanup: true
 
-# =============================================================================
-# Trainer configuration
-# =============================================================================
 trainer:
   strategy: fsdp2
-  # Gradient checkpointing ON at 32k (use_reentrant=false = recompute-safe).
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
   algorithm:
@@ -151,13 +92,7 @@ trainer:
     kl_loss_coef: 0.0
     eps_clip_low: 0.2
     eps_clip_high: 0.05
-    # seqnorm: global length-unbiased + grad-accum-correct + dead-group-dilution-free
-    # (inherited from 56GPU_seqnorm_tis.yaml). TIS already on below.
     loss_reduction: seq_mean_token_sum_norm_global
-    # Truncated Importance Sampling: clamps the off-policy ratio between vLLM rollout
-    # and FSDP train-recompute (clamp(exp(old_lp - rollout_lp), max=cap)). cap=2.0.
-    # REQUIRES collect_rollout_details=true (above). R3 router-replay is OFF (see
-    # fsdp_config) — TIS is the rollout-vs-train correction lever for this run.
     use_tis: true
     tis_imp_ratio_cap: 2.0
 
@@ -165,13 +100,10 @@ trainer:
   max_steps: 80
   update_epochs_per_batch: 1
 
-  # Batch sizes — production 64 (train == mini).
   train_batch_size: 64
   policy_mini_batch_size: 64
   eval_batch_size: 64
 
-  # micro_forward 4 (forward-only logprob pass), micro_train 1 (MoE expert FFN backward
-  # is the spiky path).
   micro_forward_batch_size_per_gpu: 4
   micro_train_batch_size_per_gpu: 1
 
@@ -179,8 +111,6 @@ trainer:
 
   eval_interval: 999999
   eval_before_train: false
-  # ckpt_interval=5: 30B steps are fast (vs the 80B's ~4.5h/step where every-1 was
-  # mandatory). hf_save_interval=5 aligns.
   ckpt_interval: 5
   resume_mode: latest
   hf_save_interval: 5
@@ -199,7 +129,6 @@ trainer:
   ckpt_path: null
   export_path: null
 
-  # Policy optimizer — a3 production hparams (lr 8e-6, max_grad_norm 0.9).
   policy:
     optimizer_config:
       lr: 8e-6
@@ -207,82 +136,49 @@ trainer:
       adam_betas: [0.9, 0.999]
       max_grad_norm: 0.9
     fsdp_config:
-      # Offload params + optimizer to the GH200 coherent LPDDR → HBM for the active
-      # shard + activations at 32k.
       cpu_offload: true
       reshard_after_forward: true
-      # EP=4 x FSDP=4 = 16 policy GPUs (4 nodes). 128/EP4=32; FSDP4|32 (8/FSDP-rank) →
-      # clean dim-0 shard. grouped-GEMM must stay ON — only the grouped weight-sync path
-      # produces per-expert vLLM-loadable names (the ungrouped path raised KeyError at
-      # weight-sync). ep_comm_backend=torch = stock torch all-to-all.
       fsdp_size: 4
       expert_model_parallel_size: 4
       moe_router_replay: false
       moe_grouped_gemm: true
       ep_comm_backend: torch
   ref:
-    # INERT (use_kl_loss=false → no RefWorker built); kept config-consistent with policy.
     model:
       path: Qwen/Qwen3-30B-A3B-Thinking-2507
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
-      # Mirror policy: EP=4 + FSDP=4 + grouped-GEMM (inert here, kept consistent).
       fsdp_size: 4
       expert_model_parallel_size: 4
       moe_router_replay: false
       moe_grouped_gemm: true
       ep_comm_backend: torch
 
-  # Disaggregated placement. Policy+Ref share 4 nodes/16 GPUs; the 2 generation nodes
-  # (4 TP=2 engines) are allocated separately. NOTE: these hardcoded values OVERRIDE the
-  # launcher's num_nodes-based derivation (rl_config_utils derives placement only when
-  # null). --num_nodes 6 is still required for the SLURM allocation, but the policy
-  # footprint is fixed here at 4 nodes.
   placement:
     colocate_all: false
     policy_num_nodes: 4
     ref_num_nodes: 4
     policy_num_gpus_per_node: 4
     ref_num_gpus_per_node: 4
-    # Reserve the 4 policy nodes (STRICT_SPREAD) BEFORE the vLLM PG is created → policy
-    # claims its nodes first, the 4 TP=2 engines land on the disjoint 2 nodes (prevents
-    # a policy FSDP worker landing on a vLLM GPU → init-OOM). Safe: use_kl_loss/
-    # use_kl_in_reward both false (policy-only placement group).
     policy_strict_spread_pg: true
-    # Per-GPU bundles (16 == world_size) engage get_reordered_bundle_indices() → each
-    # policy actor pins a distinct physical GPU (no GPU-0-stacking init-OOM in EP layout).
     policy_per_gpu_bundles: true
-    # Each policy actor MASKS CUDA_VISIBLE_DEVICES + forces CUDA_DEVICE_ORDER=
-    # PCI_BUS_ID before CUDA/EP-mesh init → EP=4xFSDP=4 ranks cannot stack on a GPU.
     policy_force_cvd_mask: true
 
   fully_async:
     max_staleness_steps: 16
-    # 256 — over-subscribes the 4 TP=2 engines ~64x; no R3 footprint inflation here.
     num_parallel_generation_workers: 256
 
-# =============================================================================
-# Generator configuration (vLLM)
-# =============================================================================
 generator:
   backend: vllm
   timeout_multiplier: 1.0
   model_dtype: bfloat16
 
-  # TP=2: 32 attn heads/2=16/GPU; 4 KV heads/2=2 KV/rank (valid GQA); 128 experts/2=
-  # 64/GPU. 4 engines x TP=2 = 8 GPUs = 2 nodes.
   inference_engine_tensor_parallel_size: 2
-  # 4 TP=2 engines = 8 inference GPUs = 2 nodes. Set EXPLICITLY so the launcher does NOT
-  # derive it: build_skyrl_hydra_args derives (num_nodes*gpus_per_node)//tp = 6*4//2 = 12
-  # when None — WRONG (4 of 6 nodes are policy-only). 4 is the disaggregated value.
   num_inference_engines: 4
 
-  # EP=1 (default): with TP=2 experts are already 64/GPU on a 3B-active MoE — plenty.
   inference_engine_expert_parallel_size: 1
 
-  # mp (multiprocessing) executor backend — no Ray Compiled-DAG. Requires
-  # colocate_all=false (set above).
   inference_engine_mp_backend: true
 
   n_samples_per_prompt: 8
@@ -306,8 +202,6 @@ generator:
   append_eos_token_after_stop_str_in_multi_turn: true
   max_turns: 999999
 
-  # Qwen3-Thinking-2507 recommended sampling: temp 0.6, top_p 0.95, top_k 20.
-  # max_generate_length 8192 (thinking room) — matches model_info.max_output_tokens.
   sampling_params:
     max_generate_length: 8192
     temperature: 0.6
@@ -315,48 +209,20 @@ generator:
     top_k: 20
 
   engine_init_kwargs:
-    # 32768 — within native 262144; no YaRN needed.
     max_model_len: 32768
-    # Leading ./ is load-bearing (forces file-path classification → resolves to an
-    # absolute PROJECT_ROOT path under the bind-mounted /e/scratch).
     custom_chat_template_chat_completion_path: ./chat_templates/qwen3_thinking_acc.jinja2
-    # R3 OFF (paired with fsdp_config.moe_router_replay=false). qwen3_moe capture over
-    # the vLLM overlay is unverified; TIS handles the rollout-vs-train correction. Flip
-    # BOTH to true together to enable R3 after validating qwen3_moe capture.
     enable_return_routed_experts: false
 
-# Data paths
 data:
   train_data: []
   val_data: []
 
-# K-actor rollout fan-out — ON (breaks the single-event-loop GIL ceiling).
 rollout:
   fanout:
     enabled: true
     num_coordinators: 4
     cpus_per_coordinator: 8
 
-# =============================================================================
-# Apptainer runtime container
-# =============================================================================
-# torch-2.11 / vLLM-0.20.2rc0 SIF + torchtitan-0.2.2 overlay. torchtitan 0.2.2 needs
-# torch>=2.10 (imports torch.nn.attention.varlen, absent on the torch-2.9 baked SIF), so
-# this run uses the torch-2.11 SIF where torchtitan 0.2.2 imports cleanly.
-#   * sif:     skyrl_megatron_vllm0202rc0_r3.sif  (vLLM 0.20.2rc0, torch 2.11.0)
-#   * overlay: skyrl_titan_overlay.img             (provides torchtitan 0.2.2)
-#
-# SIF env fixes (REQUIRED on this SIF, not model-specific) — see ENVIRONMENT_MAP §2d:
-#   * VLLM_USE_FLASHINFER_SAMPLER=0  — this SIF ships no flashinfer; vLLM 0.20.2rc0
-#     defaults the sampler ON and top-imports FlashInferBackend → crash before fallback.
-#   * VLLM_ATTENTION_BACKEND=FLASH_ATTN + TRITON_LIBCUDA_PATH=/.singularity.d/libs —
-#     Triton JIT linker stub dir on GH200/aarch64.
-#   * NCCL_P2P_DISABLE=1 (+ collnet/nvls off) — this SIF's NCCL 2.28.9 IB P2P path fails
-#     Error 3 on cross-node scatter/all_reduce without it.
-# The gmr_fix/capturer_fix R3-capture binds are DELIBERATELY OMITTED: on this SIF vLLM
-# lives at /opt/vllm_build/vllm/ (not dist-packages); binding into the non-existent
-# dist-packages path makes apptainer create a namespace dir that SHADOWS the real vLLM
-# → `cannot import name SamplingParams`. R3 capture is OFF here anyway, so inert.
 container:
   sif: /e/scratch/jureap59/feuer1/containers/skyrl_megatron_vllm0202rc0_r3.sif
   overlays:
@@ -364,22 +230,17 @@ container:
   binds:
     - /e/scratch
     - /e/data1
-    # gmr_fix/capturer_fix binds DELIBERATELY OMITTED on this SIF (would shadow
-    # /opt/vllm_build/vllm → import failure; see header).
   pydeps: /e/scratch/jureap59/feuer1/sif_pydeps
   extra_env:
     SKYRL_GDN_MASK_FLA: 1
     PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
     APPTAINERENV_PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
-    # --- vLLM 0.20.2rc0 SIF env fixes (this SIF only) ---
     VLLM_USE_FLASHINFER_SAMPLER: 0
     VLLM_ATTENTION_BACKEND: FLASH_ATTN
     TRITON_LIBCUDA_PATH: /.singularity.d/libs
     APPTAINERENV_VLLM_USE_FLASHINFER_SAMPLER: 0
     APPTAINERENV_VLLM_ATTENTION_BACKEND: FLASH_ATTN
     APPTAINERENV_TRITON_LIBCUDA_PATH: /.singularity.d/libs
-    # --- Cross-node NCCL fix for this SIF (NCCL 2.28.9 IB P2P path fails without
-    #     P2P_DISABLE; keep SHARP/NVLS disables harmless + DEBUG=INFO) ---
     NCCL_COLLNET_ENABLE: 0
     NCCL_NVLS_ENABLE: 0
     NCCL_P2P_DISABLE: 1
@@ -388,7 +249,6 @@ container:
     APPTAINERENV_NCCL_NVLS_ENABLE: 0
     APPTAINERENV_NCCL_P2P_DISABLE: 1
     APPTAINERENV_NCCL_DEBUG: INFO
-    # --- HF offline on compute nodes (model pre-staged to HF cache) ---
     HF_HUB_OFFLINE: 1
     TRANSFORMERS_OFFLINE: 1
     APPTAINERENV_HF_HUB_OFFLINE: 1

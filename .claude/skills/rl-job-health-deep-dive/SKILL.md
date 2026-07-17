@@ -15,36 +15,24 @@ description: >-
 
 # rl-job-health-deep-dive
 
-A **deep, single-RL-job** health probe ending in **one recommendation to the supervisor: `KILL`, `NO-KILL`, or
-`ERROR`**, backed by hard evidence. The per-job complement to the breadth sweep (`monitor-cron-sweep` glances at
-every job; **this looks at ONE RL job hard**) — the right tool when a run is **new/untested** (new config /
-geometry / model / image, a debug/smoke launch, first launch after a code/config change) or **looks starved or
-wedged**, where state-poll + table metrics are necessary but not sufficient to tell "progressing" from "silently
-dead."
+The per-job complement to `monitor-cron-sweep`'s breadth pass: probe **ONE RL job hard** when it is **new/untested**
+(new config / geometry / model / image, a debug/smoke launch, first launch after a code/config change) or **looks
+starved or wedged** — where state-poll + table metrics can't separate "progressing" from "silently dead."
 
-> **You are a SUBAGENT producing a recommendation — you do NOT execute the kill.** Standing guardrail
-> (`supervisor-init`, every launch skill): **never kill a RUNNING job without explicit permission.** Your
-> deliverable is the verdict + reasoning + next steps; the supervisor decides and, if KILL, runs the teardown.
-> **When genuinely uncertain, prefer NO-KILL + escalate** (a wrongly-killed healthy run wastes a whole bring-up; a
-> wrongly-kept dead one wastes one more sweep — asymmetric). **But never dress a guess as a verdict — if you
-> couldn't get the evidence, the answer is `ERROR`, not a hedged NO-KILL (see §0).**
+**You are a SUBAGENT — you do NOT execute the kill** (standing guardrail: never kill a RUNNING job without explicit
+permission). When genuinely uncertain, **prefer NO-KILL + escalate** — a wrongly-killed healthy run wastes a whole
+bring-up; a wrongly-kept dead one wastes one sweep. **But if you couldn't get the evidence, the answer is `ERROR`,
+not a hedged NO-KILL (see §0).**
 
 ---
 
-## §0. THE CONTRACT — evidence-or-ERROR (this is the load-bearing rule)
+## §0. THE CONTRACT — evidence-or-ERROR (the load-bearing rule)
 
-A verdict is only as good as the evidence under it. **A verdict you cannot back with named, quoted evidence is
-worse than useless** — it looks authoritative and gets a job killed (or kept) on a guess. So:
-
-> ### VERDICT: **ERROR** — return this whenever you could not obtain the evidence.
-> If a required tool fails (auth / PATH / a resolver bug / timeout), or a log can't be fetched or parsed, or you
-> cannot separate policy-mesh from engine GPUs, or two authoritative signals disagree and you can't reconcile them
-> → **STOP and return `VERDICT: ERROR`** with (a) the exact command you ran, (b) its exact failure output, (c) what
-> evidence is therefore missing, (d) what you *did* establish. **Do NOT emit KILL/NO-KILL, do NOT default to
-> NO-KILL, and NEVER substitute a plausible-sounding guess for a missing measurement.** "I couldn't read the engine
-> state because the tool failed with X" is a USEFUL, actionable result; a confident verdict over an unread log is a
-> trap. (The cluster tools have real, documented failure modes — see the ops pointer below — so ERROR is a normal,
-> expected outcome, not a defeat.)
+**Return `VERDICT: ERROR` whenever you could not obtain the evidence**: a required tool failed (auth / PATH /
+resolver bug / timeout), a log can't be fetched or parsed, you can't separate policy-mesh from engine GPUs, or two
+authoritative signals disagree and you can't reconcile them. Stop — give (a) the exact command you ran, (b) its exact
+failure output, (c) what evidence is therefore missing, (d) what you *did* establish. **Do NOT emit KILL/NO-KILL,
+do NOT default to NO-KILL, NEVER substitute a plausible guess for a missing measurement.**
 
 **No gate verdict without its named, quoted artifact:**
 
@@ -57,18 +45,18 @@ worse than useless** — it looks authoritative and gets a job killed (or kept) 
 ### ⛔ Engine under-subscription is NEVER Daytona / duty-cycle / tools
 
 When engines read under-subscribed/idle (`Running` low, `Waiting=0`, KV≈0, ⅓-TDP power) and the generation buffer
-stalls, the cause is **NEVER** a Daytona error, the **agentic duty cycle**, "rollouts parked in tool-execution," or
-"waiting on tools" (operator-corrected repeatedly — **we are NOT tool-bottlenecked**; do not float any of these).
-The cause is in the **gen→dispatch→train pipeline**, and you find it by MEASURING it, on the LIVE job:
-- **the RolloutCoordinator dispatch cores** — are the `num_coordinators` (K) coordinator processes CPU/GIL-pegged on
+stalls, the cause is **NEVER** a Daytona error, the agentic duty cycle, "rollouts parked in tool-execution," or
+"waiting on tools" (**we are NOT tool-bottlenecked**). The cause is in the **gen→dispatch→train pipeline** — measure it LIVE:
+- **RolloutCoordinator dispatch cores** — are the `num_coordinators` (K) coordinator processes CPU/GIL-pegged on
   `submit_batch`/`gather`/post-gather shaping? (py-spy / top them.) → dispatcher-bound → the lever is K, not n/npgw.
 - **staleness/backpressure** — is generation throttled by `max_staleness_steps` because `policy_train` is the slow
   phase (training-bound)?
 - **issued-vs-scheduled** — are `generate()` calls reaching the engine but `Waiting` stays 0 (engines drain
   instantly)? → the bottleneck is upstream dispatch rate, not engine capacity.
+
 (The saturation-READ tuple + "SM-util% is a trap" in marinskyrl's "Saturating vLLM engines" section is still valid;
 its CAUSAL "raise concurrency to beat the duty cycle" story is REFUTED — see the caveat there.) Diagnose while the
-job is ALIVE (py-spy dies with it). A verdict on a starvation you did not measure live is ERROR-quality — say so.
+job is ALIVE (py-spy dies with it). A verdict on an unmeasured starvation is ERROR-quality.
 
 ---
 
@@ -79,12 +67,12 @@ conflict).**
 
 - **Cluster access, poll mechanics, log fetch, GPU-poll, node headroom, Daytona lifecycle, the tool failure
   modes** → `.claude/ops/<cluster>/`:
-  - CoreWeave → **`ops/iris/coreweave_gpu_ops.md`** — §Access (kubeconfig per cluster: East vs cw-rno2a), §Observability (the state-poll primitive `watch_job_state.py`, JobState codes, finelog fetch, and the **Poll/tooling pitfalls** note: rno2a `job summary` flakiness, the `*_ms` query columns, the `analyze_job_history` `--config`/RL-output-dir limits, no server-side `job logs` grep), §Scheduling (gang/Kueue admission + node-headroom math), §Daytona (orgs, sandbox lifecycle, concurrency headroom), §Monitoring & debugging practices (incl. py-spy). Node shape → `ops/iris/coreweave_h100_cloud_hardware.md`.
+  - CoreWeave → **`ops/iris/ops.md`** — §Access (kubeconfig per cluster: East vs cw-rno2a), §Observability (the state-poll primitive `watch_job_state.py`, JobState codes, finelog fetch, and the **Poll/tooling pitfalls**: rno2a `job summary` flakiness, the `*_ms` query columns, the `analyze_job_history` `--config`/RL-output-dir limits, no server-side `job logs` grep), §Scheduling (gang/Kueue admission + node-headroom math), §Daytona (orgs, sandbox lifecycle, concurrency headroom), §Monitoring & debugging practices (incl. py-spy). Node shape → `ops/iris/ops.md`.
   - Leonardo → `ops/leonardo/ops.md`; TACC → `ops/tacc/ops.md`.
-  - **Log-volume discipline** (memory `iris-log-resource-discipline`): never dump a long log into the Mac; state-poll for liveness, bounded/filtered fetch for metrics. The ops §Observability note has the exact bounded-fetch commands.
+  - **Log-volume discipline** (memory `iris-log-resource-discipline`): state-poll for liveness, bounded/filtered fetch for metrics — never dump a long log into the Mac. Exact bounded-fetch commands in ops §Observability.
 - **What the logs/config MEAN — the trainer/engine vocabulary, benign-vs-fault line, known failure modes, config
   semantics** → `.claude/projects/<dep>/`:
-  - **`projects/marinskyrl/marinskyrl.md`** — the phase-Timer/step vocabulary, `[MoE-PATH]` grouped_mm-vs-for-loop, the colocated-engine/rank-0-logging deception, engine saturation (`n_concurrent_trials` scaling), the 80B GDN-GIL/HeartbeatMonitor death + FlashQLA, `SKYRL_W13_RELOAD_BRACKET` token-salad, `SKYRL_R3_RESIDENT`, the benign `prob_diff_mean` artifact, config-schema (Hydra struct) rules, and the runtime knobs. **Read the section matching what you're chasing — do not guess a log line's meaning.**
+  - **`projects/marinskyrl/marinskyrl.md`** — the phase-Timer/step vocabulary, `[MoE-PATH]` grouped_mm-vs-for-loop, the colocated-engine/rank-0-logging deception, engine saturation (`n_concurrent_trials` scaling), the 80B GDN-GIL/HeartbeatMonitor death + FlashQLA, `SKYRL_W13_RELOAD_BRACKET` token-salad, `SKYRL_R3_RESIDENT`, the benign `prob_diff_mean` artifact, config-schema (Hydra struct) rules, runtime knobs. **Read the section matching what you're chasing — do not guess a log line's meaning.**
   - `projects/vllm/vllm.md` — the serve engine: MoE/DCP/R3 flags, `enforce_eager` (CUDA-graphs) throughput cliff, serving-throughput expectations, the benign engine heartbeats (`shm_broadcast … 60/600s`).
   - `projects/harbor/vllm/daytona/` — the rollout/trial layout, verifier/reward path, passthrough exceptions, sandbox failure modes.
 - **Capture + poll scripts** (don't hand-roll): `scripts/iris/peek_rl_rollouts.sh` (CoreWeave artifact pull),
@@ -94,18 +82,18 @@ conflict).**
 
 ## §1. Inputs + capture
 
-**Inputs** (from the dispatch; most are derivable): cluster, job id, pod-name substring, model + size (dense vs
-MoE active-B), the run's stage, and **what's "new/untested"** about it (scrutinize that hardest).
+**Inputs** (from the dispatch; most derivable): cluster, job id, pod-name substring, model + size (dense vs MoE
+active-B), the run's stage, and **what's "new/untested"** about it (scrutinize that hardest).
 
-**Restart-burn check FIRST** (cheap, sets capture scope + feeds the verdict): how many restarts/retries has this
-job burned, and is it the SAME failure each time? A run repeating one crash across every restart is
-**deterministically doomed → KILL**; a restart burned on a genuine transient it has since recovered from is benign.
-*Mechanics per cluster* (failure_count / pod generation on CoreWeave; the `afterany` chain on SLURM) →
-`ops/<cluster>/`. Record `B burned / K max` and each prior attempt's terminal error.
+**Restart-burn check FIRST** (cheap, sets capture scope + feeds the verdict): how many restarts/retries burned, and
+is it the SAME failure each time? A run repeating one crash across every restart is **deterministically doomed →
+KILL**; a restart burned on a genuine transient it has since recovered from is benign. *Mechanics per cluster*
+(failure_count / pod generation on CoreWeave; the `afterany` chain on SLURM) → `ops/<cluster>/`. Record `B burned /
+K max` and each prior attempt's terminal error.
 
 **Capture the artifacts** with the existing tool (never hand-roll a kubectl/R2 sync) — logs + trace_jobs + (if
-restarts burned) the FAILED generations too. *Exact capture + finelog-fetch commands* → `ops/iris/…` §Observability
-+ `scripts/iris/peek_rl_rollouts.sh`. *What the phase-Timers / step counter / `[MoE-PATH]` markers mean* →
+restarts burned) the FAILED generations. *Exact capture + finelog-fetch commands* → `ops/iris/…` §Observability +
+`scripts/iris/peek_rl_rollouts.sh`. *What the phase-Timers / step counter / `[MoE-PATH]` markers mean* →
 `projects/marinskyrl`. **The phase Timers are the progress truth — not a trace count, not a progress bar.** (0
 trials at +15 min on a long-episode arm is normal, not "done" and not "dead.")
 
@@ -115,9 +103,8 @@ trials at +15 min on a long-episode arm is normal, not "done" and not "dead.")
 
 **Liveness = authoritative STATE-POLL + a log-freshness read — NEVER a single log-string grep** (a clean
 kill/preempt emits no terminal string and reaps pods; a content-watch then sits idle while the job is gone). *Poll
-primitive + terminal-detection rule* → `ops/iris/…` §Observability. Then read the captured logs for **freshness
-vs the run's expected cadence** (materially stale-beyond-cadence = suspected wedge) and for **wedge/death
-signatures**.
+primitive + terminal-detection rule* → `ops/iris/…` §Observability. Then read the captured logs for **freshness vs
+the run's expected cadence** (materially stale-beyond-cadence = suspected wedge) and for **wedge/death signatures**.
 
 > **⚠ Multi-mesh RL hides a wedged policy behind live engines (the colocated-engine deception).** On any
 > FSDP×EP×CP RL job the vLLM engines + RolloutCoordinator are SEPARATE actors from the policy mesh — a hung policy
@@ -150,28 +137,27 @@ caveat: `ops/iris/…` §Monitoring & debugging practices). ALIVE + fresh → Ga
   concurrency headroom to scale into. *The saturation math (`n_concurrent_trials` = `2·num_parallel_generation_workers`
   + 32, scale them together) + why engines idle demand-starved* → **`projects/marinskyrl`** (Saturating vLLM
   engines). *Throughput-vs-hardware expectations + the `enforce_eager` CUDA-graph cliff to rule out first* →
-  **`projects/vllm`** + the H100 node shape in `ops/iris/coreweave_h100_cloud_hardware.md`. The opposite failure —
-  `Waiting ≫ Running` with flat throughput — is over-subscription thrash. Report the concrete counts, not "looks
-  fine."
+  **`projects/vllm`** + the H100 node shape in `ops/iris/ops.md`. The opposite failure —
+  `Waiting ≫ Running` with flat throughput — is over-subscription thrash. Report the concrete counts, not "looks fine."
 - **Training/optimizer stage:** not VRAM-OOM (no OOM signature; mem not pinned at ceiling *while stalled*), not
   host/RAM-OOM (no `OOMKilled`), policy/ref ranks actually compute-bound (high util + power) during a step — all-0%
   with no log advance during "training" = wedge. *OOM-detection mechanics* → `ops/<cluster>/`; *host-RAM breakdown
   vocabulary + the 80B optimizer-spike danger window* → `projects/marinskyrl`.
 
 **Gate B verdict:** engines under-subscribed/idle with a stalled buffer, throughput floored with `Running>0` and
-`enforce_eager:false`, or a training-stage OOM / all-ranks-0%-no-progress → **lean KILL or a config fix** (carry
-evidence + the live py-spy to §5; for under-subscription, the fix is usually a concurrency bump, not a kill). All
-engines fed + generating, or training steps advancing without OOM → healthy; go to Gate C.
+`enforce_eager:false`, or a training-stage OOM / all-ranks-0%-no-progress → **lean KILL or a config fix** (for
+under-subscription, the fix is usually a concurrency bump, not a kill). All engines fed + generating, or training
+steps advancing without OOM → healthy; Gate C.
 
 ---
 
 ## §4. Gate C — Rollout quality (read the actual trace_jobs; use judgment)
 
 State + GPUs can be green while the run produces garbage (e.g. a degraded weight-sync serving token-salad → all
-reward-0 → no learning signal). So **read the literal rollouts**. Work through, qualitatively: trials
-INITIALIZING? COMPLETING (count the reward markers — 0 completed at +15 min on a long arm is expected)? any rewards
-NON-ZERO? TURNS completing (avg≈1 turn = dead-engine/broken-loop)? agent outputs sane (read 3–5)? verifiers scoring
-real attempts vs erroring? *The trace/reward/verifier layout + the known failure fingerprints* (incoherent output ⇒
+reward-0 → no learning signal). **Read the literal rollouts**, qualitatively: trials INITIALIZING? COMPLETING
+(count the reward markers — 0 completed at +15 min on a long arm is expected)? any rewards NON-ZERO? TURNS
+completing (avg≈1 turn = dead-engine/broken-loop)? agent outputs sane (read 3–5)? verifiers scoring real attempts
+vs erroring? *The trace/reward/verifier layout + the known failure fingerprints* (incoherent output ⇒
 weight-sync/geometry fault — check `SKYRL_W13_RELOAD_BRACKET`; genuine infra exceptions — **name them from a trial
 exception file you OPENED, don't assume**; ⚠ engine STARVATION is a §3 dispatch problem, NOT "every trial threw a
 Daytona exception") → **`projects/harbor`** + **`projects/marinskyrl`** + `ops/iris/…` §Daytona.
@@ -190,26 +176,23 @@ Daytona exception") → **`projects/harbor`** + **`projects/marinskyrl`** + `ops
 
 **Gate C verdict:** incoherent/all-reward-0 from a serving/sync/verifier fault on a new geometry, or a path that
 yields zero learning signal with no transient explanation → lean KILL (+ the fix). Trials completing with some
-non-zero rewards, or coherent multi-turn attempts on genuinely-hard tasks even at low pass-rate → NO-KILL,
-learning.
+non-zero rewards, or coherent multi-turn attempts on genuinely-hard tasks even at low pass-rate → NO-KILL, learning.
 
 ---
 
 ## §4b. Per-trial duty-cycle breakdown (sandbox-churn quantification) — OPTIONAL DEEP PROBE
 
-Run this when an agentic RL job shows an **engine sawtooth** (inference `Running` peaks then troughs) and you must
+Run when an agentic RL job shows an **engine sawtooth** (inference `Running` peaks then troughs) and you must
 decide whether each trial's throughput is capped by **LLM generation** vs **sandbox-lifecycle churn** vs
-**tool-exec** vs **error/retry** — i.e. to put NUMBERS behind (or refute) a "sandbox churn" claim, or to size the
-inference-subscription lever. **Never assert "sandbox churn" from the sawtooth alone**; no numbers → this is `ERROR`-quality per §0, say so.
+**tool-exec** vs **error/retry** — i.e. to put NUMBERS behind (or refute) a "sandbox churn" claim. **Never assert
+"sandbox churn" from the sawtooth alone**; no numbers → `ERROR` per §0.
 
 **Source + discipline:** the clean per-trial breakdown is each trial's `result.json` `TimingInfo` (NOT finelog).
-The reusable recipe — the `result.json` field-to-phase map, the duty-cycle fraction math, and the lease-race /
-burst≠churn checks (it's a **harbor** trial artifact) — is in **`projects/harbor/harbor.md` §"Per-trial `TimingInfo`
-duty-cycle recipe"**. On cw-rno2a the trials bucket is in-cluster-only, so aggregate **in-pod** and transfer
-**aggregates only** — the cluster-specific `kubectl exec` + boto3 access + trials path is in
-**`ops/iris/coreweave_gpu_ops.md` §Observability** ("Per-trial `TimingInfo` duty-cycle read"). Read only a bounded
-sample (newest ~200 for the duty cycle, ~500 for error/re-provision tails). This obeys the no-big-dump rule (a few
-hundred small JSON reads, not a log stream).
+The reusable recipe — field-to-phase map, duty-cycle fraction math, lease-race / burst≠churn checks (a **harbor**
+trial artifact) — is in **`projects/harbor/harbor.md` §"Per-trial `TimingInfo` duty-cycle recipe"**. On cw-rno2a
+the trials bucket is in-cluster-only, so aggregate **in-pod** and transfer **aggregates only** (the cluster-specific
+`kubectl exec` + boto3 access + trials path is in **`ops/iris/ops.md` §Observability** "Per-trial
+`TimingInfo` duty-cycle read"). Read only a bounded sample (newest ~200 for the duty cycle, ~500 for error/re-provision tails).
 
 **Compute + read (per trial, then median + p10/p90/max):**
 - **frac LLM-gen / total** and **frac NOT-LLM / total** (the duty-cycle overhead); **frac tool-exec / total**;
@@ -255,14 +238,14 @@ NEXT STEPS: <if KILL: root cause + the concrete fix (config knob / weight-sync /
 ```
 
 **Verdict rules:**
-- **KILL** if any gate is a hard FAIL with **no transient/benign explanation** — and you have the evidence for it.
-  Always give root cause + the fix (a KILL without a "what to change before relaunch" is incomplete). A
-  starvation/wedge KILL must include the **live py-spy** captured before the kill (§0), else it's ERROR-quality.
+- **KILL** if any gate is a hard FAIL with **no transient/benign explanation** — and you have the evidence. Always
+  give root cause + the fix. A starvation/wedge KILL must include the **live py-spy** captured before the kill (§0),
+  else it's ERROR-quality.
 - **KILL (deterministically-doomed)** if restarts repeat the SAME failure each attempt — state `B/K` + the
   traceback + the fix that must land first.
 - **NO-KILL** if all gates pass, OR the only failures have a legitimate transient/early-bring-up explanation.
   Say what you're waiting on + the flip signal.
-- **ERROR** if you could not obtain a gate's required evidence — per §0. Never launder it into a NO-KILL.
+- **ERROR** if you could not obtain a gate's required evidence (§0). Never launder it into a NO-KILL.
 
 **You never run the kill.** The supervisor executes teardown + relaunch (per `rl-agentic-launch-iris` /
 `rl-*-launch-*`) on the corrected setting. Log the probe + verdict to `~/Documents/agent_logs/` (dated).
@@ -270,12 +253,6 @@ NEXT STEPS: <if KILL: root cause + the concrete fix (config knob / weight-sync /
 ---
 
 ## Operating notes
-- **This is the HARD per-job read; `monitor-cron-sweep` is the breadth pass** — probe the ONE job you were handed,
-  deeply, return a verdict. Don't duplicate the sweep.
-- **Methodology lives here; facts live in the docs.** If you find yourself wanting to write a specific command, log
-  string, config value, or throughput number into this skill — STOP: it belongs in `.claude/ops/<cluster>/` (access
-  / tooling) or `.claude/projects/<dep>/` (codebase / config semantics), and this skill should POINT to it. Those
-  docs are maintained; a copy here rots and creates a conflicting second source of truth. If the fact isn't in the
-  right doc yet, ADD it there and point — don't encode it here.
-- **Never patch/hand-edit on a cluster.** A fix goes in the LOCAL clone → commit → (push / next-launch upload) per
-  CLAUDE.md. Your job here is diagnosis + recommendation.
+- **This is the HARD per-job read; `monitor-cron-sweep` is the breadth pass** — probe the ONE job, return a verdict. Don't duplicate the sweep.
+- **Methodology lives here; facts live in the docs.** A specific command, log string, config value, or throughput number belongs in `.claude/ops/<cluster>/` (access / tooling) or `.claude/projects/<dep>/` (codebase / config semantics), NOT here — those docs are maintained; a copy here rots. If the fact isn't in the right doc yet, ADD it there and point.
+- **Never patch/hand-edit on a cluster.** A fix goes in the LOCAL clone → commit → (push / next-launch upload) per CLAUDE.md. Your job here is diagnosis + recommendation.
