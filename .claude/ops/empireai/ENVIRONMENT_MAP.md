@@ -85,10 +85,13 @@ nodes=($($SCONTROL show hostnames "$SLURM_JOB_NODELIST")); export MASTER_ADDR="$
 srun --nodes=2 --ntasks-per-node=1 --gres=gpu:b200:4 \
      --container-image=/mnt/home/bf996/images/mega_final.sqsh --container-mount-home \
      bash -lc '<sanitize PATH>; export NCCL_DEBUG=INFO; \
+       export NCCL_SOCKET_IFNAME=bond0 GLOO_SOCKET_IFNAME=bond0 NCCL_SOCKET_FAMILY=AF_INET; \
        /usr/bin/python -m torch.distributed.run --nnodes=2 --nproc_per_node=4 \
          --node_rank=$SLURM_PROCID --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT \
          -m axolotl.cli.train <cfg.yaml>'
 ```
+- **⚠ NCCL bootstrap interface — pin `bond0` (LOAD-BEARING, validated job 31604).** NCCL auto-picks a `100.126.x` IPoIB address for its control-plane bootstrap, but that `100.126.0.0/16` net is served by **four ambiguous `ib*` routes** per node and is **NOT routable node-to-node** → `socketStartConnect … No route to host` → bootstrap hangs to the wall (killed the first Stage-3 attempts 31572/31584/31589). The **routable inter-node iface is `bond0` (10.10.10.0/25)** — the default route + what each node's hostname resolves to (`getent hosts <host>` → `10.10.10.x`), so `MASTER_ADDR=<hostname>` is already correct. **Fix: `export NCCL_SOCKET_IFNAME=bond0 GLOO_SOCKET_IFNAME=bond0 NCCL_SOCKET_FAMILY=AF_INET`** — bootstrap/rendezvous over the routable ethernet; **IB + MNNVL still carry the data plane**.
+- **MNNVL is the intended, supported NVL72 path — keep it ENABLED** (do NOT set `NCCL_MNNVL_ENABLE=0`). The earlier `Cuda failure 801 'operation not supported'` (job 31572) was a *downstream symptom of the bootstrap picking a bad interface on that node-pair*, not a fabric/IMEX block: the host fabric is healthy (`nvidia-smi -q` → `Fabric State: Completed, Success`) and the IMEX channels are injected into the container. With the `bond0` bootstrap fix, a 2-node all-reduce runs clean over MNNVL (no 801, no route-loop) — 31604. IB-fallback (`NCCL_MNNVL_ENABLE=0`) is NOT needed and would forfeit NVL72 bandwidth.
 - **One container task per node** (`--ntasks-per-node=1`); torchrun spawns the 4 local ranks inside. Pyxis passes the SLURM task env (incl. `MASTER_ADDR`/`SLURM_PROCID` + exported batch vars) into the container by default. `NCCL_DEBUG=INFO` to confirm the NVL/IB transport. OT-Agent's default axolotl launcher is `torchrun -m axolotl.cli.train <cfg>` (`hpc/sft_launch_utils.py`).
 
 ## 7. Access / SLURM / storage (brief — full facts in `ops.md`)
