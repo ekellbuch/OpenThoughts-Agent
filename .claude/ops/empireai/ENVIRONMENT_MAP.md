@@ -1,6 +1,6 @@
 # EmpireAI Beta runtime / environment map
 
-The **single mega-container** `mega_final.sqsh` carries **3 isolated env layers** — SFT/axolotl, RL, JAX — for the whole EmpireAI Beta (GB200 NVL72, aarch64) workload set. This map is the container/env/version detail; **cluster access + SLURM + filesystem facts live in `.claude/ops/empireai/ops.md`** (don't duplicate — cross-ref it).
+The **single mega-container** — current canonical **`mega_final_dm.sqsh`** (= `mega_final.sqsh` + `densemixer==1.0.1`; see §1) — carries **3 isolated env layers** — SFT/axolotl, RL, JAX — for the whole EmpireAI Beta (GB200 NVL72, aarch64) workload set. This map is the container/env/version detail; **cluster access + SLURM + filesystem facts live in `.claude/ops/empireai/ops.md`** (don't duplicate — cross-ref it).
 
 Last verified: **2026-07-17** (built + gate-probed live on the GB200).
 
@@ -23,7 +23,8 @@ Last verified: **2026-07-17** (built + gate-probed live on the GB200).
 | `pytorch-25.06-py3.sqsh` | 24.4 GB | — (NGC base) | `nvcr.io/nvidia/pytorch:25.06-py3` arm64/sbsa, torch 2.8.0a0+nv25.06, CUDA 12.9, Blackwell-optimized (sm_100). Anonymous enroot import (NO NGC key needed). |
 | `mega_v1_sft.sqsh` | 24 GB | base | SFT/axolotl into the **base system python** |
 | `mega_v2_rl.sqsh` | 58 GB | v1 | RL env `/opt/envs/rl` |
-| **`mega_final.sqsh`** | **67 GB** | v2 | JAX env `/opt/envs/jax` — **THE image; use this** |
+| `mega_final.sqsh` | 67 GB | v2 | JAX env `/opt/envs/jax` — the 3-layer base (SFT+RL+JAX); **superseded as the run image by `mega_final_dm`** |
+| **`mega_final_dm.sqsh`** | **67 GB** | final | **+ `densemixer==1.0.1`** (`pip install --no-deps` into the base system python) for the DenseMixer axolotl SFT plugin — **THE current image; use this**. Built via job `31630` (gate green: `densemixer 1.0.1 | apply_qwen3_moe_patch import OK`). densemixer is INERT unless the `DenseMixerPlugin` is enabled in the axolotl config, so this is a strict superset — safe for RL/JAX runs too. |
 
 - **Build recipe (per layer = one self-contained sbatch; scripts in `~/scripts/mega_{A,B,C}_*.sbatch`):** enroot `--rw` sandbox on node-local `/tmp` — `enroot create --name <sb> <prior.sqsh>` → `enroot start --root --rw <sb> bash -lc 'bash /root/setup.sh'` → `enroot export -o ~/images/<next>.sqsh <sb>`. **enroot = 4.0.1.** Set `ENROOT_{CACHE,DATA,TEMP,RUNTIME}_PATH=/tmp/$USER/enroot-*` before create. Sandbox unpack+build on `/tmp` (node-local `/`, ~1.6 TB free); export the `.sqsh` to HOME.
 - **All heavy builds are `sbatch`-detached** (survive the reaped ssh socket); each holds 1 B200 (`--gres=gpu:b200:1`, `qos=standard`) during CPU-bound install/compile (only `beta` GPU partition exists — no CPU-only path).
@@ -33,7 +34,7 @@ Last verified: **2026-07-17** (built + gate-probed live on the GB200).
 ```bash
 srun --partition=beta --account=ny_chinmayh_datacomp --qos=<test|interactive|standard> \
      --gres=gpu:b200:N \
-     --container-image=/mnt/home/bf996/images/mega_final.sqsh --container-mount-home \
+     --container-image=/mnt/home/bf996/images/mega_final_dm.sqsh --container-mount-home \
      bash -lc '<cmd>'
 ```
 - **⚠ PATH-sanitize gotcha (load-bearing for EVERY container job):** `--container-mount-home` puts the host `~/.pyenv` shims on PATH → a bare `python` runs the HOST pyenv interpreter ("Exec format error"/wrong python). **Inside the container sanitize first:** `export PATH=/usr/local/bin:/usr/local/cuda/bin:/usr/bin:/bin; hash -r; unset PYENV_ROOT PYENV_VERSION PYENV_SHELL`. Container system python = `/usr/bin/python` (3.12.3).
@@ -83,7 +84,7 @@ torchrun static rendezvous under Pyxis (SFT layer = system python):
 SCONTROL=$(command -v scontrol || echo /cm/local/apps/slurm/current/bin/scontrol)
 nodes=($($SCONTROL show hostnames "$SLURM_JOB_NODELIST")); export MASTER_ADDR="${nodes[0]}" MASTER_PORT=29500
 srun --nodes=2 --ntasks-per-node=1 --gres=gpu:b200:4 \
-     --container-image=/mnt/home/bf996/images/mega_final.sqsh --container-mount-home \
+     --container-image=/mnt/home/bf996/images/mega_final_dm.sqsh --container-mount-home \
      bash -lc '<sanitize PATH>; export NCCL_DEBUG=INFO; \
        export NCCL_SOCKET_IFNAME=bond0 GLOO_SOCKET_IFNAME=bond0 NCCL_SOCKET_FAMILY=AF_INET; \
        /usr/bin/python -m torch.distributed.run --nnodes=2 --nproc_per_node=4 \
