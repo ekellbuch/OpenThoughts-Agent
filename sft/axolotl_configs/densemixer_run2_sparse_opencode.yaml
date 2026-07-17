@@ -49,6 +49,14 @@ tf32: false
 attn_implementation: flash_attention_2
 
 # === memory / compute (IDENTICAL to Run 1) ===
+# ⚠ Blackwell fix (B-only, functionally inert for A): the STOCK Qwen3MoE experts default to the
+# `grouped_mm` kernel -> `torch._grouped_mm`, which is Hopper-only (cc 9.0) and RuntimeErrors on the
+# B200 (cc 10.0) at the first step (job 31707). `eager` uses the per-expert F.linear loop (no
+# grouped_mm) -> works on Blackwell. This is NOT a control confound: A (dense_mixer:true) replaces the
+# whole SparseMoeBlock.forward with the tf-5.x port that accesses expert weights directly and NEVER
+# calls self.experts.forward, so `experts_implementation` is never exercised on A's path — the only
+# FUNCTIONAL A/B difference remains dense (all-expert STE) vs sparse (top-k). Both do per-expert F.linear.
+experts_implementation: eager
 deepspeed: /opt/axolotl/deepspeed_configs/zero3_bf16.json
 gradient_checkpointing: true
 chunked_cross_entropy: true
