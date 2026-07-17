@@ -61,9 +61,9 @@ Size is read from the largest `\dB` token in the HF name. The multiplier flows a
 **Resolution order (first wins):** (1) explicit `--harbor-config` / preset `harbor_config` — overrides size selection for **every** model (use for 131k context / `openhands_*` installed-harness); (2) per-model `timeout_multiplier:` in the registry (for names with no size token, e.g. a Qwen3-8B named `laion/GLM-4_7-swesmith-…`); (3) size-based table above. For a one-off `harbor jobs start`, point `--config` at the 8B/32B file.
 
 ## 3. Pinggy tunnel — installed-harness ONLY (not terminus-2)
-**Skip for the default `terminus-2` agent** (every `eval_ctx*`/`*_non_it*` config; all `--preset`s). Do NOT pass `--pinggy_*` / consume a pair. pinggy is needed only for installed agent harnesses (e.g. `openhands_*` configs) that run in the Daytona sandbox and call back out to the served model over a public tunnel.
+**Skip for the default `terminus-2` agent** (every `eval_ctx*`/`*_non_it*` config; all `--preset`s). Do NOT pass `--pinggy_*` / consume a pair.
 
-For installed-harness: pass `--pinggy_persistent_url <URL> --pinggy_token <TOKEN>`. **Use pairs 8/9/10 by default** (1–7 reserved). The URL+token bank is privileged — read it from `.claude/secret.md` or `/Users/benjaminfeuer/Documents/notes/ot-agent/pinggy_bank.md` (re-read before launch; assignments shift). Resume of an installed-harness eval also needs the tunnel — see `eval-agentic-cleanup` check 4.
+**Installed harnesses (opencode / `openhands_*`) run in the Daytona sandbox and call back out to the served model over a public pinggy tunnel.** The full recipe for the **opencode installed-harness + pinggy** ID-eval — the config (`eval_opencode_ctx32k.yaml`), config-delivery mechanism (`--config-yaml` on TACC vs `--harbor-config`), the `--pinggy_persistent_url`/`--pinggy_token` flags + pairs 8/9/10, the sbatch installed-agent tunnel/routing branch, the `vllm/` provider, `-Thinking-` model specifics, and the pinggy infra checks — lives in **`.claude/projects/harbor/ops.md` → "Agentic ID-eval via the opencode (installed) harness + pinggy"**. The privileged URL/token bank is in `.claude/secret.md` / `notes/ot-agent/pinggy_bank.md` (never inline it). Resume of an installed-harness eval also needs the tunnel — see `eval-agentic-cleanup` check 4.
 
 ## 4. Launch (in tmux — listener is long-running)
 
@@ -92,8 +92,8 @@ A job can report RUNNING while nothing happens (pinggy locked, launcher missing 
 
 > Checks 1–2 are pinggy-path (installed-harness) ONLY — skip for terminus-2. For terminus-2, served-model reachability is proven by check 3. Checks 3–4 apply to every launch.
 
-1. **Pinggy tunnel** (installed-harness) — `grep experiments/<run>/logs/*pinggy.log`: `You are authenticated as …` = live; `A tunnel with the same token … is already active` = server-side lock → cancel + relaunch on a different pair; confirm the traffic counter (`RB:/SB:/TC:`) is growing.
-2. **Daytona → cluster** (installed-harness) — a trial's `config.json` `api_base` MUST be `https://*.a.pinggy.link/v1`, NOT `10.*.*.*` (internal IP = launcher didn't wire pinggy → relaunch with `--pinggy_*`).
+1. **Pinggy tunnel** (installed-harness) — pinggy auth `You are authenticated as …` + a growing `RB:/SB:/TC:` traffic counter. Full checks (auth, sandbox `api_base` = public `*.a.pinggy.link/v1` not `10.*`, relaunch-on-lock) → `.claude/projects/harbor/ops.md` § opencode + pinggy.
+2. **Daytona → cluster** (installed-harness) — a trial's `config.json` `api_base` MUST be `https://*.a.pinggy.link/v1`, NOT `10.*.*.*` (see the harbor ops.md opencode+pinggy section).
 3. **vLLM serving** — `POST /v1/chat/completions` count grows ≥ a few/min, `200 OK` dominates. `400` ratio > 15% → context overflow (`VLLMValidationError: input tokens …` → lower `max_input_tokens`/`max_output_tokens` in the harbor yaml).
 4. **Trial progression** — count trials with `agent/` populated (active) and `result.json` (done). 30+ min with zero `agent/command-0/` (OpenHands) → setup stalled. Completions with `n_output_tokens: None` and `agent_execution.finished_at ≈ started_at` (instant-fail) = tunnel not carrying traffic despite a healthy-looking job.
 
