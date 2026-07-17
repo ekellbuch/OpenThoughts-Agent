@@ -46,6 +46,13 @@ chat_template: chatml
 dataset_prepared_path: /mnt/home/bf996/experiments/densemixer/prepared/run1   # SHARED (multi-node sentinel fast-path)
 val_set_size: 0.0
 dataset_num_proc: 1
+# Dataloader first-batch fix — the default async path (num_workers:1 + prefetch_factor:256)
+# wedged the multi-node first batch: the worker eagerly prefetched 256 packed 16384-tok batches
+# by mmap-reading the NFS-backed prepared arrow -> rank-0 stuck in folio_wait (mmap page I/O) +
+# an anon_pipe_read thread blocked on the worker, GPUs 0% (forward never started), no NCCL
+# collective in flight (job 31682, killed ~21min pre-step). prefetch_factor:2 kills the storm.
+dataloader_num_workers: 2
+dataloader_prefetch_factor: 2
 
 # === precision — bf16 + flash-attn (coordinator signal 2026-07-17; job 31623 HEALTHY). ===
 bf16: true
