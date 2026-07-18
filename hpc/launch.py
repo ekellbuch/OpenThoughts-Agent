@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import json
 import yaml
 import dataclasses
@@ -10,6 +11,7 @@ from huggingface_hub.errors import HFValidationError
 
 from hpc.arguments import JobType, LlamaFactoryArgs, parse_args
 from hpc.cli_utils import normalize_job_type
+from hpc.data_argument_keys import DATA_ARGUMENT_KEYS
 from hpc.launch_utils import (
     _merge_dependencies,
     apply_env_overrides,
@@ -42,11 +44,6 @@ from hpc.datagen_launch_utils import (
 )
 from hpc.consolidate_launch_utils import (
     launch_consolidate_job,
-)
-from hpc.eval_launch_utils import (
-    launch_eval_job_v2,
-    prepare_eval_configuration,
-    remap_eval_cli_args,
 )
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -127,6 +124,45 @@ class _DatasetArtifacts:
     dataset_paths: list[str]
     dataset_path: str
     model_path: str
+    # True when --dataset_dir points at a local LLaMA-Factory registry
+    # (dir with dataset_info.json) and the --dataset values are registry KEYS.
+    # In that mode the caller must keep the keys in base_config["dataset"] +
+    # dataset_dir pointing at the registry, NOT overwrite with local paths
+    # (each registry entry carries its own schema/tags).
+    registry_mode: bool = False
+
+
+def _resolve_dataset_entry_for_download(entry: str, dataset_dir: Optional[str]) -> tuple[str, str]:
+    """Resolve a ``--dataset`` entry for pre-download.
+
+    When ``--dataset_dir`` points at a local LLaMA-Factory registry (a dir
+    containing ``dataset_info.json``), the ``--dataset`` values are registry
+    KEYS (e.g. ``tulu3``), not HF repo ids — so ``snapshot_download("tulu3")``
+    404s. Resolve the key against the registry instead:
+      - ``file_name`` (local data) -> already on disk; nothing to download.
+      - ``hf_hub_url`` / ``ms_hub_url`` -> the real HF repo id to snapshot.
+      - registered but no resolvable remote -> fall back to the key as repo id.
+    Non-registry entries (or no local registry) fall through to the key as-is.
+
+    Returns ``(kind, value)`` where ``kind`` is ``"local"`` or ``"repo"``.
+    """
+    if dataset_dir and dataset_dir != "ONLINE" and os.path.isdir(dataset_dir):
+        info_path = os.path.join(dataset_dir, "dataset_info.json")
+        if os.path.isfile(info_path):
+            try:
+                with open(info_path) as f:
+                    registry = json.load(f)
+            except (OSError, ValueError):
+                registry = {}
+            spec = registry.get(entry)
+            if isinstance(spec, dict):
+                if spec.get("file_name"):
+                    local = os.path.join(dataset_dir, spec["file_name"])
+                    return ("local", os.path.abspath(local) if os.path.exists(local) else entry)
+                hub_id = spec.get("hf_hub_url") or spec.get("ms_hub_url")
+                if hub_id:
+                    return ("repo", hub_id)
+    return ("repo", entry)
 
 
 def _load_base_train_config(train_config_path: str) -> dict:
@@ -160,16 +196,55 @@ def _drop_deprecated_fields(exp_args: dict, base_config: dict) -> None:
         print("Dropping deprecated argument 'push_to_db' from train config")
 
 
+# Launcher-only control keys that LlamaFactoryArgs exposes for our launch-time
+# preflight logic (e.g. _configure_output_and_logging's resume/overwrite guards)
+# but that must NEVER be written into the LLaMA-Factory train_config.yaml.
+# transformers v5 removed `overwrite_output_dir` from Seq2SeqTrainingArguments,
+# so leaving it in the YAML makes LLaMA-Factory's HfArgumentParser raise
+# "Some keys are not used by the HfArgumentParser: ['overwrite_output_dir']".
+_LAUNCHER_ONLY_TRAIN_CONFIG_KEYS = ("overwrite_output_dir",)
+
+
+def _strip_launcher_only_keys(base_config: dict) -> None:
+    """Remove launcher-only control keys from the config before it is dumped to
+    the LLaMA-Factory train_config.yaml. These keys are consumed earlier in
+    construct_config_yaml() and are not recognized by LLaMA-Factory's parser."""
+    for key in _LAUNCHER_ONLY_TRAIN_CONFIG_KEYS:
+        if base_config.pop(key, None) is not None:
+            print(f"Stripping launcher-only key '{key}' from train config (not a LLaMA-Factory arg)")
+
+
 def _merge_launch_overrides(base_config: dict, exp_args: dict) -> dict:
     explicit_cli_keys = set(exp_args.get("_explicit_cli_keys", []))
     exp_args.pop("_explicit_cli_keys", None)
     preprocessor_owned = set()
+
+    # Registry mode (--dataset_dir with a dataset_info.json): each dataset's
+    # column/tag schema is resolved per-dataset FROM the registry. The global
+    # LlamaFactoryArgs schema defaults (messages="conversations", role_tag="from",
+    # formatting="sharegpt", ...) are non-None, so without this guard they get
+    # copied into the config below and OVERRIDE the per-dataset resolution — which
+    # breaks heterogeneous mixes (e.g. wildchat_386k's column is `conversation`,
+    # not `conversations` -> KeyError in dataset preprocessing). Skip these schema
+    # keys unless the user EXPLICITLY set them on the CLI. (Same registry detection
+    # as _materialize_dataset_and_model.)
+    # NOTE: --dataset_dir arrives in exp_args and has NOT been merged into
+    # base_config yet at this point (that merge happens in the loop below), so
+    # read it from exp_args first or the guard is a silent no-op.
+    _ds_dir = exp_args.get("dataset_dir") or base_config.get("dataset_dir")
+    _registry_mode = bool(
+        _ds_dir and _ds_dir != "ONLINE" and os.path.isdir(_ds_dir)
+        and os.path.isfile(os.path.join(_ds_dir, "dataset_info.json"))
+    )
+    _registry_protected_keys = set(DATA_ARGUMENT_KEYS) | {"formatting"}
 
     llama_fields = {field.name for field in dataclasses.fields(LlamaFactoryArgs)}
     for key, value in exp_args.items():
         if key.startswith("_"):
             continue
         if key == "deepspeed" and key not in explicit_cli_keys:
+            continue
+        if _registry_mode and key in _registry_protected_keys and key not in explicit_cli_keys:
             continue
         # Don't overwrite base config values with None defaults from LlamaFactoryArgs.
         # Only override if the value was explicitly set on CLI or is non-None.
@@ -206,18 +281,34 @@ def _materialize_dataset_and_model(
         return _DatasetArtifacts(dataset_paths, str(dataset_path), str(model_path))
 
     download_datasets = not exp_args.get("internet_node", False)
+    ds_dir = base_config.get("dataset_dir")
+    registry_mode = bool(
+        ds_dir and ds_dir != "ONLINE" and os.path.isdir(ds_dir)
+        and os.path.isfile(os.path.join(ds_dir, "dataset_info.json"))
+    )
     dataset_paths: list[str] = []
     if dataset_entries:
         if download_datasets:
-            for repo in dataset_entries:
+            for entry in dataset_entries:
+                kind, value = _resolve_dataset_entry_for_download(entry, ds_dir)
+                if kind == "local":
+                    # Registry entry backed by local data (file_name) — already
+                    # on disk under the registry dir; nothing to pre-download.
+                    dataset_paths.append(value)
+                    print(f"Dataset '{entry}' is local registry data ({value}); skipping download")
+                    continue
                 try:
-                    local_path = snapshot_download(repo_id=repo, repo_type="dataset")
+                    local_path = snapshot_download(repo_id=value, repo_type="dataset")
                 except HFValidationError:
-                    if os.path.isdir(repo):
-                        local_path = os.path.abspath(repo)
+                    if os.path.isdir(value):
+                        local_path = os.path.abspath(value)
                     else:
                         raise
                 dataset_paths.append(local_path)
+                if value != entry:
+                    print(f"Dataset '{entry}' -> HF '{value}' (registry) downloaded to {local_path}")
+                else:
+                    print(f"Downloaded dataset to {local_path}")
         else:
             dataset_paths = dataset_entries.copy()
     else:
@@ -242,7 +333,7 @@ def _materialize_dataset_and_model(
         model_path = snapshot_download(repo_id=base_config["model_name_or_path"], repo_type="model")
     print(f"Downloaded model to {model_path}")
 
-    return _DatasetArtifacts(dataset_paths, dataset_path, model_path)
+    return _DatasetArtifacts(dataset_paths, dataset_path, model_path, registry_mode)
 
 
 _COMPLETED_MODEL_FILES = {
@@ -357,6 +448,13 @@ def _write_train_config(configs_dir: str, job_name: str, base_config: dict) -> s
 
 
 def construct_config_yaml(exp_args):
+    # Axolotl backend: emit an axolotl-schema YAML instead of the LF one. The LF
+    # (default) path below is byte-identical to pre-change — this branch is only
+    # taken when --sft_backend axolotl.
+    if exp_args.get("sft_backend") == "axolotl":
+        from hpc.axolotl_config_utils import construct_axolotl_config_yaml
+        return construct_axolotl_config_yaml(exp_args)
+
     # Load base config first so we can finalize the job name (which may
     # include the model identifier) BEFORE creating experiment directories.
     train_config_path = exp_args.get("train_config_path")
@@ -417,14 +515,25 @@ def construct_config_yaml(exp_args):
         base_config["dataset"] = artifacts.dataset_path
         base_config["dataset_dir"] = artifacts.dataset_path
     elif not exp_args["internet_node"]:
-        if artifacts.dataset_paths:
+        if artifacts.registry_mode:
+            # Registry mode (--dataset_dir with dataset_info.json): keep the
+            # registry KEYS in base_config["dataset"] and dataset_dir pointing at
+            # the registry, so LLaMA-Factory resolves each dataset's own
+            # schema/tags. Overwriting with local snapshot paths drops the
+            # per-dataset tags -> KeyError on heterogeneous mixes.
+            print(
+                f"Registry mode: keeping dataset keys '{base_config.get('dataset')}' "
+                f"(dataset_dir={base_config.get('dataset_dir')}); pre-download warmed the cache"
+            )
+        elif artifacts.dataset_paths:
             base_config["dataset"] = ",".join(artifacts.dataset_paths)
 
     base_config = configure_sft_reporting(base_config, exp_args, artifacts.model_path)
     base_config = _configure_output_and_logging(base_config, exp_args, checkpoints_dir)
     base_config = maybe_compute_gradient_accumulation(base_config, exp_args)
     _maybe_assign_tokenized_path(base_config, exp_args, dataset_entries)
-    apply_data_argument_overrides(base_config, exp_args)
+    apply_data_argument_overrides(base_config, exp_args, registry_mode=artifacts.registry_mode)
+    _strip_launcher_only_keys(base_config)
 
     train_config_path_out = _write_train_config(configs_dir, exp_args["job_name"], base_config)
 
@@ -487,14 +596,26 @@ def display_args(exp_args, name):
 def main():
     # Lazy import to avoid torch dependency at module load time
     from database.unified_db.utils import load_supabase_keys
+    from hpc.resume_manager import ResumeBail
     load_supabase_keys()
+    # Stage-1 thin wrapper: eval_listener forwards sys.argv verbatim to the listener
+    # after the preamble. Fast-pathed BEFORE parse_args() so the listener's ~50 own
+    # flags parse natively (zero forwarding loss, zero argparse coupling). See
+    # hpc/eval_listener_launch_utils.py + notes/ot-agent/eval_listener_unification_plan.md.
+    from hpc.eval_listener_launch_utils import _is_eval_listener_request, launch_eval_listener_from_argv
+    if _is_eval_listener_request():
+        return launch_eval_listener_from_argv()
     # this is where defaults are stored for experiments_dir and deepspeed
     cli_args = parse_args()
 
-    # Apply job-type-specific argument remapping
-    job_type_raw = cli_args.get("job_type", "").lower()
-    if job_type_raw == "eval":
-        cli_args = remap_eval_cli_args(cli_args)
+    try:
+        return _main_dispatch(cli_args)
+    except ResumeBail as exc:
+        print(exc.message, file=sys.stderr)
+        sys.exit(2)
+
+
+def _main_dispatch(cli_args):
 
     # Storing all the arguments in a dictionary that we add to in order of precedence
     exp_args = dict()
@@ -521,7 +642,6 @@ def main():
         apply_mca_template_fn=apply_mca_training_template,
         apply_cluster_overrides_fn=maybe_apply_cluster_specific_env_overrides,
         prepare_datagen_fn=_prepare_datagen_configuration,
-        prepare_eval_fn=prepare_eval_configuration,
     )
 
     # Job name
@@ -547,10 +667,6 @@ def main():
     if job_type == JobType.DATAGEN.value:
         launch_datagen_job_v2(exp_args, hpc)
         return  # Skip normal training flow
-
-    if job_type == JobType.EVAL.value:
-        launch_eval_job_v2(exp_args, hpc)
-        return
 
     if job_type == JobType.PRETOKENIZE.value:
         schedule_pretokenize(

@@ -39,6 +39,22 @@ elif [ -n "${DCFT:-}" ]; then
 else
   WORKDIR="$PWD"
 fi
+
+# --- WORKDIR sanity guard (HARD FAIL — do not remove) ---
+# If WORKDIR does not point at the OpenThoughts-Agent repo root, every downstream
+# `source "$WORKDIR/hpc/..."` and `python -m hpc....` fails cryptically and the job
+# dies instantly. This happens when a job is submitted from outside the repo with
+# DCFT/DCFT_PRIVATE unset, so the fallback resolves WORKDIR=$PWD (the wrong dir).
+# Fail loudly and immediately instead of running from the wrong place.
+if [ ! -f "$WORKDIR/hpc/shell_utils/triton_cache.sh" ]; then
+  echo "FATAL: WORKDIR='$WORKDIR' is not the OpenThoughts-Agent repo root." >&2
+  echo "       (marker hpc/shell_utils/triton_cache.sh not found under it)." >&2
+  echo "       Submit the job FROM the repo dir with DCFT exported — on Jupiter:" >&2
+  echo "         cd /e/scratch/jureap59/feuer1/OpenThoughts-Agent && export DCFT=\$PWD" >&2
+  echo "       or pass --chdir <repo> to sbatch. Do NOT submit from \$HOME or a scratch subdir." >&2
+  echo "       See .claude/skills/datagen-launch for the correct launch procedure." >&2
+  exit 1
+fi
 cd "$WORKDIR"
 
 if [ -z "${DCFT:-}" ]; then
@@ -75,12 +91,19 @@ export NCCL_IB_TIMEOUT=23
 export PYTORCH_ALLOC_CONF="garbage_collection_threshold:0.6,max_split_size_mb:128"
 export PYTHONPATH="$WORKDIR:${PYTHONPATH:-}"
 
-# --- Ray/vLLM GPU visibility fix ---
-# Prevent Ray from modifying CUDA_VISIBLE_DEVICES per-actor.
-# Without these, Ray sets CVD to a single physical GPU index (e.g. "3") per actor,
-# but vLLM uses Ray-reported indices as torch ordinals, causing "invalid device ordinal".
-export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
-export RAY_NOSET_CUDA_VISIBLE_DEVICES=1
+# --- Ray/vLLM GPU visibility ---
+# Previously we set RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1 and
+# RAY_NOSET_CUDA_VISIBLE_DEVICES=1 to keep Ray from rewriting CUDA_VISIBLE_DEVICES
+# per actor (which caused "invalid device ordinal" on an earlier vLLM build).
+# That now breaks the new wheel's multi-node DP placement: with NOSET set,
+# vllm/v1/engine/core.py's per-actor `get_accelerator_ids()` returns an empty
+# list (Ray isn't binding accelerators to actors), and the legacy fallback's
+# `get_device_indices` formula crashes with `IndexError: list index out of
+# range` on cross-node DP.
+# Leave NOSET unset so Ray's placement-group bundle drives per-actor GPU
+# selection, matching the patched core.py + ray_executor_v2.
+# If the original "invalid device ordinal" regression returns for single-node
+# taskgen on the new wheel, scope NOSET back on conditionally on NUM_NODES==1.
 
 # --- Cluster-specific environment variables ---
 {env_exports}

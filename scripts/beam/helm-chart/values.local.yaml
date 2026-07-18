@@ -1,4 +1,3 @@
-# This is null so that only the defaults at pkg/common/config.default.yaml are used.
 config: null
 
 images:
@@ -43,7 +42,6 @@ manifests:
           value: s3
         enableStartupScripts: true
         startupScriptContent: |
-          #!/bin/bash
           awslocal s3 mb s3://juicefs
           awslocal s3 mb s3://logs
           awslocal s3 mb s3://beta9-images

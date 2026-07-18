@@ -1,0 +1,80 @@
+
+job_name: default-eval-job
+jobs_dir: trace_jobs
+n_attempts: 3
+timeout_multiplier: 16.0
+debug: false
+orchestrator:
+  type: local
+  n_concurrent_trials: 8
+  quiet: false
+  plain_output: true
+  adaptive_concurrency:
+    enabled: false
+    algorithm: gradient2
+    min_limit: null
+    max_limit: null
+    metrics_endpoint: null
+    metrics_timeout_sec: 10.0
+    poll_interval_sec: 120.0
+    window_size: 5
+    queue_p95_drop_threshold: null
+    algorithm_kwargs: {}
+  retry:
+    max_retries: 10
+    include_exceptions: null
+    exclude_exceptions:
+    - AgentTimeoutError
+    - AgentEnvironmentTimeoutError
+    - VerifierTimeoutError
+    - RewardFileNotFoundError
+    - RewardFileEmptyError
+    - VerifierOutputParseError
+    - SandboxBuildFailedError
+    - VerifierRuntimeError
+    - SummarizationTimeoutError
+    - ContextLengthExceededError
+    wait_multiplier: 2.0
+    min_wait_sec: 1.0
+    max_wait_sec: 90.0
+  kwargs: {}
+environment:
+  type: daytona
+  force_build: true
+  delete: true
+  override_cpus: 2
+  override_memory_mb: 8192
+  override_storage_mb: 8192
+  kwargs:
+    auto_snapshot: true
+verifier:
+  override_timeout_sec: null
+  max_timeout_sec: 14400
+  disable: false
+agents:
+- name: opencode
+  import_path: null
+  model_name: vllm/override-at-runtime
+  max_timeout_sec: null
+  override_setup_timeout_sec: 600
+  kwargs:
+    # No auto-compaction: it makes opencode run a summary turn during which these
+    # -Thinking- opencode-SFT models emit a tool call, which opencode fatally rejects
+    # ("Tool call not allowed while generating summary: write") -> NonZeroAgentExit ->
+    # reward 0. With reserved(16384) ~= the limit.context (16384) the harbor max_tokens
+    # fix writes, compaction fired almost immediately -> ~100% trial loss (sparse 8/8,
+    # densemixer 1/1). The DATAGEN/training opencode config uses an EMPTY opencode_config
+    # (no compaction), so disabling it here also restores train-eval parity. opencode's
+    # limit.context still bounds the prompt (sliding-window) so trials do not overflow.
+    opencode_config: {}
+    model_info:
+      max_input_tokens: 32768
+      max_output_tokens: 16384
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+    trajectory_config:
+      raw_content: false
+      linear_history: true
+datasets:
+- path: /replace/with/tasks/path
+tasks: []

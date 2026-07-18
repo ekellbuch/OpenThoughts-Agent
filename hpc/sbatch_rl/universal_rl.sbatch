@@ -49,6 +49,22 @@ elif [ -n "${DCFT:-}" ]; then
 else
   WORKDIR="$PWD"
 fi
+
+# --- WORKDIR sanity guard (HARD FAIL — do not remove) ---
+# If WORKDIR does not point at the OpenThoughts-Agent repo root, every downstream
+# `source "$WORKDIR/hpc/..."` and `python -m hpc....` fails cryptically and the job
+# dies instantly. This happens when a job is submitted from outside the repo with
+# DCFT/DCFT_PRIVATE unset, so the fallback resolves WORKDIR=$PWD (the wrong dir).
+# Fail loudly and immediately instead of running from the wrong place.
+if [ ! -f "$WORKDIR/hpc/shell_utils/triton_cache.sh" ]; then
+  echo "FATAL: WORKDIR='$WORKDIR' is not the OpenThoughts-Agent repo root." >&2
+  echo "       (marker hpc/shell_utils/triton_cache.sh not found under it)." >&2
+  echo "       Submit the job FROM the repo dir with DCFT exported — on Jupiter:" >&2
+  echo "         cd /e/scratch/jureap59/feuer1/OpenThoughts-Agent && export DCFT=\$PWD" >&2
+  echo "       or pass --chdir <repo> to sbatch. Do NOT submit from \$HOME or a scratch subdir." >&2
+  echo "       See .claude/skills/rl-agentic-launch-jupiter for the correct launch procedure." >&2
+  exit 1
+fi
 cd "$WORKDIR"
 
 if [ -z "${DCFT:-}" ]; then
@@ -106,22 +122,72 @@ fi
 # --- NCCL/Networking settings (cluster-specific) ---
 {nccl_exports}
 
+# --- RL container env (Apptainer SIF overlays / pydeps / extra exports) ---
+# Emitted by the launcher from the RL yaml `container:` section (if present).
+# Sets RL_CONTAINER_OVERLAYS / RL_CONTAINER_PYDEPS (read at runtime by
+# hpc/rl_launch_utils.py build_apptainer_prefix + _build_container_pythonpath)
+# plus any container.extra_env exports (e.g. SKYRL_GDN_MASK_FLA, alloc-conf).
+# Empty (comment-only) when the yaml has no container section — byte-identical
+# to the prior non-container path. Exported here so every Ray daemon/driver
+# (apptainer --env passthrough + srun --export=ALL) inherits them.
+{rl_container_env}
+
 # --- Standard environment variables ---
+# UV_USE_IO_URING=0 forces libuv (bundled in uvloop 0.22.1 as libuv 1.48.0)
+# onto the plain, immediate epoll_ctl path instead of the io_uring EPOLL_CTL
+# batching path. libuv 1.48.0 defers EPOLL_CTL_DEL through an io_uring SQ; under
+# high socket churn (timeout-heavy RL rollouts → constant connect/teardown to
+# vLLM + Daytona) a deferred op runs against a closed/recycled fd and libuv
+# aborts() in uv__epoll_ctl_flush — surfacing as `uv__epoll_ctl_prep ->
+# Fatal Python error: Aborted` in the skyrl_entrypoint Ray driver at ~30-70 min.
+# Fixed upstream in libuv 1.49.0 ("don't delay EPOLL_CTL_DEL operations"), which
+# no uvloop release ships yet. This var is exported in the top-level batch shell
+# and propagates to every Ray head/worker via `srun --export=ALL` (ray_utils.py),
+# so the skyrl_entrypoint Ray task inherits it. Harmless on io_uring-disabled
+# nodes (they already run the plain-epoll path). See
+# notes/ot-agent/agent_logs/2026-05-28_uvloop_libuv_io_uring_epoll_abort_rootcause.md
+export UV_USE_IO_URING=0
 export PYTHONFAULTHANDLER=1
 export TORCH_SHOW_CPP_STACKTRACES=1
 export CUDA_LAUNCH_BLOCKING=0
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
+# NCCL_BLOCKING_WAIT=1 makes the NCCL collective itself error out at the
+# call boundary rather than spinning while the watchdog races to abort.
+# Combined with TORCH_NCCL_ASYNC_ERROR_HANDLING above, this surfaces the
+# real failure point (often a peer-node HSN socket close on Perlmutter)
+# instead of a downstream SIGABRT in a NCCL destructor.
+export NCCL_BLOCKING_WAIT=1
+# TORCH_NCCL_TRACE_BUFFER_SIZE > 0 enables PyTorch's NCCL FlightRecorder,
+# which captures rank-by-rank stack traces of the most recent N collective
+# operations. On crash, ProcessGroupNCCL.cpp emits these traces — the
+# "Stack trace of the failed collective not found, potentially because
+# FlightRecorder is disabled" line in prior Perlmutter crashes goes away
+# and we get the actual offending collective + stack frames.
+export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
 export OMP_NUM_THREADS=1
 export PYTHONPATH="$WORKDIR:${PYTHONPATH:-}"
 
 # --- RL-specific environment variables ---
 {rl_env_exports}
 
+# --- RL container env (LATE override — config container.extra_env wins) ---
+# Re-emit the yaml container.extra_env exports AFTER both the hardcoded
+# export TORCH_NCCL_* lines above and the RL-specific env exports block,
+# so a config that intentionally sets a normally-hardcoded var (e.g. #232 lowering
+# TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC to 600 so NCCL's flight-recorder fires BEFORE
+# vLLM's 900s execute_model watchdog and actually dumps) wins by shell last-write.
+# No-op for every config whose extra_env does NOT collide with a hardcoded var
+# (the earlier container-env block already exported those, re-export is
+# idempotent), so this is byte-identical behavior for all existing configs.
+{rl_container_env_late}
+
 # --- Ray defaults ---
 {ray_env_exports}
 
 # --- vLLM/Ray settings ---
+# RL uses its own conda env pinned to an older vLLM wheel that requires the
+# V1 engine. The eval/datagen path uses the newer wheel and runs V2 instead.
 export VLLM_USE_V1=1
 export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
 
@@ -187,6 +253,7 @@ echo "Config: {config_path}"
 echo "Working directory: $WORKDIR"
 echo "Python: $(which python)"
 echo "Python version: $(python --version)"
+echo "UV_USE_IO_URING: ${UV_USE_IO_URING:-<unset>}"  # libuv io_uring epoll-abort fix; must be 0
 
 # --- Proxy setup for no-internet clusters ---
 # Uses LD_PRELOAD set by ssh_tunnel_setup (proxychains library approach)

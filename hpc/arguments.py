@@ -1,6 +1,6 @@
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional
 import argparse
 import sys
 from enum import Enum
@@ -13,6 +13,7 @@ class JobType(str, Enum):
     PRETOKENIZE = "pretokenize"
     DATAGEN = "datagen"
     EVAL = "eval"
+    EVAL_LISTENER = "eval_listener"
     CONSOLIDATE = "consolidate"
     RL = "rl"
 
@@ -343,11 +344,36 @@ class LaunchArgs:
     train_config_path: Optional[str] = field(
         default=None, metadata={"help": "Path to config file"}
     )
+    sft_backend: str = field(
+        default="llamafactory",
+        metadata={
+            "help": "SFT training backend: 'llamafactory' (default) or 'axolotl'. "
+            "Selects the trainer entrypoint + config schema. Flag-off "
+            "('llamafactory') is byte-identical to the pre-axolotl launch path.",
+            "choices": ["llamafactory", "axolotl"],
+        },
+    )
     experiments_dir: Optional[str] = field(
         default=None,
         metadata={
             "help": "Output for storing experiment outputs - logs, configs, sbatch scripts. "
             "Defaults to ./experiments/<job_name> when not specified."
+        },
+    )
+    force_mutate: bool = field(
+        default=False,
+        metadata={
+            "help": "[datagen/eval] Allow the resume manager to patch an existing job dir "
+            "to reconcile mutable config drift (synthetic vLLM IDs, api_base, timeout "
+            "multipliers, retry settings). Ignored for SFT / RL / consolidate."
+        },
+    )
+    allow_overwrite: bool = field(
+        default=False,
+        metadata={
+            "help": "[datagen/eval] When resume mutation is not possible (fatal drift "
+            "or --force_mutate off), wipe the existing job dir and start fresh instead "
+            "of bailing. Ignored for SFT / RL / consolidate."
         },
     )
     image: Optional[str] = field(
@@ -445,6 +471,41 @@ class LaunchArgs:
             "help": "Debugger URL exposed via Pinggy (used for health checks)",
         },
     )
+    ingress_mode: str = field(
+        default="pinggy",
+        metadata={
+            "help": (
+                "How cloud sandboxes reach the on-cluster vLLM: 'pinggy' (default, legacy paid "
+                "SSH reverse tunnel) or 'controller' (auth-gated Iris controller ingress). "
+                "Inert until the wiring swap (Stage 4) reads it; 'pinggy' is byte-identical to today."
+            ),
+            "choices": ["pinggy", "controller"],
+        },
+    )
+    ingress_host: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Public controller-ingress host (e.g., ingress.iris.example) used only when "
+                "--ingress-mode controller; the sandbox api_base becomes "
+                "https://<ingress_host>/proxy/<endpoint_name>/v1. Unused in pinggy mode."
+            ),
+        },
+    )
+    record_literal: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Co-locate harbor's RecordProxy in front of the on-cluster vLLM and route the "
+                "agent's inference endpoint THROUGH it, capturing literal token IDs / logprobs "
+                "to a literal.jsonl log (for agents with SUPPORTS_LITERAL_TRACES, e.g. opencode). "
+                "Default off = the proxy is never started and the endpoint wiring is "
+                "byte-identical to today. Pair with make_and_upload_trace_dataset "
+                "--include_literal_tokens at export time."
+            ),
+            "store_true": True,
+        },
+    )
     use_mca: bool = field(
         default=False,
         metadata={
@@ -493,6 +554,12 @@ class DataGenArgs:
     chunk_size: Optional[int] = field(
         default=None,
         metadata={"help": "Maximum number of tasks per trace chunk when splitting trace jobs"}
+    )
+    chunk_array_max: Optional[int] = field(
+        default=None,
+        metadata={"help": "Max number of trace chunks to run concurrently (rolling afterany gate; "
+                          "chunk[i] waits on chunk[i-N]). 0/unset = all chunks submit at once. "
+                          "Overrides the datagen-config chunk_array_max when provided."}
     )
     datagen_script: Optional[str] = field(
         default=None,
@@ -744,6 +811,28 @@ class RLArgs:
             "Default: dcagent-rl"
         }
     )
+    rl_container_sif: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Path to an Apptainer/Singularity SIF image to use as the RL "
+            "runtime. OPT-IN: when set, the SkyRL trainer + Ray head/workers run "
+            "inside the SIF via `apptainer exec --nv` instead of activating the "
+            "host venv/conda. Live host SkyRL/harbor source is bind-mounted over "
+            "the in-SIF install via PYTHONPATH. Mutually informative with "
+            "--rl_use_conda/--rl_conda_env (the host-activation switches are "
+            "skipped when this is set)."
+        }
+    )
+    rl_container_binds: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "help": "Bind-mount sources for --rl_container_sif (each passed as "
+            "`--bind <src>`). Defaults to /e/scratch and /e/data1 (the Jupiter "
+            "GPFS roots covering code, SIF, tasks, checkpoints, HF cache). "
+            "Only used when --rl_container_sif is set.",
+            "nargs": "+",
+        }
+    )
     hf_hub_repo_id: Optional[str] = field(
         default=None,
         metadata={
@@ -788,6 +877,30 @@ def _option_strings(field_name: str) -> list[str]:
     return [primary, dashed]
 
 
+def _field_is_bool_typed(field) -> bool:
+    """Return True if a dataclass field is annotated `bool` or `Optional[bool]`.
+
+    Needed because many bool fields default to ``None`` (``Optional[bool]``),
+    so a literal ``isinstance(field.default, bool)`` check misses them. Such a
+    field would otherwise fall through to the ``str`` argparse type, so e.g.
+    ``--overwrite_output_dir true`` would be stored as the *string* ``"true"``
+    and later rejected by LLaMA-Factory's HfArgumentParser
+    ("Some keys are not used by the HfArgumentParser: ['overwrite_output_dir']").
+    """
+    import typing
+
+    ann = field.type
+    # Annotation may be a string under `from __future__ import annotations`.
+    if isinstance(ann, str):
+        return ann in ("bool", "Optional[bool]", "typing.Optional[bool]", "bool | None", "Optional[bool] | None")
+    if ann is bool:
+        return True
+    origin = typing.get_origin(ann)
+    if origin is typing.Union or origin is getattr(__import__("types"), "UnionType", None):
+        return bool in typing.get_args(ann)
+    return False
+
+
 def _add_dataclass_arguments(arg_group, dataclass_type, exclude_fields=None, *, bool_fields: set[str] | None = None):
     """
     Helper function to add arguments from a dataclass to an argument group.
@@ -828,7 +941,11 @@ def _add_dataclass_arguments(arg_group, dataclass_type, exclude_fields=None, *, 
                 default=[],
                 help=help_text,
             )
-        elif isinstance(field.default, bool):
+        elif isinstance(field.default, bool) or _field_is_bool_typed(field):
+            # Covers both literal-bool-default fields AND `Optional[bool]`
+            # fields that default to None. Both must parse via parse_bool_flag
+            # (so `--flag true` becomes the bool True, not the string "true")
+            # and be registered in bool_fields for coerce_str_bool_none.
             kwargs = {
                 "dest": field.name,
                 "type": parse_bool_flag,
@@ -850,6 +967,12 @@ def _add_dataclass_arguments(arg_group, dataclass_type, exclude_fields=None, *, 
                 "help": help_text,
                 "default": field.default,
             }
+            nargs = field.metadata.get("nargs")
+            if nargs is not None:
+                # Multi-value option (e.g. --rl_container_binds /e/scratch /e/data1).
+                # type(None) defaults to str above, which is correct for str lists.
+                kwargs["nargs"] = nargs
+                kwargs["type"] = str
             if choices:
                 kwargs["choices"] = choices
             if required:

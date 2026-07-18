@@ -48,6 +48,22 @@ elif [ -n "${DCFT:-}" ]; then
 else
   WORKDIR="$PWD"
 fi
+
+# --- WORKDIR sanity guard (HARD FAIL — do not remove) ---
+# If WORKDIR does not point at the OpenThoughts-Agent repo root, every downstream
+# `source "$WORKDIR/hpc/..."` and `python -m hpc....` fails cryptically and the job
+# dies instantly. This happens when a job is submitted from outside the repo with
+# DCFT/DCFT_PRIVATE unset, so the fallback resolves WORKDIR=$PWD (the wrong dir).
+# Fail loudly and immediately instead of running from the wrong place.
+if [ ! -f "$WORKDIR/hpc/shell_utils/triton_cache.sh" ]; then
+  echo "FATAL: WORKDIR='$WORKDIR' is not the OpenThoughts-Agent repo root." >&2
+  echo "       (marker hpc/shell_utils/triton_cache.sh not found under it)." >&2
+  echo "       Submit the job FROM the repo dir with DCFT exported — on Jupiter:" >&2
+  echo "         cd /e/scratch/jureap59/feuer1/OpenThoughts-Agent && export DCFT=\$PWD" >&2
+  echo "       or pass --chdir <repo> to sbatch. Do NOT submit from \$HOME or a scratch subdir." >&2
+  echo "       See .claude/skills/datagen-launch for the correct launch procedure." >&2
+  exit 1
+fi
 cd "$WORKDIR"
 
 if [ -z "${DCFT:-}" ]; then
@@ -84,12 +100,19 @@ export NCCL_IB_TIMEOUT=23
 export PYTORCH_ALLOC_CONF="garbage_collection_threshold:0.6,max_split_size_mb:128"
 export PYTHONPATH="$WORKDIR:${PYTHONPATH:-}"
 
-# --- Ray/vLLM GPU visibility fix ---
-# Prevent Ray from modifying CUDA_VISIBLE_DEVICES per-actor.
-# Without these, Ray sets CVD to a single physical GPU index (e.g. "3") per actor,
-# but vLLM uses Ray-reported indices as torch ordinals, causing "invalid device ordinal".
-export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
-export RAY_NOSET_CUDA_VISIBLE_DEVICES=1
+# --- Ray/vLLM GPU visibility ---
+# Previously we set RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1 and
+# RAY_NOSET_CUDA_VISIBLE_DEVICES=1 to keep Ray from rewriting CUDA_VISIBLE_DEVICES
+# per actor (which caused "invalid device ordinal" on an earlier vLLM build).
+# That now breaks the new wheel's multi-node DP placement: with NOSET set,
+# vllm/v1/engine/core.py's per-actor `get_accelerator_ids()` returns an empty
+# list (Ray isn't binding accelerators to actors), and the legacy fallback's
+# `get_device_indices` formula crashes with `IndexError: list index out of
+# range` on cross-node DP (see Jupiter 445905/447100/447578 logs).
+# Leave NOSET unset on this path so Ray's placement-group bundle drives the
+# per-actor GPU selection, matching the patched core.py + ray_executor_v2.
+# If the original "invalid device ordinal" regression returns for single-node
+# datagen on the new wheel, scope NOSET back on conditionally on $NUM_NODES==1.
 
 # --- Cluster-specific environment variables ---
 {env_exports}
@@ -143,6 +166,47 @@ trap cleanup_ray_logs EXIT
 # --- Container Runtime Setup ---
 source "$WORKDIR/hpc/shell_utils/container_runtime.sh"
 setup_container_runtime "{harbor_env}" "$WORKDIR" || exit $?
+
+# --- Node health probe sidecar (every 5 min, per node) ---
+# Logs /dev/shm usage + free RAM + top shm consumers to
+# {experiments_dir}/logs/node_health_<NODE>.log
+#
+# Motivation: Jupiter docs note /dev/shm is tmpfs backed by node RAM and
+# "can contribute to Out-of-Memory errors." We've observed datagen jobs hit
+# shm_broadcast.py:698 watchdogs after ~55-80 min of sustained serving
+# (GLM-4.7 job 493343, MiniMax job 493421). If /dev/shm or RAM is growing
+# toward its ceiling over the serving window, that's a strong contributing
+# signal. Flat usage rules out the tmpfs angle and points the diagnosis at
+# vLLM-internal cross-node coordination.
+#
+# Cheap: 1 process per node, sleeping 300s between samples; logs are
+# ~150 bytes/sample, ~10 KB/job at 2h × per-node. srun --overlap shares
+# the allocation without contending for the main job step's tasks.
+NODE_HEALTH_DIR="{experiments_dir}/logs"
+mkdir -p "$NODE_HEALTH_DIR"
+srun --overlap --ntasks-per-node=1 --nodes="$SLURM_JOB_NUM_NODES" \
+     --kill-on-bad-exit=0 \
+     bash -c '
+NODE=$(hostname -s)
+LOG="'"$NODE_HEALTH_DIR"'/node_health_$NODE.log"
+echo "[probe] started on $NODE at $(date -Is) pid=$$" >> "$LOG"
+while true; do
+    TS=$(date -Is)
+    # /dev/shm capacity (Linux tmpfs: used / total / use%)
+    SHM=$(df -B1 /dev/shm 2>/dev/null | tail -1 \
+          | awk "{printf \"used=%s total=%s pct=%s\", \$3, \$2, \$5}")
+    # RAM (used / total / free / available)
+    MEM=$(awk "/^Mem:/ {printf \"mem_used=%s mem_total=%s mem_free=%s mem_avail=%s\", \$3, \$2, \$4, \$7}" \
+          <(free -b 2>/dev/null))
+    # Top 5 /dev/shm consumers (size-sorted)
+    SHM_TOP=$(du -sb /dev/shm/* 2>/dev/null | sort -rn | head -5 \
+              | awk "{printf \"%s:%s \", \$2, \$1}")
+    echo "$TS $SHM $MEM top_shm=[$SHM_TOP]" >> "$LOG"
+    sleep 300
+done
+' >/dev/null 2>&1 &
+NODE_HEALTH_PID=$!
+echo "[node-health] sidecar started PID=$NODE_HEALTH_PID — logs at $NODE_HEALTH_DIR/node_health_<NODE>.log"
 
 # --- Run the trace generation job via Python runner ---
 echo "=== Universal Trace Generation Runner ==="

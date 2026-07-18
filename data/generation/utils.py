@@ -80,7 +80,13 @@ class VLLMServerConfig:
     endpoint_json_path: Optional[str] = None
     time_limit: str = "48:00:00"
     hf_overrides: Optional[str] = None
-    use_deep_gemm: bool = False
+    # use_deep_gemm + FlashInfer flags use Optional[bool] = None so YAMLs
+    # that omit the key leave the env var unset → vLLM picks its own default
+    # (DEEP_GEMM=True, SAMPLER=True, MOE_FP16=False per vllm/envs.py).
+    # Explicit true/false in YAML forces the env var to 1/0.
+    use_deep_gemm: Optional[bool] = None
+    use_flashinfer_sampler: Optional[bool] = None
+    use_flashinfer_moe_fp16: Optional[bool] = None
     max_num_seqs: Optional[int] = None
     gpu_memory_utilization: Optional[float] = None
     enable_expert_parallel: bool = False
@@ -96,6 +102,50 @@ class VLLMServerConfig:
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
     logging_level: Optional[str] = None
+    # Periodic pynccl trace-buffer flush interval (seconds). 0/None disables.
+    # See vllm_utils._NUMERIC_ENV_VAR_FIELDS for the env var plumbing.
+    pynccl_trace_flush_interval_sec: Optional[int] = None
+    # py-spy-on-SIGUSR1: if true, the pynccl SIGUSR1 handler also forks
+    # py-spy --pid <self> --native and writes the stack snapshot next to the
+    # pynccl trace dump. Default off.
+    pynccl_pyspy_on_sigusr1: Optional[bool] = None
+    # faulthandler.dump_traceback_later interval (seconds). 0/None disables.
+    # In-process periodic Python stack dump for ALL threads — replacement
+    # for py-spy on clusters where ptrace_scope=2 blocks external attach.
+    pynccl_faulthandler_interval_sec: Optional[int] = None
+    # NCCL diagnostic / workaround env vars. All three propagate to the
+    # cross-node Ray DP actors via vLLM's NCCL_ copy-prefix
+    # (vllm/ray/ray_env.py DEFAULT_ENV_VAR_PREFIXES), so they reach the
+    # worker process where NCCL initializes its comms — not just the driver.
+    #   nccl_cumem_enable=false → NCCL_CUMEM_ENABLE=0. Disables NCCL's
+    #     cuMem-based buffer registration; candidate workaround for the
+    #     cudagraph-capture "illegal memory access" on the cross-node MoE
+    #     all-to-all (cuMem×graph-capture regression on the current Jupiter
+    #     wheel). See 2026-05-27_minimax_dp2_compiled_capture_crash.md.
+    #   nccl_debug="INFO" / nccl_debug_subsys="INIT,COLL,GRAPH" →
+    #     NCCL_DEBUG / NCCL_DEBUG_SUBSYS. Surfaces connection/channel setup
+    #     so we can tell whether it happens DURING the profile_cudagraph_memory
+    #     capture window (the lazy-connection-during-capture hypothesis).
+    nccl_cumem_enable: Optional[bool] = None
+    nccl_debug: Optional[str] = None
+    nccl_debug_subsys: Optional[str] = None
+    # cuda_launch_blocking=true → CUDA_LAUNCH_BLOCKING=1. Serializes every
+    #   CUDA op so an async illegal-memory-access aborts SYNCHRONOUSLY at the
+    #   offending kernel, making the Python traceback name the exact failing
+    #   line inside profile_cudagraph_memory (H1 vs H3 discriminator for the
+    #   MiniMax DP=2 capture crash). NOTE: CUDA_ is NOT a default vLLM
+    #   copy-prefix, so this var does NOT reach the cross-node Ray DP actor on
+    #   its own — you MUST also set vllm_ray_extra_env_vars_to_copy below
+    #   (= 'CUDA_LAUNCH_BLOCKING') so vLLM copies it to the worker. Big
+    #   slowdown; debug-only.
+    cuda_launch_blocking: Optional[bool] = None
+    # vllm_ray_extra_env_vars_to_copy → VLLM_RAY_EXTRA_ENV_VARS_TO_COPY.
+    #   Comma-separated list of EXACT env var names vLLM should copy to the
+    #   cross-node Ray DP actors in addition to the DEFAULT_ENV_VAR_PREFIXES
+    #   (VLLM_, NCCL_, ...). This var is itself read by get_env_vars_to_copy
+    #   and is VLLM_-prefixed, so it self-copies. Use it to ferry non-prefixed
+    #   vars (e.g. CUDA_LAUNCH_BLOCKING) to the worker.
+    vllm_ray_extra_env_vars_to_copy: Optional[str] = None
     extra_args: Any = None
 
 
@@ -106,6 +156,12 @@ class DataGenerationConfig:
     extra_agent_kwargs: Dict[str, Any] = field(default_factory=dict)
     chunk_array_max: Optional[int] = None
     vllm_server: Optional[VLLMServerConfig] = None
+    # Optional per-config env var overrides — lifted by launchers (e.g.
+    # data/cloud/launch_tracegen_iris.py:TracegenIrisLauncher.build_env) and
+    # injected into the iris task's env_vars BEFORE the launcher-wide
+    # setdefaults run, so per-config values win. Ignored on the worker
+    # side (the env vars are already in the process environment by then).
+    env_vars: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

@@ -12,6 +12,7 @@ This module provides common components for cloud launchers including:
 
 from __future__ import annotations
 
+import argparse
 import shutil
 import subprocess
 import sys

@@ -71,6 +71,13 @@ Utility entrypoints that support data generation, trace analysis, Harbor uploads
     --episodes last
   ```
 - `harbor/run_and_export_traces.py` – programmatic helper that loads a Harbor job config, runs it in-process, and returns a Hugging Face `Dataset` (import and call from Python, or build your own wrapper).
+- `harbor/literal_traces_to_sft.py` – convert a literal-token trace dataset (with `prompt_token_ids`/`completion_token_ids`) into an SFT dataset whose assistant turns are decoded **verbatim** from the literal completion tokens (real `<think>` + native tool calls). Emits `conversations` (ShareGPT) + a reasoning-preserving `text` string. The tokenizer is auto-resolved from the source's `tokenizer_provenance.json` (override with `--tokenizer`).  
+  ```bash
+  python -m scripts.harbor.literal_traces_to_sft \
+    --source_repo my-org/<task>-qwen3.5-122b-131k-opencode-traces \
+    --target_repo my-org/<task>-opencode-sft
+  # dry-run: python -m scripts.harbor.literal_traces_to_sft --source_repo <repo> --validate 3
+  ```
 
 ### Daytona & Supabase tooling
 - `daytona/inspect_daytona_data.py` – build a sandbox from a local task and dump the staged files to inspect what the orchestrator uploads.  

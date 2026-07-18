@@ -114,9 +114,15 @@ def _count_tasks_in_path(tasks_path: str) -> int:
         return count
 
     # Strategy 5: Pre-extracted task directories (each task has an instruction.md)
+    # Use os.walk(followlinks=True) so symlink-based task subsets (created by
+    # `ln -s` on a head of a larger corpus) are also counted — Path.rglob does
+    # not traverse directory symlinks by default.
     if p.is_dir():
         task_marker = "instruction.md"
-        count = sum(1 for d in p.rglob(task_marker) if d.is_file())
+        count = sum(
+            1 for root, _dirs, files in os.walk(str(p), followlinks=True)
+            if task_marker in files
+        )
         if count > 0:
             print(f"[chunk] Counted {count} tasks via task folder marker ({task_marker})")
             return count
@@ -307,6 +313,13 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             cpus_per_node=cpus_per_node,
             vllm_server_config=vllm_server_config,
             ray_object_store_gb=float(exp_args.get("ray_object_store_gb", 40.0)),
+            # 2026-05-28: thread the YAML `backend.healthcheck_max_attempts` /
+            # `healthcheck_retry_delay` through to the JobConfig so VLLMConfig
+            # receives the user-intended value instead of the previous 120-attempt
+            # default. _prepare_datagen_configuration stores the parsed values at
+            # exp_args["trace_health_{max_attempts,retry_delay}"] (line 191-192).
+            health_max_attempts=exp_args.get("trace_health_max_attempts"),
+            health_retry_delay=exp_args.get("trace_health_retry_delay"),
         )
 
         # Write task config JSON
@@ -393,7 +406,12 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
         served_model_id = None
         harbor_model_name = trace_model
         if requires_vllm:
-            served_model_id = generate_served_model_id()
+            # Deterministic per job_name so chain-restarts produce the same
+            # synthetic ID. Without this, every resume gets a fresh
+            # timestamp-based ID, the YAML diverges from the on-disk
+            # config.json, and Harbor's _maybe_init_existing_job fails
+            # with FileExistsError.
+            served_model_id = generate_served_model_id(job_name=job_name)
             harbor_model_name = hosted_vllm_alias(served_model_id)
             if not vllm_model_path:
                 vllm_model_path = trace_model or ""
@@ -442,15 +460,56 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
         sbatch_directives = build_sbatch_directives(hpc, exp_args)
         harbor_env = exp_args.get("trace_env") or get_harbor_env_from_config(harbor_config_resolved)
 
+        # Pre-build Daytona snapshots on the login node so trial-time
+        # `auto_snapshot=true` short-circuits to an existing ACTIVE snapshot
+        # instead of falling through to the declarative-build path (which
+        # the RL key blocks with DaytonaValidationError, and other keys hit
+        # bearer-token rotation degradation on).
+        # No-op on docker/modal backends or when no api_key is configured.
+        if tasks_input_path:
+            from hpc.launch_utils import (
+                get_daytona_api_key_override as _get_dt_key,
+                maybe_prebuild_daytona_snapshots,
+            )
+            from hpc.snapshot_manager import OrgConfig
+            _api_key = _get_dt_key(exp_args)
+            _orgs = [OrgConfig(name="cli", api_key=_api_key)] if _api_key else []
+            maybe_prebuild_daytona_snapshots(
+                [tasks_input_path],
+                harbor_env=harbor_env,
+                orgs=_orgs,
+            )
+
         base_hf_repo_id = exp_args.get("upload_hf_repo") or trace_target_repo
 
         # Set dependency on task job if both are enabled, otherwise use CLI dependency
         if task_enabled and task_job_id and task_job_id != "dry_run_task_job_id":
-            dependency = f"afterok:{task_job_id}"
+            base_dependency = f"afterok:{task_job_id}"
         else:
-            dependency = exp_args.get("dependency")
+            base_dependency = exp_args.get("dependency")
 
-        for chunk_idx in chunk_indices:
+        # Rolling concurrency cap across chunks. `chunk_array_max` (parsed into
+        # exp_args["_chunk_array_max"]) bounds how many chunk jobs run at once:
+        # chunk[i] gets an extra `afterany:<chunk[i-max]>` dependency so it cannot
+        # start until the chunk `max` positions earlier has finished. With M total
+        # chunks and a cap of K, at most K are ever RUNNING; the rest queue behind
+        # their gating predecessor. afterany (not afterok) so a failed/timed-out
+        # chunk still releases its successor rather than wedging the whole sweep.
+        # 0/unset → all chunks submit with only base_dependency (unbounded, prior behavior).
+        # CLI --chunk_array_max overrides the datagen-config value when provided.
+        chunk_array_max = exp_args.get("chunk_array_max")
+        if chunk_array_max is None:
+            chunk_array_max = exp_args.get("_chunk_array_max")
+        try:
+            chunk_array_max = int(chunk_array_max) if chunk_array_max else 0
+        except (TypeError, ValueError):
+            chunk_array_max = 0
+        if chunk_array_max and num_chunks > chunk_array_max:
+            print(f"[datagen] chunk concurrency cap: {chunk_array_max} of {num_chunks} chunks run at once "
+                  f"(rolling afterany gate)")
+        submitted_chunk_job_ids: list[str] = []
+
+        for list_pos, chunk_idx in enumerate(chunk_indices):
             is_chunked = chunk_idx is not None
             suffix = f"_chunk{chunk_idx}" if is_chunked else ""
             chunk_job_name = f"{job_name}_traces{suffix}"
@@ -496,11 +555,21 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
                 hf_episodes=exp_args.get("upload_hf_episodes") or "last",
                 pinggy_persistent_url=exp_args.get("pinggy_persistent_url"),
                 pinggy_token=exp_args.get("pinggy_token"),
+                ingress_mode=exp_args.get("ingress_mode") or "pinggy",
+                ingress_host=exp_args.get("ingress_host"),
+                record_literal=bool(exp_args.get("record_literal")),
                 # Chunking fields (None when not chunking)
                 chunk_size=chunk_size if is_chunked else None,
                 chunk_index=chunk_idx,
                 num_chunks=num_chunks if is_chunked else None,
                 ray_object_store_gb=float(exp_args.get("ray_object_store_gb", 40.0)),
+                # 2026-05-28: thread the YAML `backend.healthcheck_max_attempts` /
+                # `healthcheck_retry_delay` through to the JobConfig so VLLMConfig
+                # receives the user-intended value instead of the previous 120-attempt
+                # default. _prepare_datagen_configuration stores the parsed values at
+                # exp_args["trace_health_{max_attempts,retry_delay}"] (line 191-192).
+                health_max_attempts=exp_args.get("trace_health_max_attempts"),
+                health_retry_delay=exp_args.get("trace_health_retry_delay"),
             )
 
             trace_config_path = exp_paths.configs / f"{chunk_job_name}_tracegen_config.json"
@@ -532,13 +601,31 @@ def launch_datagen_job_v2(exp_args: dict, hpc) -> None:
             trace_sbatch_output.write_text(sbatch_text)
             os.chmod(trace_sbatch_output, 0o750)
 
+            # Compose this chunk's dependency: base (task-job/CLI) AND the rolling
+            # concurrency gate (afterany on the chunk `chunk_array_max` positions back).
+            chunk_dependency = base_dependency
+            if chunk_array_max and list_pos >= chunk_array_max:
+                gate_job_id = submitted_chunk_job_ids[list_pos - chunk_array_max]
+                if gate_job_id:
+                    chunk_dependency = (
+                        f"{base_dependency},afterany:{gate_job_id}"
+                        if base_dependency else f"afterany:{gate_job_id}"
+                    )
+
             if exp_args.get("dry_run"):
                 print(f"DRY RUN: Tracegen sbatch script written to {trace_sbatch_output}")
-                if dependency:
-                    print(f"  Would submit with dependency: {dependency}")
+                if chunk_dependency:
+                    print(f"  Would submit with dependency: {chunk_dependency}")
+                # Placeholder so downstream chunks' gate-indexing stays aligned in dry runs.
+                submitted_chunk_job_ids.append(f"dry_run_chunk{chunk_idx}")
             else:
-                job_id = launch_sbatch(str(trace_sbatch_output), dependency=dependency)
-                print(f"✓ Trace generation job submitted: {job_id} ({chunk_job_name})")
+                job_id = launch_sbatch(str(trace_sbatch_output), dependency=chunk_dependency)
+                submitted_chunk_job_ids.append(job_id)
+                gate_note = (
+                    f" [gated on {submitted_chunk_job_ids[list_pos - chunk_array_max]}]"
+                    if chunk_array_max and list_pos >= chunk_array_max else ""
+                )
+                print(f"✓ Trace generation job submitted: {job_id} ({chunk_job_name}){gate_note}")
 
 
 # ==============================================================================
@@ -579,8 +666,14 @@ class TaskgenJobConfig:
     vllm_server_config: Dict[str, Any] = field(default_factory=dict)  # Raw vllm_server config from YAML
 
     # Health check settings
-    health_max_attempts: int = 120
-    health_retry_delay: int = 15
+    # 2026-05-28: was `int = 120` (a hardcoded ~30-min cap that silently overrode
+    # YAML `backend.healthcheck_max_attempts`). Changed to Optional[int] = None so
+    # the value from the datagen YAML (threaded via exp_args["trace_health_max_attempts"]
+    # at the construction site) flows through to VLLMConfig. When None, VLLMConfig's
+    # own default (currently 480 = 2h budget) wins. See
+    # /Users/benjaminfeuer/Documents/notes/ot-agent/agent_logs/2026-05-28_glm51_cross_node_tp_proxy_failure.md
+    health_max_attempts: Optional[int] = None
+    health_retry_delay: Optional[int] = None
     healthcheck_interval: int = 300
 
     # Extra args
@@ -700,17 +793,25 @@ class TaskgenJobRunner:
             _, tiktoken_env = setup_gpt_oss_tiktoken()
             extra_env_vars.update(tiktoken_env)
 
-        vllm_cfg = VLLMConfig(
+        # 2026-05-28: only forward health-check overrides when explicitly set
+        # (YAML value plumbed through TaskgenJobConfig.health_max_attempts). If
+        # None, VLLMConfig's own default (480 attempts = 2h) wins. This is the
+        # fix for the silent-120 override bug; see agent_log
+        # 2026-05-28_glm51_cross_node_tp_proxy_failure.md.
+        vllm_cfg_kwargs = dict(
             model_path=model_path,
             tensor_parallel_size=self.config.tensor_parallel_size,
             pipeline_parallel_size=self.config.pipeline_parallel_size,
             data_parallel_size=self.config.data_parallel_size,
             api_port=self.config.api_port,
             endpoint_json_path=self.config.endpoint_json_path,
-            health_max_attempts=self.config.health_max_attempts,
-            health_retry_delay=self.config.health_retry_delay,
             server_config=self.config.vllm_server_config,  # Pass through YAML config
         )
+        if self.config.health_max_attempts is not None:
+            vllm_cfg_kwargs["health_max_attempts"] = self.config.health_max_attempts
+        if self.config.health_retry_delay is not None:
+            vllm_cfg_kwargs["health_retry_delay"] = self.config.health_retry_delay
+        vllm_cfg = VLLMConfig(**vllm_cfg_kwargs)
 
         log_dir = Path(self.config.experiments_dir) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -808,8 +909,14 @@ class TracegenJobConfig:
     vllm_server_config: Dict[str, Any] = field(default_factory=dict)  # Raw vllm_server config from YAML
 
     # Health check settings
-    health_max_attempts: int = 120
-    health_retry_delay: int = 15
+    # 2026-05-28: was `int = 120` (a hardcoded ~30-min cap that silently overrode
+    # YAML `backend.healthcheck_max_attempts`). Changed to Optional[int] = None so
+    # the value from the datagen YAML (threaded via exp_args["trace_health_max_attempts"]
+    # at the construction site) flows through to VLLMConfig. When None, VLLMConfig's
+    # own default (currently 480 = 2h budget) wins. See
+    # /Users/benjaminfeuer/Documents/notes/ot-agent/agent_logs/2026-05-28_glm51_cross_node_tp_proxy_failure.md
+    health_max_attempts: Optional[int] = None
+    health_retry_delay: Optional[int] = None
 
     # Harbor settings
     model: str = ""
@@ -836,6 +943,15 @@ class TracegenJobConfig:
     # Pinggy tunnel settings (for cloud backends that can't reach local vLLM)
     pinggy_persistent_url: Optional[str] = None
     pinggy_token: Optional[str] = None
+
+    # Ingress mode: "pinggy" (default, legacy) or "controller" (auth-gated
+    # controller ingress). ingress_host is the public controller-ingress host.
+    ingress_mode: str = "pinggy"
+    ingress_host: Optional[str] = None
+
+    # Literal-token capture: co-locate harbor's RecordProxy in front of the vLLM
+    # server and route the agent endpoint through it. Default off = no proxy.
+    record_literal: bool = False
 
     # Ray object store size in GB (default: 40)
     ray_object_store_gb: float = 40.0
@@ -883,8 +999,13 @@ class TracegenJobRunner:
         """Check if path is a directory of pre-extracted task folders (with instruction.md)."""
         if not path.is_dir():
             return False
-        # Quick check: any instruction.md under the directory?
-        return any(path.rglob("instruction.md"))
+        # Quick check: any instruction.md under the directory? Use os.walk with
+        # followlinks=True so symlink-based subsets are recognised (Path.rglob
+        # does not traverse directory symlinks).
+        for _root, _dirs, files in os.walk(str(path), followlinks=True):
+            if "instruction.md" in files:
+                return True
+        return False
 
     def _slice_task_folders(self, tasks_path: str, chunk_index: int, chunk_size: int) -> str:
         """Slice a directory of pre-extracted task folders for this chunk.
@@ -893,9 +1014,14 @@ class TracegenJobRunner:
         Returns the path to the chunk directory.
         """
         p = Path(tasks_path)
-        # Collect all task directories (containing instruction.md), sorted for determinism
+        # Collect all task directories (containing instruction.md), sorted for
+        # determinism. Use os.walk(followlinks=True) so symlink-based subsets
+        # (e.g. a 1000-task slice of a larger 10K corpus, created via `ln -s`)
+        # are descended into — Path.rglob does not traverse directory symlinks.
         task_dirs = sorted(
-            d.parent for d in p.rglob("instruction.md") if d.is_file()
+            Path(root)
+            for root, _dirs, files in os.walk(str(p), followlinks=True)
+            if "instruction.md" in files
         )
         total = len(task_dirs)
         start = chunk_index * chunk_size
@@ -1135,7 +1261,12 @@ class TracegenJobRunner:
             _, tiktoken_env = setup_gpt_oss_tiktoken()
             extra_env_vars.update(tiktoken_env)
 
-        vllm_cfg = VLLMConfig(
+        # 2026-05-28: only forward health-check overrides when explicitly set
+        # (YAML value plumbed through TracegenJobConfig.health_max_attempts). If
+        # None, VLLMConfig's own default (480 attempts = 2h) wins. This is the
+        # fix for the silent-120 override bug; see agent_log
+        # 2026-05-28_glm51_cross_node_tp_proxy_failure.md.
+        vllm_cfg_kwargs = dict(
             model_path=model_path,
             tensor_parallel_size=self.config.tensor_parallel_size,
             pipeline_parallel_size=self.config.pipeline_parallel_size,
@@ -1143,10 +1274,13 @@ class TracegenJobRunner:
             api_port=self.config.api_port,
             endpoint_json_path=self.config.endpoint_json_path,
             custom_model_name=self.config.served_model_id,
-            health_max_attempts=self.config.health_max_attempts,
-            health_retry_delay=self.config.health_retry_delay,
             server_config=self.config.vllm_server_config,  # Pass through YAML config
         )
+        if self.config.health_max_attempts is not None:
+            vllm_cfg_kwargs["health_max_attempts"] = self.config.health_max_attempts
+        if self.config.health_retry_delay is not None:
+            vllm_cfg_kwargs["health_retry_delay"] = self.config.health_retry_delay
+        vllm_cfg = VLLMConfig(**vllm_cfg_kwargs)
 
         log_dir = Path(self.config.experiments_dir) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -1168,54 +1302,151 @@ class TracegenJobRunner:
                 extra_env_vars=extra_env_vars if extra_env_vars else None,
             )
             with vllm_server:
-                # Check if we need Pinggy tunnel for cloud backends with installed agents
-                from hpc.pinggy_utils import (
-                    needs_pinggy_tunnel,
-                    PinggyTunnel,
-                    PinggyConfig,
-                    parse_endpoint_host_port,
-                )
-
-                # Evaluate Pinggy conditions with diagnostic logging
-                has_url = bool(self.config.pinggy_persistent_url)
-                has_token = bool(self.config.pinggy_token)
-                needs_tunnel = needs_pinggy_tunnel(self.config.agent, self.config.trace_env)
-                use_pinggy = has_url and has_token and needs_tunnel
-
-                print(f"[TracegenJobRunner] Pinggy check: url={has_url}, token={has_token}, "
-                      f"needs_tunnel={needs_tunnel} (agent={self.config.agent}, env={self.config.trace_env})")
-                print(f"[TracegenJobRunner] use_pinggy={use_pinggy}, vllm_endpoint={vllm_server.endpoint}")
-
-                if use_pinggy:
-                    # Parse the vLLM endpoint to get the actual host:port
-                    # (vLLM may bind to a specific IP, not localhost)
-                    local_host, local_port = parse_endpoint_host_port(vllm_server.endpoint)
-                    print(f"[TracegenJobRunner] Starting Pinggy tunnel: {local_host}:{local_port} -> {self.config.pinggy_persistent_url}")
-                    pinggy_cfg = PinggyConfig(
-                        persistent_url=self.config.pinggy_persistent_url,
-                        token=self.config.pinggy_token,
-                        local_port=local_port,
-                        local_host=local_host,
+                # Controller-ingress mode: replace the pinggy tunnel with a stable
+                # public URL fronting the controller proxy. Only reroutes cloud
+                # backends; local backends keep the direct vLLM endpoint. In the
+                # default "pinggy" mode this branch is skipped, so the legacy path
+                # below is byte-identical.
+                if self.config.ingress_mode == "controller":
+                    from hpc.pinggy_utils import needs_pinggy_tunnel
+                    from hpc.ingress_utils import (
+                        capability_api_base,
+                        controller_registration_plan,
+                        inject_ingress_agent_key,
+                        register_controller_endpoint,
+                        DUMMY_API_KEY,
                     )
-                    pinggy_log = log_dir / f"{self.config.job_name}_pinggy.log"
-                    pinggy_tunnel = PinggyTunnel(pinggy_cfg, log_path=pinggy_log)
 
-                    with pinggy_tunnel:
-                        # Use Pinggy's public endpoint instead of local vLLM endpoint
-                        public_endpoint = pinggy_tunnel.public_endpoint
-                        print(f"[TracegenJobRunner] Using Pinggy endpoint for Harbor: {public_endpoint}")
-                        return self._run_harbor(endpoint=public_endpoint)
-                else:
-                    # Use local vLLM endpoint directly
-                    print(f"[TracegenJobRunner] Using local vLLM endpoint for Harbor: {vllm_server.endpoint}")
-                    return self._run_harbor(endpoint=vllm_server.endpoint)
+                    if needs_pinggy_tunnel(self.config.agent, self.config.trace_env):
+                        if not self.config.ingress_host:
+                            raise ValueError(
+                                "--ingress-mode controller requires --ingress-host "
+                                "(the public controller-ingress host)."
+                            )
+                        # Register the co-located upstream with the iris controller
+                        # under ENDPOINT_ACCESS_LINK, then mint a scoped capability
+                        # token and build the /proxy/t/<token>/<name>/v1 api_base. The
+                        # upstream is the RecordProxy (record_literal: controller ->
+                        # RecordProxy -> vLLM, so literal tokens are captured) or raw
+                        # vLLM otherwise; the proxy binds 0.0.0.0 so the (remote)
+                        # controller reaches it at IRIS_ADVERTISE_HOST. record_literal
+                        # off = maybe_serve_literal_proxy is a null CM (no proxy), and
+                        # controller_registration_plan registers raw vLLM's port.
+                        from hpc.literal_proxy_utils import (
+                            maybe_serve_literal_proxy,
+                            DEFAULT_LITERAL_PROXY_PORT,
+                        )
 
-    def _run_harbor(self, endpoint: Optional[str]) -> int:
-        """Execute the Harbor CLI for trace generation."""
+                        endpoint_name, register_address = controller_registration_plan(
+                            self.config.job_name,
+                            record_literal=self.config.record_literal,
+                            proxy_port=DEFAULT_LITERAL_PROXY_PORT,
+                        )
+                        with maybe_serve_literal_proxy(
+                            self.config.record_literal,
+                            vllm_server.endpoint,
+                            experiments_dir=self.config.experiments_dir,
+                            job_name=self.config.job_name,
+                            host="0.0.0.0",
+                        ):
+                            # The leased EndpointClient must stay alive for the whole
+                            # harbor run; _run_harbor runs synchronously here, so close
+                            # (stop renewal + unregister) after it.
+                            registration = register_controller_endpoint(
+                                endpoint_name, register_address
+                            )
+                            try:
+                                # Mint + build the capability api_base AFTER register
+                                # (the mint resolves the just-registered endpoint).
+                                api_base = capability_api_base(
+                                    self.config.ingress_host, endpoint_name
+                                )
+                                injected = inject_ingress_agent_key()
+                                print(
+                                    f"[TracegenJobRunner] ingress_mode=controller "
+                                    f"record_literal={self.config.record_literal}: registered "
+                                    f"{endpoint_name} -> {register_address} "
+                                    f"(id={registration.endpoint_id}, access=LINK); Harbor "
+                                    f"endpoint=/proxy/t/<token>/{endpoint_name}/v1 "
+                                    f"(dummy key injected={injected})"
+                                )
+                                return self._run_harbor(
+                                    endpoint=api_base, api_key=DUMMY_API_KEY
+                                )
+                            finally:
+                                registration.close()
+                    else:
+                        print(
+                            "[TracegenJobRunner] ingress_mode=controller but local "
+                            f"backend, using local vLLM endpoint: {vllm_server.endpoint}"
+                        )
+                        return self._run_harbor(endpoint=vllm_server.endpoint)
+
+                # Co-locate harbor's RecordProxy in front of vLLM when
+                # --record_literal is set, and route the agent endpoint through it
+                # so literal token IDs / logprobs are captured. Default off = a null
+                # context manager yielding vllm_server.endpoint UNCHANGED and starting
+                # no server, so the pinggy/local handoff below is byte-identical.
+                from hpc.literal_proxy_utils import maybe_serve_literal_proxy
+
+                with maybe_serve_literal_proxy(
+                    self.config.record_literal,
+                    vllm_server.endpoint,
+                    experiments_dir=self.config.experiments_dir,
+                    job_name=self.config.job_name,
+                ) as effective_endpoint:
+                    # Check if we need Pinggy tunnel for cloud backends with installed agents
+                    from hpc.pinggy_utils import (
+                        needs_pinggy_tunnel,
+                        PinggyTunnel,
+                        PinggyConfig,
+                        parse_endpoint_host_port,
+                    )
+
+                    # Evaluate Pinggy conditions with diagnostic logging
+                    has_url = bool(self.config.pinggy_persistent_url)
+                    has_token = bool(self.config.pinggy_token)
+                    needs_tunnel = needs_pinggy_tunnel(self.config.agent, self.config.trace_env)
+                    use_pinggy = has_url and has_token and needs_tunnel
+
+                    print(f"[TracegenJobRunner] Pinggy check: url={has_url}, token={has_token}, "
+                          f"needs_tunnel={needs_tunnel} (agent={self.config.agent}, env={self.config.trace_env})")
+                    print(f"[TracegenJobRunner] use_pinggy={use_pinggy}, vllm_endpoint={effective_endpoint}")
+
+                    if use_pinggy:
+                        # Parse the (effective) endpoint to get the actual host:port
+                        # (vLLM may bind to a specific IP, not localhost)
+                        local_host, local_port = parse_endpoint_host_port(effective_endpoint)
+                        print(f"[TracegenJobRunner] Starting Pinggy tunnel: {local_host}:{local_port} -> {self.config.pinggy_persistent_url}")
+                        pinggy_cfg = PinggyConfig(
+                            persistent_url=self.config.pinggy_persistent_url,
+                            token=self.config.pinggy_token,
+                            local_port=local_port,
+                            local_host=local_host,
+                        )
+                        pinggy_log = log_dir / f"{self.config.job_name}_pinggy.log"
+                        pinggy_tunnel = PinggyTunnel(pinggy_cfg, log_path=pinggy_log)
+
+                        with pinggy_tunnel:
+                            # Use Pinggy's public endpoint instead of local vLLM endpoint
+                            public_endpoint = pinggy_tunnel.public_endpoint
+                            print(f"[TracegenJobRunner] Using Pinggy endpoint for Harbor: {public_endpoint}")
+                            return self._run_harbor(endpoint=public_endpoint)
+                    else:
+                        # Use the effective (local vLLM, or co-located proxy) endpoint directly
+                        print(f"[TracegenJobRunner] Using local vLLM endpoint for Harbor: {effective_endpoint}")
+                        return self._run_harbor(endpoint=effective_endpoint)
+
+    def _run_harbor(self, endpoint: Optional[str], api_key: Optional[str] = None) -> int:
+        """Execute the Harbor CLI for trace generation.
+
+        api_key is set only in controller-ingress mode (a ``${IRIS_INGRESS_API_KEY}``
+        placeholder carried into agent kwargs); None on the legacy/pinggy path.
+        """
         from hpc.harbor_utils import build_harbor_command, load_harbor_config, build_endpoint_meta
 
         # Build endpoint metadata for vLLM
-        endpoint_meta = build_endpoint_meta(endpoint) if endpoint else None
+        endpoint_meta = build_endpoint_meta(endpoint, api_key=api_key) if endpoint else None
 
         # Load harbor config data for agent kwargs extraction
         harbor_config_data = load_harbor_config(self.config.harbor_config)
@@ -1274,6 +1505,25 @@ def run_datagen_job_main():
         python -m hpc.datagen_launch_utils --mode tracegen --config /path/to/config.json
     """
     import argparse
+    import asyncio
+
+    # Force CPython stock asyncio (NOT uvloop) at the datagen orchestrator's
+    # shared chokepoint -- EVERY datagen path funnels through this entrypoint
+    # (`python -m hpc.datagen_launch_utils --mode {taskgen,tracegen}`), so this
+    # is the datagen analog of SkyRL's BasePPOExp.run() reset. Ray installs
+    # uvloop in every worker/actor by default (RAY_USE_UVLOOP, gated in
+    # ray/_private/async_compat.py + default_worker.py), and libuv's
+    # io_uring/epoll-ctl path SIGABRTs + freezes the harbor agent event loops
+    # under Daytona sandbox-teardown socket churn (uv__epoll_ctl_prep /
+    # uv__io_poll asserts, libuv 1.45-1.49+). Resetting the policy here -- BEFORE
+    # the runner inits the Ray cluster / vLLM and spawns the harbor subprocess --
+    # ensures this driver process (and any in-process asyncio.run) builds a stock
+    # SelectorEventLoop with no libuv path. The sbatch template additionally
+    # exports RAY_USE_UVLOOP=0 (belt) and harbor's run_async chokepoint resets the
+    # policy in the agent subprocess (suspenders) -- see RL fix
+    # feedback_uvloop_libuv_019_pin. DeprecationWarning on 3.12+ is benign on our
+    # runtime; the policy still works.
+    asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
     parser = argparse.ArgumentParser(description="Run datagen job from config JSON")
     parser.add_argument(

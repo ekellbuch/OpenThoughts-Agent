@@ -67,7 +67,14 @@ from harbor.trial.trial import Trial
 import traceback
 import json
 from rapidfuzz import fuzz
-from transformers import AutoTokenizer
+# NOTE: `from transformers import AutoTokenizer` is intentionally NOT imported at
+# module level. It is used only by `decontaminate_ngram_overlap` (below), and a
+# cold module-level transformers import on a fresh RL node (e.g. the train-data
+# extraction subprocess, which imports this module only for `download_hf_dataset`)
+# triggers a transformers->accelerate circular import in the gpu-rl RL env
+# (accelerate==1.14.0 / transformers==5.12.1): `cannot import name 'dispatch_model'
+# from partially initialized module 'accelerate.big_modeling'`. Keeping the import
+# lazy means a data-staging import of this module never pulls transformers.
 from rich.console import Console, Group
 from rich.live import Live
 from rich.progress import (
@@ -1449,11 +1456,22 @@ def ensure_output_dir_in_dockerfile(dockerfile: Path) -> None:
     if any(directive in line for line in content):
         return
 
-    insert_idx = 0
+    insert_idx = None
     for idx, line in enumerate(content):
-        if line.strip().upper().startswith("WORKDIR"):
+        s = line.strip().upper()
+        if s.startswith("WORKDIR"):
             insert_idx = idx + 1
             break
+    if insert_idx is None:
+        # No WORKDIR — insert after the FIRST FROM directive.
+        for idx, line in enumerate(content):
+            if line.strip().upper().startswith("FROM"):
+                insert_idx = idx + 1
+                break
+    if insert_idx is None:
+        # No FROM either (truly malformed Dockerfile) — skip insertion;
+        # the build will fail later on its own.
+        return
 
     content.insert(insert_idx, directive)
     dockerfile.write_text("\n".join(content) + "\n")
@@ -2158,6 +2176,13 @@ def decontaminate_ngram_overlap(
     Returns:
         List of booleans where True indicates the value is contaminated
     """
+    # Lazy import (see module-level note): importing transformers cold can trigger a
+    # transformers<->accelerate circular import in the RL env. Pre-import
+    # accelerate.big_modeling first so it is fully initialized before transformers
+    # references it, then import AutoTokenizer here where it is actually used.
+    import accelerate.big_modeling  # noqa: F401  (pre-import to break the circular import)
+    from transformers import AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     all_text_tokens = tokenizer(values)["input_ids"]
     all_benchmark_tokens = tokenizer(benchmark_questions)["input_ids"]

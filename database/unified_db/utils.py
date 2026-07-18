@@ -1953,10 +1953,27 @@ def get_sandbox_job_by_id(job_id: str) -> Optional[Dict[str, Any]]:
 
 
 def get_sandbox_job_by_name(job_name: str) -> Optional[Dict[str, Any]]:
-    """Retrieve a sandbox job from the database by name."""
+    """Retrieve a sandbox job from the database by name.
+
+    When v6 resume reuses a run_tag, multiple rows may share the same job_name
+    (the original Started/Finished row plus the new Pending row created by the
+    resume listener). Without explicit ordering, Postgres returns rows in
+    physical-insertion order, which means callers like
+    update_job_status_to_started() may see the stale Started row first and
+    short-circuit "already_started", leaving the actual Pending row never
+    flipped to Started. Order by submitted_at desc to always return the most
+    recent row.
+    """
     try:
         client = get_supabase_client()
-        response = client.table('sandbox_jobs').select('*').eq('job_name', job_name).execute()
+        response = (
+            client.table('sandbox_jobs')
+            .select('*')
+            .eq('job_name', job_name)
+            .order('submitted_at', desc=True)
+            .limit(1)
+            .execute()
+        )
 
         if not response.data:
             return None
@@ -2755,6 +2772,41 @@ def _extract_job_metadata(
     # job_name can be None in Harbor result.json — fall back to config or dir name
     job_name = config.get("job_name") or result.get("job_name") or job_dir.name
 
+    # Ensure the leaderboard-expected VALID-trial numerator is present as a top-level
+    # `stats.n_trials` key. The leaderboard reads `stats.n_trials` for the "completed"
+    # numerator (server/storage.ts), but current Harbor (>=0.1.x JobStats schema) renamed
+    # the legacy top-level `n_trials` -> `n_completed_trials` and the legacy field no longer
+    # serializes — so without this the leaderboard renders "?/X". `n_completed_trials` is
+    # NOT the right numerator anyway: it counts ALL completed trials (incl. errored/no-reward
+    # ones), whereas the VALID count we standardized on (eval-agentic-cleanup §0 check-4 =
+    # trials with a numeric verifier reward) is the per-eval `stats.evals.<key>.n_trials`,
+    # which JobStats only increments when a reward is present. Sum those into a top-level
+    # `n_trials` so the leaderboard numerator is the VALID count.
+    stats = result.get("stats")
+    if isinstance(stats, dict) and "n_trials" not in stats:
+        evals = stats.get("evals")
+        if isinstance(evals, dict) and evals:
+            valid_trials = 0
+            for eval_data in evals.values():
+                if isinstance(eval_data, dict):
+                    n = eval_data.get("n_trials")
+                    if isinstance(n, int):
+                        valid_trials += n
+            stats["n_trials"] = valid_trials
+
+    # Additively persist the INFRASTRUCTURE-error count + per-type breakdown so a
+    # plain Supabase query can read them (stats->>'n_infra_errors',
+    # stats->'infra_error_breakdown') without re-deriving the INFRA_ERROR_TYPES
+    # classification from exception_stats. Pure audit fields — they do NOT touch
+    # the accuracy denominator or any existing metric. The classification set is
+    # the single source of truth in database/unified_db/infra_errors.py.
+    if isinstance(stats, dict):
+        from .infra_errors import compute_infra_error_stats
+
+        n_infra, infra_breakdown = compute_infra_error_stats(stats)
+        stats["n_infra_errors"] = n_infra
+        stats["infra_error_breakdown"] = infra_breakdown
+
     job_metadata = {
         "job_id": result["id"],  # Preserve local job ID from result.json
         "job_name": job_name,
@@ -2766,7 +2818,7 @@ def _extract_job_metadata(
         "n_rep_eval": config.get("n_attempts", 1),
         "config": config,
         "metrics": metrics_list,  # Now properly extracted from nested structure
-        "stats": result.get("stats"),
+        "stats": stats,
         "git_commit_id": git_commit_id,
         "package_version": package_version,
         "started_at": _parse_datetime(result.get("started_at")),

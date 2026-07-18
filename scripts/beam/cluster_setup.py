@@ -263,8 +263,7 @@ def cmd_destroy(args) -> int:
         # Get credentials first (may fail if cluster doesn't exist)
         get_credentials(gke_config, dry_run=args.dry_run)
         uninstall_beta9(beta9_config, dry_run=args.dry_run)
-        # Delete PVCs to clean up GCP persistent disks
-        # (Helm uninstall doesn't delete PVCs by default)
+        # Delete PVCs (Helm uninstall doesn't delete them by default).
         delete_namespace_pvcs(beta9_config.namespace, dry_run=args.dry_run)
     else:
         logger.info("Skipping Beta9 uninstall (--skip-beta9)")
@@ -527,7 +526,7 @@ def cmd_test(args) -> int:
             # Uninstall Beta9 and delete PVCs
             get_credentials(gke_config, dry_run=args.dry_run)
             uninstall_beta9(beta9_config, dry_run=args.dry_run)
-            # Delete PVCs to clean up GCP persistent disks
+            # Delete PVCs (Helm uninstall doesn't delete them by default).
             delete_namespace_pvcs(beta9_config.namespace, dry_run=args.dry_run)
 
             # Note: S3 storage artifacts are NOT deleted - they are cached for reuse

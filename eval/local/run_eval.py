@@ -26,6 +26,14 @@ class EvalRunner(LocalHarborRunner):
     DEFAULT_EXPERIMENTS_SUBDIR = "eval_runs"
     DEFAULT_N_CONCURRENT = 16
     DATAGEN_CONFIG_REQUIRED = False
+    # Cluster-level default for the Iris/TPU agentic-eval serve: enable vLLM prefix
+    # caching (APC) so each agentic turn reuses the KV cache for the shared, growing
+    # conversation prefix instead of re-prefilling it (~30x redundant-prefill fix on
+    # v6e-4). Applied to ALL models on the iris eval path, NOT per-model. Scoped to
+    # eval (not the shared base) as a canary while APC support on tpu-inference
+    # 0.23.0 is unconfirmed — see the CAVEAT at the call site in
+    # hpc/local_runner_utils.py (validate n_cache_tokens>0 on the next eval leg).
+    TPU_SERVE_DEFAULT_CLI_ARGS = ["--enable-prefix-caching"]
 
     @classmethod
     def create_parser(cls) -> argparse.ArgumentParser:
@@ -59,11 +67,43 @@ class EvalRunner(LocalHarborRunner):
         parser.add_argument("--datagen-config", dest="datagen_config", help=argparse.SUPPRESS)
 
         parser.add_argument(
+            "--vllm_model_uri",
+            help="Object-store URI (s3://|gs://) the vLLM server loads weights from "
+                 "(via runai_streamer), while --model stays the HF id used for "
+                 "model_config resolution + the served-model name. Set by the iris "
+                 "launcher's offline pre-cache; leave unset for normal HF loads.",
+        )
+        parser.add_argument("--vllm-model-uri", dest="vllm_model_uri", help=argparse.SUPPRESS)
+
+        parser.add_argument(
             "--experiments_dir",
             default=str(PROJECT_ROOT / cls.DEFAULT_EXPERIMENTS_SUBDIR),
             help="Directory for logs + endpoint JSON.",
         )
         parser.add_argument("--experiments-dir", dest="experiments_dir", help=argparse.SUPPRESS)
+
+        # Re-fire errored-trial pruning. On a warm-dir re-fire (an existing run
+        # dir), delete trials whose exception_info.exception_type is one of these
+        # BEFORE the harbor auto-resume, so those infra-errored trials re-run
+        # (the gs://-capable analog of `harbor jobs resume --filter-error-type`).
+        # Repeatable; empty/unset -> no pruning (auto-resume keeps errored trials,
+        # i.e. the historical no-op behavior). The Iris launcher bakes the
+        # resolved non-benign infra set here; a direct run_eval invocation must
+        # pass the types explicitly.
+        parser.add_argument(
+            "--refire_filter_error_type",
+            dest="refire_filter_error_types",
+            action="append",
+            default=None,
+            help="Exception type to delete-and-re-run on a warm-dir re-fire "
+                 "(repeatable). Unset -> no pruning.",
+        )
+        parser.add_argument(
+            "--refire-filter-error-type",
+            dest="refire_filter_error_types",
+            action="append",
+            help=argparse.SUPPRESS,
+        )
 
         # Upload options (shared from arg_groups)
         add_hf_upload_args(parser)

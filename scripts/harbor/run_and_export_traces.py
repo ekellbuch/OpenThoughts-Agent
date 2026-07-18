@@ -20,12 +20,20 @@ import importlib
 import inspect
 import os
 from pydantic import BaseModel
+from datasets import Dataset
 
 from harbor.job import Job
 from harbor.models.agent.name import AgentName
 from harbor.models.environment_type import EnvironmentType
-from harbor.models.job.config import JobConfig, LocalDatasetConfig
+from harbor.models.job.config import JobConfig
 from harbor.models.trial.config import AgentConfig, EnvironmentConfig, VerifierConfig
+
+from scripts.harbor._harbor_compat import (
+    LocalDatasetConfig,
+    create_job,
+    get_orchestrator_field,
+    set_orchestrator_field,
+)
 from harbor.utils.traces_utils import export_traces as _export_traces
 from data.gcs_cache import gcs_cache
 from scripts.harbor.job_config_utils import (
@@ -271,7 +279,7 @@ def force_resume(
 ) -> Dataset:
     existing_job_dir = Path(existing_job_dir)
     config = JobConfig.model_validate_json((existing_job_dir / "config.json").read_text())
-    job = Job(config)
+    job = create_job(Job, config)
 
     try:
         asyncio.run(job.run())
@@ -279,7 +287,7 @@ def force_resume(
         _shutdown_litellm(timeout=5.0)
 
     ds = _export_traces(
-        root=job_dir,
+        root=existing_job_dir,
         recursive=bool(recursive),
         episodes=episodes,
         to_sharegpt=to_sharegpt,
@@ -477,7 +485,7 @@ def run_dataset_to_traces(
         _merge_agent_timeout_into_config(config, agent_timeout_sec)
         _merge_verifier_timeout_into_config(config, verifier_timeout_sec)
         _merge_disable_verification_into_config(config, disable_verification)
-        job = Job(config)
+        job = create_job(Job, config)
     else:
         if config_from_spec is not None:
             config = config_from_spec
@@ -558,9 +566,9 @@ def run_dataset_to_traces(
             config.n_attempts = int(n_attempts)
             config.timeout_multiplier = float(timeout_multiplier)
 
-            # Orchestrator
-            config.orchestrator.n_concurrent_trials = int(n_concurrent)
-            config.orchestrator.quiet = bool(quiet)
+            # Orchestrator (compat: flat on unified Harbor, nested on legacy)
+            set_orchestrator_field(config, "n_concurrent_trials", int(n_concurrent))
+            set_orchestrator_field(config, "quiet", bool(quiet))
 
             # Agents
             if agent_name is not None or agent_import_path is not None or model_name is not None:
@@ -592,7 +600,7 @@ def run_dataset_to_traces(
         _merge_verifier_timeout_into_config(config, verifier_timeout_sec)
         _merge_disable_verification_into_config(config, disable_verification)
 
-        job = Job(config)
+        job = create_job(Job, config)
         job.job_dir.mkdir(parents=True, exist_ok=True)
         _save_dataset_checksum(job.job_dir, dataset_checksum)
 
@@ -919,14 +927,14 @@ def run_dataset_to_traces_hdf5(
         config = JobConfig.model_validate_json((existing_job_dir / "config.json").read_text())
 
         # Update config with new parameters (only orchestrator settings, agent config must match)
-        old_n_concurrent = config.orchestrator.n_concurrent_trials
-        config.orchestrator.n_concurrent_trials = int(n_concurrent)
+        old_n_concurrent = get_orchestrator_field(config, "n_concurrent_trials")
+        set_orchestrator_field(config, "n_concurrent_trials", int(n_concurrent))
         if old_n_concurrent != n_concurrent:
             logger.info(f"  Updating n_concurrent_trials: {old_n_concurrent} → {n_concurrent}")
             # Save updated config so Harbor's validation passes
             (existing_job_dir / "config.json").write_text(config.model_dump_json(indent=4))
 
-        job = Job(config)
+        job = create_job(Job, config)
     else:
         # Extract HDF5 to persistent directory for harbor to use (enables resuming)
         # Use a deterministic path based on HDF5 file location
@@ -975,9 +983,9 @@ def run_dataset_to_traces_hdf5(
         config.n_attempts = int(n_attempts)
         config.timeout_multiplier = float(timeout_multiplier)
 
-        # Orchestrator
-        config.orchestrator.n_concurrent_trials = int(n_concurrent)
-        config.orchestrator.quiet = bool(quiet)
+        # Orchestrator (compat: flat on unified Harbor, nested on legacy)
+        set_orchestrator_field(config, "n_concurrent_trials", int(n_concurrent))
+        set_orchestrator_field(config, "quiet", bool(quiet))
 
         # Agents
         if agent_name is not None or agent_import_path is not None or model_name is not None:
@@ -999,7 +1007,7 @@ def run_dataset_to_traces_hdf5(
         config.tasks = []
 
         # Create job
-        job = Job(config)
+        job = create_job(Job, config)
         # Environment
         config.environment = EnvironmentConfig(
             type=env_type,

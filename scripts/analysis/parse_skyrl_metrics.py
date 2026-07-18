@@ -13,9 +13,15 @@ Outputs:
 - A reward/errors vs steps plot
 
 Usage:
+    # Agentic (default):
     python parse_skyrl_metrics.py <log_folder> <output_folder>
-    python parse_skyrl_metrics.py /path/to/logs /path/to/results
     python parse_skyrl_metrics.py /path/to/logs /path/to/results --trace_jobs_dir /path/to/trace_jobs
+
+    # Standard (non-agentic) GRPO: double-quoted WANDB_MIRROR JSON lines, no trace_jobs.
+    # Emits metrics.csv / vllm_metrics.csv / report.md / reward_plot.png, plus a
+    # trailing-5-EMA best-checkpoint selection over <run_dir>/exports/.
+    python parse_skyrl_metrics.py <log_file_or_dir> <output_folder> --format standard \
+        --run_dir $WORK/rl_ckpts/<RUN_NAME> --save_every 20
 """
 
 import argparse
@@ -129,6 +135,205 @@ def parse_metrics_block(block: str) -> dict[str, Any] | None:
         except Exception:
             print(f"Warning: Could not parse metrics block: {e}")
             return None
+
+
+def extract_standard_metrics(log_content: str) -> list[dict[str, Any]]:
+    """
+    Extract per-step training metrics from a STANDARD (non-agentic) GRPO log.
+
+    Standard SkyRL runs with logger=console emit one line per train step of the form:
+        (skyrl_entrypoint pid=...)<ANSI> ... WANDB_MIRROR kind=train step=N metrics={...}<ANSI>
+    where the metrics dict is DOUBLE-QUOTED JSON. We strip ANSI codes + the Ray
+    actor prefix, then json.loads the dict. ALL present keys are kept (no
+    hardcoded pass@k key — standard runs use reward/avg_pass_at_16, but the
+    suffix is n_samples_per_prompt-dependent).
+
+    Returns a list of dicts (one per train step), each carrying every key in the JSON dict
+    (e.g. trainer/global_step, reward/avg_raw_reward, reward/avg_pass_at_*, policy/policy_entropy,
+    policy/raw_grad_norm, policy/policy_loss, policy/ppo_clip_ratio, policy/log_ratio_abs_*,
+    policy/n_tokens_dp_gt_*pct, loss/avg_raw_advantages, timing/*, ...).
+    """
+    content = strip_ansi(log_content)
+
+    # Match the WANDB_MIRROR train line. The metrics dict runs to end-of-line; after ANSI
+    # stripping the trailing reset code is gone, so {.*} to line end is the JSON object.
+    pattern = re.compile(
+        r'WANDB_MIRROR\s+kind=train\s+step=(\d+)\s+metrics=(\{.*\})\s*$',
+        re.MULTILINE,
+    )
+
+    metrics_list: list[dict[str, Any]] = []
+    n_bad = 0
+    for match in pattern.finditer(content):
+        step_str, dict_str = match.group(1), match.group(2)
+        try:
+            metrics = json.loads(dict_str)
+        except json.JSONDecodeError:
+            n_bad += 1
+            continue
+        # Ensure trainer/global_step is present (fall back to the step= token).
+        if 'trainer/global_step' not in metrics:
+            try:
+                metrics['trainer/global_step'] = int(step_str)
+            except ValueError:
+                pass
+        metrics_list.append(metrics)
+
+    if n_bad:
+        print(f"  Warning: {n_bad} WANDB_MIRROR train lines failed JSON parse")
+
+    return metrics_list
+
+
+def select_best_standard_checkpoint(
+    log_files: list[Path],
+    run_dir: Path | None = None,
+    save_every: int = 20,
+) -> dict[str, Any]:
+    """
+    Best-checkpoint selector for the STANDARD GRPO run layout.
+
+    Run dir layout:
+        <run_dir>/exports/global_step_<N>/policy/<weights>
+        <run_dir>/latest_ckpt_global_step.txt
+
+    Trailing-5 EMA selection over reward/avg_raw_reward:
+      - reward keyed by trainer/global_step, first-seen wins
+      - trailing-5 EMA: alpha = 1/3; EMA_n = alpha*r_n + (1-alpha)*EMA_{n-1}, EMA_1 = r_1
+      - eligible saved-aligned steps = multiples of save_every, excluding the FIRST save
+        (s >= 2*save_every), pick max EMA among them
+      - selection is CAPPED at latest_ckpt_global_step.txt
+
+    Returns a dict with the chosen step, the EMA table, eligibility info, and diagnostics.
+    """
+    # Collect rewards from every .out, parsing the standard WANDB_MIRROR train lines.
+    rewards: dict[int, float] = {}  # step -> avg_raw_reward (first-seen wins)
+    for fn in log_files:
+        try:
+            with open(fn, 'r', errors='replace') as f:
+                content = f.read()
+        except OSError:
+            continue
+        for m in extract_standard_metrics(content):
+            step = m.get('trainer/global_step')
+            reward = m.get('reward/avg_raw_reward')
+            if step is None or reward is None:
+                continue
+            try:
+                step = int(step)
+                reward = float(reward)
+            except (ValueError, TypeError):
+                continue
+            rewards.setdefault(step, reward)  # first-seen wins (chain links may overlap)
+
+    result: dict[str, Any] = {
+        'rewards': rewards,
+        'ema': {},
+        'best_step': None,
+        'available_exports': [],
+        'cap_step': None,
+        'eligible': [],
+        'reason': '',
+    }
+
+    if not rewards:
+        result['reason'] = 'No reward lines parsed from any .out'
+        return result
+
+    steps = sorted(rewards)
+    alpha = 1 / 3
+    ema: dict[int, float] = {}
+    prev = rewards[steps[0]]
+    for s in steps:
+        prev = alpha * rewards[s] + (1 - alpha) * prev
+        ema[s] = prev
+    result['ema'] = ema
+
+    # Available exports (intersect candidate set).
+    available: list[int] = []
+    cap_step: int | None = None
+    if run_dir is not None:
+        exports_dir = run_dir / 'exports'
+        if exports_dir.is_dir():
+            for child in exports_dir.iterdir():
+                m = re.match(r'global_step_(\d+)$', child.name)
+                if m and child.is_dir():
+                    available.append(int(m.group(1)))
+            available.sort()
+        result['available_exports'] = available
+
+        cap_file = run_dir / 'latest_ckpt_global_step.txt'
+        if cap_file.is_file():
+            try:
+                cap_step = int(cap_file.read_text().strip())
+            except (ValueError, OSError):
+                cap_step = None
+        result['cap_step'] = cap_step
+
+    # Eligible = saved-aligned (multiple of save_every, excluding the first save),
+    # present in the available exports set (if known), and <= cap_step (if known).
+    def is_eligible(s: int) -> bool:
+        if s % save_every != 0 or s < 2 * save_every:
+            return False
+        if cap_step is not None and s > cap_step:
+            return False
+        if available and s not in available:
+            return False
+        return True
+
+    # If we have an explicit exports set, prefer iterating that (a ckpt exists on disk);
+    # otherwise fall back to the EMA steps (selector still reports a recommendation).
+    candidate_steps = available if available else steps
+    eligible = [s for s in candidate_steps if is_eligible(s) and s in ema]
+    result['eligible'] = eligible
+
+    if not eligible:
+        result['reason'] = (
+            'No saved-aligned checkpoint eligible (after cap + exports intersection). '
+            f'available_exports={available}, cap_step={cap_step}, save_every={save_every}'
+        )
+        return result
+
+    best = max(eligible, key=lambda s: ema[s])
+    result['best_step'] = best
+    result['reason'] = (
+        f'highest trailing-5 EMA ({ema[best]:.4f}) among saved-aligned exports '
+        f'<= cap_step={cap_step}'
+    )
+    return result
+
+
+def print_best_standard_checkpoint(selection: dict[str, Any], save_every: int) -> None:
+    """Pretty-print the best-checkpoint selector output (EMA table + chosen step)."""
+    print("\n" + "=" * 60)
+    print("BEST-CHECKPOINT SELECTOR (standard GRPO, trailing-5 EMA)")
+    print("=" * 60)
+
+    rewards = selection.get('rewards', {})
+    ema = selection.get('ema', {})
+    available = selection.get('available_exports', [])
+    cap_step = selection.get('cap_step')
+    eligible = set(selection.get('eligible', []))
+    best = selection.get('best_step')
+
+    print(f"  save_every (hf_save_interval): {save_every}")
+    print(f"  available exports: {available}")
+    print(f"  cap (latest_ckpt_global_step.txt): {cap_step}")
+    print()
+    print(f"  {'step':>6} | {'reward':>10} | {'EMA':>10} | export? | eligible?")
+    print("  " + "-" * 56)
+    for s in sorted(ema):
+        has_export = '  yes  ' if (not available or s in available) else '  no   '
+        elig = ' yes' if s in eligible else ''
+        star = ' <-- BEST' if s == best else ''
+        print(f"  {s:>6} | {rewards.get(s, float('nan')):>10.4f} | "
+              f"{ema[s]:>10.4f} | {has_export} |{elig}{star}")
+    print()
+    if best is not None:
+        print(f"  CHOSEN STEP: {best}  ({selection.get('reason', '')})")
+        print(f"  export path: exports/global_step_{best}/policy/")
+    else:
+        print(f"  NO STEP CHOSEN: {selection.get('reason', '')}")
 
 
 def extract_batch_errors(log_content: str) -> dict[int, dict[str, float]]:
@@ -532,20 +737,31 @@ def generate_vllm_summary(vllm_metrics: list[dict[str, Any]], aggregated: list[d
     return summary
 
 
-def process_log_file(log_path: Path) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
-    """Process a single log file and return its name, training metrics, and vLLM metrics."""
+def process_log_file(
+    log_path: Path, fmt: str = "agentic"
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Process a single log file and return its name, training metrics, and vLLM metrics.
+
+    fmt="agentic" (default): single-quoted py-dict metric blocks + batch-error merge.
+    fmt="standard": double-quoted WANDB_MIRROR JSON lines; no batch-error/trace pipeline.
+    vLLM extraction is identical in both modes (extract_vllm_metrics is format-agnostic).
+    """
     with open(log_path, 'r', errors='replace') as f:
         content = f.read()
 
-    metrics = extract_metrics_blocks(content)
     vllm_metrics = extract_vllm_metrics(content)
-    batch_errors = extract_batch_errors(content)
 
-    # Merge batch error stats into training metrics
-    for m in metrics:
-        step = m.get('trainer/global_step')
-        if step is not None and step in batch_errors:
-            m.update(batch_errors[step])
+    if fmt == "standard":
+        # Standard GRPO: per-step double-quoted JSON; trace/batch-error emitters no-op.
+        metrics = extract_standard_metrics(content)
+    else:
+        metrics = extract_metrics_blocks(content)
+        batch_errors = extract_batch_errors(content)
+        # Merge batch error stats into training metrics
+        for m in metrics:
+            step = m.get('trainer/global_step')
+            if step is not None and step in batch_errors:
+                m.update(batch_errors[step])
 
     # Extract a short name from the filename
     name = log_path.stem
@@ -910,6 +1126,201 @@ def generate_reward_plot(all_data: dict[str, list[dict[str, Any]]], output_path:
     print(f"Saved reward plot to: {output_path}")
 
 
+def _find_pass_at_key(metrics_list: list[dict[str, Any]]) -> str | None:
+    """Return the first reward/avg_pass_at_<k> key present (k is n_samples-dependent)."""
+    for m in metrics_list:
+        for key in m:
+            if re.match(r'reward/avg_pass_at_\d+$', key):
+                return key
+    return None
+
+
+def generate_standard_report(
+    all_data: dict[str, list[dict[str, Any]]],
+    output_path: Path,
+    df: pd.DataFrame,
+    vllm_data: dict[str, dict[str, Any]] | None = None,
+    selection: dict[str, Any] | None = None,
+) -> None:
+    """Generate a markdown report for STANDARD (non-agentic) GRPO logs."""
+    with open(output_path, 'w') as f:
+        f.write("# SkyRL Standard-GRPO Training Metrics Analysis\n\n")
+        f.write(f"Generated from {len(all_data)} log file(s) (`--format standard`)\n\n")
+
+        # Overview
+        f.write("## Overview\n\n")
+        f.write("| Log File | Max Step | Train Steps | Final Reward | Max Reward | Final Entropy |\n")
+        f.write("|----------|----------|-------------|--------------|------------|---------------|\n")
+        for log_name, metrics in all_data.items():
+            if not metrics:
+                continue
+            global_steps = [m.get('trainer/global_step', 0) for m in metrics]
+            total_steps = max(global_steps) if global_steps else 0
+            rewards = [m.get('reward/avg_raw_reward', 0) for m in metrics]
+            ents = [m.get('policy/policy_entropy') for m in metrics if m.get('policy/policy_entropy') is not None]
+            final_reward = rewards[-1] if rewards else 0
+            max_reward = max(rewards) if rewards else 0
+            final_ent = ents[-1] if ents else float('nan')
+            f.write(f"| {log_name} | {total_steps} | {len(metrics)} | "
+                    f"{final_reward:.4f} | {max_reward:.4f} | {final_ent:.4f} |\n")
+        f.write("\n")
+
+        # Detailed stats by category (reuses the agentic helper)
+        summaries = create_summary_statistics(df)
+        for category, summary in summaries.items():
+            f.write(f"## {category.title()} Metrics\n\n")
+            f.write(summary.to_markdown())
+            f.write("\n\n")
+
+        # Per-step progression (collapse signals)
+        f.write("## Training Progression (collapse signals)\n\n")
+        for log_name, metrics in all_data.items():
+            if not metrics:
+                continue
+            pass_key = _find_pass_at_key(metrics)
+            pass_label = pass_key.split('/')[-1] if pass_key else 'pass@k'
+            f.write(f"### {log_name}\n\n")
+            f.write(f"| Step | Epoch | Reward | {pass_label} | Entropy | GradNorm | PPOClip | "
+                    f"PolicyLoss | logRatio_mean | Step Time (s) |\n")
+            f.write("|------|-------|--------|--------|---------|----------|---------|"
+                    "------------|---------------|---------------|\n")
+            for m in metrics:
+                step = m.get('trainer/global_step', 0)
+                epoch = m.get('trainer/epoch', '')
+                reward = m.get('reward/avg_raw_reward', float('nan'))
+                passk = m.get(pass_key, float('nan')) if pass_key else float('nan')
+                ent = m.get('policy/policy_entropy', float('nan'))
+                gn = m.get('policy/raw_grad_norm', float('nan'))
+                clip = m.get('policy/ppo_clip_ratio', float('nan'))
+                ploss = m.get('policy/policy_loss', float('nan'))
+                lr_mean = m.get('policy/log_ratio_abs_mean', float('nan'))
+                step_time = m.get('timing/step', float('nan'))
+                f.write(f"| {step} | {epoch} | {reward:.4f} | {passk:.4f} | {ent:.4f} | "
+                        f"{gn:.4f} | {clip:.5f} | {ploss:.5f} | {lr_mean:.5f} | {step_time:.1f} |\n")
+            f.write("\n")
+
+        # vLLM analysis (reuse agentic table format via a compact inline summary)
+        if vllm_data:
+            f.write("## vLLM Inference Engine Analysis (per-engine)\n\n")
+            f.write("| Log | Avg Running/Engine | Avg Gen Throughput/Engine | Avg KV Cache % | Avg Prefix Hit % |\n")
+            f.write("|-----|-------------------|--------------------------|----------------|------------------|\n")
+            for log_name, data in vllm_data.items():
+                s = data.get('summary', {})
+                if not s:
+                    continue
+                f.write(f"| {log_name} | {s.get('avg_running_per_engine', 0):.1f} | "
+                        f"{s.get('avg_generation_throughput_per_engine', 0):.1f} tok/s | "
+                        f"{s.get('avg_kv_cache_usage_pct', 0):.1f}% | "
+                        f"{s.get('avg_prefix_cache_hit_rate_pct', 0):.1f}% |\n")
+            f.write("\n")
+
+        # Best-checkpoint selection
+        if selection is not None:
+            f.write("## Best Checkpoint (trailing-5 EMA of reward/avg_raw_reward)\n\n")
+            best = selection.get('best_step')
+            if best is not None:
+                f.write(f"**Chosen step: `{best}`** — {selection.get('reason', '')}\n\n")
+                f.write(f"Export path: `exports/global_step_{best}/policy/`\n\n")
+            else:
+                f.write(f"No step chosen: {selection.get('reason', '')}\n\n")
+            f.write(f"- available exports: `{selection.get('available_exports', [])}`\n")
+            f.write(f"- cap (latest_ckpt_global_step.txt): `{selection.get('cap_step')}`\n\n")
+            ema = selection.get('ema', {})
+            rewards = selection.get('rewards', {})
+            eligible = set(selection.get('eligible', []))
+            if ema:
+                f.write("| Step | Reward | EMA | Eligible |\n|------|--------|-----|----------|\n")
+                for s in sorted(ema):
+                    f.write(f"| {s} | {rewards.get(s, float('nan')):.4f} | {ema[s]:.4f} | "
+                            f"{'yes' if s in eligible else ''} |\n")
+                f.write("\n")
+
+
+def generate_standard_reward_plot(all_data: dict[str, list[dict[str, Any]]], output_path: Path) -> None:
+    """
+    Standard-mode plot: reward curve + entropy & grad_norm overlay (collapse signals)
+    + a TIS / log-ratio panel when those keys exist.
+    """
+    # Decide whether a log-ratio panel is warranted.
+    has_logratio = any(
+        any('policy/log_ratio_abs' in k for k in m)
+        for metrics in all_data.values() for m in metrics
+    )
+    n_panels = 3 if has_logratio else 2
+    fig, axes = plt.subplots(n_panels, 1, figsize=(10, 4 * n_panels), sharex=True)
+    if n_panels == 1:
+        axes = [axes]
+    ax_reward = axes[0]
+    ax_collapse = axes[1]
+    ax_lr = axes[2] if has_logratio else None
+
+    for log_name, metrics in all_data.items():
+        if not metrics:
+            continue
+        steps = [m.get('trainer/global_step', i) for i, m in enumerate(metrics)]
+        rewards = [m.get('reward/avg_raw_reward', float('nan')) for m in metrics]
+        ents = [m.get('policy/policy_entropy', float('nan')) for m in metrics]
+        gns = [m.get('policy/raw_grad_norm', float('nan')) for m in metrics]
+        if not steps:
+            continue
+        single = len(steps) == 1
+        marker = 'o' if single else None
+        ms = 8 if single else None
+
+        # Reward panel: EMA solid + raw faint
+        raw_series = pd.Series(rewards, index=steps)
+        ema_series = raw_series.ewm(span=5).mean()
+        color = ax_reward.plot(steps, ema_series.values, label=log_name, linewidth=2,
+                               marker=marker, markersize=ms)[0].get_color()
+        ax_reward.plot(steps, rewards, color=color, alpha=0.2, linewidth=1)
+
+        # Collapse panel: entropy (left axis) + grad_norm (right axis, dashed)
+        ax_collapse.plot(steps, ents, color=color, linewidth=2, label=f"{log_name} entropy",
+                         marker=marker, markersize=ms)
+        ax_gn = getattr(ax_collapse, '_twin', None)
+        if ax_gn is None:
+            ax_gn = ax_collapse.twinx()
+            ax_collapse._twin = ax_gn
+        ax_gn.plot(steps, gns, color=color, linewidth=1.5, linestyle='--', alpha=0.7,
+                   label=f"{log_name} grad_norm")
+
+        # TIS / log-ratio panel
+        if ax_lr is not None:
+            lr_mean = [m.get('policy/log_ratio_abs_mean', float('nan')) for m in metrics]
+            lr_p99 = [m.get('policy/log_ratio_abs_p99', float('nan')) for m in metrics]
+            lr_max = [m.get('policy/log_ratio_abs_max', float('nan')) for m in metrics]
+            ax_lr.plot(steps, lr_mean, color=color, linewidth=2, label=f"{log_name} |logr| mean",
+                       marker=marker, markersize=ms)
+            ax_lr.plot(steps, lr_p99, color=color, linewidth=1, linestyle=':', alpha=0.8,
+                       label=f"{log_name} |logr| p99")
+            ax_lr.plot(steps, lr_max, color=color, linewidth=1, linestyle='--', alpha=0.5,
+                       label=f"{log_name} |logr| max")
+
+    ax_reward.set_ylabel('Avg Raw Reward')
+    ax_reward.set_title('Average Reward vs Training Step (EMA solid, raw faint)')
+    ax_reward.legend(loc='best', fontsize='small')
+    ax_reward.grid(True, alpha=0.3)
+
+    ax_collapse.set_ylabel('Policy Entropy (solid)')
+    ax_collapse.set_title('Entropy & Grad Norm (collapse signals)')
+    ax_collapse.grid(True, alpha=0.3)
+    if getattr(ax_collapse, '_twin', None) is not None:
+        ax_collapse._twin.set_ylabel('Raw Grad Norm (dashed)')
+    ax_collapse.legend(loc='upper left', fontsize='small')
+
+    if ax_lr is not None:
+        ax_lr.set_ylabel('|log ratio| (TIS)')
+        ax_lr.set_title('Token Importance Sampling: |log ratio| mean / p99 / max')
+        ax_lr.grid(True, alpha=0.3)
+        ax_lr.legend(loc='best', fontsize='small')
+
+    axes[-1].set_xlabel('Training Step')
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved standard reward/collapse plot to: {output_path}")
+
+
 def generate_turn_count_plot(trials: list[dict[str, Any]], output_path: Path) -> None:
     """Generate a turn count distribution plot from per-trial result.json data."""
     df = pd.DataFrame(trials)
@@ -969,7 +1380,8 @@ def main():
     parser.add_argument(
         "log_folder",
         type=str,
-        help="Path to folder containing log files"
+        help="Path to a FOLDER of logs (globbed by --pattern) or a single log file. "
+             "NOT a list of files: pass ONE folder, stage the .out chain links into it first."
     )
     parser.add_argument(
         "output_folder",
@@ -987,29 +1399,54 @@ def main():
         type=str,
         default=None,
         help="Path to trace_jobs directory for per-trial analysis. "
-             "Auto-discovered from log_folder if not specified."
+             "Auto-discovered from log_folder if not specified. (agentic only)"
+    )
+    parser.add_argument(
+        "--format",
+        choices=["agentic", "standard"],
+        default="agentic",
+        help="Log format. 'agentic' (default): single-quoted py-dict metric blocks + "
+             "trace_jobs pipeline (UNCHANGED). 'standard': non-agentic GRPO, double-quoted "
+             "WANDB_MIRROR JSON lines; trace/batch-error emitters no-op."
+    )
+    parser.add_argument(
+        "--run_dir",
+        type=str,
+        default=None,
+        help="(standard only) RL run dir for best-checkpoint selection: "
+             "<run_dir>/exports/global_step_<N>/policy + latest_ckpt_global_step.txt"
+    )
+    parser.add_argument(
+        "--save_every",
+        type=int,
+        default=20,
+        help="(standard only) hf_save_interval; checkpoint-alignment for best-ckpt EMA (default: 20)"
     )
 
     args = parser.parse_args()
+    fmt = args.format
 
     log_folder = Path(args.log_folder)
     output_folder = Path(args.output_folder)
 
     if not log_folder.exists():
-        print(f"Error: Log folder does not exist: {log_folder}")
+        print(f"Error: Log path does not exist: {log_folder}")
         sys.exit(1)
 
     # Create output folder
     output_folder.mkdir(parents=True, exist_ok=True)
 
-    # Find all log files
-    log_files = list(log_folder.glob(args.pattern))
+    # Accept either a directory (glob by --pattern) or a single log file.
+    if log_folder.is_file():
+        log_files = [log_folder]
+    else:
+        log_files = list(log_folder.glob(args.pattern))
 
     if not log_files:
         print(f"No log files matching '{args.pattern}' found in {log_folder}")
         sys.exit(1)
 
-    print(f"Found {len(log_files)} log files")
+    print(f"Found {len(log_files)} log file(s) (format={fmt})")
 
     # Process each log file
     all_data = {}
@@ -1019,7 +1456,7 @@ def main():
 
     for log_path in sorted(log_files):
         print(f"Processing: {log_path.name}")
-        log_name, metrics, vllm_metrics = process_log_file(log_path)
+        log_name, metrics, vllm_metrics = process_log_file(log_path, fmt=fmt)
 
         if not metrics and not vllm_metrics:
             print(f"  Warning: No metrics found in {log_path.name}")
@@ -1071,6 +1508,11 @@ def main():
         csv_path = output_folder / f"{ts}_metrics_table.csv"
         df.to_csv(csv_path, index=False)
         print(f"\nSaved training metrics table to: {csv_path}")
+        if fmt == "standard":
+            # Canonical name for the standard-cleanup workflow (one row/step).
+            std_csv = output_folder / "metrics.csv"
+            df.to_csv(std_csv, index=False)
+            print(f"Saved standard metrics.csv to: {std_csv}")
 
         # Save per-log CSVs
         for log_name, metrics in all_data.items():
@@ -1088,6 +1530,10 @@ def main():
         vllm_csv_path = output_folder / f"{ts}_vllm_metrics_table.csv"
         vllm_df.to_csv(vllm_csv_path, index=False)
         print(f"\nSaved vLLM metrics table to: {vllm_csv_path}")
+        if fmt == "standard":
+            std_vllm_csv = output_folder / "vllm_metrics.csv"
+            vllm_df.to_csv(std_vllm_csv, index=False)
+            print(f"Saved standard vllm_metrics.csv to: {std_vllm_csv}")
 
         # Save per-log vLLM CSVs
         for log_name, data in all_vllm_data.items():
@@ -1102,41 +1548,68 @@ def main():
     trial_data = []
     trial_stats_result = None
 
-    if args.trace_jobs_dir:
-        trace_jobs_dir = Path(args.trace_jobs_dir)
+    if fmt == "standard":
+        # Standard GRPO has NO trace_jobs/ and NO trainer_log.jsonl — the trace-dependent
+        # emitters (trial_stats.csv, batch_errors/*) cleanly no-op here.
+        print("\n[standard] Skipping trace_jobs / per-trial analysis (none in standard GRPO runs)")
     else:
-        trace_jobs_dir = find_trace_jobs_dir(log_folder)
-
-    if trace_jobs_dir and trace_jobs_dir.is_dir():
-        print(f"\nParsing result.json files from: {trace_jobs_dir}")
-        trial_data = parse_result_files(trace_jobs_dir)
-        if trial_data:
-            print(f"  Parsed {len(trial_data)} trial results")
-            trial_stats_result = compute_trial_stats(trial_data)
-
-            # Save trial data CSV
-            trial_df = pd.DataFrame(trial_data)
-            trial_csv_path = output_folder / f"{ts}_trial_results.csv"
-            trial_df.to_csv(trial_csv_path, index=False)
-            print(f"Saved trial results to: {trial_csv_path}")
+        if args.trace_jobs_dir:
+            trace_jobs_dir = Path(args.trace_jobs_dir)
         else:
-            print("  No trial results found")
-    else:
-        print("\nNo trace_jobs directory found; skipping per-trial analysis")
+            trace_jobs_dir = find_trace_jobs_dir(log_folder)
+
+        if trace_jobs_dir and trace_jobs_dir.is_dir():
+            print(f"\nParsing result.json files from: {trace_jobs_dir}")
+            trial_data = parse_result_files(trace_jobs_dir)
+            if trial_data:
+                print(f"  Parsed {len(trial_data)} trial results")
+                trial_stats_result = compute_trial_stats(trial_data)
+
+                # Save trial data CSV
+                trial_df = pd.DataFrame(trial_data)
+                trial_csv_path = output_folder / f"{ts}_trial_results.csv"
+                trial_df.to_csv(trial_csv_path, index=False)
+                print(f"Saved trial results to: {trial_csv_path}")
+            else:
+                print("  No trial results found")
+        else:
+            print("\nNo trace_jobs directory found; skipping per-trial analysis")
+
+    # Best-checkpoint selection (standard only)
+    selection = None
+    if fmt == "standard":
+        run_dir = Path(args.run_dir) if args.run_dir else None
+        selection = select_best_standard_checkpoint(
+            log_files, run_dir=run_dir, save_every=args.save_every
+        )
+        print_best_standard_checkpoint(selection, args.save_every)
 
     # Generate markdown report
-    md_path = output_folder / f"{ts}_metrics_report.md"
-    generate_markdown_report(
-        all_data, md_path, df,
-        vllm_data=all_vllm_data if all_vllm_data else None,
-        trial_stats=trial_stats_result,
-    )
-    print(f"Saved markdown report to: {md_path}")
+    if fmt == "standard":
+        md_path = output_folder / "report.md"
+        generate_standard_report(
+            all_data, md_path, df,
+            vllm_data=all_vllm_data if all_vllm_data else None,
+            selection=selection,
+        )
+        print(f"Saved standard report to: {md_path}")
+    else:
+        md_path = output_folder / f"{ts}_metrics_report.md"
+        generate_markdown_report(
+            all_data, md_path, df,
+            vllm_data=all_vllm_data if all_vllm_data else None,
+            trial_stats=trial_stats_result,
+        )
+        print(f"Saved markdown report to: {md_path}")
 
     # Generate reward vs steps plot
     if all_data:
-        plot_path = output_folder / f"{ts}_reward_vs_steps.png"
-        generate_reward_plot(all_data, plot_path)
+        if fmt == "standard":
+            plot_path = output_folder / "reward_plot.png"
+            generate_standard_reward_plot(all_data, plot_path)
+        else:
+            plot_path = output_folder / f"{ts}_reward_vs_steps.png"
+            generate_reward_plot(all_data, plot_path)
 
     # Generate turn count plot
     if trial_data:

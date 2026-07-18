@@ -159,4 +159,9 @@ JOB_NAME_IGNORE_KEYS: list[str] = [
     "trace_upload_repo_org",
     "trace_upload_episodes",
     "trace_upload_dataset_type",
+    # Resume-manager toggles — pure operator flags, no impact on job identity
+    "force_mutate",
+    "allow_overwrite",
+    # Ray runtime tuning — infra knob, not identity
+    "ray_object_store_gb",
 ]

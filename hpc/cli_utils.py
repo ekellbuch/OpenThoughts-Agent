@@ -304,7 +304,10 @@ def resolve_n_concurrent(
         except (TypeError, ValueError):
             pass
 
-    # 2. Harbor config (dict or Pydantic model)
+    # 2. Harbor config (dict or Pydantic model).
+    # Supports both legacy Harbor (nested ``orchestrator.n_concurrent_trials``)
+    # and unified Harbor (top-level ``n_concurrent_trials``). The legacy
+    # location is checked first, falling through to the top-level on miss.
     yaml_val = None
     if isinstance(harbor_config, dict):
         orch = harbor_config.get("orchestrator") or {}
@@ -312,10 +315,16 @@ def resolve_n_concurrent(
             yaml_val = orch.get("n_concurrent_trials")
         else:
             yaml_val = getattr(orch, "n_concurrent_trials", None)
+        if yaml_val is None:
+            # Unified Harbor: top-level on the dict.
+            yaml_val = harbor_config.get("n_concurrent_trials")
     elif harbor_config is not None:
         orch = getattr(harbor_config, "orchestrator", None)
         if orch is not None:
             yaml_val = getattr(orch, "n_concurrent_trials", None)
+        if yaml_val is None:
+            # Unified Harbor: top-level on the model.
+            yaml_val = getattr(harbor_config, "n_concurrent_trials", None)
 
     if yaml_val is not None:
         try:

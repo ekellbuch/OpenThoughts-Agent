@@ -111,6 +111,38 @@ def derive_default_hf_repo_id(job_name: str) -> str:
     return f"{org}/{job_name}"
 
 
+def _download_object_store_dataset(uri: str, *, verbose: bool = True) -> str:
+    """Recursively fetch a gs://|s3:// dataset snapshot to a local temp dir.
+
+    Uses fsspec (gcsfs/s3fs) with default credential discovery — on iris workers
+    that is workload-identity for gs:// and the injected AWS_* creds for s3://.
+    Makes ZERO HuggingFace calls, so it is safe under HF_HUB_OFFLINE=1. Returns
+    the local directory (containing the mirrored parquet / task tree), which the
+    caller feeds to the same raw-vs-parquet handling as an HF snapshot.
+    """
+    import tempfile
+    from pathlib import Path
+
+    import fsspec
+
+    proto = uri.split("://", 1)[0]
+    fs = fsspec.filesystem("gcs" if proto == "gs" else "s3")
+    dest = Path(tempfile.mkdtemp(prefix="ds_precached_"))
+    if verbose:
+        print(f"[hf_utils] Fetching pre-cached dataset from {uri} -> {dest} (offline, no HF)")
+    # Trailing slash + recursive => copy the directory tree, preserving layout.
+    fs.get(uri.rstrip("/") + "/", str(dest) + "/", recursive=True)
+    files = [p for p in dest.rglob("*") if p.is_file()]
+    if not files:
+        raise FileNotFoundError(
+            f"Pre-cached dataset URI {uri} resolved to no files under {dest}; "
+            "the mirror is empty or the URI is wrong."
+        )
+    if verbose:
+        print(f"[hf_utils] Fetched {len(files)} files from {uri}")
+    return str(dest)
+
+
 def resolve_dataset_path(
     path_or_repo: str,
     *,
@@ -129,6 +161,14 @@ def resolve_dataset_path(
         Resolved local filesystem path (absolute)
     """
     from pathlib import Path
+
+    if path_or_repo.startswith(("gs://", "s3://")):
+        # Pre-cached dataset snapshot in object storage (offline path — the iris
+        # launcher mirrored the HF dataset to the region-local GCS bucket and
+        # rewrote --dataset_path to it). Fetch from the store WITHOUT touching HF
+        # (so HF_HUB_OFFLINE=1 is honored), then let the caller's raw-vs-parquet
+        # detection + convert_parquet_to_tasks run on the local snapshot as usual.
+        return _download_object_store_dataset(path_or_repo, verbose=verbose)
 
     if is_hf_dataset_path(path_or_repo):
         # It's an HF dataset identifier - download it

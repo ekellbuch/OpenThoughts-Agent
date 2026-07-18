@@ -56,10 +56,16 @@ REPORT_PATH = SCRIPT_DIR / "dataset_analysis_report.jsonl"
 REGISTRY_PATH = SCRIPT_DIR / "snapshot_registry.jsonl"
 DOCKERFILE_CACHE_DIR = os.path.join(PLAYGROUND_TMP, "dockerfile_cache")
 
-DAYTONA_KEYS = {
-    "org1": "dtn_17868a1955b56a52cb367af6dd3c6e93ee531b2073df801784273435c0e0fc6c",
-    "org2": "dtn_ecfb759d2abcbf0f044413182677b3cc7624af495cb48409e8873b5283bda313",
-}
+# Daytona API keys come from the environment (source secrets.env before running) — NEVER hardcode.
+# The two eval orgs are DAYTONA_API_KEY (org1) + DAYTONA_DATA_API_KEY (org2).
+_DAYTONA_KEY_ENV = {"org1": "DAYTONA_API_KEY", "org2": "DAYTONA_DATA_API_KEY"}
+_missing = [v for v in _DAYTONA_KEY_ENV.values() if not os.environ.get(v)]
+if _missing:
+    raise SystemExit(
+        f"register_snapshots: missing Daytona key env var(s): {_missing}. "
+        "Source secrets.env before running (keys are never hardcoded)."
+    )
+DAYTONA_KEYS = {org: os.environ[var] for org, var in _DAYTONA_KEY_ENV.items()}
 
 # Match harbor's default snapshot resources
 DEFAULT_RESOURCES = Resources(cpu=1, memory=1, disk=3)

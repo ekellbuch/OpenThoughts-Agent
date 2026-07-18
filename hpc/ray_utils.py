@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -103,7 +104,13 @@ class RayClusterConfig:
     ray_env_vars: str = ""  # Space-separated KEY=value pairs for Ray workers
     wait_for_cluster_script: str = "scripts/ray/wait_for_cluster.py"
     poll_interval: int = 10
-    startup_timeout: int = 600
+    # Driver-side wait window for the full cluster to register all GPUs/nodes.
+    # Raised 600 -> 1200 for 6-node GH200 RL: with RAY_raylet_start_wait_time_s
+    # bumped to 120s (see build_apptainer_prefix), a slow head/worker raylet
+    # registration can legitimately push first-contact past the old 600s cliff.
+    # The driver still polls on poll_interval and returns as soon as the cluster
+    # is ready, so this only extends the patience ceiling, not the happy path.
+    startup_timeout: int = 1200
     # Memory configuration (bytes). If None, Ray auto-detects (which can cause OOM).
     # Set explicitly to limit Ray to the SLURM allocation minus headroom.
     memory_per_node: Optional[int] = None  # Total memory Ray can use per node
@@ -126,6 +133,16 @@ class RayClusterConfig:
     # When set, wraps ray commands with: proxychains4 -f $PROXYCHAINS_CONF_FILE ray start ...
     # This is more reliable on some systems (e.g., Jupiter ARM GH200 nodes)
     proxychains_binary: str = ""
+    # Apptainer/Singularity RL runtime mode (OPT-IN). When container_sif is set,
+    # `ray start` (head + worker) and the ray.init() wait scripts run inside the
+    # SIF via `apptainer exec --nv`. Proxychains stays OUTSIDE the apptainer exec
+    # (proxychains4 -f conf apptainer exec ... ray ...). See
+    # scope_rl_via_apptainer_launcher.md §5.
+    container_sif: Optional[str] = None
+    container_binds: List[str] = field(default_factory=list)
+    # In-container PYTHONPATH (prepended via `--env`) so the bind-mounted host
+    # SkyRL/harbor source overrides the in-SIF install.
+    container_pythonpath: str = ""
 
 
 @dataclass
@@ -471,11 +488,41 @@ class RayCluster:
         # 2. LD_PRELOAD approach: preserve LD_PRELOAD env var for Ray workers
         #    Requires localnet exclusions in proxychains config to not proxy Ray traffic
 
+        # Apptainer RL runtime mode (OPT-IN): wrap the `ray start ...` invocation
+        # in `apptainer exec --nv <binds> <sif>` so Ray runs from the SIF's own
+        # install. `ray` (cmd[0]) resolves inside the container. Proxychains, when
+        # used, stays OUTSIDE the apptainer exec (added below) so egress is handled
+        # at the host layer and the container needn't know about proxychains.
+        # See scope_rl_via_apptainer_launcher.md §5.
+        if self.config.container_sif:
+            from hpc.rl_launch_utils import build_apptainer_prefix
+            apptainer_prefix = build_apptainer_prefix(
+                self.config.container_sif,
+                binds=self.config.container_binds or None,
+                pythonpath=self.config.container_pythonpath or None,
+            )
+            cmd = apptainer_prefix + cmd
+
+        # Shell-quote each argv token before embedding the command into the
+        # `srun ... bash -c '<string>'` body. Apptainer's `--env PYTHONPATH=<v>`
+        # value can contain spaces, double-quotes, and literal `$(...)`/`${...}`
+        # (e.g. an inherited PYTHONPATH that still carries an unexpanded
+        # `$(resolve_rl_repo_dir "$DCFT")/skyrl-train:${DCFT_PRIVATE:-$DCFT}...`
+        # tail from jupiter.env). A naive `' '.join(cmd)` lets those spaces
+        # re-tokenize under `bash -c`, so apptainer reads the value's tail as a
+        # separate argv element and tries to open it as the SIF image
+        # ("FATAL: could not open image .../OpenThoughts-Agent/\"...\")/skyrl-train:...")
+        # → ray head exits 255 before producing any output. shlex.quote is a
+        # no-op for space/quote-free tokens, so this is byte-identical for all
+        # configs whose PYTHONPATH has no spaces (e.g. the 8B/32B ablations).
+        cmd_str = ' '.join(shlex.quote(c) for c in cmd)
+
         if self.config.proxychains_binary:
             # Wrapped binary approach: unset LD_PRELOAD (avoid double-proxying) and wrap ray command
             # Uses $PROXYCHAINS_CONF_FILE env var (set by SSH tunnel setup script)
+            # In container mode the wrap is: proxychains4 -f conf apptainer exec ... ray ...
             unset_proxychains = "unset LD_PRELOAD 2>/dev/null; "
-            ray_cmd_str = ' '.join(cmd)
+            ray_cmd_str = cmd_str
             proxychains_wrap = f'{self.config.proxychains_binary} -f "$PROXYCHAINS_CONF_FILE" '
             if self.config.ray_env_vars:
                 bash_cmd = f"{proxychains_wrap}{ray_cmd_str}"
@@ -485,16 +532,16 @@ class RayCluster:
             # LD_PRELOAD approach: preserve proxychains env vars for external API calls
             # The proxychains config should have localnet exclusions for internal IPs
             if self.config.ray_env_vars:
-                bash_cmd = f"env {self.config.ray_env_vars} {' '.join(cmd)}"
+                bash_cmd = f"env {self.config.ray_env_vars} {cmd_str}"
             else:
-                bash_cmd = ' '.join(cmd)
+                bash_cmd = cmd_str
         else:
             # No proxychains: unset env vars to prevent interference with Ray networking
             unset_proxychains = "unset LD_PRELOAD PROXYCHAINS_CONF_FILE 2>/dev/null; "
             if self.config.ray_env_vars:
-                bash_cmd = f"{unset_proxychains}env {self.config.ray_env_vars} {' '.join(cmd)}"
+                bash_cmd = f"{unset_proxychains}env {self.config.ray_env_vars} {cmd_str}"
             else:
-                bash_cmd = f"{unset_proxychains}{' '.join(cmd)}"
+                bash_cmd = f"{unset_proxychains}{cmd_str}"
 
         srun_cmd = [
             "srun",
@@ -512,7 +559,15 @@ class RayCluster:
 
         # Log Ray startup command and output for debugging
         role = "head" if is_head else "worker"
-        log_dir = Path(os.environ.get("DCFT", ".")) / "experiments" / "logs"
+        # OT_AGENT_RAY_LOG_DIR override: Jupiter /e/scratch project-shared inode
+        # quota is chronically over-soft; default path $DCFT/experiments/logs/
+        # hits EDQUOT on every new ray_<role>_<node>.log creation. Setting this
+        # env var redirects to /e/data1 (mmlaion, multi-PB headroom).
+        ray_log_override = os.environ.get("OT_AGENT_RAY_LOG_DIR")
+        if ray_log_override:
+            log_dir = Path(ray_log_override)
+        else:
+            log_dir = Path(os.environ.get("DCFT", ".")) / "experiments" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         ray_log_path = log_dir / f"ray_{role}_{node}.log"
 
@@ -555,8 +610,19 @@ class RayCluster:
         # Build the wait command
         # Unset proxychains env vars to avoid interfering with Ray communication
         unset_proxychains = "unset LD_PRELOAD PROXYCHAINS_CONF_FILE 2>/dev/null; "
-        wait_cmd = unset_proxychains + " ".join([
-            sys.executable,
+        # In Apptainer mode the wait script imports ray, so it must run INSIDE
+        # the SIF; use a bare `python` prefixed with `apptainer exec --nv`.
+        # Otherwise use the host sys.executable (the activated venv/conda).
+        if self.config.container_sif:
+            from hpc.rl_launch_utils import build_apptainer_prefix
+            python_invocation = build_apptainer_prefix(
+                self.config.container_sif,
+                binds=self.config.container_binds or None,
+                pythonpath=self.config.container_pythonpath or None,
+            ) + ["python"]
+        else:
+            python_invocation = [sys.executable]
+        wait_cmd = unset_proxychains + " ".join(python_invocation + [
             str(script_path),
             "--address", self.address,
             "--expected-gpus", str(self.total_gpus),
@@ -672,7 +738,17 @@ sys.exit(1)
 
             # Run on head node via srun
             # Wrap in bash to unset proxychains env vars before running Python with ray.init()
-            bash_cmd = f"unset LD_PRELOAD PROXYCHAINS_CONF_FILE 2>/dev/null; {sys.executable} {script_path}"
+            # In Apptainer mode the poll script imports ray → must run inside the SIF.
+            if self.config.container_sif:
+                from hpc.rl_launch_utils import build_apptainer_prefix
+                python_invocation = " ".join(build_apptainer_prefix(
+                    self.config.container_sif,
+                    binds=self.config.container_binds or None,
+                    pythonpath=self.config.container_pythonpath or None,
+                ) + ["python"])
+            else:
+                python_invocation = sys.executable
+            bash_cmd = f"unset LD_PRELOAD PROXYCHAINS_CONF_FILE 2>/dev/null; {python_invocation} {script_path}"
             srun_cmd = [
                 "srun",
                 f"--export={self.config.srun_export_env}",

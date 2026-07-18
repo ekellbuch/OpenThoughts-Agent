@@ -1,8 +1,9 @@
 import math
 import os
 import re
+import shlex
 import socket
-from typing import Dict, List
+from typing import Any, Dict, List
 from pydantic import BaseModel, computed_field
 
 
@@ -126,12 +127,56 @@ class HPC(BaseModel):
     # JSC clusters use $SCRATCH/ray due to /tmp limitations on compute nodes
     ray_tmpdir_base: str = "/tmp/ray"
 
+    # Eval-listener cluster config (Stage 4 of the eval-listener-unification plan).
+    # When set, this cluster object is the SINGLE SOURCE OF TRUTH for the eval
+    # listener's cluster config — the verbatim content of eval/clusters/<name>.yaml,
+    # in the dict shape `eval/unified_eval_listener.load_cluster_config()` returns.
+    # `to_eval_cluster_view()` returns it (env-expanded) so the listener can resolve
+    # `--cluster-config <name>` from the HPC object instead of a YAML file path.
+    # The eval/clusters/*.yaml files remain as deprecated compat shims. NOTE: the
+    # user-scoped paths here mirror the corresponding eval/clusters/<name>.yaml
+    # (which are themselves user-specific, e.g. bfeuer00 on leonardo); parameterizing
+    # them via the dotenv is a documented follow-up.
+    eval_cluster_view: Dict[str, Any] | None = None
+
     def model_post_init(self, __context) -> None:
         # Derive a default CPU-per-GPU ratio when not explicitly provided.
         if not self.cpus_per_gpu:
             gpus = max(self.gpus_per_node, 1)
             if self.cpus_per_node:
                 self.cpus_per_gpu = math.ceil(self.cpus_per_node / gpus)
+
+    def to_eval_cluster_view(self) -> Dict[str, Any]:
+        """Return the eval-listener cluster-config dict for this cluster.
+
+        Mirrors the dict shape `eval/unified_eval_listener.load_cluster_config()`
+        returns from `eval/clusters/<name>.yaml`, so the listener can resolve
+        `--cluster-config <cluster_name>` from the HPC object instead of a YAML
+        path. Returns `{}` when no eval view is configured (non-eval clusters +
+        backward-compat for clusters not yet populated). Applies the same
+        `$USER`/`~` env expansion `load_cluster_config` does, so paths resolve
+        per-user at call time.
+        """
+        if not self.eval_cluster_view:
+            return {}
+        view = self.eval_cluster_view
+
+        def _expand(obj: Any) -> Any:
+            if isinstance(obj, str):
+                return os.path.expandvars(os.path.expanduser(obj))
+            if isinstance(obj, dict):
+                return {k: _expand(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_expand(v) for v in obj]
+            return obj
+        expanded = _expand(view)
+        # load_cluster_config sets DCFT from paths.project_root as a side effect;
+        # mirror that so baseline-yaml extra_args ('${DCFT}/...') expand against
+        # the cluster's checkout root, exactly as the YAML path does.
+        proj = (expanded.get("paths") or {}).get("project_root")
+        if proj:
+            os.environ["DCFT"] = proj
+        return expanded
 
     def get_max_time_limit(self, num_nodes: int) -> str:
         """Get the maximum allowed time limit for a given number of nodes.
@@ -184,7 +229,14 @@ class HPC(BaseModel):
         """Generate environment variable exports for SBATCH scripts."""
         lines = []
         for key, value in {**self.env_vars, **self.library_paths}.items():
-            lines.append(f'export {key}="{value}"')
+            # shlex.quote keeps values with shell-special characters intact —
+            # notably the JSON RAY_object_spilling_config blob, whose inner
+            # double-quotes would otherwise prematurely close a naive
+            # `export KEY="value"` and mangle the spill config (Ray then fails
+            # json.loads at `ray start --head`). shlex.quote is a no-op for
+            # plain values, so this is byte-identical for all other vars.
+            # Mirrors get_rl_env_exports in rl_launch_utils.py.
+            lines.append(f"export {key}={shlex.quote(str(value))}")
         return "\n".join(lines)
 
     def get_exclude_directive(self) -> str:
@@ -274,9 +326,22 @@ class HPC(BaseModel):
         return "\n".join(lines)
 
     def get_srun_export_env(self) -> str:
-        """Generate SRUN --export string with all necessary env vars."""
+        """Generate SRUN --export string with all necessary env vars.
+
+        srun parses ``--export`` as a comma-separated list, so any value that
+        itself contains a comma (e.g. the JSON ``RAY_object_spilling_config``
+        blob) cannot be embedded here verbatim — it would re-tokenize and
+        corrupt the export list. Such values are skipped from the explicit
+        ``KEY=value`` entries; ``ALL`` (always first) already propagates them
+        to the srun child from the launcher shell environment, where the
+        sbatch ``export KEY="value"`` lines (get_rl_env_exports) have set them.
+        """
         env_parts = ["ALL"]
         for key, value in {**self.env_vars, **self.library_paths}.items():
+            if "," in str(value):
+                # Covered by ALL + the sbatch-level export; embedding it here
+                # would break srun's comma-delimited --export parsing.
+                continue
             env_parts.append(f"{key}={value}")
         # Add common paths
         # env_parts.append("PATH=$PATH")
@@ -286,10 +351,19 @@ class HPC(BaseModel):
         return ",".join(env_parts)
 
     def get_ray_env_vars(self) -> str:
-        """Generate space-separated env vars for Ray worker processes."""
+        """Generate space-separated env vars for Ray worker processes.
+
+        These tokens are interpolated into an ``env KEY=val KEY2=val2 ray
+        start ...`` command run under ``bash -c`` (see ray_utils._start_node),
+        so any value containing shell-special characters (spaces, quotes,
+        braces, commas — e.g. the JSON ``RAY_object_spilling_config`` blob)
+        must be shell-quoted to survive as a single ``KEY=value`` token.
+        shlex.quote is a no-op for already-safe values, so this is
+        byte-identical for every plain-string env var.
+        """
         env_parts = []
         for key, value in {**self.env_vars, **self.library_paths}.items():
-            env_parts.append(f"{key}={value}")
+            env_parts.append(f"{key}={shlex.quote(str(value))}")
         env_parts.append("PATH=$PATH")
         env_parts.append("LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}")
         env_parts.append("PYTHONPATH=${PYTHONPATH:-}")
@@ -334,6 +408,19 @@ class HPC(BaseModel):
             "# workers during this transient phase. Already disabled for GH200",
             "# (unified memory), now disabled universally.",
             'export RAY_memory_monitor_refresh_ms=0',
+            "# Force Ray (and every worker/actor it spawns) onto CPython stock",
+            "# asyncio instead of uvloop. Ray installs uvloop in every worker by",
+            "# default (RAY_USE_UVLOOP defaults True -> ray/_private/async_compat.py",
+            "# try_install_uvloop in default_worker.py). libuv's io_uring/epoll-ctl",
+            "# machinery SIGABRTs and then freezes the harbor agent event loops under",
+            "# Daytona sandbox-teardown socket churn (uv__epoll_ctl_prep / uv__io_poll",
+            "# asserts; present across libuv 1.45-1.49+). This is the SAME class of",
+            "# freeze that the RL path fixed via asyncio.set_event_loop_policy in",
+            "# BasePPOExp.run(). Belt: kill it globally for the whole datagen job;",
+            "# suspenders: the harbor run_async chokepoint also resets the policy.",
+            "# Datagen is network-RTT-bound (vLLM/Daytona) so uvloop's throughput",
+            "# edge is moot here.",
+            'export RAY_USE_UVLOOP=0',
         ]
 
         lines += [
@@ -769,6 +856,27 @@ jupiter = HPC(
         # Force GLOO and NCCL to use IPv4 (IPv6 doesn't work on Jupiter compute nodes)
         "GLOO_USE_IPV6": "0",
         "NCCL_SOCKET_FAMILY": "AF_INET",
+        # Force vLLM's process-wide socket.getaddrinfo to return AF_INET only.
+        # GLOO_USE_IPV6/NCCL_SOCKET_FAMILY above only gate Gloo+NCCL; the
+        # c10d TCPStore bootstrap (used by vLLM's mp DP backend) consults
+        # getaddrinfo directly and tries the IPv6 entry first, hitting
+        # `errno 97 - Address family not supported by protocol` on Jupiter
+        # compute nodes (their hostnames have both A and AAAA records,
+        # but IPv6 transport is dead). Job 479619 / Bug F. The monkey
+        # patch lives in vllm/env_override.py and is gated on this var.
+        "VLLM_FORCE_IPV4": "1",
+        # Skip the `vllm --help` flag-discovery probe in
+        # scripts/vllm/start_vllm_ray_controller.py. The probe parses
+        # `vllm --help` output to check whether each launcher flag is
+        # supported; when the probe transiently fails to capture the
+        # full help text (intermittent: cold-cache, slow imports,
+        # buffering), `_flag_supported("--data-parallel-size")` returns
+        # False → controller WARN's and DROPS the flag → vLLM defaults
+        # to data_parallel_size=1 → DP master assert (Bug D recurrence
+        # on job 487389, 2026-05-22). All flags the launcher emits have
+        # been stable in vLLM for many releases so this short-circuit
+        # is safe.
+        "VLLM_SKIP_FLAG_DISCOVERY": "1",
         # NOTE: Do NOT set GLOO_SOCKET_IFNAME=ib0 - it causes Gloo to use the IB hostname
         # which resolves to IPv6. Let Gloo auto-detect the interface.
         # GH200 NUMA affinity: bind each GPU worker to its local CPU NUMA node
@@ -787,12 +895,68 @@ jupiter = HPC(
         # but that commit post-dates torch 2.9.1. Flash SDP and math backends
         # still work fine. Only affects SFT (RL uses vLLM, not SDPA).
         "TORCH_CUDNN_SDPA_ENABLED": "0",
+        # Dump a Python traceback on fatal signals (SIGABRT/SIGSEGV/SIGFPE/etc).
+        # Catches C-level aborts from extensions (DeepSpeed CPU Adam, Liger Triton)
+        # that otherwise exit with code 1 and no Python stack.
+        "PYTHONFAULTHANDLER": "1",
+        # Promote async NCCL errors (e.g. failed allreduce on one rank) to a
+        # raised exception instead of a silent hang, so we get a real traceback.
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
+        # Extend the NCCL watchdog timeout from the 10-min default to 30 min.
+        # 12-node FA3 SFT 445090 died at 2h44m with WorkNCCL reduce_scatter
+        # hanging 600.077s before the watchdog SIGABRT'd. Training was healthy
+        # right up to the hang (loss 0.35, grad 0.13) — at 48-rank scale on
+        # Jupiter IB, one rank occasionally straggles past 10 min on a single
+        # collective. 30 min lets the run survive transient stragglers without
+        # masking permanent hangs (those still die, just 20 min later).
+        "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC": "1800",
+        "TORCH_NCCL_BLOCKING_WAIT_TIMEOUT_MS": "1800000",
+        # Bump shm_broadcast ring slot count 10 → 240 to widen the buffer
+        # for the cross-node DP+MoE+EP coordination bus. Hardcoded default
+        # in MessageQueue is 10 slots; with our patches it's overridable
+        # via this env var. 240 slots × 16 MiB chunk size = ~3.8 GB per
+        # MessageQueue (trivial against Jupiter's 239 GB /dev/shm cap).
+        # If the late-game shm_broadcast hang is "chronic-slow reader",
+        # 24× more chunks gives ~24× more pre-stuck headroom; if it's
+        # "stuck reader", we still get the new diagnostic slot-state
+        # dump at watchdog time to tell us WHICH reader is stuck.
+        # Experiment 494030+ on 2026-05-23.
+        "VLLM_MQ_MAX_CHUNKS": "240",
+        # Redirect Ray cluster startup logs to /e/data1 — /e/scratch jureap59
+        # project-shared inode quota is chronically over-soft (8.20M / 8.0M)
+        # and any new file creation under $DCFT/experiments/logs/ EDQUOTs.
+        # Symlink fix isn't viable because creating the symlink itself needs
+        # a new inode. See reference_jupiter_inode_quota.md.
+        "OT_AGENT_RAY_LOG_DIR": "/e/data1/datasets/playground/ot-baf/experiments/_ray_logs",
+        # Redirect Ray's object-store SPILL directory to GPFS /e/scratch
+        # (multi-PB free) instead of the compute node's LOCAL disk (default
+        # /tmp/ray, a small node-local fs that fills). The 80B Qwen3-Next
+        # R3+TIS run completes its rollout cleanly but the first training step
+        # OOD-crashes with `ray.exceptions.OutOfDiskError: Local disk is full`:
+        # the R3 routed_experts capture arrays ([gen_len × ~48 layers × top-10]
+        # per token) × 300 concurrent trials × 8 samples — plus trajectories /
+        # logprobs — overflow the Ray object store and spill to node-local disk.
+        # R3 capture roughly multiplies the rollout-data footprint vs the
+        # no-capture runs. GPFS has petabytes free; only node-local is
+        # exhausted, so point the spill at /e/scratch.
+        #
+        # `RAY_object_spilling_config` is read by the Ray head when it
+        # initializes the object store (and propagated to every worker via
+        # the per-node `env KEY=val ray start ...` prefix in
+        # get_ray_env_vars()). The filesystem spill backend writes spilled
+        # objects under `params.directory_path`. The dir is created lazily by
+        # Ray. Keep the path short (well under the 107-byte plasma_store socket
+        # limit, which lives under --temp-dir, NOT here).
+        "RAY_object_spilling_config": (
+            '{"type":"filesystem","params":'
+            '{"directory_path":"/e/scratch/jureap59/feuer1/ray_spill"}}'
+        ),
     },
     # NOTE: Do NOT use master_addr_suffix="i" - the "i" suffixed hostname is not DNS-resolvable
     # InfiniBand routing is handled by NCCL_SOCKET_IFNAME=ib0 instead
     # NCCL/networking settings for SFT training (InfiniBand NDR)
     nccl_settings={
-        "NCCL_DEBUG": "INFO",
+        "NCCL_DEBUG": "WARN",
         "NCCL_NET_GDR_LEVEL": "0",
         "NCCL_SOCKET_IFNAME": "ib0",
         "NCCL_IB_TIMEOUT": "60",
@@ -821,7 +985,49 @@ jupiter = HPC(
     # Also exclude jpbo-038-38, jpbo-065-17, jpbo-074-22, jpbo-048-41, jpbo-011-[01-48] - recurring NCCL socket/heartbeat failures
     # jpbo-091-05 added 2026-04-15: repeated SIGABRT on 32B training (hung the 32B-5ds superset job chain twice)
     # jpbo-044-0[1-5] added 2026-04-22: repeated NCCL TCPStore broken-pipe stalls on Qwen3.5-9B chain (4 consecutive failures)
-    node_exclusion_list="jpbo-031-[01-48],jpbo-011-[01-48],jpbo-038-38,jpbo-004-46,jpbo-065-17,jpbo-074-22,jpbo-048-41,jpbo-091-05,jpbo-044-0[1-5]",
+    # jpbo-074-40 added 2026-05-20: SSH tunnel to login jpbl-s01-01 "No route to host" — proxychains setup fails at job start (exit 127 in 29s, job 475717)
+    # 2026-05-22: briefly excluded jpbo-063-40 + jpbo-063-36 after GLM-4.7 v6 (493343) shm_broadcast cascade was heavily attributed to those nodes. Rolled back after MiniMax (493421) on disjoint nodes jpbo-001-[23,32] hit the same hang at a comparable serving-time mark (~55min) with jpbo-001-32 as the primary offender (5/7 warnings). Two disjoint node sets, two distinct configs, same failure mode → the issue is a wheel-level cross-node sustained-load bug, not a per-node interconnect flake. Don't add per-incident -063 / -001 exclusions to mask it.
+    node_exclusion_list="jpbo-031-[01-48],jpbo-011-[01-48],jpbo-038-38,jpbo-004-46,jpbo-065-17,jpbo-074-22,jpbo-074-40,jpbo-048-41,jpbo-091-05,jpbo-044-0[1-5]",
+    # Stage 4: eval-listener cluster config (single source of truth — was eval/clusters/jupiter.yaml).
+    # User-scoped paths mirror that yaml (zhuang1's); parameterizing via dotenv is a follow-up.
+    eval_cluster_view={
+        "cluster_name": "jupiter_eval",
+        "use_model_registry": True,
+        "model_registry": "eval/configs/model_configs.yaml",
+        "hardware_profile": "default",
+        "slurm_partition": "booster",
+        "slurm_account": "reformo",
+        "slurm_time": "12:00:00",
+        "conda_envs": {
+            "otagent-fix": "/e/scratch/jureap59/zhuang1/conda/envs/otagent-fix",
+            "otagent2-fix": "/e/scratch/jureap59/zhuang1/conda/envs/otagent2-fix",
+            "otagent2": "/e/scratch/jureap59/zhuang1/conda/envs/otagent2",
+        },
+        "paths": {
+            "project_root": "/e/scratch/jureap59/zhuang1/OpenThoughts-Agent-Latest",
+            "hf_cache": "/e/data1/datasets/playground/ot/hf_hub",
+            "eval_jobs_dir": "/e/data1/datasets/playground/mmlaion/shared/zhuang1_eval_jobs",
+            "eval_logs_dir": "eval/logs",
+            "listener_logs_dir": "experiments/listener_logs",
+            "sbatch_script": "eval/jupiter/eval_harbor.sbatch",
+            "dp_sbatch_script": "eval/jupiter/eval_harbor.sbatch",
+            "harbor_src": "/e/scratch/jureap59/zhuang1/harbor-fix/src",
+            "datasets_dirs": ["/e/data1/datasets/playground/ot/hf_hub"],
+            "secrets_file": "~/secrets.env",
+        },
+        "proxy": {
+            "enabled": True,
+            "login_node": "jpbl-s01-02",
+            "proxychains_bin": "/e/scratch/jureap59/feuer1/proxychains-ng-aarch64/bin/proxychains4",
+        },
+        "hardware": {
+            "gpus_per_node": 4,
+            "cpus_per_node": 72,
+            "mem_per_node_mb": 480000,
+            "arch": "aarch64",
+            "cuda_home": "/usr/local/cuda-13",
+        },
+    },
 )
 
 juwels = HPC(
@@ -896,7 +1102,44 @@ leonardo = HPC(
     # SSH tunnel + proxychains for no-internet compute nodes (like JSC clusters)
     needs_ssh_tunnel=True,
     proxychains_binary="/leonardo_work/AIFAC_5C0_290/bfeuer00/proxychains/bin/proxychains4",
+    conda_activate="source /leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/etc/profile.d/conda.sh && conda activate otagent",
     # Note: PBS Pro is NOT used here — Leonardo uses SLURM
+    # Stage 4: eval-listener cluster config (single source of truth — was eval/clusters/leonardo.yaml).
+    # User-scoped paths mirror that yaml (bfeuer00's); parameterizing via dotenv is a follow-up.
+    eval_cluster_view={
+        "cluster_name": "leonardo",
+        "baseline_model_configs": "eval/configs/baseline_model_configs_minimal.yaml",
+        "use_model_registry": True,
+        "model_registry": "eval/configs/model_configs.yaml",
+        "hardware_profile": "default",
+        "slurm_partition": "boost_usr_prod",
+        "slurm_account": "AIFAC_5C0_290",
+        "slurm_time": "23:59:00",
+        "conda_envs": {
+            "otagent": "/leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/envs/otagent",
+            "eval-qwen35": "/leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/envs/eval-qwen35",
+        },
+        "paths": {
+            "project_root": "/leonardo_work/AIFAC_5C0_290/bfeuer00/code/OpenThoughts-Agent",
+            "hf_cache": "/leonardo_work/AIFAC_5C0_290/bfeuer00/data/hub",
+            "eval_jobs_dir": "/leonardo_work/AIFAC_5C0_290/bfeuer00/eval_jobs",
+            "eval_logs_dir": "eval/leonardo/logs",
+            "listener_logs_dir": "experiments/listener_logs",
+            "sbatch_script": "eval/leonardo/eval_harbor.sbatch",
+            "dp_sbatch_script": "eval/leonardo/eval_harbor.sbatch",
+            "harbor_src": "/leonardo_work/AIFAC_5C0_290/bfeuer00/code/harbor/src",
+            "datasets_dirs": ["/leonardo_work/AIFAC_5C0_290/bfeuer00/data/hub"],
+            "secrets_file": "~/secrets.env",
+        },
+        "proxy": {"enabled": False},
+        "hardware": {
+            "gpus_per_node": 4,
+            "cpus_per_node": 32,
+            "mem_per_node_mb": 490000,
+            "arch": "x86_64",
+            "cuda_home": "/leonardo_work/AIFAC_5C0_290/bfeuer00/miniforge3/envs/otagent",
+        },
+    },
 )
 
 capella = HPC(
@@ -1026,7 +1269,60 @@ vista = HPC(
     total_partition_nodes=552,
     pretok_time_limit="4:00:00",
     pretok_partition="gh",
-    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082",
+    # Nodes below the c636-121 marker added 2026-07-10 from SLURM-detected NODE_FAILs
+    # ("srun: error: Node failure on <node>") mid-run on the axolotl Qwen3-32B SFT chain:
+    # c636-121 (819032), c635-101 (818130), c641-061 (820376), c611-051 (820378) — the
+    # specific failed node from each job's LOG (NOT the whole allocation) —
+    # agent_logs/2026-07-10_tacc_sft_818554_nccl_timeout.md.
+    # c636-152 added 2026-07-10 from job 820379's NCCL watchdog collective timeout: it was the
+    # single-rank straggler (rank 8) — the ONLY rank whose "last enqueued NCCL work" lagged
+    # (335264 vs 335268 on all 15 others) → it never joined the _ALLGATHER_BASE the others
+    # blocked on. Single-node straggler w/ healthy loss to the hang = flaky node, not a config bug.
+    # c608-042 added 2026-07-11 from job 821885 (7th pre-step-100 transient today): SLURM State
+    # NODE_FAIL + log "srun: error: Node failure on c608-042". It hosted rank 1; that node died in
+    # early init, and rank 0 (c608-041) NCCL-watchdog'd ~90s later on "remote process exited or
+    # there was a network error" (the symptom, not the cause). agent_logs/2026-07-10_tacc_sft_820379_nccl_watchdog.md.
+    # c634-142 added 2026-07-11 from job 822309 (axolotl Qwen3-32B SFT, exp _14, died step 9 ~16:59
+    # CDT): SLURM State NODE_FAIL + log "srun: error: Node failure on c634-142". It hosted rank 11 —
+    # the ONE task not in srun's terminated list (the node died before srun could kill it); rank 10
+    # (c622-151) merely NCCL-watchdog-timed-out waiting on the dead peer's _ALLGATHER_BASE (symptom,
+    # not cause).
+    # c641-012 added 2026-07-12 from job 823965 (axolotl Qwen3-32B SFT, exp _16, died ~02:01 CDT,
+    # ~27 min in): SLURM State NODE_FAIL + log "srun: error: Node failure on c641-012", matching
+    # `sinfo -R` ("Not responding", timestamp 2026-07-12T02:01:19 == job End). It hosted rank 15;
+    # peer c641-001 (rank 14) merely exited with code 1 ~seconds earlier (symptom, not cause).
+    # c634-052 added 2026-07-12 from jobs 824241/824242 (axolotl Qwen3-32B SFT, exp _17): RECURRING —
+    # died TWICE with the identical ZeRO-3 backward `_REDUCE_SCATTER_BASE` 600s c10d-watchdog SIGABRT
+    # (824241 ~step 130, 824242 step 243). rank 4 = c634-052 is the SOLE non-arriving straggler in BOTH
+    # (its own log: "Last enqueued NCCL work == last completed" → no outstanding collective; hung in
+    # non-NCCL/CPU/IO code, exited only on kill). Identical 16-node set both jobs → same rank→node map.
+    # Degraded/hanging GH200 node (unlike the others here, which were single NODE_FAILs), not a config
+    # bug. agent_logs/2026-07-12_tacc_axolotl32b_c634-052_straggler_nccl_timeout.md.
+    # c621-102 added 2026-07-13 from job 825770 (axolotl Qwen3-32B SFT, exp _18): SLURM State NODE_FAIL
+    # + `down*` node — same class as c634-052; confirmed NODE_FAIL.
+    # c639-[...] (WHOLE RACK, 32 nodes) added 2026-07-14 (operator-authorized): the axolotl Qwen3-32B SFT
+    # chain died FOUR consecutive times whenever it landed on the c639 rack (829050/051/052/053, each ~2h in,
+    # ZeRO-3 backward `reduce_scatter` NCCL SIGABRT with only c639 nodes exiting 1; 829053 showed the
+    # straggler pre-failure signature — step time ballooning 1.2→100+ s/it). Per-node exclusion wasn't
+    # converging (multiple c639 nodes implicated across runs), so the whole rack is excluded as a class.
+    # Expanded/validated on Vista: `scontrol show hostnames` yields exactly the 32 existing c639 nodes.
+    # agent_logs/2026-07-14_tacc_axolotl32b_c639_rack_exclude_freshrelaunch.md.
+    # c637-042,c638-101,c638-102,c638-112 added 2026-07-15: the exp _25 chain (832095/096/097/098) died
+    # substantially on these nodes — 832096/098 at C10d rendezvous bring-up (DistNetworkError, c638-101
+    # broken-pipe = node/network fault, never trained); 832097 reached the BACKWARD then SIGABRT (deepspeed
+    # fp16 backward, rank 9 @ c637-042); 832095 OOM'd on resume @ c638-102/112. The 16-node full-CPU-offload
+    # config HAS trained (checkpoint-150 banked = 150 steps) → the failures are substantially node-flakiness,
+    # so exclude these 4 and resume from checkpoint-150 on clean nodes (operator: KEEP 16 nodes + full offload;
+    # do NOT shrink to 32). agent_logs/2026-07-15_axolotl-32b-relaunch-nodeexclude.md.
+    node_exclusion_list="c610-021,c611-011,c640-041,c611-041,c611-122,c637-082,c636-121,c635-101,c641-061,c611-051,c636-152,c608-042,c634-142,c641-012,c634-052,c621-102,c637-042,c638-101,c638-102,c638-112,c639-[001-002,011-012,021-022,031-032,041-042,051-052,061-062,071-072,081-082,091-092,101-102,111-112,121-122,131-132,141-142,151-152]",
+    # Detect + expose the CUDA math_libs (sbsa) lib dir on LIBRARY_PATH/LD_LIBRARY_PATH
+    # so DeepSpeed's JIT cpu_adam op links `-lcurand` (libcurand.so lives under
+    # math_libs/<ver>/targets/sbsa-linux/lib on this aarch64 install, NOT cuda/lib64).
+    # Without this, ZeRO CPU-offload dies at optimizer construction with
+    # "ld: cannot find -lcurand" (job 827273, exp _20). The conda x86_64 compiler
+    # override in setup_cuda_environment() Step 5 is a no-op on aarch64 (files absent),
+    # so vista's load-bearing gcc/15.1.0 CC/CXX below are preserved.
+    needs_cuda_detection=True,
     # Runtime configuration for Ray/vLLM
     modules=["gcc/15.1.0", "cuda/12.8", "tacc-apptainer"],
     conda_activate="source $SCRATCH/miniconda3/etc/profile.d/conda.sh && conda activate $SCRATCH/miniconda3/envs/vllm_sandboxes",
@@ -1034,17 +1330,29 @@ vista = HPC(
         "HF_HOME": "/tmp/hf_home",
         "PYTHONFAULTHANDLER": "1",
         "NCCL_TIMEOUT": "1800",
-        "NCCL_IB_TIMEOUT": "23",
+        # Fix A (2026-07-14): 23 is above NCCL's documented max exponent (22) and gets
+        # clamped; pin 22 explicitly. Kept in sync with nccl_settings below (env_exports
+        # renders AFTER nccl_exports in universal_sft.sbatch, so this dict wins collisions).
+        "NCCL_IB_TIMEOUT": "22",
         "PYTORCH_ALLOC_CONF": "garbage_collection_threshold:0.6,max_split_size_mb:128",
     },
     library_paths={
         "TRITON_CC": "/home1/apps/gcc/15.1.0/bin/gcc",
         "LD_PRELOAD": "/home1/apps/gcc/15.1.0/lib64/libstdc++.so.6",
+        # Export CC/CXX so any native JIT build (notably DeepSpeed's CPUAdamBuilder
+        # for ZeRO CPU-offload) picks the module-loaded gcc/g++ 15.1.0 — the same
+        # compiler TRITON_CC already uses — instead of TACC's default nvc++, which
+        # rejects the armv9 flags DeepSpeed emits (the "cpu_adam unbuildable"
+        # artifact; see .claude/projects/axolotl/axolotl.md gotcha #2). Harmless for
+        # the liger-only relaunch; unblocks CPU offload as the next memory lever.
+        "CC": "/home1/apps/gcc/15.1.0/bin/gcc",
+        "CXX": "/home1/apps/gcc/15.1.0/bin/g++",
     },
     # NCCL/networking settings for SFT training (EFA networking)
     nccl_settings={
         "NCCL_PROTO": "simple",
-        "NCCL_DEBUG": "INFO",
+        # Fix A (2026-07-14): WARN, not INFO — INFO is too verbose/slow at 16-node scale.
+        "NCCL_DEBUG": "WARN",
         "FI_EFA_FORK_SAFE": "1",
         "FI_LOG_LEVEL": "1",
         "FI_EFA_ENABLE_SHM_TRANSFER": "0",
@@ -1052,7 +1360,57 @@ vista = HPC(
         "FI_EFA_TX_MIN_CREDITS": "64",
         "NCCL_TREE_THRESHOLD": "0",
         "NCCL_TIMEOUT": "1800",
-        "NCCL_IB_TIMEOUT": "23",
+        # --- Fix A (2026-07-14): NCCL/IB robustness + NCCL flight recorder for the axolotl
+        # Qwen3-32B SFT ZeRO-3 backward `reduce_scatter` NCCL hang. The c639-rack exclusion
+        # (commit 7f479d03) was FALSIFIED: leg 830658 hit the ZeRO-3 backward
+        # `__reduce_and_partition_ipg_grads` -> `reduce_scatter_coalesced` 600s NCCL
+        # `_REDUCE_SCATTER_BASE` timeout at step ~160 on FRESH NON-c639 nodes (all 16 ranks
+        # timed out on the same SeqNum=23976 -> one rank didn't arrive = intermittent IB
+        # straggler / pre-collective rank wedge). Raise IB timeout to the documented max
+        # exponent (22) + more retries, widen QPs per connection, and force the Ring
+        # collective path (the logs showed "Connected all trees"). Arm the PyTorch NCCL
+        # flight recorder so a recurrence dumps definitive per-rank collective forensics.
+        # The 16->8 node shrink is the ESCALATION if this recurs (halving nodes doubles the
+        # per-GPU ZeRO-3 shard on the 32B model -> OOM risk), NOT applied this round.
+        # agent_logs/2026-07-14_tacc_axolotl32b_reduce_scatter_fixA.md
+        #
+        # --- Fix B (2026-07-14, operator-chosen "KEEP 16 NODES + other levers"): Fix A DIED
+        # the same way (exp _24: 831541 @ step 182, 831542 @ step ~155, IDENTICAL ZeRO-3
+        # backward `reduce_scatter_coalesced` SIGABRT on DISJOINT node sets) -> the hang is a
+        # fabric-wide intermittent collective straggler, not fixed by the IB-robustness env
+        # alone and not node/rack-specific. Operator kept 16 nodes and picked NCCL collective
+        # tuning as the secondary lever (PRIMARY = ZeRO-3 CPU offload_param, in
+        # zero3_bf16_offload_shardsave.json). Two changes here:
+        #   (1) RAISE NCCL_BUFFSIZE 4MB(default)->32MB: bigger per-channel buffers = FEWER
+        #       collective chunks per reduce_scatter = less per-collective straggler exposure.
+        #   (2) DROP NCCL_ALGO=Ring: Fix A forced Ring, but Ring is already NCCL's default for
+        #       reduce_scatter (so forcing it was ~no-op) AND Ring is the most straggler-
+        #       sensitive algo (every rank gates the ring). Let NCCL auto-select so it can
+        #       fall back off the ring topology if a rank wedges.
+        # IB robustness (timeout/retry/QPs) + the flight recorder are KEPT armed. If this STILL
+        # dies at ~step 155-190, the flight recorder can't dump on this SIGABRT abort path, so
+        # the next step is a SIGABRT-surviving per-rank arrival-timestamp capture (deeper
+        # forensics) — flagged for the supervisor, not attempted here.
+        #
+        # --- Fix B REVERT of NCCL_BUFFSIZE ONLY (2026-07-15): the 16-node full-CPU-offload
+        # relaunch 832852 (exp _25, clean nodes c638-072/082) OOM'd at the FIRST backward
+        # (ZeRO-3 reduce_scatter CUDA OOM, "Cuda failure 2 out of memory"). The SAME 16-node
+        # full-offload config had TRAINED to checkpoint-150 (job 832095) BEFORE Fix B raised
+        # NCCL_BUFFSIZE 4MB->32MB (8x). A 32MB NCCL buffer allocates per-peer/per-channel HBM;
+        # at 16-node scale that enlarged footprint tipped the previously-fitting config into
+        # OOM. Revert JUST NCCL_BUFFSIZE (back to the torch/NCCL ~4MB default by removing it);
+        # KEEP the IB-robustness settings (IB_TIMEOUT/RETRY_CNT/QPS_PER_CONNECTION) + the
+        # flight recorder (those address the straggler, not HBM) and KEEP the node exclusions.
+        # agent_logs/2026-07-15_axolotl-32b-nccl-buffsize-revert.md
+        "NCCL_IB_TIMEOUT": "22",
+        "NCCL_IB_RETRY_CNT": "13",
+        "NCCL_IB_QPS_PER_CONNECTION": "4",
+        "TORCH_NCCL_TRACE_BUFFER_SIZE": "20000",
+        "TORCH_NCCL_DUMP_ON_TIMEOUT": "1",
+        # $SCRATCH (=/scratch/10635/penfever) expands at sbatch runtime — nccl_exports uses
+        # plain double-quoted `export K="V"` (NOT shlex.quote), and this renders after the
+        # tacc.env source. PyTorch appends the rank, writing $SCRATCH/nccl_trace_<rank>.
+        "TORCH_NCCL_DEBUG_INFO_TEMP_FILE": "$SCRATCH/nccl_trace_",
     },
     training_launcher="torchrun",
     # Job scaling (from tacc.env)
@@ -1061,6 +1419,99 @@ vista = HPC(
     num_nodes_slow=4,
     num_nodes_default=16,
     num_nodes_fast=32,
+    # Stage 4: eval-listener cluster config (single source of truth — was eval/clusters/tacc.yaml).
+    # NOTE: this HPC object is named "vista" (the machine) but operators pass the bare
+    # name "tacc"; the view's cluster_name is "tacc" (mirroring tacc.yaml) and the
+    # listener's _resolve_cluster_view_by_name() matches EITHER c.name ("vista") OR the
+    # view's cluster_name ("tacc"), so `--cluster-config tacc` AND `--cluster-config vista`
+    # both resolve. User-scoped paths mirror that yaml (penfever's). Vista-specific vs
+    # leonardo: hardware_profile gh200, 1 GPU/node, NO mem_per_node_mb (RealMemory is
+    # misreported as 1 MB → request whole nodes), and hardware.gpu_gres false (GPUs are
+    # not a SLURM gres here). Compute nodes have full egress so proxy is disabled.
+    eval_cluster_view={
+        "cluster_name": "tacc",
+        "baseline_model_configs": "eval/clusters/tacc_baseline_model_configs.yaml",
+        "use_model_registry": True,
+        "model_registry": "eval/configs/model_configs.yaml",
+        "hardware_profile": "gh200",
+        "slurm_partition": "gh",
+        "slurm_account": "CCR24067",
+        "slurm_time": "23:59:00",
+        "conda_envs": {
+            "otagent": "/scratch/10635/penfever/miniconda3/envs/otagent",
+        },
+        "paths": {
+            "project_root": "/scratch/10635/penfever/OpenThoughts-Agent",
+            "hf_cache": "/scratch/10635/penfever/hub",
+            "eval_jobs_dir": "/scratch/10635/penfever/eval_jobs",
+            "eval_logs_dir": "eval/tacc/logs",
+            "listener_logs_dir": "experiments/listener_logs",
+            "sbatch_script": "eval/tacc/eval_harbor.sbatch",
+            "dp_sbatch_script": "eval/tacc/eval_harbor.sbatch",
+            "harbor_src": "/scratch/10635/penfever/harbor/src",
+            "datasets_dirs": ["/scratch/10635/penfever/hub"],
+            "secrets_file": "/scratch/10635/penfever/keys.env",
+        },
+        "proxy": {"enabled": False},
+        "hardware": {
+            "gpus_per_node": 1,
+            "cpus_per_node": 72,
+            "arch": "aarch64",
+            "cuda_home": "/scratch/10635/penfever/miniconda3/envs/otagent",
+            "gpu_gres": False,
+        },
+    },
+)
+
+# EmpireAI Beta — NY-state consortium GB200 NVL72 SuperPOD (aarch64 Grace + B200/sm_100).
+# Placed by the aarch64/TACC blocks (vista) since it shares that arch class.
+# NOTE: EmpireAI is currently driven by DIRECT enroot/sbatch — Pyxis/Enroot containers
+# (run image `mega_final_dm.sqsh`, the 3-layer SFT/RL/JAX mega-container), NOT yet fully
+# `python -m hpc.launch`-integrated. This block registers the cluster + its per-cluster
+# secrets path per the standard HPC convention (so it's discoverable/resolvable like the
+# others); the containerized run mechanics live in .claude/ops/empireai/ + hpc/empireai/.
+# All scalar fields below are LIVE-VERIFIED (2026-07-17, sinfo/scontrol over the beta login):
+#   total_partition_nodes=72 (sinfo -p beta %D), cpus_per_node=144 (scontrol CPUTot, 2×72-core
+#   Grace), GPUs ARE a SLURM gres here (--gres=gpu:b200:N), account confirmed by operator.
+empireai = HPC(
+    name="empireai",
+    # Login mgmt node fqdn `b6-21-s1-mgmt-01.cm.cluster`; compute nodes `b1-11-s1-dgx-01-c01`
+    # … `bN-NN-sN-dgx-01-cNN`. This pattern matches both (Bright `bN-NN-sN-<role>-…`).
+    hostname_pattern=r"b\d+-\d+-s\d+-.*",
+    dotenv_filename="empireai.env",
+    account="ny_chinmayh_datacomp",
+    partition="beta",  # the only partition on Beta (GPU); no CPU-only path
+    gpus_per_node=4,  # 4× NVIDIA B200 (GB200 NVL72) per DGX node
+    cpus_per_node=144,  # 2× 72-core aarch64 Grace = 144 cores/node (verified CPUTot)
+    internet_node=True,  # compute nodes have egress
+    gpus_type="B200",  # Blackwell sm_100, ~189GB HBM (GB200 NVL72 rack)
+    total_partition_nodes=72,  # 72 DGX nodes = 288 B200 total (verified sinfo)
+    # GPUs are a real SLURM gres on Beta (unlike TACC/vista) → request them explicitly.
+    gpu_directive_format="--gres=gpu:b200:{n}",
+    # Eval-listener / secrets cluster view (per-cluster secrets path lives here, as on
+    # vista/leonardo). project_root is intentionally OMITTED — `/mnt/home/bf996/OpenThoughts-Agent`
+    # does not exist yet (HOME is a 100GB VAST quota; code checkout TBD), and omitting it
+    # avoids to_eval_cluster_view() setting a bogus DCFT.
+    eval_cluster_view={
+        "cluster_name": "empireai",
+        "use_model_registry": True,
+        "model_registry": "eval/configs/model_configs.yaml",
+        "hardware_profile": "default",
+        "slurm_partition": "beta",
+        "slurm_account": "ny_chinmayh_datacomp",
+        "slurm_time": "23:59:00",
+        "paths": {
+            "hf_cache": "/mnt/home/bf996/hf_cache",
+            "secrets_file": "/mnt/home/bf996/secrets.env",
+        },
+        "proxy": {"enabled": False},
+        "hardware": {
+            "gpus_per_node": 4,
+            "cpus_per_node": 144,
+            "arch": "aarch64",
+            "gpu_gres": True,
+        },
+    },
 )
 
 lonestar = HPC(
@@ -1297,8 +1748,8 @@ polaris = HPC(
         "TORCH_DISABLE_ADDR2LINE": "1",
     },
     # Note: Polaris uses PBS Pro, not SLURM. The HPC model is used for env config,
-    # eval listener, and datagen — not for sbatch submission. PBS job scripts are
-    # separate (eval/polaris/*.pbs).
+    # eval listener, and datagen — not for sbatch submission. (The eval/polaris/*.pbs
+    # job scripts were retired/removed in the 2026-06-25 eval/ cleanup.)
     default_time_limit="24:00:00",
     max_time_limit="24:00:00",
     num_nodes_slow=10,
@@ -1306,7 +1757,7 @@ polaris = HPC(
     num_nodes_fast=56,
 )
 
-clusters = [jureca, jupiter, juwels, leonardo, capella, alpha, dip, lrz, vista, lonestar, claix, nyugreene, nyutorch, oumi, perlmutter, frontier, polaris]
+clusters = [jureca, jupiter, juwels, leonardo, capella, alpha, dip, lrz, vista, empireai, lonestar, claix, nyugreene, nyutorch, oumi, perlmutter, frontier, polaris]
 
 
 def detect_hpc() -> HPC:

@@ -25,11 +25,14 @@ vllm_server:
   gpu_memory_utilization: 0.9
   swap_space: 32
   enable_expert_parallel: true
+  use_flashinfer_sampler: false
   enable_auto_tool_choice: true
   tool_call_parser: glm45
   reasoning_parser: deepseek_v3
   trust_remote_code: true
   extra_args:
+  - --compilation-config
+  - '{"pass_config":{"fuse_allreduce_rms":false}}'
   - --dtype
   - bfloat16
   - --kv-cache-dtype

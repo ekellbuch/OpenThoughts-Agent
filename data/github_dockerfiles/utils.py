@@ -974,6 +974,7 @@ def extract_keywords_keybert(prompt: str) -> List[str]:
     """KeyBERT semantic keyword extraction"""
     global _keybert_model
     if _keybert_model is None:
+        from keybert import KeyBERT
         _keybert_model = KeyBERT()
 
     # Generic words to filter out (not useful for GitHub search)
