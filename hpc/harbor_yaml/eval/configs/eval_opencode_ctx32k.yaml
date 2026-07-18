@@ -58,10 +58,15 @@ agents:
   max_timeout_sec: null
   override_setup_timeout_sec: 600
   kwargs:
-    opencode_config:
-      compaction:
-        auto: true
-        reserved: 16384
+    # No auto-compaction: it makes opencode run a summary turn during which these
+    # -Thinking- opencode-SFT models emit a tool call, which opencode fatally rejects
+    # ("Tool call not allowed while generating summary: write") -> NonZeroAgentExit ->
+    # reward 0. With reserved(16384) ~= the limit.context (16384) the harbor max_tokens
+    # fix writes, compaction fired almost immediately -> ~100% trial loss (sparse 8/8,
+    # densemixer 1/1). The DATAGEN/training opencode config uses an EMPTY opencode_config
+    # (no compaction), so disabling it here also restores train-eval parity. opencode's
+    # limit.context still bounds the prompt (sliding-window) so trials do not overflow.
+    opencode_config: {}
     model_info:
       max_input_tokens: 32768
       max_output_tokens: 16384
